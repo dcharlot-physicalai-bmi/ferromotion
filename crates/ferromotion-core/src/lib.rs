@@ -18,6 +18,7 @@ mod dex_retarget;
 mod diffik;
 mod dcol;
 mod dynamics;
+mod ipm;
 mod kdl;
 mod pink;
 mod planar_contact;
@@ -35,6 +36,7 @@ pub use contact::{
 pub use diffik::{solve_diffik, DiffIkOptions, DiffIkResult, FrameTaskDef};
 pub use dcol::{proximity, proximity_grad_spheres, Primitive};
 pub use dynamics::{forward_dynamics, gravity_vector, inverse_dynamics, mass_matrix, LinkInertia};
+pub use ipm::{solve_lcp, solve_lcp_diff, solve_lcp_smoothed};
 pub use kdl::resolved_rate;
 pub use urdf::from_urdf_full;
 pub use robust::solve_ik_robust;
