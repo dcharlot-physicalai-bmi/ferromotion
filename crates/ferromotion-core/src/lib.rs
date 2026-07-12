@@ -20,6 +20,7 @@ mod dcol;
 mod dynamics;
 mod kdl;
 mod pink;
+mod planar_contact;
 mod retarget;
 mod rigidbody;
 mod robust;
@@ -45,6 +46,7 @@ pub use dex_retarget::{
     DexPilotRetargeter, PositionCorr, PositionRetargeter, VectorCorr,
     VectorRetargeter as DexVectorRetargeter,
 };
+pub use planar_contact::PlanarBody;
 pub use pink::{
     solve_pink, FramePoseTask, PinkOptions, PinkResult, PinkSolver, PinkTask, PostureTask, TaskStack,
 };
