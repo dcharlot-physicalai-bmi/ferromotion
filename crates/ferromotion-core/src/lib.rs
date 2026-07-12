@@ -16,6 +16,7 @@ mod contact;
 mod costs;
 mod dex_retarget;
 mod diffik;
+mod dcol;
 mod dynamics;
 mod kdl;
 mod pink;
@@ -30,6 +31,7 @@ pub use contact::{
     ContactSolveDiff, FrictionContact,
 };
 pub use diffik::{solve_diffik, DiffIkOptions, DiffIkResult, FrameTaskDef};
+pub use dcol::{proximity, proximity_grad_spheres, Primitive};
 pub use dynamics::{forward_dynamics, gravity_vector, inverse_dynamics, mass_matrix, LinkInertia};
 pub use kdl::resolved_rate;
 pub use urdf::from_urdf_full;
