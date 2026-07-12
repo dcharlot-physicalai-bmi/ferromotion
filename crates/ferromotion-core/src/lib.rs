@@ -21,6 +21,7 @@ mod dynamics;
 mod kdl;
 mod pink;
 mod retarget;
+mod rigidbody;
 mod robust;
 mod sparse;
 mod traj;
@@ -38,6 +39,7 @@ pub use urdf::from_urdf_full;
 pub use robust::solve_ik_robust;
 pub use constraints::{solve_al, AlOptions, AlResult, PlaneConstraint};
 pub use costs::{Cost, JointLimitCost, PointCost, PoseCost, PostureCost, VectorCost};
+pub use rigidbody::RigidBody;
 pub use retarget::{FrameTask, Retargeter, VectorRetargeter, VectorTask};
 pub use dex_retarget::{
     DexPilotRetargeter, PositionCorr, PositionRetargeter, VectorCorr,
