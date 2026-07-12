@@ -24,6 +24,7 @@ mod placo;
 mod qp;
 mod sliding_mode;
 mod srbd_mpc;
+mod tinympc;
 mod wbc;
 mod zmp;
 pub use admittance::{Admittance, HybridForcePosition};
@@ -42,6 +43,7 @@ pub use osc::OperationalSpace;
 pub use placo::{PlacoResult, PlacoSolver, PlacoTask};
 pub use sliding_mode::{sat, SlidingMode};
 pub use srbd_mpc::SrbdMpc;
+pub use tinympc::TinyMpc;
 pub use wbc::{CartesianTask, WholeBody};
 pub use zmp::{capture_point, CartState, PreviewState, ZmpPreview};
 
