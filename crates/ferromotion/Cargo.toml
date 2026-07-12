@@ -11,7 +11,7 @@ categories.workspace = true
 description = "Ferromotion — a Rust library for the kinematics, dynamics, and control of physical AI (native + WebAssembly). Umbrella crate re-exporting the ferromotion-* components."
 
 [dependencies]
-ferromotion-core = { path = "../ferromotion-core", version = "0.1.0" }
-ferromotion-control = { path = "../ferromotion-control", version = "0.1.0" }
-ferromotion-ruckig = { path = "../ferromotion-ruckig", version = "0.1.0" }
-ferromotion-policy = { path = "../ferromotion-policy", version = "0.1.0" }
+ferromotion-core = { path = "../ferromotion-core", version = "0.2.0" }
+ferromotion-control = { path = "../ferromotion-control", version = "0.2.0" }
+ferromotion-ruckig = { path = "../ferromotion-ruckig", version = "0.2.0" }
+ferromotion-policy = { path = "../ferromotion-policy", version = "0.2.0" }
