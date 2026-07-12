@@ -1,52 +1,68 @@
-# Ferromotion — the Rust library for the kinematics, dynamics & control of physical AI
+# Ferromotion
 
-A native-Rust + universal-WASM port of the ideas in **PyRoki** (Kim, Yi, et al., IROS 2025,
-MIT) — a modular toolkit for **robot kinematic optimization**: inverse kinematics, trajectory
-optimization, and motion retargeting expressed as one composable nonlinear-least-squares problem.
+[![crates.io](https://img.shields.io/crates/v/ferromotion.svg)](https://crates.io/crates/ferromotion)
+[![docs.rs](https://img.shields.io/docsrs/ferromotion-core)](https://docs.rs/ferromotion-core)
+[![license](https://img.shields.io/crates/l/ferromotion-core.svg)](#license)
 
-Working name `ferromotion`; final naming is the Dean's call.
+**A Rust library for the kinematics, dynamics, and control of physical AI — native and in the browser.**
 
-## Why Rust + WASM
-PyRoki is Python + JAX (CPU/GPU/TPU, server-side). The Institute runs **in-browser, on-device**
-(WebGPU/WASM — Forge, the labs, the Rust course). A Rust core with a `wasm32` build gives us the
-same kinematics **everywhere**: native (fast, GPU later), and in every browser with zero install —
-the universal variant no one else in this niche has.
+Ferromotion is a pure-Rust ecosystem for embodied control: forward/inverse kinematics, rigid-body
+dynamics, trajectory optimization, motion retargeting, and a broad library of controllers — all
+compiling to native *and* `wasm32`, so the same solver runs on a workstation, an edge robot, and a
+browser tab with zero install. It grew out of the [PyRoki](https://github.com/chungmin99/pyroki)-class
+ecosystem (JAX/Python, server-side) and expanded well past it into a full control stack.
 
-## PyRoki → Rust mapping
-| PyRoki (Python/JAX) | ferromotion (Rust) | notes |
-|---|---|---|
-| `jaxlie` (SE3/SO3) | `ferromotion-lie` | quaternion SO3 + SE3, exp/log, tangent residuals |
-| `yourdfpy` (URDF) | `ferromotion-urdf` (wrap `urdf-rs`) | URDF → kinematic tree |
-| `Robot` FK + autodiff Jac | `ferromotion-robot` | FK; **analytic geometric Jacobian** (fast, exact) + optional forward-mode autodiff (`num-dual`) for arbitrary costs |
-| collision primitives (sphere/capsule/half-space) | `ferromotion-collide` | closed-form signed distance + gradients |
-| costs (EE pose, collision, manipulability, limits, smoothness) | `ferromotion-costs` | composable `Cost` trait, decoupled from variables |
-| `jaxls` LM / augmented-Lagrangian | `ferromotion-solve` | LM nonlinear-least-squares; dense v1 → **block-sparse** (temporal) + Aug-Lagrangian for hard constraints |
-| `viser` viz | (n/a) | our labs render in WebGPU already |
-| — | `ferromotion-wasm` | `wasm-bindgen` JS/TS API for the browser labs + Forge |
+Sibling to [Ferric](https://physicalai-bmi.org) (the Institute's pure-Rust compute fabric). From the
+[Institute for Physical AI](https://physicalai-bmi.org).
 
-Linear algebra: **`nalgebra`** (pure Rust, WASM-clean, no BLAS). Autodiff for arbitrary costs:
-forward-mode dual numbers (low-DoF problems → dense is fine); analytic Jacobians for the hot paths.
+## Crates
+| Crate | Description |
+|---|---|
+| [`ferromotion`](https://crates.io/crates/ferromotion) | Umbrella — re-exports everything below. |
+| [`ferromotion-core`](https://crates.io/crates/ferromotion-core) | FK, analytic + multi-frame Jacobians, **RNEA** dynamics / forward-dynamics / mass matrix, IK (LM + robust), trajectory optimization, sparse factor-graph solve, collision costs, motion retargeting, augmented-Lagrangian, URDF loading. |
+| [`ferromotion-control`](https://crates.io/crates/ferromotion-control) | PID · computed-torque · Cartesian impedance · LQR · linear MPC · OSC · WBC · placo · iLQR/DDP · MPPI · CEM · CBF-QP · sliding-mode · **SRBD MPC** · capture-point/ZMP · centroidal MPC · Kalman/EKF/UKF · complementary filter · momentum observer. |
+| [`ferromotion-ruckig`](https://crates.io/crates/ferromotion-ruckig) | Jerk-limited online trajectory generation. |
+| [`ferromotion-policy`](https://crates.io/crates/ferromotion-policy) | On-device runner for exported learned (RL/VLA) policies. |
+| [`ferromotion-wasm`](https://crates.io/crates/ferromotion-wasm) | WebAssembly bindings — build a chain or load a URDF, then FK / IK / retargeting / motion planning in the browser. |
 
-## Roadmap
-- **M0 — vertical slice (this pass):** revolute chain → FK → analytic Jacobian → LM IK → converges;
-  compiles to `wasm32-unknown-unknown`. Proves the whole spine.
-- **M1 — real robots:** `urdf-rs` loader; all joint types; Panda/SO-101/humanoid URDFs; pose (6-DoF) cost.
-- **M2 — cost library + collision:** capsule/sphere self- & world-collision, manipulability, joint limits,
-  smoothness; composable `Cost` trait; augmented-Lagrangian hard constraints.
-- **M3 — trajectories & retargeting:** time-series variables, block-sparse LM; human→robot motion retargeting.
-- **M4 — WASM API + labs:** `ferromotion-wasm` bindings, a TS wrapper, Web-Worker solving; wire into the arm/pilot
-  labs and Forge (target-pose IK, live retargeting on-device).
-- **M5 — parity + benches:** benchmark vs PyRoki/cuRobo; GPU (wgpu) path for batched solves.
-
-## Layout
+## Quickstart
+```toml
+[dependencies]
+ferromotion-core = "0.1"
+nalgebra = "0.35"
 ```
-ferromotion/
-  crates/
-    ferromotion-core/     # M0: lie + robot + solve + ik (single crate; splits into ferromotion-lie/-robot/-solve later)
-    ferromotion-urdf/     # M1
-    ferromotion-costs/    # M2
-    ferromotion-collide/  # M2
-    ferromotion-wasm/     # M4
-  examples/
+```rust
+use ferromotion_core::{from_urdf_str, solve_ik, IkOptions};
+use nalgebra::{Isometry3, Translation3};
+
+// Load a robot from URDF text (works natively and in the browser).
+let robot = from_urdf_str(urdf, "base_link", "tool").unwrap();
+
+// Solve inverse kinematics to a target pose.
+let target = Isometry3::from_parts(Translation3::new(0.4, 0.1, 0.3), Default::default());
+let seed = vec![0.0; robot.dof()];
+let res = solve_ik(&robot, &target, &seed, &IkOptions::default());
+println!("q = {:?}  converged = {}  residual = {:.2e}", res.q, res.converged, res.error);
 ```
-Graduates to its own repo (`dcharlot-physicalai-bmi/ferromotion`) once M1 lands.
+
+## Highlights
+- **Kinematics & dynamics** on SE(3): analytic geometric Jacobians (verified vs finite differences),
+  Recursive Newton-Euler inverse/forward dynamics, joint-space mass matrix, gravity compensation.
+- **Optimization**: composable-cost IK, block-tridiagonal trajectory optimization, sparse factor-graph
+  solve (`faer`), collision-aware planning, augmented-Lagrangian hard constraints, motion retargeting
+  (position / vector / DexPilot).
+- **Control corpus**: from PID to MPC to whole-body QP to nonlinear optimal control (iLQR/DDP), sampling
+  MPC (MPPI/CEM), safety filters (CBF-QP), legged balance (capture point, ZMP preview, centroidal &
+  single-rigid-body MPC), and estimation (Kalman/EKF/UKF, momentum observer, complementary filter).
+- **GPU fleet path**: batched MPPI rollouts as a WebGPU compute kernel — **~26× over CPU** at 16k
+  rollouts, matching the CPU reference to 1e-6 (`gpu/mppi.html`).
+- **Universal**: every library crate compiles to `wasm32`; `ferromotion-wasm` ships a browser API.
+
+## In the browser
+`ferromotion-wasm` builds with `wasm-pack` to a self-contained module. See `demo/` for a page that
+drives a robot arm with live IK and an obstacle-avoiding planned trajectory — computed entirely
+on-device, no server. Validated end-to-end on a real open-source robot (NormaCore's 3D-printed
+7-DoF ElRobot) straight from its URDF (`crates/ferromotion-core/examples/elrobot.rs`).
+
+## License
+Dual-licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
