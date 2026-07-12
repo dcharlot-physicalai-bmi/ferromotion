@@ -44,9 +44,18 @@ impl PlanarBody {
 
     /// Advance one step under gravity `g` (downward). Resolves all frictional contacts jointly.
     pub fn step(&mut self, dt: f64, g: f64) {
+        self.step_actuated(dt, g, [0.0, 0.0, 0.0]);
+    }
+
+    /// Like [`step`], but with an applied generalized force/torque `u = [fx, fz, τ]` at the COM.
+    pub fn step_actuated(&mut self, dt: f64, g: f64, u: [f64; 3]) {
         let m = DMatrix::from_diagonal(&DVector::from_row_slice(&[self.mass, self.mass, self.inertia]));
-        // Free generalized velocity after gravity (acts at the COM → no torque).
-        let v_free = DVector::from_row_slice(&[self.vx, self.vz - g * dt, self.omega]);
+        // Free generalized velocity after gravity + applied wrench.
+        let v_free = DVector::from_row_slice(&[
+            self.vx + u[0] / self.mass * dt,
+            self.vz + (u[1] / self.mass - g) * dt,
+            self.omega + u[2] / self.inertia * dt,
+        ]);
 
         let (c, s) = (self.theta.cos(), self.theta.sin());
         let contacts: Vec<FrictionContact> = self
@@ -109,6 +118,64 @@ mod tests {
         assert!(b.kinetic_energy() < 1e-3, "did not come to rest, KE = {}", b.kinetic_energy());
         assert!((b.z - 0.25).abs() < 5e-3, "did not settle at half-height: z = {}", b.z);
         assert!(b.theta.abs() < 1e-2, "should stay flat: θ = {}", b.theta);
+    }
+
+    #[test]
+    fn contact_implicit_cem_pushes_box_to_a_target() {
+        // Contact-implicit trajectory optimization: a box rests on the floor; the ONLY way a
+        // horizontal force moves it is through ground friction (contact). A sampling optimizer
+        // (CEM — robust to the non-smooth stick-slip) plans a horizontal-force trajectory that
+        // slides the box to a target x and brings it (roughly) to rest.
+        let (target_x, n_seg, horizon, dt, g) = (0.4, 4usize, 40usize, 0.01, 9.81);
+
+        // Deterministic LCG + Box-Muller (no `rand`).
+        let mut rng: u64 = 0xC0FFEE_1234_5678;
+        let mut gauss = || {
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let a = (((rng >> 11) as f64) / ((1u64 << 53) as f64)).max(1e-12);
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let b = ((rng >> 11) as f64) / ((1u64 << 53) as f64);
+            (-2.0 * a.ln()).sqrt() * (std::f64::consts::TAU * b).cos()
+        };
+
+        // Unit-mass slab, two bottom-corner contacts (fast + won't tip under a COM force).
+        let make = || PlanarBody {
+            x: 0.0, z: 0.25, theta: 0.0, vx: 0.0, vz: 0.0, omega: 0.0,
+            mass: 1.0, inertia: 0.1, contacts_body: vec![[-0.5, -0.25], [0.5, -0.25]], mu: 0.6,
+        };
+        let rollout = |seg: &[f64]| -> (f64, f64) {
+            let mut b = make();
+            for k in 0..horizon {
+                b.step_actuated(dt, g, [seg[k * n_seg / horizon], 0.0, 0.0]);
+            }
+            (b.x, b.vx)
+        };
+        let cost = |seg: &[f64]| -> f64 {
+            let (x, vx) = rollout(seg);
+            20.0 * (x - target_x).powi(2) + vx * vx + 1e-4 * seg.iter().map(|s| s * s).sum::<f64>()
+        };
+
+        let (mut mean, mut std) = (vec![0.0f64; n_seg], vec![6.0f64; n_seg]);
+        let k_samp = 120;
+        for _ in 0..8 {
+            let mut samples: Vec<(f64, Vec<f64>)> = Vec::with_capacity(k_samp);
+            for _ in 0..k_samp {
+                let s: Vec<f64> = (0..n_seg).map(|i| mean[i] + std[i] * gauss()).collect();
+                let c = cost(&s);
+                samples.push((c, s));
+            }
+            samples.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            let elite = &samples[0..k_samp / 5];
+            for i in 0..n_seg {
+                let m = elite.iter().map(|(_, s)| s[i]).sum::<f64>() / elite.len() as f64;
+                let v = elite.iter().map(|(_, s)| (s[i] - m).powi(2)).sum::<f64>() / elite.len() as f64;
+                mean[i] = m;
+                std[i] = v.sqrt().max(0.05);
+            }
+        }
+        let (xf, vf) = rollout(&mean);
+        assert!((xf - target_x).abs() < 0.1, "did not reach target: x = {xf} (target {target_x})");
+        assert!(vf.abs() < 0.4, "did not come to rest: vx = {vf}");
     }
 
     #[test]
