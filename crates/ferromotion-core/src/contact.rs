@@ -92,6 +92,47 @@ pub fn solve_contacts(m: &DMatrix<f64>, v_free: &DVector<f64>, contacts: &[Conta
     ContactSolve { impulses, v_next }
 }
 
+/// A contact solve plus the gradient of the post-contact velocity w.r.t. the free velocity —
+/// the quantity you backpropagate through for differentiable simulation (à la Dojo, obtained here
+/// analytically from the active-set KKT system rather than an interior-point IFT).
+#[derive(Clone, Debug)]
+pub struct ContactSolveDiff {
+    pub solve: ContactSolve,
+    /// `∂v⁺/∂v_free` (dof×dof).
+    pub dvnext_dvfree: DMatrix<f64>,
+}
+
+/// Like [`solve_contacts`], but also returns `∂v⁺/∂v_free`. On the active set `S` (impulses > 0),
+/// `A_SS λ_S = −b_S`, so `∂λ_S/∂v_free = −A_SS⁻¹ J_S` and
+/// `∂v⁺/∂v_free = I + M⁻¹ Jᵀ (∂λ/∂v_free)`. Inactive contacts contribute nothing. This makes the
+/// contact step a differentiable layer for gradient-based control / learning.
+pub fn solve_contacts_diff(
+    m: &DMatrix<f64>,
+    v_free: &DVector<f64>,
+    contacts: &[Contact],
+    dt: f64,
+) -> ContactSolveDiff {
+    let n = v_free.len();
+    let solve = solve_contacts(m, v_free, contacts, dt);
+    let mut d = DMatrix::identity(n, n);
+    let active: Vec<usize> = (0..solve.impulses.len()).filter(|&i| solve.impulses[i] > 1e-9).collect();
+    if !active.is_empty() {
+        let minv = m.clone().try_inverse().expect("mass matrix invertible");
+        // Contact Jacobian rows for the active set.
+        let mut j_s = DMatrix::zeros(active.len(), n);
+        for (r, &i) in active.iter().enumerate() {
+            j_s.row_mut(r).copy_from(&contacts[i].jn.transpose());
+        }
+        // A_SS = J_S M⁻¹ J_Sᵀ  (active Delassus block).
+        let a_ss = &j_s * &minv * j_s.transpose();
+        let a_ss_inv = a_ss.try_inverse().expect("active contact block invertible");
+        // ∂λ_S/∂v_free = −A_SS⁻¹ J_S ;  ∂v⁺/∂v_free = I + M⁻¹ J_Sᵀ (∂λ_S/∂v_free).
+        let dlam = -&a_ss_inv * &j_s;
+        d += &minv * j_s.transpose() * dlam;
+    }
+    ContactSolveDiff { solve, dvnext_dvfree: d }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,6 +173,43 @@ mod tests {
         let sol = solve_contacts(&m, &v_free, &contacts, 0.01);
         assert!(sol.impulses[0] < 1e-9, "spurious impulse while separated: {}", sol.impulses[0]);
         assert!((sol.v_next[0] - (-0.5)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn contact_gradient_matches_finite_difference() {
+        // 2-DoF system, one contact coupling both coordinates (jn = [1,1]) — a non-trivial Jacobian.
+        let m = DMatrix::from_diagonal(&DVector::from_row_slice(&[1.0, 1.0]));
+        let jn = DVector::from_row_slice(&[1.0, 1.0]);
+        let dt = 0.01;
+        let v_free = DVector::from_row_slice(&[-0.3, -0.1]);
+        let contacts = [Contact { jn: jn.clone(), phi: 0.0 }];
+
+        let diff = solve_contacts_diff(&m, &v_free, &contacts, dt);
+        assert!(diff.solve.impulses[0] > 1e-6, "contact should be active");
+
+        // Finite-difference ∂v⁺/∂v_free.
+        let eps = 1e-6;
+        for col in 0..2 {
+            let mut vp = v_free.clone();
+            vp[col] += eps;
+            let fd = (solve_contacts(&m, &vp, &contacts, dt).v_next - &diff.solve.v_next) / eps;
+            for row in 0..2 {
+                assert!(
+                    (diff.dvnext_dvfree[(row, col)] - fd[row]).abs() < 1e-4,
+                    "grad mismatch at ({row},{col}): analytic {} vs fd {}",
+                    diff.dvnext_dvfree[(row, col)],
+                    fd[row]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn separated_contact_gradient_is_identity() {
+        let m = DMatrix::from_element(1, 1, 1.0);
+        let contacts = [Contact { jn: DVector::from_row_slice(&[1.0]), phi: 1.0 }];
+        let diff = solve_contacts_diff(&m, &DVector::from_row_slice(&[-0.5]), &contacts, 0.01);
+        assert!((diff.dvnext_dvfree[(0, 0)] - 1.0).abs() < 1e-12, "no contact ⇒ ∂v⁺/∂v_free = I");
     }
 
     #[test]

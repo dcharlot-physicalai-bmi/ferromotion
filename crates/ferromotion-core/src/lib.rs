@@ -25,7 +25,7 @@ mod sparse;
 mod traj;
 mod urdf;
 pub use collision::{CapsuleCollisionCost, PlaneCollisionCost, SphereCollisionCost};
-pub use contact::{solve_contacts, Contact, ContactSolve};
+pub use contact::{solve_contacts, solve_contacts_diff, Contact, ContactSolve, ContactSolveDiff};
 pub use diffik::{solve_diffik, DiffIkOptions, DiffIkResult, FrameTaskDef};
 pub use dynamics::{forward_dynamics, gravity_vector, inverse_dynamics, mass_matrix, LinkInertia};
 pub use kdl::resolved_rate;
