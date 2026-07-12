@@ -92,6 +92,84 @@ pub fn solve_contacts(m: &DMatrix<f64>, v_free: &DVector<f64>, contacts: &[Conta
     ContactSolve { impulses, v_next }
 }
 
+/// A frictional unilateral contact: normal row `jn`, one or two tangent rows `jt`, signed gap
+/// `phi`, and Coulomb friction coefficient `mu`. The impulse `(μ·λₙ, λ_t…)` is constrained to a
+/// second-order (Coulomb) cone — the exact friction model, not a pyramidal LCP linearization.
+#[derive(Clone, Debug)]
+pub struct FrictionContact {
+    pub jn: DVector<f64>,
+    pub jt: Vec<DVector<f64>>,
+    pub phi: f64,
+    pub mu: f64,
+}
+
+/// Resolve frictional contacts for one step as a second-order-cone program (Gauss/Anitescu convex
+/// model): `min ½ λᵀAλ + bᵀλ` s.t. per contact `(μ·λₙ, λ_t…)` in the second-order cone, with
+/// `A = J M⁻¹ Jᵀ` and `b = J·v_free` (+ `φ/dt` gap stabilization on the normal rows). Solved via
+/// `clarabel`'s conic solver. Returns per-DoF impulses `λ` (normal then tangents, per contact) and
+/// `v⁺ = v_free + M⁻¹ Jᵀ λ`.
+pub fn solve_contacts_friction(
+    m: &DMatrix<f64>,
+    v_free: &DVector<f64>,
+    contacts: &[FrictionContact],
+    dt: f64,
+) -> ContactSolve {
+    if contacts.is_empty() {
+        return ContactSolve { impulses: vec![], v_next: v_free.clone() };
+    }
+    let n = v_free.len();
+    let minv = m.clone().try_inverse().expect("mass matrix invertible");
+
+    // Stack the contact Jacobian J (d×n): per contact [normal; tangents…]; track normal slots.
+    let mut rows: Vec<DVector<f64>> = Vec::new();
+    let mut is_normal: Vec<bool> = Vec::new();
+    let mut mus: Vec<f64> = Vec::new();
+    let mut cone_dims: Vec<usize> = Vec::new();
+    let mut gap: Vec<f64> = Vec::new();
+    for c in contacts {
+        rows.push(c.jn.clone());
+        is_normal.push(true);
+        mus.push(c.mu);
+        gap.push(c.phi / dt);
+        for t in &c.jt {
+            rows.push(t.clone());
+            is_normal.push(false);
+            mus.push(c.mu);
+            gap.push(0.0);
+        }
+        cone_dims.push(1 + c.jt.len());
+    }
+    let d = rows.len();
+    let mut j = DMatrix::zeros(d, n);
+    for (i, r) in rows.iter().enumerate() {
+        j.row_mut(i).copy_from(&r.transpose());
+    }
+
+    let a = &j * &minv * j.transpose(); // d×d PSD
+    let b: Vec<f64> = ((&j * v_free) + DVector::from_row_slice(&gap)).iter().cloned().collect();
+
+    // Cone map: s = -A_c·x ∈ ∏ SOC, with s = (μ·λₙ, λ_t…) per contact → A_c = -diag(μ on normal, 1 on tangent).
+    let a_c = {
+        let (mut colptr, mut rowval, mut nzval) = (vec![0usize], Vec::new(), Vec::new());
+        for jcol in 0..d {
+            rowval.push(jcol);
+            nzval.push(if is_normal[jcol] { -mus[jcol] } else { -1.0 });
+            colptr.push(rowval.len());
+        }
+        CscMatrix::new(d, d, colptr, rowval, nzval)
+    };
+    let b_c = vec![0.0; d];
+    let cones: Vec<SupportedConeT<f64>> = cone_dims.iter().map(|&k| SupportedConeT::SecondOrderConeT(k)).collect();
+
+    let p = csc_upper(&a);
+    let settings = DefaultSettingsBuilder::default().verbose(false).build().unwrap();
+    let mut solver = DefaultSolver::new(&p, &b, &a_c, &b_c, &cones, settings).unwrap();
+    solver.solve();
+    let lam = DVector::from_row_slice(&solver.solution.x);
+    let v_next = v_free + &minv * j.transpose() * &lam;
+    ContactSolve { impulses: solver.solution.x.clone(), v_next }
+}
+
 /// A contact solve plus the gradient of the post-contact velocity w.r.t. the free velocity —
 /// the quantity you backpropagate through for differentiable simulation (à la Dojo, obtained here
 /// analytically from the active-set KKT system rather than an interior-point IFT).
@@ -173,6 +251,56 @@ mod tests {
         let sol = solve_contacts(&m, &v_free, &contacts, 0.01);
         assert!(sol.impulses[0] < 1e-9, "spurious impulse while separated: {}", sol.impulses[0]);
         assert!((sol.v_next[0] - (-0.5)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn sliding_block_decelerates_under_coulomb_friction() {
+        // 2-DoF block (x horizontal, z vertical), mass 2. Normal = +z, tangent = +x, μ = 0.5.
+        let mass = 2.0;
+        let m = DMatrix::from_diagonal(&DVector::from_row_slice(&[mass, mass]));
+        let (g, dt, mu) = (9.81, 0.01, 0.5);
+        let contact = FrictionContact {
+            jn: DVector::from_row_slice(&[0.0, 1.0]),
+            jt: vec![DVector::from_row_slice(&[1.0, 0.0])],
+            phi: 0.0,
+            mu,
+        };
+        let (mut vx, mut vz) = (2.0, 0.0);
+        let mut worst_cone: f64 = 0.0;
+        let mut min_vx = vx;
+        for _ in 0..80 {
+            let v_free = DVector::from_row_slice(&[vx, vz - g * dt]);
+            let sol = solve_contacts_friction(&m, &v_free, std::slice::from_ref(&contact), dt);
+            vx = sol.v_next[0];
+            vz = sol.v_next[1];
+            min_vx = min_vx.min(vx);
+            // Friction-cone check: |λ_t| ≤ μ·λ_n (+tol).
+            let (ln, lt) = (sol.impulses[0], sol.impulses[1]);
+            worst_cone = worst_cone.max(lt.abs() - mu * ln);
+        }
+        // Kinetic friction (decel ≈ μg ≈ 4.9 m/s²) brings vx from 2 to rest in < 0.8 s; it must not reverse.
+        assert!(vx.abs() < 0.05, "block did not stop under friction: vx = {vx}");
+        assert!(min_vx > -1e-3, "friction wrongly reversed the motion: min vx = {min_vx}");
+        assert!(worst_cone < 1e-6, "friction cone violated by {worst_cone}");
+    }
+
+    #[test]
+    fn static_friction_holds_a_light_push() {
+        // At rest, a tangential push below μ·(normal impulse) must not move the block.
+        let mass = 1.0;
+        let m = DMatrix::from_diagonal(&DVector::from_row_slice(&[mass, mass]));
+        let (g, dt, mu) = (9.81, 0.01, 0.8);
+        let contact = FrictionContact {
+            jn: DVector::from_row_slice(&[0.0, 1.0]),
+            jt: vec![DVector::from_row_slice(&[1.0, 0.0])],
+            phi: 0.0,
+            mu,
+        };
+        // Small horizontal velocity from a light push; friction (μ·m·g·dt) can absorb it fully.
+        let push = 0.5 * mu * g * dt; // well within the cone
+        let v_free = DVector::from_row_slice(&[push, -g * dt]);
+        let sol = solve_contacts_friction(&m, &v_free, std::slice::from_ref(&contact), dt);
+        assert!(sol.v_next[0].abs() < 1e-6, "static friction should hold, vx⁺ = {}", sol.v_next[0]);
     }
 
     #[test]
