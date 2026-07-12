@@ -1,5 +1,6 @@
 # Ferromotion
 
+[![CI](https://github.com/dcharlot-physicalai-bmi/ferromotion/actions/workflows/ci.yml/badge.svg)](https://github.com/dcharlot-physicalai-bmi/ferromotion/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/ferromotion.svg)](https://crates.io/crates/ferromotion)
 [![docs.rs](https://img.shields.io/docsrs/ferromotion-core)](https://docs.rs/ferromotion-core)
 [![license](https://img.shields.io/crates/l/ferromotion-core.svg)](#license)
