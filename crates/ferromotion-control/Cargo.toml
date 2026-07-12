@@ -1,0 +1,16 @@
+[package]
+name = "ferromotion-control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Control schemes for physical AI, in Rust — PID, computed-torque, Cartesian impedance, and more. WASM-clean."
+
+[dependencies]
+ferromotion-core = { path = "../ferromotion-core", version = "0.1.0" }
+nalgebra.workspace = true
+clarabel = "0.11"

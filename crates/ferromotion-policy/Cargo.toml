@@ -1,0 +1,19 @@
+[package]
+name = "ferromotion-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "On-device runner for exported learned policies (RL/VLA MLPs) — inference only, WASM-clean. Interop tier: run trained weights, don't rewrite training."
+
+[dependencies]
+nalgebra.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+ferromotion-core = { path = "../ferromotion-core", version = "0.1.0" }

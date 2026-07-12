@@ -1,0 +1,9 @@
+# Rust build output
+/target
+
+# wasm-pack output (regenerated via wasm-pack / examples/build_demo.js)
+**/pkg
+**/pkg-node
+
+# macOS
+.DS_Store

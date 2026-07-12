@@ -1,0 +1,11 @@
+[package]
+name = "ferromotion-ruckig"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Jerk-limited, time-optimal trajectory generation in Rust — a port of Ruckig's MIT Community S-curve. WASM-clean, no deps."

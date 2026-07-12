@@ -1,0 +1,16 @@
+[workspace]
+resolver = "3"
+members = ["crates/ferromotion", "crates/ferromotion-core", "crates/ferromotion-ruckig", "crates/ferromotion-wasm", "crates/ferromotion-control", "crates/ferromotion-policy"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+authors = ["Institute for Physical AI @ BMI"]
+homepage = "https://physicalai-bmi.org"
+repository = "https://github.com/dcharlot-physicalai-bmi/ferromotion"
+keywords = ["robotics", "kinematics", "dynamics", "control", "physical-ai"]
+categories = ["science::robotics", "simulation", "mathematics", "wasm"]
+
+[workspace.dependencies]
+nalgebra = { version = "0.35", default-features = false, features = ["std"] }

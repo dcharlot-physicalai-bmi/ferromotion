@@ -1,0 +1,17 @@
+[package]
+name = "ferromotion-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Robot kinematic optimization in Rust — FK, analytic Jacobians, Levenberg-Marquardt IK. WASM-clean."
+
+[dependencies]
+nalgebra.workspace = true
+urdf-rs = "0.9"
+clarabel = "0.11"
+faer = { version = "0.24", default-features = false, features = ["std"] }
