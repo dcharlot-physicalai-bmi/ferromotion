@@ -25,6 +25,7 @@ mod pink;
 mod planar_contact;
 mod retarget;
 mod rigidbody;
+mod robot_contact;
 mod robust;
 mod sparse;
 mod traj;
@@ -51,6 +52,7 @@ pub use dex_retarget::{
     VectorRetargeter as DexVectorRetargeter,
 };
 pub use planar_contact::PlanarBody;
+pub use robot_contact::RobotContactSim;
 pub use pink::{
     solve_pink, FramePoseTask, PinkOptions, PinkResult, PinkSolver, PinkTask, PostureTask, TaskStack,
 };

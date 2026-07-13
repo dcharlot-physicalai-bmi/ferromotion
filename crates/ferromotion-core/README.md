@@ -11,8 +11,10 @@ Kinematics, dynamics, and optimization for physical AI, in pure Rust (native + `
   gravity compensation, and a symplectic free-rigid-body integrator.
 - **Optimization:** composable costs, block-tridiagonal trajectory optimization, sparse factor-graph
   solve, augmented-Lagrangian hard constraints, motion retargeting (position / vector / DexPilot).
-- **Contact:** convex contact-implicit dynamics, SOC Coulomb friction, differentiable contact, DCOL
-  differentiable collision, and a planar rigid-body-with-friction simulator.
+- **Contact:** convex contact-implicit dynamics, SOC Coulomb friction, interior-point differentiable
+  contact (Dojo-style, smooth through stick↔slip), DCOL differentiable collision, a planar
+  rigid-body-with-friction simulator, and **articulated-multibody contact** — differentiable
+  frictional floor contact on a full robot chain, with the control gradient `∂q̇⁺/∂τ`.
 
 ```rust
 use ferromotion_core::{from_urdf_str, solve_ik, IkOptions};
