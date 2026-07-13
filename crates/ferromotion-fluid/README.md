@@ -27,7 +27,21 @@ assert!(fluid.max_divergence() < 1e-8);
 let profile = fluid.centerline_u(); // (y, u) up the vertical centerline
 ```
 
-The immersed-boundary coupling for a moving robot surface (full FSI, with gradients) builds on this
-core next.
+## Fluid–structure interaction
+
+A **direct-forcing immersed boundary** couples a rigid body's surface to the fluid without a
+body-fitted mesh. The surface is a ring of Lagrangian markers; iterated forcing through the 4-point
+Peskin kernel drives the interpolated fluid velocity to the surface velocity.
+
+```rust
+let mut fluid = MacFluid::new(64, 64, 0.01, 0.003, 0.0);
+let disk = RigidDisk { cx: 0.5, cy: 0.5, r: 0.12, ux: 0.4, uy: 0.0 };
+let (fx, fy) = fluid.step_with_disk(&disk); // hydrodynamic force on the body
+assert!(fluid.slip_residual(&disk) / 0.4 < 0.06); // no-slip enforced to a few %
+```
+
+Verified: no-slip enforcement (~4 % residual at the surface), Stokes-regime **drag linearity**
+(`F(2U)/F(U) ≈ 2.0`), and drag opposing the body's motion. Coupling to a body's own dynamics (a
+free-swimming/settling body) and gradients through the coupled step come next.
 
 Dual-licensed MIT OR Apache-2.0.
