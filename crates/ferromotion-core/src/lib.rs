@@ -13,6 +13,7 @@ use nalgebra::{DMatrix, DVector, Isometry3, Translation3, Unit, UnitQuaternion, 
 mod collision;
 mod constraints;
 mod contact;
+mod contact_ipm;
 mod costs;
 mod dex_retarget;
 mod diffik;
@@ -29,6 +30,7 @@ mod sparse;
 mod traj;
 mod urdf;
 pub use collision::{CapsuleCollisionCost, PlaneCollisionCost, SphereCollisionCost};
+pub use contact_ipm::{solve_frictional_ipm, FrictionalStep, StFrictionContact};
 pub use contact::{
     solve_contacts, solve_contacts_diff, solve_contacts_friction, Contact, ContactSolve,
     ContactSolveDiff, FrictionContact,
