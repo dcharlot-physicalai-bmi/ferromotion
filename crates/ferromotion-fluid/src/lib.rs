@@ -26,10 +26,11 @@
 //! The coupled step is **differentiable**: [`MacFluid::step_with_disk_tangent`] carries a tangent
 //! fluid field through advection/diffusion (product rule), the immersed-boundary forcing, and the
 //! pressure projection (the same prefactored Laplacian applied to the differentiated RHS), yielding
-//! the exact `∂F/∂θ` of the hydrodynamic force w.r.t. the actuation — verified against finite
-//! differences to machine precision, and used to Newton-tune a gait to a target force. (Forward
-//! sensitivity for a held body; the moving-boundary *shape* derivative is the next frontier.) Pure
-//! Rust → WASM-clean.
+//! the exact `∂F/∂θ` of the hydrodynamic force w.r.t. `θ` — where `θ` is either the actuation (held
+//! body; matches finite differences to machine precision, and Newton-tunes a gait to a target force)
+//! or the **body's position**, in which case the immersed markers move and the Peskin weights'
+//! position sensitivity (`∂w/∂X`) is carried through interpolation and spreading — the moving-boundary
+//! (shape) derivative, verified against finite differences to ~0.1 %. Pure Rust → WASM-clean.
 
 use faer::linalg::solvers::Solve;
 use faer::sparse::linalg::solvers::Llt;
@@ -271,6 +272,56 @@ impl MacFluid {
         out
     }
 
+    /// Like [`stencil_u`], but each entry also carries `(∂w/∂mx, ∂w/∂my)` — the weight's sensitivity
+    /// to the marker position, for moving-boundary derivatives.
+    fn stencil_u_d(&self, mx: f64, my: f64) -> Vec<(usize, f64, f64, f64)> {
+        let (nx, ny, h) = (self.nx, self.ny, self.h);
+        let i0 = (mx / h).floor() as i64;
+        let j0 = (my / h - 0.5).floor() as i64;
+        let mut out = Vec::with_capacity(16);
+        for i in i0 - 1..=i0 + 2 {
+            for j in j0 - 1..=j0 + 2 {
+                if i < 0 || i > nx as i64 || j < 0 || j >= ny as i64 {
+                    continue;
+                }
+                let (rx, ry) = ((i as f64 * h - mx) / h, ((j as f64 + 0.5) * h - my) / h);
+                let (px, py) = (phi(rx), phi(ry));
+                let w = px * py;
+                // ∂rx/∂mx = −1/h, ∂ry/∂my = −1/h
+                let dwx = phi_prime(rx) * (-1.0 / h) * py;
+                let dwy = px * phi_prime(ry) * (-1.0 / h);
+                if w != 0.0 || dwx != 0.0 || dwy != 0.0 {
+                    out.push((i as usize * ny + j as usize, w, dwx, dwy));
+                }
+            }
+        }
+        out
+    }
+
+    /// Like [`stencil_v`], with `(∂w/∂mx, ∂w/∂my)` per entry.
+    fn stencil_v_d(&self, mx: f64, my: f64) -> Vec<(usize, f64, f64, f64)> {
+        let (nx, ny, h) = (self.nx, self.ny, self.h);
+        let i0 = (mx / h - 0.5).floor() as i64;
+        let j0 = (my / h).floor() as i64;
+        let mut out = Vec::with_capacity(16);
+        for i in i0 - 1..=i0 + 2 {
+            for j in j0 - 1..=j0 + 2 {
+                if i < 0 || i >= nx as i64 || j < 0 || j > ny as i64 {
+                    continue;
+                }
+                let (rx, ry) = (((i as f64 + 0.5) * h - mx) / h, (j as f64 * h - my) / h);
+                let (px, py) = (phi(rx), phi(ry));
+                let w = px * py;
+                let dwx = phi_prime(rx) * (-1.0 / h) * py;
+                let dwy = px * phi_prime(ry) * (-1.0 / h);
+                if w != 0.0 || dwx != 0.0 || dwy != 0.0 {
+                    out.push((i as usize * (ny + 1) + j as usize, w, dwx, dwy));
+                }
+            }
+        }
+        out
+    }
+
     /// Velocity `(u, v)` interpolated from the grid to world point `(mx, my)` via the Peskin kernel.
     pub fn velocity_at(&self, mx: f64, my: f64) -> (f64, f64) {
         let u = self.stencil_u(mx, my).iter().map(|&(k, w)| self.u[k] * w).sum();
@@ -332,16 +383,25 @@ impl MacFluid {
         f
     }
 
-    /// **Differentiable coupled step (forward sensitivity).** Advance one timestep with a *held*
-    /// disk actuated at surface speed `θ = disk.ux`, carrying a tangent fluid field `(ut, vt) = ∂(u,v)/∂θ`
-    /// alongside the primal, and return `(Fx, ∂Fx/∂θ)` — the x-force on the body and its exact
-    /// derivative w.r.t. the actuation. Because the disk is held, the marker stencils are constant, so
-    /// the advection/diffusion predictor (product rule), the immersed-boundary forcing (linear in the
-    /// velocity deficit), and the pressure projection (the same prefactored Laplacian applied to the
-    /// differentiated RHS) all differentiate cleanly. `ut`/`vt` persist across steps to capture the
-    /// fluid's memory; seed them to zero. (`disk.uy` is held at 0; the moving-boundary *shape*
-    /// derivative is a separate frontier.)
+    /// **Differentiable coupled step (forward sensitivity).** Advance one timestep carrying a tangent
+    /// fluid field `(ut, vt) = ∂(u,v)/∂θ` alongside the primal, and return `(Fx, ∂Fx/∂θ)` — the x-force
+    /// on the body and its exact derivative w.r.t. `θ`. The advection/diffusion predictor (product
+    /// rule), the immersed-boundary forcing (linear in the velocity deficit), and the pressure
+    /// projection (the same prefactored Laplacian applied to the differentiated RHS) all differentiate
+    /// cleanly. `ut`/`vt` persist across steps to capture the
+    /// fluid's memory; seed them to zero. This is the fixed-geometry case (`θ` = actuation); for a
+    /// **moving** body use [`step_with_disk_sensitivity`](Self::step_with_disk_sensitivity).
     pub fn step_with_disk_tangent(&mut self, disk: &RigidDisk, ut: &mut [f64], vt: &mut [f64]) -> (f64, f64) {
+        // θ = actuation (surface x-velocity): ∂surf/∂θ = (1,0); the markers do not move.
+        self.step_with_disk_sensitivity(disk, ut, vt, (1.0, 0.0), (0.0, 0.0))
+    }
+
+    /// General forward-sensitivity coupled step. `dsurf = ∂(disk.ux, disk.uy)/∂θ` and
+    /// `dmarker = ∂(marker position)/∂θ` (a rigid translation of the body — e.g. `(1,0)` when `θ` is
+    /// the x-position) select what `θ` is. When `dmarker ≠ 0` the immersed markers **move** with `θ`,
+    /// so the Peskin weights' position sensitivity (`∂w/∂X`, via [`phi_prime`]) enters both the
+    /// interpolation and the spreading — the moving-boundary (shape) derivative. Returns `(Fx, ∂Fx/∂θ)`.
+    pub fn step_with_disk_sensitivity(&mut self, disk: &RigidDisk, ut: &mut [f64], vt: &mut [f64], dsurf: (f64, f64), dmarker: (f64, f64)) -> (f64, f64) {
         const N_FORCE_ITERS: usize = 6;
         let (nx, ny, h, nu, dt, lid) = (self.nx, self.ny, self.h, self.nu, self.dt, self.lid_u);
         let (inv2h, invh2) = (1.0 / (2.0 * h), 1.0 / (h * h));
@@ -389,33 +449,36 @@ impl MacFluid {
             }
         }
 
-        // --- immersed-boundary forcing (primal + tangent); stencils constant (held disk) ---
+        // --- immersed-boundary forcing (primal + tangent). Stencils carry ∂w/∂X, so when the body
+        // moves with θ (dmarker ≠ 0) the weight sensitivity enters both interpolation and spreading. ---
         let markers = disk.markers(h);
-        let su: Vec<_> = markers.iter().map(|&(mx, my)| self.stencil_u(mx, my)).collect();
-        let sv: Vec<_> = markers.iter().map(|&(mx, my)| self.stencil_v(mx, my)).collect();
+        let su: Vec<_> = markers.iter().map(|&(mx, my)| self.stencil_u_d(mx, my)).collect();
+        let sv: Vec<_> = markers.iter().map(|&(mx, my)| self.stencil_v_d(mx, my)).collect();
         let (mut sum_fx, mut sum_fx_dot) = (0.0f64, 0.0f64);
         for _ in 0..N_FORCE_ITERS {
             let defs: Vec<(f64, f64, f64, f64)> = (0..markers.len())
                 .map(|m| {
-                    let ui: f64 = su[m].iter().map(|&(k, w)| us[k] * w).sum();
-                    let vi: f64 = sv[m].iter().map(|&(k, w)| vs[k] * w).sum();
-                    let uit: f64 = su[m].iter().map(|&(k, w)| uts[k] * w).sum();
-                    let vit: f64 = sv[m].iter().map(|&(k, w)| vts[k] * w).sum();
-                    // deficit and its θ-derivative (∂(disk.ux)/∂θ = 1, ∂(disk.uy)/∂θ = 0)
-                    (disk.ux - ui, disk.uy - vi, 1.0 - uit, -vit)
+                    let ui: f64 = su[m].iter().map(|&(k, w, ..)| us[k] * w).sum();
+                    let vi: f64 = sv[m].iter().map(|&(k, w, ..)| vs[k] * w).sum();
+                    // d(interp)/dθ = Σ [ (∂w/∂θ)·field + w·field_tangent ], ∂w/∂θ = ∂w/∂X · dmarker
+                    let uit: f64 = su[m].iter().map(|&(k, w, dwx, dwy)| (dwx * dmarker.0 + dwy * dmarker.1) * us[k] + w * uts[k]).sum();
+                    let vit: f64 = sv[m].iter().map(|&(k, w, dwx, dwy)| (dwx * dmarker.0 + dwy * dmarker.1) * vs[k] + w * vts[k]).sum();
+                    (disk.ux - ui, disk.uy - vi, dsurf.0 - uit, dsurf.1 - vit)
                 })
                 .collect();
             for m in 0..markers.len() {
                 let (fx, fy, fxt, fyt) = defs[m];
-                for &(k, w) in &su[m] {
+                for &(k, w, dwx, dwy) in &su[m] {
+                    let dw = dwx * dmarker.0 + dwy * dmarker.1; // ∂w/∂θ
                     us[k] += fx * w;
-                    uts[k] += fxt * w;
+                    uts[k] += fxt * w + fx * dw; // spread the tangent force AND the moved weight
                     sum_fx += fx * w;
-                    sum_fx_dot += fxt * w;
+                    sum_fx_dot += fxt * w + fx * dw;
                 }
-                for &(k, w) in &sv[m] {
+                for &(k, w, dwx, dwy) in &sv[m] {
+                    let dw = dwx * dmarker.0 + dwy * dmarker.1;
                     vs[k] += fy * w;
-                    vts[k] += fyt * w;
+                    vts[k] += fyt * w + fy * dw;
                 }
             }
         }
@@ -581,6 +644,22 @@ fn phi(r: f64) -> f64 {
     }
 }
 
+/// Derivative `φ'(r)` of the Peskin kernel — needed for moving-boundary (shape) sensitivity.
+fn phi_prime(r: f64) -> f64 {
+    let a = r.abs();
+    let s = if r < 0.0 { -1.0 } else { 1.0 };
+    let dphi_da = if a <= 1.0 {
+        let root = (1.0 + 4.0 * a - 4.0 * a * a).sqrt();
+        (-2.0 + (2.0 - 4.0 * a) / root) / 8.0
+    } else if a <= 2.0 {
+        let root = (-7.0 + 12.0 * a - 4.0 * a * a).sqrt();
+        (-2.0 - (6.0 - 4.0 * a) / root) / 8.0
+    } else {
+        0.0
+    };
+    dphi_da * s
+}
+
 /// Linear interpolation of a monotone-in-`x` `(x, y)` table.
 #[cfg(test)]
 fn interp(table: &[(f64, f64)], x: f64) -> f64 {
@@ -681,6 +760,39 @@ mod tests {
         let rel = (ad.1 - fd).abs() / fd.abs();
         eprintln!("FSI grad: analytic={:.5}, fd={fd:.5}, rel_err={rel:.2e}", ad.1);
         assert!(rel < 5e-3, "coupled-FSI gradient wrong: analytic {} vs fd {fd}", ad.1);
+    }
+
+    // Primal-only rollout: force on a disk held at center x = cx (fixed surface speed), after `n` steps.
+    #[cfg(test)]
+    fn rollout_force_at_cx(cx: f64, n: usize) -> f64 {
+        let mut f = MacFluid::new(48, 48, 0.02, 0.003, 0.0);
+        let disk = RigidDisk { cx, cy: 0.5, r: 0.1, ux: 0.3, uy: 0.0 };
+        let mut fx = 0.0;
+        for _ in 0..n {
+            fx = f.step_with_disk(&disk).0;
+        }
+        fx
+    }
+
+    #[test]
+    fn moving_boundary_gradient_matches_finite_difference() {
+        // The hard case: θ is the body's x-position, so the immersed markers MOVE with θ and the
+        // Peskin weight sensitivity (∂w/∂X) must be accounted for. Analytic ∂Fx/∂cx vs central FD.
+        let (cx, n) = (0.35, 25); // off-center in x → ∂Fx/∂cx is substantial (not a symmetry point)
+        let mut f = MacFluid::new(48, 48, 0.02, 0.003, 0.0);
+        let disk = RigidDisk { cx, cy: 0.5, r: 0.1, ux: 0.3, uy: 0.0 };
+        let (mut ut, mut vt) = (vec![0.0; f.u.len()], vec![0.0; f.v.len()]);
+        let mut ad = (0.0, 0.0);
+        for _ in 0..n {
+            // θ = center x: surface velocity is θ-independent, markers translate in +x.
+            ad = f.step_with_disk_sensitivity(&disk, &mut ut, &mut vt, (0.0, 0.0), (1.0, 0.0));
+        }
+
+        let eps = 1e-4;
+        let fd = (rollout_force_at_cx(cx + eps, n) - rollout_force_at_cx(cx - eps, n)) / (2.0 * eps);
+        let rel = (ad.1 - fd).abs() / fd.abs().max(1e-9);
+        eprintln!("moving-boundary grad: analytic={:.5}, fd={fd:.5}, rel_err={rel:.2e}", ad.1);
+        assert!(rel < 1e-2, "moving-boundary gradient wrong: analytic {} vs fd {fd}", ad.1);
     }
 
     #[test]
