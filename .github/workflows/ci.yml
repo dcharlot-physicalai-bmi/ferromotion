@@ -20,8 +20,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Test (native)
         run: cargo test --workspace
+      - name: Benchmark (Ghia lid-driven cavity, release)
+        run: cargo test -p ferromotion-fluid --release -- --ignored
       - name: Build (wasm32-unknown-unknown)
         run: >
           cargo build --target wasm32-unknown-unknown
           -p ferromotion-core -p ferromotion-control -p ferromotion-ruckig
-          -p ferromotion-policy -p ferromotion-wasm
+          -p ferromotion-policy -p ferromotion-wasm -p ferromotion-fluid

@@ -304,17 +304,18 @@ dependencies = [
 
 [[package]]
 name = "ferromotion"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "ferromotion-control",
  "ferromotion-core",
+ "ferromotion-fluid",
  "ferromotion-policy",
  "ferromotion-ruckig",
 ]
 
 [[package]]
 name = "ferromotion-control"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "clarabel",
  "ferromotion-core",
@@ -323,7 +324,7 @@ dependencies = [
 
 [[package]]
 name = "ferromotion-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "clarabel",
  "faer",
@@ -332,8 +333,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferromotion-fluid"
+version = "0.7.0"
+dependencies = [
+ "faer",
+]
+
+[[package]]
 name = "ferromotion-policy"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "ferromotion-core",
  "nalgebra",
@@ -343,11 +351,11 @@ dependencies = [
 
 [[package]]
 name = "ferromotion-ruckig"
-version = "0.6.0"
+version = "0.7.0"
 
 [[package]]
 name = "ferromotion-wasm"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "ferromotion-core",
  "nalgebra",

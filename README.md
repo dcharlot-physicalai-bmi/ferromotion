@@ -20,8 +20,9 @@ Sibling to [Ferric](https://physicalai-bmi.org) (the Institute's pure-Rust compu
 | Crate | Description |
 |---|---|
 | [`ferromotion`](https://crates.io/crates/ferromotion) | Umbrella — re-exports everything below. |
-| [`ferromotion-core`](https://crates.io/crates/ferromotion-core) | FK, analytic + multi-frame Jacobians, **RNEA** dynamics / forward-dynamics / mass matrix, IK (LM + robust), trajectory optimization, sparse factor-graph solve, collision costs, motion retargeting, augmented-Lagrangian, URDF loading. |
+| [`ferromotion-core`](https://crates.io/crates/ferromotion-core) | FK, analytic + multi-frame Jacobians, **RNEA** dynamics / forward-dynamics / mass matrix, IK (LM + robust), trajectory optimization, sparse factor-graph solve, collision costs, motion retargeting, augmented-Lagrangian, **differentiable contact** (interior-point LCP + articulated frictional contact on a robot chain), URDF loading. |
 | [`ferromotion-control`](https://crates.io/crates/ferromotion-control) | PID · computed-torque · Cartesian impedance · LQR · linear MPC · OSC · WBC · placo · iLQR/DDP · MPPI · CEM · CBF-QP · sliding-mode · **SRBD MPC** · capture-point/ZMP · centroidal MPC · Kalman/EKF/UKF · complementary filter · momentum observer. |
+| [`ferromotion-fluid`](https://crates.io/crates/ferromotion-fluid) | 2D incompressible **Navier–Stokes** (MAC projection) for fluid–robot interaction — verified against the Ghia Re=100 lid-driven-cavity benchmark. |
 | [`ferromotion-ruckig`](https://crates.io/crates/ferromotion-ruckig) | Jerk-limited online trajectory generation. |
 | [`ferromotion-policy`](https://crates.io/crates/ferromotion-policy) | On-device runner for exported learned (RL/VLA) policies. |
 | [`ferromotion-wasm`](https://crates.io/crates/ferromotion-wasm) | WebAssembly bindings — build a chain or load a URDF, then FK / IK / retargeting / motion planning in the browser. |
