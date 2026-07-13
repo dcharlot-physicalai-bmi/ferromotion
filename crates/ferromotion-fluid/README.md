@@ -41,7 +41,18 @@ assert!(fluid.slip_residual(&disk) / 0.4 < 0.06); // no-slip enforced to a few %
 ```
 
 Verified: no-slip enforcement (~4 % residual at the surface), Stokes-regime **drag linearity**
-(`F(2U)/F(U) ≈ 2.0`), and drag opposing the body's motion. Coupling to a body's own dynamics (a
-free-swimming/settling body) and gradients through the coupled step come next.
+(`F(2U)/F(U) ≈ 2.0`), and drag opposing the body's motion.
+
+**Two-way coupling** closes the loop — `FreeDisk` + `MacFluid::step_free_disk` solve the body's own
+motion from the fluid force plus external forces. A dense disk released from rest settles to the
+**terminal velocity** where drag balances net weight (verified to ~6 %):
+
+```rust
+let mut body = FreeDisk { cx: 0.5, cy: 0.75, r: 0.08, ux: 0.0, uy: 0.0, mass: rho_b * area };
+let net_weight = (0.0, -(rho_b - rho_f) * area * g);
+let force = fluid.step_free_disk(&mut body, net_weight); // body.cy, body.uy evolve
+```
+
+Gradients through the coupled fluid–body step (for swimming-gait optimization) come next.
 
 Dual-licensed MIT OR Apache-2.0.

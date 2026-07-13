@@ -18,7 +18,10 @@
 //! [`MacFluid::step_with_disk`]): a body's surface is a set of Lagrangian markers, and iterated
 //! forcing through the 4-point Peskin kernel drives the interpolated fluid velocity to the surface
 //! velocity — no body-fitted mesh. Verified no-slip enforcement (~4 % residual), Stokes-regime drag
-//! linearity, and reported hydrodynamic force on the body. Pure Rust → WASM-clean.
+//! linearity, and reported hydrodynamic force on the body. A [`FreeDisk`] closes the loop —
+//! [`MacFluid::step_free_disk`] solves the body's own motion from the fluid force plus external
+//! forces (two-way coupling); a dense disk released from rest settles to the terminal velocity where
+//! drag balances net weight (verified to ~6 %). Pure Rust → WASM-clean.
 
 use faer::linalg::solvers::Solve;
 use faer::sparse::linalg::solvers::Llt;
@@ -307,6 +310,20 @@ impl MacFluid {
         (-sum_fx * h * h / dt, -sum_fy * h * h / dt)
     }
 
+    /// Advance one timestep with a **free** rigid disk whose motion is driven by the fluid: the
+    /// hydrodynamic force plus the caller-supplied external force `(fx, fy)` (gravity − buoyancy,
+    /// thrust, …) integrate the body's velocity and position (weak/explicit coupling). Returns the
+    /// hydrodynamic force on the body. Stable while the added mass `ρ_f·π r²` is below the body mass.
+    pub fn step_free_disk(&mut self, body: &mut FreeDisk, ext_force: (f64, f64)) -> (f64, f64) {
+        let disk = RigidDisk { cx: body.cx, cy: body.cy, r: body.r, ux: body.ux, uy: body.uy };
+        let f = self.step_with_disk(&disk);
+        body.ux += self.dt * (f.0 + ext_force.0) / body.mass;
+        body.uy += self.dt * (f.1 + ext_force.1) / body.mass;
+        body.cx += self.dt * body.ux;
+        body.cy += self.dt * body.uy;
+        f
+    }
+
     /// Max no-slip residual `‖u_fluid(Xₖ) − U_body‖` over the disk's surface markers (0 = perfect no-slip).
     pub fn slip_residual(&self, disk: &RigidDisk) -> f64 {
         disk.markers(self.h)
@@ -378,6 +395,18 @@ impl RigidDisk {
             })
             .collect()
     }
+}
+
+/// A free rigid disk: position, velocity, radius, and mass — its motion is solved from the fluid
+/// force plus external forces (see [`MacFluid::step_free_disk`]).
+#[derive(Clone, Copy, Debug)]
+pub struct FreeDisk {
+    pub cx: f64,
+    pub cy: f64,
+    pub r: f64,
+    pub ux: f64,
+    pub uy: f64,
+    pub mass: f64,
 }
 
 /// The 4-point Peskin regularized delta kernel (1D factor), argument in cell units.
@@ -460,6 +489,37 @@ mod tests {
         assert!(ux_out > 0.1 * 0.4, "fluid not dragged along: u_out = {ux_out:.4}");
         // (3) Drag opposes the surface motion (force on the body points −x).
         assert!(drag.0 < 0.0, "drag does not oppose motion: Fx = {:.4}", drag.0);
+    }
+
+    #[test]
+    fn free_disk_settles_to_terminal_velocity() {
+        // A disk denser than the fluid, released from rest, settles under gravity−buoyancy until
+        // hydrodynamic drag balances the net weight → constant terminal velocity.
+        let (rho_f, rho_b, g) = (1.0, 3.0, 1.2);
+        let mut f = MacFluid::new(64, 64, 0.02, 0.003, 0.0);
+        let mut body = FreeDisk { cx: 0.5, cy: 0.75, r: 0.08, ux: 0.0, uy: 0.0, mass: 0.0 };
+        let area = std::f64::consts::PI * body.r * body.r;
+        body.mass = rho_b * area;
+        let ext = (0.0, -(rho_b - rho_f) * area * g); // net weight (down)
+
+        let mut uy_hist = Vec::new();
+        let mut last_fy = 0.0;
+        for _ in 0..360 {
+            last_fy = f.step_free_disk(&mut body, ext).1;
+            uy_hist.push(body.uy);
+        }
+
+        // Terminal plateau: last-fifth velocities are near-constant.
+        let tail = &uy_hist[uy_hist.len() * 4 / 5..];
+        let mean: f64 = tail.iter().sum::<f64>() / tail.len() as f64;
+        let spread = tail.iter().map(|&u| (u - mean).abs()).fold(0.0f64, f64::max);
+        // Force balance at terminal: drag (up) ≈ net weight (down).
+        let balance = (last_fy + ext.1).abs() / ext.1.abs();
+        eprintln!("settle: cy={:.3}, u_term={mean:.4}, plateau_spread={spread:.4}, force_imbalance={balance:.3}", body.cy);
+
+        assert!(mean < -0.02 && body.cy < 0.72, "disk did not settle downward");
+        assert!(spread / mean.abs() < 0.05, "no terminal plateau: spread {spread:.4} vs u {mean:.4}");
+        assert!(balance < 0.15, "drag does not balance weight at terminal: imbalance {balance:.3}");
     }
 
     #[test]
