@@ -21,7 +21,15 @@
 //! linearity, and reported hydrodynamic force on the body. A [`FreeDisk`] closes the loop —
 //! [`MacFluid::step_free_disk`] solves the body's own motion from the fluid force plus external
 //! forces (two-way coupling); a dense disk released from rest settles to the terminal velocity where
-//! drag balances net weight (verified to ~6 %). Pure Rust → WASM-clean.
+//! drag balances net weight (verified to ~6 %).
+//!
+//! The coupled step is **differentiable**: [`MacFluid::step_with_disk_tangent`] carries a tangent
+//! fluid field through advection/diffusion (product rule), the immersed-boundary forcing, and the
+//! pressure projection (the same prefactored Laplacian applied to the differentiated RHS), yielding
+//! the exact `∂F/∂θ` of the hydrodynamic force w.r.t. the actuation — verified against finite
+//! differences to machine precision, and used to Newton-tune a gait to a target force. (Forward
+//! sensitivity for a held body; the moving-boundary *shape* derivative is the next frontier.) Pure
+//! Rust → WASM-clean.
 
 use faer::linalg::solvers::Solve;
 use faer::sparse::linalg::solvers::Llt;
@@ -324,6 +332,133 @@ impl MacFluid {
         f
     }
 
+    /// **Differentiable coupled step (forward sensitivity).** Advance one timestep with a *held*
+    /// disk actuated at surface speed `θ = disk.ux`, carrying a tangent fluid field `(ut, vt) = ∂(u,v)/∂θ`
+    /// alongside the primal, and return `(Fx, ∂Fx/∂θ)` — the x-force on the body and its exact
+    /// derivative w.r.t. the actuation. Because the disk is held, the marker stencils are constant, so
+    /// the advection/diffusion predictor (product rule), the immersed-boundary forcing (linear in the
+    /// velocity deficit), and the pressure projection (the same prefactored Laplacian applied to the
+    /// differentiated RHS) all differentiate cleanly. `ut`/`vt` persist across steps to capture the
+    /// fluid's memory; seed them to zero. (`disk.uy` is held at 0; the moving-boundary *shape*
+    /// derivative is a separate frontier.)
+    pub fn step_with_disk_tangent(&mut self, disk: &RigidDisk, ut: &mut [f64], vt: &mut [f64]) -> (f64, f64) {
+        const N_FORCE_ITERS: usize = 6;
+        let (nx, ny, h, nu, dt, lid) = (self.nx, self.ny, self.h, self.nu, self.dt, self.lid_u);
+        let (inv2h, invh2) = (1.0 / (2.0 * h), 1.0 / (h * h));
+
+        // --- predictor (primal us,vs and tangent uts,vts), product rule on the advection terms ---
+        let (mut us, mut vs) = (self.u.clone(), self.v.clone());
+        let (mut uts, mut vts) = (ut.to_vec(), vt.to_vec());
+        let ug = |i: i32, j: i32| ughost(&self.u, ny, lid, i, j);
+        let vg = |i: i32, j: i32| vghost(&self.v, nx, ny, i, j);
+        let tg = |i: i32, j: i32| ughost(ut, ny, 0.0, i, j);
+        let wg = |i: i32, j: i32| vghost(vt, nx, ny, i, j);
+        for i in 1..nx {
+            for j in 0..ny {
+                let (ii, jj) = (i as i32, j as i32);
+                let uc = ug(ii, jj);
+                let dudx = (ug(ii + 1, jj) - ug(ii - 1, jj)) * inv2h;
+                let dudy = (ug(ii, jj + 1) - ug(ii, jj - 1)) * inv2h;
+                let vbar = 0.25 * (vg(ii - 1, jj) + vg(ii, jj) + vg(ii - 1, jj + 1) + vg(ii, jj + 1));
+                let lap = (ug(ii + 1, jj) + ug(ii - 1, jj) + ug(ii, jj + 1) + ug(ii, jj - 1) - 4.0 * uc) * invh2;
+                us[i * ny + j] = uc + dt * (-(uc * dudx + vbar * dudy) + nu * lap);
+                // tangent
+                let uct = tg(ii, jj);
+                let dudxt = (tg(ii + 1, jj) - tg(ii - 1, jj)) * inv2h;
+                let dudyt = (tg(ii, jj + 1) - tg(ii, jj - 1)) * inv2h;
+                let vbart = 0.25 * (wg(ii - 1, jj) + wg(ii, jj) + wg(ii - 1, jj + 1) + wg(ii, jj + 1));
+                let lapt = (tg(ii + 1, jj) + tg(ii - 1, jj) + tg(ii, jj + 1) + tg(ii, jj - 1) - 4.0 * uct) * invh2;
+                uts[i * ny + j] = uct + dt * (-(uct * dudx + uc * dudxt + vbart * dudy + vbar * dudyt) + nu * lapt);
+            }
+        }
+        for i in 0..nx {
+            for j in 1..ny {
+                let (ii, jj) = (i as i32, j as i32);
+                let vc = vg(ii, jj);
+                let dvdx = (vg(ii + 1, jj) - vg(ii - 1, jj)) * inv2h;
+                let dvdy = (vg(ii, jj + 1) - vg(ii, jj - 1)) * inv2h;
+                let ubar = 0.25 * (ug(ii, jj - 1) + ug(ii + 1, jj - 1) + ug(ii, jj) + ug(ii + 1, jj));
+                let lap = (vg(ii + 1, jj) + vg(ii - 1, jj) + vg(ii, jj + 1) + vg(ii, jj - 1) - 4.0 * vc) * invh2;
+                vs[i * (ny + 1) + j] = vc + dt * (-(ubar * dvdx + vc * dvdy) + nu * lap);
+                let vct = wg(ii, jj);
+                let dvdxt = (wg(ii + 1, jj) - wg(ii - 1, jj)) * inv2h;
+                let dvdyt = (wg(ii, jj + 1) - wg(ii, jj - 1)) * inv2h;
+                let ubart = 0.25 * (tg(ii, jj - 1) + tg(ii + 1, jj - 1) + tg(ii, jj) + tg(ii + 1, jj));
+                let lapt = (wg(ii + 1, jj) + wg(ii - 1, jj) + wg(ii, jj + 1) + wg(ii, jj - 1) - 4.0 * vct) * invh2;
+                vts[i * (ny + 1) + j] = vct + dt * (-(ubart * dvdx + ubar * dvdxt + vct * dvdy + vc * dvdyt) + nu * lapt);
+            }
+        }
+
+        // --- immersed-boundary forcing (primal + tangent); stencils constant (held disk) ---
+        let markers = disk.markers(h);
+        let su: Vec<_> = markers.iter().map(|&(mx, my)| self.stencil_u(mx, my)).collect();
+        let sv: Vec<_> = markers.iter().map(|&(mx, my)| self.stencil_v(mx, my)).collect();
+        let (mut sum_fx, mut sum_fx_dot) = (0.0f64, 0.0f64);
+        for _ in 0..N_FORCE_ITERS {
+            let defs: Vec<(f64, f64, f64, f64)> = (0..markers.len())
+                .map(|m| {
+                    let ui: f64 = su[m].iter().map(|&(k, w)| us[k] * w).sum();
+                    let vi: f64 = sv[m].iter().map(|&(k, w)| vs[k] * w).sum();
+                    let uit: f64 = su[m].iter().map(|&(k, w)| uts[k] * w).sum();
+                    let vit: f64 = sv[m].iter().map(|&(k, w)| vts[k] * w).sum();
+                    // deficit and its θ-derivative (∂(disk.ux)/∂θ = 1, ∂(disk.uy)/∂θ = 0)
+                    (disk.ux - ui, disk.uy - vi, 1.0 - uit, -vit)
+                })
+                .collect();
+            for m in 0..markers.len() {
+                let (fx, fy, fxt, fyt) = defs[m];
+                for &(k, w) in &su[m] {
+                    us[k] += fx * w;
+                    uts[k] += fxt * w;
+                    sum_fx += fx * w;
+                    sum_fx_dot += fxt * w;
+                }
+                for &(k, w) in &sv[m] {
+                    vs[k] += fy * w;
+                    vts[k] += fyt * w;
+                }
+            }
+        }
+
+        // --- projection (primal p and tangent p_dot share the prefactored Laplacian) ---
+        let n = nx * ny - 1;
+        let (mut rhs, mut rhs_t) = (Mat::<f64>::zeros(n, 1), Mat::<f64>::zeros(n, 1));
+        for i in 0..nx {
+            for j in 0..ny {
+                let k = i * ny + j;
+                if k == 0 {
+                    continue;
+                }
+                let div = (us[(i + 1) * ny + j] - us[i * ny + j]) / h + (vs[i * (ny + 1) + j + 1] - vs[i * (ny + 1) + j]) / h;
+                let divt = (uts[(i + 1) * ny + j] - uts[i * ny + j]) / h + (vts[i * (ny + 1) + j + 1] - vts[i * (ny + 1) + j]) / h;
+                rhs[(k - 1, 0)] = -h * h * div / dt;
+                rhs_t[(k - 1, 0)] = -h * h * divt / dt;
+            }
+        }
+        self.poisson.solve_in_place(&mut rhs);
+        self.poisson.solve_in_place(&mut rhs_t);
+        let (mut p, mut pt) = (vec![0.0; nx * ny], vec![0.0; nx * ny]);
+        for k in 1..nx * ny {
+            p[k] = rhs[(k - 1, 0)];
+            pt[k] = rhs_t[(k - 1, 0)];
+        }
+
+        // --- corrector: write both primal and tangent fields back ---
+        for i in 1..nx {
+            for j in 0..ny {
+                self.u[i * ny + j] = us[i * ny + j] - dt * (p[i * ny + j] - p[(i - 1) * ny + j]) / h;
+                ut[i * ny + j] = uts[i * ny + j] - dt * (pt[i * ny + j] - pt[(i - 1) * ny + j]) / h;
+            }
+        }
+        for i in 0..nx {
+            for j in 1..ny {
+                self.v[i * (ny + 1) + j] = vs[i * (ny + 1) + j] - dt * (p[i * ny + j] - p[i * ny + j - 1]) / h;
+                vt[i * (ny + 1) + j] = vts[i * (ny + 1) + j] - dt * (pt[i * ny + j] - pt[i * ny + j - 1]) / h;
+            }
+        }
+        (-sum_fx * h * h / dt, -sum_fx_dot * h * h / dt)
+    }
+
     /// Max no-slip residual `‖u_fluid(Xₖ) − U_body‖` over the disk's surface markers (0 = perfect no-slip).
     pub fn slip_residual(&self, disk: &RigidDisk) -> f64 {
         disk.markers(self.h)
@@ -409,6 +544,31 @@ pub struct FreeDisk {
     pub mass: f64,
 }
 
+/// x-velocity with tangential-wall ghosts (free-function form, so it works on primal *or* tangent
+/// fields; pass the field's lid value — 0 for a tangent field since the lid speed is a constant).
+fn ughost(u: &[f64], ny: usize, lid: f64, i: i32, j: i32) -> f64 {
+    let nyi = ny as i32;
+    if j < 0 {
+        -u[i as usize * ny]
+    } else if j >= nyi {
+        2.0 * lid - u[i as usize * ny + (ny - 1)]
+    } else {
+        u[i as usize * ny + j as usize]
+    }
+}
+
+/// y-velocity with tangential-wall ghosts (free-function form; identical for primal and tangent).
+fn vghost(v: &[f64], nx: usize, ny: usize, i: i32, j: i32) -> f64 {
+    let nxi = nx as i32;
+    if i < 0 {
+        -v[j as usize]
+    } else if i >= nxi {
+        -v[(nx - 1) * (ny + 1) + j as usize]
+    } else {
+        v[i as usize * (ny + 1) + j as usize]
+    }
+}
+
 /// The 4-point Peskin regularized delta kernel (1D factor), argument in cell units.
 fn phi(r: f64) -> f64 {
     let a = r.abs();
@@ -489,6 +649,63 @@ mod tests {
         assert!(ux_out > 0.1 * 0.4, "fluid not dragged along: u_out = {ux_out:.4}");
         // (3) Drag opposes the surface motion (force on the body points −x).
         assert!(drag.0 < 0.0, "drag does not oppose motion: Fx = {:.4}", drag.0);
+    }
+
+    // Primal-only rollout: force on a held disk actuated at surface speed θ, after `n` steps.
+    #[cfg(test)]
+    fn rollout_force(theta: f64, n: usize) -> f64 {
+        let mut f = MacFluid::new(48, 48, 0.02, 0.003, 0.0);
+        let disk = RigidDisk { cx: 0.5, cy: 0.5, r: 0.1, ux: theta, uy: 0.0 };
+        let mut fx = 0.0;
+        for _ in 0..n {
+            fx = f.step_with_disk(&disk).0;
+        }
+        fx
+    }
+
+    #[test]
+    fn coupled_fsi_gradient_matches_finite_difference() {
+        // Analytic forward-sensitivity ∂Fx/∂θ through the whole coupled fluid+IB+projection rollout
+        // must match a central finite difference of the same rollout.
+        let (theta, n) = (0.3, 30);
+        let mut f = MacFluid::new(48, 48, 0.02, 0.003, 0.0);
+        let disk = RigidDisk { cx: 0.5, cy: 0.5, r: 0.1, ux: theta, uy: 0.0 };
+        let (mut ut, mut vt) = (vec![0.0; f.u.len()], vec![0.0; f.v.len()]);
+        let mut ad = (0.0, 0.0);
+        for _ in 0..n {
+            ad = f.step_with_disk_tangent(&disk, &mut ut, &mut vt);
+        }
+
+        let eps = 1e-4;
+        let fd = (rollout_force(theta + eps, n) - rollout_force(theta - eps, n)) / (2.0 * eps);
+        let rel = (ad.1 - fd).abs() / fd.abs();
+        eprintln!("FSI grad: analytic={:.5}, fd={fd:.5}, rel_err={rel:.2e}", ad.1);
+        assert!(rel < 5e-3, "coupled-FSI gradient wrong: analytic {} vs fd {fd}", ad.1);
+    }
+
+    #[test]
+    fn gradient_tunes_actuation_to_a_target_force() {
+        // Gait tuning: use the analytic gradient to Newton-solve for the surface speed that produces
+        // a target hydrodynamic force through the coupled FSI rollout.
+        let (target, n) = (-0.08, 30);
+        let mut theta = 0.15;
+        let mut last = 0.0;
+        for _ in 0..5 {
+            let mut f = MacFluid::new(48, 48, 0.02, 0.003, 0.0);
+            let disk = RigidDisk { cx: 0.5, cy: 0.5, r: 0.1, ux: theta, uy: 0.0 };
+            let (mut ut, mut vt) = (vec![0.0; f.u.len()], vec![0.0; f.v.len()]);
+            let mut fd = (0.0, 0.0);
+            for _ in 0..n {
+                fd = f.step_with_disk_tangent(&disk, &mut ut, &mut vt);
+            }
+            last = fd.0;
+            if (fd.0 - target).abs() < 1e-3 {
+                break;
+            }
+            theta += (target - fd.0) / fd.1; // Newton step using ∂F/∂θ
+        }
+        eprintln!("tuned: theta={theta:.4}, F={last:.4} (target {target})");
+        assert!((last - target).abs() < 2e-3, "did not reach target force: F = {last:.4}");
     }
 
     #[test]
