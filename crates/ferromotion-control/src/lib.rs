@@ -241,3 +241,6 @@ mod tests {
         assert!((tip - x_des).norm() < 5e-3, "tool at {tip:?}, target {x_des:?}");
     }
 }
+
+mod rmpflow;
+pub use rmpflow::RmpArm;
