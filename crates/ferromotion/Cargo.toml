@@ -19,3 +19,4 @@ ferromotion-fluid = { path = "../ferromotion-fluid", version = "0.9.0" }
 ferromotion-mpm = { path = "../ferromotion-mpm", version = "0.9.0" }
 ferromotion-cloth = { path = "../ferromotion-cloth", version = "0.9.0" }
 ferromotion-tactile = { path = "../ferromotion-tactile", version = "0.9.0" }
+ferromotion-rod = { path = "../ferromotion-rod", version = "0.9.0" }

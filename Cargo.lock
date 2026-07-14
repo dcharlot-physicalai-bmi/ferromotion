@@ -312,6 +312,7 @@ dependencies = [
  "ferromotion-fluid",
  "ferromotion-mpm",
  "ferromotion-policy",
+ "ferromotion-rod",
  "ferromotion-ruckig",
  "ferromotion-tactile",
 ]
@@ -364,6 +365,13 @@ dependencies = [
  "nalgebra",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "ferromotion-rod"
+version = "0.9.0"
+dependencies = [
+ "nalgebra",
 ]
 
 [[package]]

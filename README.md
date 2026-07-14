@@ -25,6 +25,7 @@ Sibling to [Ferric](https://physicalai-bmi.org) (the Institute's pure-Rust compu
 | [`ferromotion-fluid`](https://crates.io/crates/ferromotion-fluid) | 2D incompressible **Navier–Stokes** (MAC projection) for fluid–robot interaction — verified against the Ghia Re=100 lid-driven-cavity benchmark. |
 | [`ferromotion-mpm`](https://crates.io/crates/ferromotion-mpm) | Differentiable 2D **Material Point Method** (MLS-MPM, neo-Hookean) for soft/elastic/granular material — analytic material-stiffness gradients. |
 | [`ferromotion-tactile`](https://crates.io/crates/ferromotion-tactile) | Differentiable **optical-tactile** (GelSight/DIGIT) sensor simulation — gel deformation → photometric image. |
+| [`ferromotion-rod`](https://crates.io/crates/ferromotion-rod) | Differentiable **Discrete Elastic Rods** (stretch + bending) for cables, tendons, and continuum robots — validated vs Euler-Bernoulli. |
 | [`ferromotion-cloth`](https://crates.io/crates/ferromotion-cloth) | Differentiable **FEM thin-shell cloth** (StVK membrane + bending) — exact forces + analytic material-stiffness gradients. |
 | [`ferromotion-ruckig`](https://crates.io/crates/ferromotion-ruckig) | Jerk-limited online trajectory generation. |
 | [`ferromotion-policy`](https://crates.io/crates/ferromotion-policy) | On-device runner for exported learned (RL/VLA) policies. |
