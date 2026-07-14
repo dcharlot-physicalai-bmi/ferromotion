@@ -294,3 +294,6 @@ mod tests {
         assert!(e < 1e-3, "policy-driven arm did not regulate: err {e}, q={q:?}");
     }
 }
+
+pub mod flow;
+pub use flow::{sample_field, sample_mlp, Integrator};

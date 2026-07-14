@@ -28,7 +28,7 @@ Sibling to [Ferric](https://physicalai-bmi.org) (the Institute's pure-Rust compu
 | [`ferromotion-rod`](https://crates.io/crates/ferromotion-rod) | Differentiable **Discrete Elastic Rods** (stretch + bending) for cables, tendons, and continuum robots — validated vs Euler-Bernoulli. |
 | [`ferromotion-cloth`](https://crates.io/crates/ferromotion-cloth) | Differentiable **FEM thin-shell cloth** (StVK membrane + bending) — exact forces + analytic material-stiffness gradients. |
 | [`ferromotion-ruckig`](https://crates.io/crates/ferromotion-ruckig) | Jerk-limited online trajectory generation. |
-| [`ferromotion-policy`](https://crates.io/crates/ferromotion-policy) | On-device runner for exported learned (RL/VLA) policies. |
+| [`ferromotion-policy`](https://crates.io/crates/ferromotion-policy) | On-device runner for exported learned (RL/VLA) policies — MLP inference + **flow-matching action sampler** (ODE integration of a learned velocity field). |
 | [`ferromotion-wasm`](https://crates.io/crates/ferromotion-wasm) | WebAssembly bindings — build a chain or load a URDF, then FK / IK / retargeting / motion planning in the browser. |
 
 ## Quickstart
