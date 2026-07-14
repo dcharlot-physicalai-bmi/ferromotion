@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ferromotion", "crates/ferromotion-core", "crates/ferromotion-ruckig", "crates/ferromotion-wasm", "crates/ferromotion-control", "crates/ferromotion-policy", "crates/ferromotion-fluid", "crates/ferromotion-mpm"]
+members = ["crates/ferromotion", "crates/ferromotion-core", "crates/ferromotion-ruckig", "crates/ferromotion-wasm", "crates/ferromotion-control", "crates/ferromotion-policy", "crates/ferromotion-fluid", "crates/ferromotion-mpm", "crates/ferromotion-cloth"]
 
 [workspace.package]
 version = "0.8.0"

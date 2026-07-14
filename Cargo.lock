@@ -306,12 +306,20 @@ dependencies = [
 name = "ferromotion"
 version = "0.8.0"
 dependencies = [
+ "ferromotion-cloth",
  "ferromotion-control",
  "ferromotion-core",
  "ferromotion-fluid",
  "ferromotion-mpm",
  "ferromotion-policy",
  "ferromotion-ruckig",
+]
+
+[[package]]
+name = "ferromotion-cloth"
+version = "0.8.0"
+dependencies = [
+ "nalgebra",
 ]
 
 [[package]]

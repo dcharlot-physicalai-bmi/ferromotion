@@ -26,4 +26,4 @@ jobs:
         run: >
           cargo build --target wasm32-unknown-unknown
           -p ferromotion-core -p ferromotion-control -p ferromotion-ruckig
-          -p ferromotion-policy -p ferromotion-wasm -p ferromotion-fluid -p ferromotion-mpm
+          -p ferromotion-policy -p ferromotion-wasm -p ferromotion-fluid -p ferromotion-mpm -p ferromotion-cloth
