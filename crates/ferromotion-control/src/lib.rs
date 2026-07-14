@@ -242,5 +242,7 @@ mod tests {
     }
 }
 
+mod hqp;
 mod rmpflow;
+pub use hqp::solve_hqp;
 pub use rmpflow::RmpArm;
