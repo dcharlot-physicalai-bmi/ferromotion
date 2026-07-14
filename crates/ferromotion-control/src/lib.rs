@@ -243,6 +243,8 @@ mod tests {
 }
 
 mod hqp;
+mod koopman;
 mod rmpflow;
 pub use hqp::solve_hqp;
+pub use koopman::{edmd, edmdc, Koopman};
 pub use rmpflow::RmpArm;
