@@ -7,7 +7,7 @@
 //! Pure `nalgebra` → WASM-clean.
 
 use nalgebra::{DMatrix, DVector, Vector3};
-use ferromotion_core::{forward_dynamics, LinkInertia, Robot};
+use ferromotion_core::{forward_dynamics, forward_dynamics_derivatives, LinkInertia, Robot};
 
 /// A finite-horizon optimal-control problem: swing the robot from a start state toward a goal
 /// state `x_goal = [q_goal; qd_goal]`, trading state error against control effort.
@@ -107,30 +107,29 @@ impl IlqrProblem<'_> {
         j
     }
 
-    /// Finite-difference linearization of `f` about `(x, u)`: `A = ∂f/∂x` (2n×2n), `B = ∂f/∂u`
-    /// (2n×n), by central differences.
+    /// **Exact** linearization of the discrete step `f` about `(x, u)` via the analytical
+    /// forward-dynamics derivatives (Carpentier–Mansard, in `ferromotion-core`), composed with the
+    /// semi-implicit Euler map `q̇⁺ = q̇ + q̈·dt`, `q⁺ = q + q̇⁺·dt` (so `q⁺ = q + q̇·dt + q̈·dt²`).
+    /// Replaces finite differences: exact gradients, O(n²), no `2n+n` extra rollouts per stage.
     fn linearize(&self, x: &DVector<f64>, u: &DVector<f64>) -> (DMatrix<f64>, DMatrix<f64>) {
         let n = self.n();
         let s = 2 * n;
-        let eps = 1e-6;
+        let dt = self.dt;
+        let q: Vec<f64> = (0..n).map(|i| x[i]).collect();
+        let qd: Vec<f64> = (0..n).map(|i| x[n + i]).collect();
+        let tau: Vec<f64> = (0..n).map(|i| u[i]).collect();
+        let (da_dq, da_dqd, da_dtau) = forward_dynamics_derivatives(self.robot, self.inertia, &q, &qd, &tau, self.gravity);
+        let eye = DMatrix::<f64>::identity(n, n);
+
         let mut a = DMatrix::zeros(s, s);
-        for j in 0..s {
-            let mut xp = x.clone();
-            let mut xm = x.clone();
-            xp[j] += eps;
-            xm[j] -= eps;
-            let col = (self.step(&xp, u) - self.step(&xm, u)) / (2.0 * eps);
-            a.set_column(j, &col);
-        }
+        a.view_mut((0, 0), (n, n)).copy_from(&(&eye + &da_dq * (dt * dt))); // ∂q⁺/∂q
+        a.view_mut((0, n), (n, n)).copy_from(&(&eye * dt + &da_dqd * (dt * dt))); // ∂q⁺/∂q̇
+        a.view_mut((n, 0), (n, n)).copy_from(&(&da_dq * dt)); // ∂q̇⁺/∂q
+        a.view_mut((n, n), (n, n)).copy_from(&(&eye + &da_dqd * dt)); // ∂q̇⁺/∂q̇
+
         let mut b = DMatrix::zeros(s, n);
-        for j in 0..n {
-            let mut up = u.clone();
-            let mut um = u.clone();
-            up[j] += eps;
-            um[j] -= eps;
-            let col = (self.step(x, &up) - self.step(x, &um)) / (2.0 * eps);
-            b.set_column(j, &col);
-        }
+        b.view_mut((0, 0), (n, n)).copy_from(&(&da_dtau * (dt * dt))); // ∂q⁺/∂τ
+        b.view_mut((n, 0), (n, n)).copy_from(&(&da_dtau * dt)); // ∂q̇⁺/∂τ
         (a, b)
     }
 }

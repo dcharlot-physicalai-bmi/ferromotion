@@ -21,6 +21,7 @@ mod costs;
 mod dex_retarget;
 mod diffik;
 mod dcol;
+mod dyn_derivatives;
 mod dynamics;
 mod ipm;
 mod kdl;
@@ -45,6 +46,7 @@ pub use contact::{
 pub use diffik::{solve_diffik, DiffIkOptions, DiffIkResult, FrameTaskDef};
 pub use dcol::{proximity, proximity_grad_spheres, Primitive};
 pub use dynamics::{forward_dynamics, gravity_vector, inverse_dynamics, mass_matrix, LinkInertia};
+pub use dyn_derivatives::{forward_dynamics_derivatives, id_derivatives};
 pub use ipm::{solve_lcp, solve_lcp_diff, solve_lcp_smoothed};
 pub use kdl::resolved_rate;
 pub use urdf::from_urdf_full;
