@@ -16,3 +16,4 @@ ferromotion-control = { path = "../ferromotion-control", version = "0.7.0" }
 ferromotion-ruckig = { path = "../ferromotion-ruckig", version = "0.7.0" }
 ferromotion-policy = { path = "../ferromotion-policy", version = "0.7.0" }
 ferromotion-fluid = { path = "../ferromotion-fluid", version = "0.7.0" }
+ferromotion-mpm = { path = "../ferromotion-mpm", version = "0.7.0" }

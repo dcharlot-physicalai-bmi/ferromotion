@@ -11,6 +11,7 @@
 //! - [`ruckig`] — jerk-limited online trajectory generation.
 //! - [`policy`] — on-device runner for exported learned (RL/VLA) policies.
 //! - [`fluid`] — 2D incompressible Navier–Stokes (MAC projection) for fluid–robot interaction.
+//! - [`mpm`] — differentiable 2D Material Point Method for soft/elastic/granular material.
 //!
 //! From the [Institute for Physical AI](https://physicalai-bmi.org). Sibling to `ferric` (the
 //! pure-Rust compute fabric).
@@ -18,5 +19,6 @@
 pub use ferromotion_control as control;
 pub use ferromotion_core as core;
 pub use ferromotion_fluid as fluid;
+pub use ferromotion_mpm as mpm;
 pub use ferromotion_policy as policy;
 pub use ferromotion_ruckig as ruckig;

@@ -309,6 +309,7 @@ dependencies = [
  "ferromotion-control",
  "ferromotion-core",
  "ferromotion-fluid",
+ "ferromotion-mpm",
  "ferromotion-policy",
  "ferromotion-ruckig",
 ]
@@ -337,6 +338,13 @@ name = "ferromotion-fluid"
 version = "0.7.0"
 dependencies = [
  "faer",
+]
+
+[[package]]
+name = "ferromotion-mpm"
+version = "0.7.0"
+dependencies = [
+ "nalgebra",
 ]
 
 [[package]]
