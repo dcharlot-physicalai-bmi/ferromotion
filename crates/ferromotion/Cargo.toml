@@ -18,3 +18,4 @@ ferromotion-policy = { path = "../ferromotion-policy", version = "0.9.0" }
 ferromotion-fluid = { path = "../ferromotion-fluid", version = "0.9.0" }
 ferromotion-mpm = { path = "../ferromotion-mpm", version = "0.9.0" }
 ferromotion-cloth = { path = "../ferromotion-cloth", version = "0.9.0" }
+ferromotion-tactile = { path = "../ferromotion-tactile", version = "0.9.0" }

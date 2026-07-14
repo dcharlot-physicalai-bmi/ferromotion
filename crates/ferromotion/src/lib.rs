@@ -13,6 +13,7 @@
 //! - [`fluid`] — 2D incompressible Navier–Stokes (MAC projection) for fluid–robot interaction.
 //! - [`mpm`] — differentiable 2D Material Point Method for soft/elastic/granular material.
 //! - [`cloth`] — differentiable FEM thin-shell cloth (StVK membrane + bending).
+//! - [`tactile`] — differentiable optical-tactile (GelSight/DIGIT) sensor simulation.
 //!
 //! From the [Institute for Physical AI](https://physicalai-bmi.org). Sibling to `ferric` (the
 //! pure-Rust compute fabric).
@@ -24,3 +25,4 @@ pub use ferromotion_cloth as cloth;
 pub use ferromotion_mpm as mpm;
 pub use ferromotion_policy as policy;
 pub use ferromotion_ruckig as ruckig;
+pub use ferromotion_tactile as tactile;

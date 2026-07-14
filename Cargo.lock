@@ -313,6 +313,7 @@ dependencies = [
  "ferromotion-mpm",
  "ferromotion-policy",
  "ferromotion-ruckig",
+ "ferromotion-tactile",
 ]
 
 [[package]]
@@ -368,6 +369,13 @@ dependencies = [
 [[package]]
 name = "ferromotion-ruckig"
 version = "0.9.0"
+
+[[package]]
+name = "ferromotion-tactile"
+version = "0.9.0"
+dependencies = [
+ "nalgebra",
+]
 
 [[package]]
 name = "ferromotion-wasm"
