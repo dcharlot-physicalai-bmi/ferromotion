@@ -11,6 +11,7 @@
 use nalgebra::{DMatrix, DVector, Isometry3, Translation3, Unit, UnitQuaternion, Vector3, Vector6};
 
 mod aba;
+mod cfd_contact;
 mod collision;
 mod constraints;
 mod contact;
@@ -32,6 +33,7 @@ mod sparse;
 mod traj;
 mod urdf;
 pub use aba::{floating_base_forward_dynamics, forward_dynamics_aba};
+pub use cfd_contact::{rollout_impulse, CfdContact};
 pub use collision::{CapsuleCollisionCost, PlaneCollisionCost, SphereCollisionCost};
 pub use contact_ipm::{solve_frictional_ipm, FrictionalStep, StFrictionContact};
 pub use contact::{
