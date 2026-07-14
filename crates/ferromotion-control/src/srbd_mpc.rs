@@ -196,7 +196,6 @@ mod tests {
     #[test]
     fn swing_feet_carry_no_force() {
         let mpc = quadruped();
-        let nf = mpc.feet.len();
         let g = -9.81;
         let mut x_ref = [0.0; NX];
         x_ref[12] = g;
