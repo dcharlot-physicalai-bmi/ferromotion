@@ -33,6 +33,7 @@ mod retarget;
 mod rigidbody;
 mod robot_contact;
 mod robust;
+mod sdf;
 mod sparse;
 mod traj;
 mod urdf;
@@ -68,6 +69,7 @@ pub use robot_contact::RobotContactSim;
 pub use pink::{
     solve_pink, FramePoseTask, PinkOptions, PinkResult, PinkSolver, PinkTask, PostureTask, TaskStack,
 };
+pub use sdf::{Sdf, SdfScene};
 pub use sparse::{solve_factor_graph, SparseFactor, SparseResult};
 pub use traj::{TrajectoryProblem, TrajectoryResult};
 pub use urdf::from_urdf_str;
