@@ -33,6 +33,7 @@ mod qp;
 mod sliding_mode;
 mod srbd_mpc;
 mod tinympc;
+mod topp;
 mod wbc;
 mod zmp;
 pub use actuator::SeaJoint;
@@ -60,6 +61,7 @@ pub use proxddp::{ConstrainedDdpResult, ConstrainedLqr};
 pub use sliding_mode::{sat, SlidingMode};
 pub use srbd_mpc::SrbdMpc;
 pub use tinympc::TinyMpc;
+pub use topp::{topp, ToppPath, ToppResult};
 pub use wbc::{CartesianTask, WholeBody};
 pub use zmp::{capture_point, CartState, PreviewState, ZmpPreview};
 
