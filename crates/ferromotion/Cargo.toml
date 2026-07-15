@@ -11,12 +11,12 @@ categories.workspace = true
 description = "Ferromotion — a Rust library for the kinematics, dynamics, and control of physical AI (native + WebAssembly). Umbrella crate re-exporting the ferromotion-* components."
 
 [dependencies]
-ferromotion-core = { path = "../ferromotion-core", version = "0.14.0" }
-ferromotion-control = { path = "../ferromotion-control", version = "0.14.0" }
-ferromotion-ruckig = { path = "../ferromotion-ruckig", version = "0.14.0" }
-ferromotion-policy = { path = "../ferromotion-policy", version = "0.14.0" }
-ferromotion-fluid = { path = "../ferromotion-fluid", version = "0.14.0" }
-ferromotion-mpm = { path = "../ferromotion-mpm", version = "0.14.0" }
-ferromotion-cloth = { path = "../ferromotion-cloth", version = "0.14.0" }
-ferromotion-tactile = { path = "../ferromotion-tactile", version = "0.14.0" }
-ferromotion-rod = { path = "../ferromotion-rod", version = "0.14.0" }
+ferromotion-core = { path = "../ferromotion-core", version = "0.15.0" }
+ferromotion-control = { path = "../ferromotion-control", version = "0.15.0" }
+ferromotion-ruckig = { path = "../ferromotion-ruckig", version = "0.15.0" }
+ferromotion-policy = { path = "../ferromotion-policy", version = "0.15.0" }
+ferromotion-fluid = { path = "../ferromotion-fluid", version = "0.15.0" }
+ferromotion-mpm = { path = "../ferromotion-mpm", version = "0.15.0" }
+ferromotion-cloth = { path = "../ferromotion-cloth", version = "0.15.0" }
+ferromotion-tactile = { path = "../ferromotion-tactile", version = "0.15.0" }
+ferromotion-rod = { path = "../ferromotion-rod", version = "0.15.0" }
