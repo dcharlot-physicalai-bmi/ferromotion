@@ -7,6 +7,7 @@
 use nalgebra::{DVector, Vector3};
 use ferromotion_core::{gravity_vector, inverse_dynamics, mass_matrix, LinkInertia, Robot};
 
+mod actuator;
 mod admittance;
 mod algames;
 mod reluqp;
@@ -33,6 +34,7 @@ mod srbd_mpc;
 mod tinympc;
 mod wbc;
 mod zmp;
+pub use actuator::SeaJoint;
 pub use admittance::{Admittance, HybridForcePosition};
 pub use algames::{AlGames, AlGamesResult, Player};
 pub use reluqp::ReluQp;
