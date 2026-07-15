@@ -11,12 +11,12 @@ use nalgebra::{Matrix3, Matrix6, Vector3, Vector6};
 use {crate::Iso, nalgebra::Translation3, nalgebra::UnitQuaternion};
 
 /// 3×3 skew-symmetric (cross-product) matrix of `v`.
-fn skew(v: Vector3<f64>) -> Matrix3<f64> {
+pub(crate) fn skew(v: Vector3<f64>) -> Matrix3<f64> {
     Matrix3::new(0.0, -v.z, v.y, v.z, 0.0, -v.x, -v.y, v.x, 0.0)
 }
 
 /// Build a 6×6 from four 3×3 blocks (spatial ordering `[angular; linear]`).
-fn block6(tl: Matrix3<f64>, tr: Matrix3<f64>, bl: Matrix3<f64>, br: Matrix3<f64>) -> Matrix6<f64> {
+pub(crate) fn block6(tl: Matrix3<f64>, tr: Matrix3<f64>, bl: Matrix3<f64>, br: Matrix3<f64>) -> Matrix6<f64> {
     let mut m = Matrix6::zeros();
     m.fixed_view_mut::<3, 3>(0, 0).copy_from(&tl);
     m.fixed_view_mut::<3, 3>(0, 3).copy_from(&tr);
@@ -27,7 +27,7 @@ fn block6(tl: Matrix3<f64>, tr: Matrix3<f64>, bl: Matrix3<f64>, br: Matrix3<f64>
 
 /// Spatial motion transform `ⁱX_{parent}`: `R` is the child→parent rotation, `p` the child origin in
 /// the parent frame. Motion transforms as `v_child = X·v_parent`; forces as `f_parent = Xᵀ·f_child`.
-fn motion_transform(r: Matrix3<f64>, p: Vector3<f64>) -> Matrix6<f64> {
+pub(crate) fn motion_transform(r: Matrix3<f64>, p: Vector3<f64>) -> Matrix6<f64> {
     let e = r.transpose(); // parent → child
     block6(e, Matrix3::zeros(), -e * skew(p), e)
 }
@@ -40,18 +40,18 @@ fn spatial_inertia(li: &LinkInertia) -> Matrix6<f64> {
 }
 
 /// Spatial motion cross product `v ×` (acts on motion vectors).
-fn crm(v: Vector6<f64>) -> Matrix6<f64> {
+pub(crate) fn crm(v: Vector6<f64>) -> Matrix6<f64> {
     let (w, vl) = (v.fixed_rows::<3>(0).into_owned(), v.fixed_rows::<3>(3).into_owned());
     block6(skew(w), Matrix3::zeros(), skew(vl), skew(w))
 }
 
 /// Spatial force cross product `v ×*` (acts on force vectors) `= −(v×)ᵀ`.
-fn crf(v: Vector6<f64>) -> Matrix6<f64> {
+pub(crate) fn crf(v: Vector6<f64>) -> Matrix6<f64> {
     -crm(v).transpose()
 }
 
 /// Joint motion subspace `S` for joint `i` (revolute → `[axis; 0]`, prismatic → `[0; axis]`).
-fn motion_subspace(kind: JointKind, axis: Vector3<f64>) -> Vector6<f64> {
+pub(crate) fn motion_subspace(kind: JointKind, axis: Vector3<f64>) -> Vector6<f64> {
     let mut s = Vector6::zeros();
     match kind {
         JointKind::Revolute => s.fixed_rows_mut::<3>(0).copy_from(&axis),

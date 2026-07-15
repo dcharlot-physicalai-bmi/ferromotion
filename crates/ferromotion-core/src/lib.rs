@@ -38,6 +38,7 @@ mod robust;
 mod rrt;
 mod sdf;
 mod sparse;
+mod sysid;
 mod traj;
 mod urdf;
 pub use aba::{floating_base_forward_dynamics, forward_dynamics_aba};
@@ -77,6 +78,7 @@ pub use pink::{
 };
 pub use sdf::{Sdf, SdfScene};
 pub use sparse::{solve_factor_graph, SparseFactor, SparseResult};
+pub use sysid::{identify, inertial_regressor, is_physically_consistent, params_from_inertia, pseudo_inertia, IdSample, PARAMS_PER_LINK};
 pub use traj::{TrajectoryProblem, TrajectoryResult};
 pub use urdf::from_urdf_str;
 
