@@ -38,6 +38,7 @@ mod slip;
 mod srbd_mpc;
 mod tinympc;
 mod topp;
+mod visual_servo;
 mod wbc;
 mod zmp;
 pub use actuator::SeaJoint;
@@ -70,6 +71,7 @@ pub use slip::{Phase, Slip, SlipState};
 pub use srbd_mpc::SrbdMpc;
 pub use tinympc::TinyMpc;
 pub use topp::{topp, ToppPath, ToppResult};
+pub use visual_servo::{ibvs_twist, interaction_matrix, Camera};
 pub use wbc::{CartesianTask, WholeBody};
 pub use zmp::{capture_point, CartState, PreviewState, ZmpPreview};
 
