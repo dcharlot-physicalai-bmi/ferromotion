@@ -15,5 +15,6 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 ferromotion-core = { path = "../ferromotion-core", version = "0.15.0" }
+ferromotion-control = { path = "../ferromotion-control", version = "0.15.0" }
 wasm-bindgen = "0.2"
 nalgebra.workspace = true
