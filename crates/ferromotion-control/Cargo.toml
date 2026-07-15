@@ -11,6 +11,6 @@ categories.workspace = true
 description = "Control schemes for physical AI, in Rust — PID, computed-torque, Cartesian impedance, and more. WASM-clean."
 
 [dependencies]
-ferromotion-core = { path = "../ferromotion-core", version = "0.12.0" }
+ferromotion-core = { path = "../ferromotion-core", version = "0.13.0" }
 nalgebra.workspace = true
 clarabel = "0.11"
