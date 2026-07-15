@@ -43,7 +43,7 @@ pub struct GelSim {
 
 impl GelSim {
     /// Grid coordinate of column/row `i`.
-    fn coord(&self, i: usize) -> f64 {
+    pub(crate) fn coord(&self, i: usize) -> f64 {
         -self.extent + 2.0 * self.extent * i as f64 / (self.n - 1) as f64
     }
 
@@ -196,3 +196,6 @@ mod tests {
         assert!(rim_spread > bg_spread + 0.05, "contact produced no photometric contrast (rim {rim_spread}, bg {bg_spread})");
     }
 }
+
+pub mod servo;
+pub use servo::{extract_features, TactileFeatures, TactileServo};
