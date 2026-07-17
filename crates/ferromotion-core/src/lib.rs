@@ -17,6 +17,7 @@ mod collision;
 mod constraints;
 mod contact;
 mod contact_ipm;
+mod cosserat;
 mod costs;
 mod dex_retarget;
 mod diffik;
@@ -46,6 +47,7 @@ pub use aba::{floating_base_forward_dynamics, forward_dynamics_aba};
 pub use cfd_contact::{rollout_impulse, CfdContact};
 pub use closed_loop::{Pin, PlanarLoop};
 pub use collision::{CapsuleCollisionCost, PlaneCollisionCost, SphereCollisionCost};
+pub use cosserat::CosseratRod;
 pub use contact_ipm::{solve_frictional_ipm, FrictionalStep, StFrictionContact};
 pub use contact::{
     solve_contacts, solve_contacts_diff, solve_contacts_friction, Contact, ContactSolve,
