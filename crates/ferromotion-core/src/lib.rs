@@ -28,6 +28,7 @@ mod ipc;
 mod ipm;
 mod kdl;
 mod lgvi;
+mod leg_smoother;
 mod modal;
 mod pink;
 mod planar_contact;
@@ -76,6 +77,7 @@ pub use robot_contact::RobotContactSim;
 pub use pink::{
     solve_pink, FramePoseTask, PinkOptions, PinkResult, PinkSolver, PinkTask, PostureTask, TaskStack,
 };
+pub use leg_smoother::{LegSmoother, PriorPose2, RelPose2};
 pub use sdf::{Sdf, SdfScene};
 pub use sparse::{solve_factor_graph, SparseFactor, SparseResult};
 pub use sysid::{identify, inertial_regressor, is_physically_consistent, params_from_inertia, pseudo_inertia, IdSample, PARAMS_PER_LINK};
