@@ -1,7 +1,7 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>The Ferromotion Textbook — an interactive book on how machines move</title>
-<meta name="description" content="Ten interactive chapters on the ideas that make machines move — actuation, coordination, safety, manipulation, learning, perception, planning, locomotion, modeling, composition. Every chapter runs the real Rust library on your device and verifies its own headline live."/>
+<meta name="description" content="Twelve interactive chapters on the ideas that make machines move — actuation, coordination, safety, manipulation, learning, perception, planning, locomotion, modeling, composition, compliance, mapping. Every chapter runs the real Rust library on your device and verifies its own headline live."/>
 <style>
 :root{--ground:#0a0f1e;--panel:#111830;--line:#26324c;--ink:#eef1f8;--soft:#aeb6cc;--dim:#727d99;--gold:#d9b45e;--goldb:#f0cf82;--green:#7dd3a0;--mono:ui-monospace,"SF Mono",Menlo,monospace;--sans:system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif}
 *{box-sizing:border-box}html,body{margin:0}
@@ -33,7 +33,7 @@ a.card::before{content:"";position:absolute;inset:0 auto 0 0;width:3px;backgroun
 <div class="wrap">
   <p class="kicker"><span style="color:var(--goldb);font-size:1.1rem">&#934;</span><span>Institute for Physical AI</span><span>· the Charlot Lab</span></p>
   <h1>The Ferromotion Textbook</h1>
-  <p class="lede">Ten ideas that make machines move — and each one runs, in full, on your device as you read.</p>
+  <p class="lede">Twelve ideas that make machines move — and each one runs, in full, on your device as you read.</p>
   <p class="thesis">This is not a book <i>about</i> robotics that shows you finished results. Every chapter drives the same <b>Rust library</b> the Institute's tools are built on, compiled to WebAssembly, and <b>computes its central claim live in front of you</b> — no recordings, no precomputed plots. Drag the pieces, push the limits, and watch the numbers hold. Each chapter also <b>verifies its own headline</b> on load, against an analytic answer or a physical invariant, so you can trust that the thing you are playing with is the real thing.</p>
   <div class="pills">
     <span class="pill">runs on your device</span>
@@ -102,6 +102,18 @@ a.card::before{content:"";position:absolute;inset:0 auto 0 0;width:3px;backgroun
       <div class="chtitle">Do everything at once</div>
       <div class="chhook">Reach the goal, avoid the obstacle, stay smooth — fused into one reactive motion by a metric that weights each behavior by how much it matters right now.</div>
       <div class="chgov"><span class="lab">governed by</span> the Riemannian metric</div>
+    </a>
+    <a class="card" href="/assets/sims/soft-robots">
+      <div class="chnum"><span>Chapter 11</span><span class="facet">Compliance</span></div>
+      <div class="chtitle">The robot that bends</div>
+      <div class="chhook">A soft arm has no joints — it curves everywhere. Describe it by its strain along the body, and its bending under load matches beam theory exactly.</div>
+      <div class="chgov"><span class="lab">governed by</span> the strain field</div>
+    </a>
+    <a class="card" href="/assets/sims/loop-closure">
+      <div class="chnum"><span>Chapter 12</span><span class="facet">Mapping</span></div>
+      <div class="chtitle">Revising the past</div>
+      <div class="chhook">A drifting loop never closes — until one late "I've been here before" re-optimizes the whole trajectory and snaps every past pose into place.</div>
+      <div class="chgov"><span class="lab">governed by</span> the pose graph</div>
     </a>
   </div>
 
