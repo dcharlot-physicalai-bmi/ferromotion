@@ -1,7 +1,7 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>The Ferromotion Textbook — an interactive book on how machines move</title>
-<meta name="description" content="Eight interactive chapters on the ideas that make machines move — actuation, coordination, safety, manipulation, learning, perception, planning, locomotion. Every chapter runs the real Rust library on your device and verifies its own headline live."/>
+<meta name="description" content="Nine interactive chapters on the ideas that make machines move — actuation, coordination, safety, manipulation, learning, perception, planning, locomotion, modeling. Every chapter runs the real Rust library on your device and verifies its own headline live."/>
 <style>
 :root{--ground:#0a0f1e;--panel:#111830;--line:#26324c;--ink:#eef1f8;--soft:#aeb6cc;--dim:#727d99;--gold:#d9b45e;--goldb:#f0cf82;--green:#7dd3a0;--mono:ui-monospace,"SF Mono",Menlo,monospace;--sans:system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif}
 *{box-sizing:border-box}html,body{margin:0}
@@ -33,7 +33,7 @@ a.card::before{content:"";position:absolute;inset:0 auto 0 0;width:3px;backgroun
 <div class="wrap">
   <p class="kicker"><span style="color:var(--goldb);font-size:1.1rem">&#934;</span><span>Institute for Physical AI</span><span>· the Charlot Lab</span></p>
   <h1>The Ferromotion Textbook</h1>
-  <p class="lede">Eight ideas that make machines move — and each one runs, in full, on your device as you read.</p>
+  <p class="lede">Nine ideas that make machines move — and each one runs, in full, on your device as you read.</p>
   <p class="thesis">This is not a book <i>about</i> robotics that shows you finished results. Every chapter drives the same <b>Rust library</b> the Institute's tools are built on, compiled to WebAssembly, and <b>computes its central claim live in front of you</b> — no recordings, no precomputed plots. Drag the pieces, push the limits, and watch the numbers hold. Each chapter also <b>verifies its own headline</b> on load, against an analytic answer or a physical invariant, so you can trust that the thing you are playing with is the real thing.</p>
   <div class="pills">
     <span class="pill">runs on your device</span>
@@ -90,6 +90,12 @@ a.card::before{content:"";position:absolute;inset:0 auto 0 0;width:3px;backgroun
       <div class="chtitle">Where to put your foot</div>
       <div class="chhook">Walking is a fall, caught over and over. There is exactly one point on the ground where a step brings the body to rest — steer that, and the body follows.</div>
       <div class="chgov"><span class="lab">governed by</span> the capture point ξ</div>
+    </a>
+    <a class="card" href="/assets/sims/koopman">
+      <div class="chnum"><span>Chapter 9</span><span class="facet">Modeling</span></div>
+      <div class="chtitle">Make it linear</div>
+      <div class="chhook">A nonlinear system moves in a straight line after all — in the right coordinates. Add one observable and a linear model predicts it exactly, learned from data.</div>
+      <div class="chgov"><span class="lab">governed by</span> the lifted operator</div>
     </a>
   </div>
 
