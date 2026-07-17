@@ -1,0 +1,99 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>The Ferromotion Textbook — an interactive book on how machines move</title>
+<meta name="description" content="Eight interactive chapters on the ideas that make machines move — actuation, coordination, safety, manipulation, learning, perception, planning, locomotion. Every chapter runs the real Rust library on your device and verifies its own headline live."/>
+<style>
+:root{--ground:#0a0f1e;--panel:#111830;--line:#26324c;--ink:#eef1f8;--soft:#aeb6cc;--dim:#727d99;--gold:#d9b45e;--goldb:#f0cf82;--green:#7dd3a0;--mono:ui-monospace,"SF Mono",Menlo,monospace;--sans:system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif}
+*{box-sizing:border-box}html,body{margin:0}
+body{background:radial-gradient(1300px 760px at 50% -12%,#12203f,var(--ground));color:var(--ink);font-family:var(--sans);line-height:1.62}
+.wrap{max-width:860px;margin:0 auto;padding:clamp(28px,6vw,72px) 20px 80px}
+.kicker{font-family:var(--mono);font-size:.68rem;letter-spacing:.3em;text-transform:uppercase;color:var(--gold);display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 18px}
+.kicker>span{white-space:nowrap}
+h1{font-size:clamp(2.1rem,6vw,3.6rem);margin:0 0 .22em;font-weight:850;letter-spacing:-.03em;line-height:1.05}
+.lede{color:var(--soft);font-size:clamp(1.05rem,2.2vw,1.28rem);margin:0 0 10px;max-width:60ch}
+.thesis{color:#c9d1e4;max-width:64ch;margin:22px 0 0;font-size:1.02rem}
+.thesis b{color:var(--ink)}
+.pills{display:flex;gap:8px;flex-wrap:wrap;margin:26px 0 6px}
+.pill{font-family:var(--mono);font-size:.62rem;letter-spacing:.12em;text-transform:uppercase;color:var(--soft);border:1px solid var(--line);border-radius:999px;padding:6px 12px;background:#0d1428}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:40px 0 0}
+@media(max-width:640px){.grid{grid-template-columns:1fr}}
+a.card{display:flex;flex-direction:column;text-decoration:none;background:linear-gradient(180deg,#131b34,#0f1730);border:1px solid var(--line);border-radius:16px;padding:20px 20px 18px;transition:border-color .16s,transform .16s,box-shadow .16s;position:relative;overflow:hidden}
+a.card:hover{border-color:rgba(217,180,94,.55);transform:translateY(-2px);box-shadow:0 12px 30px -18px rgba(217,180,94,.5)}
+a.card::before{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:linear-gradient(180deg,var(--gold),transparent)}
+.chnum{font-family:var(--mono);font-size:.66rem;letter-spacing:.2em;color:var(--gold);display:flex;justify-content:space-between;align-items:center;margin-bottom:9px}
+.facet{color:var(--dim);text-transform:uppercase}
+.chtitle{font-size:1.16rem;font-weight:750;letter-spacing:-.015em;color:var(--ink);margin:0 0 7px}
+.chhook{color:var(--soft);font-size:.92rem;margin:0 0 14px;flex:1}
+.chgov{font-family:var(--mono);font-size:.72rem;color:var(--goldb);display:flex;align-items:center;gap:7px;border-top:1px solid var(--line);padding-top:11px}
+.chgov .lab{color:var(--dim);text-transform:uppercase;letter-spacing:.08em;font-size:.6rem}
+.note{color:var(--dim);font-family:var(--mono);font-size:.72rem;margin-top:52px;border-top:1px solid var(--line);padding-top:18px;line-height:1.75}
+.note b{color:var(--gold)}.note a{color:var(--soft)}
+.brandline{margin-top:14px}
+</style></head><body>
+<div class="wrap">
+  <p class="kicker"><span style="color:var(--goldb);font-size:1.1rem">&#934;</span><span>Institute for Physical AI</span><span>· the Charlot Lab</span></p>
+  <h1>The Ferromotion Textbook</h1>
+  <p class="lede">Eight ideas that make machines move — and each one runs, in full, on your device as you read.</p>
+  <p class="thesis">This is not a book <i>about</i> robotics that shows you finished results. Every chapter drives the same <b>Rust library</b> the Institute's tools are built on, compiled to WebAssembly, and <b>computes its central claim live in front of you</b> — no recordings, no precomputed plots. Drag the pieces, push the limits, and watch the numbers hold. Each chapter also <b>verifies its own headline</b> on load, against an analytic answer or a physical invariant, so you can trust that the thing you are playing with is the real thing.</p>
+  <div class="pills">
+    <span class="pill">runs on your device</span>
+    <span class="pill">self-verifying</span>
+    <span class="pill">the real Rust library</span>
+    <span class="pill">no install</span>
+  </div>
+
+  <div class="grid">
+    <a class="card" href="/assets/sims/morphological-computation">
+      <div class="chnum"><span>Chapter 1</span><span class="facet">Actuation</span></div>
+      <div class="chtitle">The body is the controller</div>
+      <div class="chhook">A muscle rejects a disturbance before a nerve could carry the news. When the body is fast enough, it is the controller — and a loop cannot compete.</div>
+      <div class="chgov"><span class="lab">governed by</span> the delay margin</div>
+    </a>
+    <a class="card" href="/assets/sims/algebraic-connectivity">
+      <div class="chnum"><span>Chapter 2</span><span class="facet">Coordination</span></div>
+      <div class="chtitle">Agreement, and the one number behind it</div>
+      <div class="chhook">Agents that see only their neighbours still come to agree — and how fast is set entirely by a single eigenvalue of the network.</div>
+      <div class="chgov"><span class="lab">governed by</span> the Fiedler value λ₂</div>
+    </a>
+    <a class="card" href="/assets/sims/safety-filter">
+      <div class="chnum"><span>Chapter 3</span><span class="facet">Safety</span></div>
+      <div class="chtitle">The command it will not obey</div>
+      <div class="chhook">A filter that minimally corrects any command so a robot physically cannot be driven into a hazard — whatever it is told.</div>
+      <div class="chgov"><span class="lab">governed by</span> the barrier h(x)</div>
+    </a>
+    <a class="card" href="/assets/sims/force-closure">
+      <div class="chnum"><span>Chapter 4</span><span class="facet">Manipulation</span></div>
+      <div class="chtitle">When touching becomes holding</div>
+      <div class="chhook">A grip holds against a push from any direction only when its friction cones surround the origin. Drag the fingers and read the grasp by eye.</div>
+      <div class="chgov"><span class="lab">governed by</span> the Ferrari–Canny Q1</div>
+    </a>
+    <a class="card" href="/assets/sims/movement-primitives">
+      <div class="chnum"><span>Chapter 5</span><span class="facet">Learning</span></div>
+      <div class="chtitle">Show it once</div>
+      <div class="chhook">Teach a motion a single time; replay its shape to any new goal, always arriving. The learning carries the style; the arrival is guaranteed.</div>
+      <div class="chgov"><span class="lab">governed by</span> the structural attractor</div>
+    </a>
+    <a class="card" href="/assets/sims/invariant-estimation">
+      <div class="chnum"><span>Chapter 6</span><span class="facet">Perception</span></div>
+      <div class="chtitle">The estimator that stays honest</div>
+      <div class="chhook">Measure error on the group instead of by subtraction, and the model of how it grows becomes exact — for any error, however large.</div>
+      <div class="chgov"><span class="lab">governed by</span> the invariant error-model</div>
+    </a>
+    <a class="card" href="/assets/sims/time-optimal">
+      <div class="chnum"><span>Chapter 7</span><span class="facet">Planning</span></div>
+      <div class="chtitle">As fast as the motors allow</div>
+      <div class="chhook">The fastest way to follow a path is bang-bang: crawl the corners, floor the straights, always pinned to a limit. Race it against one safe speed.</div>
+      <div class="chgov"><span class="lab">governed by</span> the velocity ceiling</div>
+    </a>
+    <a class="card" href="/assets/sims/capture-point">
+      <div class="chnum"><span>Chapter 8</span><span class="facet">Locomotion</span></div>
+      <div class="chtitle">Where to put your foot</div>
+      <div class="chhook">Walking is a fall, caught over and over. There is exactly one point on the ground where a step brings the body to rest — steer that, and the body follows.</div>
+      <div class="chgov"><span class="lab">governed by</span> the capture point ξ</div>
+    </a>
+  </div>
+
+  <p class="note">Every chapter runs <span style="color:var(--soft)">ferromotion</span> — a pure-Rust library for the kinematics, dynamics, and control of physical AI — compiled to WebAssembly and executed in your browser. The interactive claims are computed on demand and each chapter re-derives its headline result on load; the same properties are checked in the library's <span style="color:var(--soft)">cargo test</span> suite. Nothing here is a screenshot of an answer.
+  <span class="brandline"><b>Institute for Physical AI</b> · the Charlot Lab · <a href="https://github.com/dcharlot-physicalai-bmi/ferromotion">the Rust library</a> · <a href="https://crates.io/crates/ferromotion">crates.io</a></span></p>
+</div>
+</body></html>
