@@ -296,4 +296,6 @@ mod tests {
 }
 
 pub mod flow;
+mod rtc;
 pub use flow::{sample_field, sample_mlp, Integrator};
+pub use rtc::{guided_sample, rtc_mask, sample_rtc};
