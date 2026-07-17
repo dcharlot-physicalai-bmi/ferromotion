@@ -20,6 +20,7 @@ mod contact_ipm;
 mod cosserat;
 mod costs;
 mod dex_retarget;
+mod foci;
 mod diffik;
 mod dcol;
 mod dyn_derivatives;
@@ -49,6 +50,7 @@ pub use cfd_contact::{rollout_impulse, CfdContact};
 pub use closed_loop::{Pin, PlanarLoop};
 pub use collision::{CapsuleCollisionCost, PlaneCollisionCost, SphereCollisionCost};
 pub use cosserat::CosseratRod;
+pub use foci::{collision_cost, collision_grad_p, collision_kernel, overlap_integral, FociPlan, Gaussian3, RobotSplat};
 pub use contact_ipm::{solve_frictional_ipm, FrictionalStep, StFrictionContact};
 pub use contact::{
     solve_contacts, solve_contacts_diff, solve_contacts_friction, Contact, ContactSolve,
