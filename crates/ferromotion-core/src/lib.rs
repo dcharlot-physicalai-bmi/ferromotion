@@ -50,7 +50,7 @@ pub use cfd_contact::{rollout_impulse, CfdContact};
 pub use closed_loop::{Pin, PlanarLoop};
 pub use collision::{CapsuleCollisionCost, PlaneCollisionCost, SphereCollisionCost};
 pub use cosserat::CosseratRod;
-pub use foci::{collision_cost, collision_grad_p, collision_kernel, overlap_integral, FociPlan, Gaussian3, RobotSplat};
+pub use foci::{collision_cost, collision_grad_p, collision_kernel, overlap_integral, plan as foci_plan, FociPlan, Gaussian3, RobotSplat};
 pub use contact_ipm::{solve_frictional_ipm, FrictionalStep, StFrictionContact};
 pub use contact::{
     solve_contacts, solve_contacts_diff, solve_contacts_friction, Contact, ContactSolve,
