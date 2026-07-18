@@ -39,6 +39,7 @@ mod rigidbody;
 mod robot_contact;
 mod robust;
 mod rrt;
+mod cspace_sdf;
 mod sdf;
 mod sparse;
 mod sysid;
@@ -83,6 +84,7 @@ pub use pink::{
     solve_pink, FramePoseTask, PinkOptions, PinkResult, PinkSolver, PinkTask, PostureTask, TaskStack,
 };
 pub use leg_smoother::{LegSmoother, PriorPose2, RelPose2};
+pub use cspace_sdf::{CspaceField, PlanarArm};
 pub use sdf::{Sdf, SdfScene};
 pub use sparse::{solve_factor_graph, SparseFactor, SparseResult};
 pub use tensegrity::{Member, Tensegrity};
