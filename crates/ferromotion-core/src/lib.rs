@@ -50,6 +50,7 @@ mod sysid;
 mod tensegrity;
 mod traj;
 mod urdf;
+mod xpbd;
 pub use aba::{floating_base_forward_dynamics, forward_dynamics_aba};
 pub use cfd_contact::{rollout_impulse, CfdContact};
 pub use chomp::{Chomp, ChompResult};
@@ -99,6 +100,7 @@ pub use tensegrity::{Member, Tensegrity};
 pub use sysid::{identify, inertial_regressor, is_physically_consistent, params_from_inertia, pseudo_inertia, IdSample, PARAMS_PER_LINK};
 pub use traj::{TrajectoryProblem, TrajectoryResult};
 pub use urdf::from_urdf_str;
+pub use xpbd::{DistanceConstraint, Particle as XpbdParticle, XpbdSolver};
 
 /// SE(3) rigid transform.
 pub type Iso = Isometry3<f64>;
