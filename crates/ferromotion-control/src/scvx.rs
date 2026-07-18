@@ -63,11 +63,14 @@ pub struct ScvxOpts {
     pub r_max: f64,
     pub max_iter: usize,
     pub tol: f64,
+    /// If set, record a snapshot of the whole trajectory after each iteration in
+    /// [`ScvxReport::xs_history`] (for visualization / introspection).
+    pub capture_history: bool,
 }
 
 impl Default for ScvxOpts {
     fn default() -> Self {
-        ScvxOpts { rho0: 0.0, rho1: 0.1, rho2: 0.9, alpha: 2.0, beta: 1.5, r0: 0.5, r_min: 1e-4, r_max: 10.0, max_iter: 60, tol: 1e-5 }
+        ScvxOpts { rho0: 0.0, rho1: 0.1, rho2: 0.9, alpha: 2.0, beta: 1.5, r0: 0.5, r_min: 1e-4, r_max: 10.0, max_iter: 60, tol: 1e-5, capture_history: false }
     }
 }
 
@@ -86,6 +89,9 @@ pub struct ScvxReport {
     pub final_virtual: f64,
     pub radius_history: Vec<f64>,
     pub defect_history: Vec<f64>,
+    /// Trajectory snapshots (one per entry of `defect_history`) when `opts.capture_history` is set;
+    /// `xs_history[0]` is the initial guess. Empty otherwise.
+    pub xs_history: Vec<Vec<DVector<f64>>>,
 }
 
 impl ScvxProblem {
@@ -124,6 +130,7 @@ impl ScvxProblem {
         let mut j_cur = self.penalized_cost(f, &xs, &us);
         let mut radius_history = vec![r];
         let mut defect_history = vec![self.defect(f, &xs, &us)];
+        let mut xs_history: Vec<Vec<DVector<f64>>> = if opts.capture_history { vec![xs.clone()] } else { vec![] };
         let mut converged = false;
         let mut last_virtual = f64::INFINITY;
         let mut iterations = 0;
@@ -180,6 +187,9 @@ impl ScvxProblem {
             }
             radius_history.push(r);
             defect_history.push(self.defect(f, &xs, &us));
+            if opts.capture_history {
+                xs_history.push(xs.clone());
+            }
             if converged {
                 break;
             }
@@ -193,6 +203,7 @@ impl ScvxProblem {
             converged,
             radius_history,
             defect_history,
+            xs_history,
             xs,
             us,
         }
