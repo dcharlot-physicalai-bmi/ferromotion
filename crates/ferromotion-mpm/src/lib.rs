@@ -17,6 +17,9 @@
 
 use nalgebra::{Matrix2, Vector2};
 
+pub mod adjoint;
+pub use adjoint::{AdjointResult, SoftBody, Tape, Var};
+
 /// A material point.
 #[derive(Clone, Copy, Debug)]
 pub struct Particle {
