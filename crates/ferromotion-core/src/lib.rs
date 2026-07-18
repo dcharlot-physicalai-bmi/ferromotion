@@ -12,6 +12,7 @@ use nalgebra::{DMatrix, DVector, Isometry3, Translation3, Unit, UnitQuaternion, 
 
 mod aba;
 mod cfd_contact;
+mod chomp;
 mod closed_loop;
 mod collision;
 mod constraints;
@@ -51,6 +52,7 @@ mod traj;
 mod urdf;
 pub use aba::{floating_base_forward_dynamics, forward_dynamics_aba};
 pub use cfd_contact::{rollout_impulse, CfdContact};
+pub use chomp::{Chomp, ChompResult};
 pub use closed_loop::{Pin, PlanarLoop};
 pub use collision::{CapsuleCollisionCost, PlaneCollisionCost, SphereCollisionCost};
 pub use cosserat::CosseratRod;
