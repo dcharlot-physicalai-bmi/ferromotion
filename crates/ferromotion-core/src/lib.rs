@@ -25,6 +25,7 @@ mod foci;
 mod gjk;
 mod diffik;
 mod dcol;
+mod dubins;
 mod dyn_derivatives;
 mod dynamics;
 mod grasp;
@@ -75,6 +76,7 @@ pub use dynamics::{forward_dynamics, gravity_vector, inverse_dynamics, mass_matr
 pub use grasp::{force_closure_q1, force_closure_soft, primitive_wrenches, GraspContact};
 pub use gcs::{Gcs, GcsPath, HPolytope};
 pub use gnc::{gnc_solve, GncResult};
+pub use dubins::{dubins_shortest, DubinsPath, Pose as DubinsPose, Seg as DubinsSeg};
 pub use dyn_derivatives::{forward_dynamics_derivatives, id_derivatives};
 pub use iris::{ConvexRegion as IrisRegion, Iris};
 pub use icp::{umeyama, Icp, IcpResult};
