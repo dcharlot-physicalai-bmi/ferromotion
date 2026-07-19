@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/ferromotion", "crates/ferromotion-core", "crates/ferromotion-ruckig", "crates/ferromotion-wasm", "crates/ferromotion-control", "crates/ferromotion-policy", "crates/ferromotion-fluid", "crates/ferromotion-mpm", "crates/ferromotion-cloth", "crates/ferromotion-tactile", "crates/ferromotion-rod"]
 
 [workspace.package]
-version = "0.25.0"
+version = "0.26.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["Institute for Physical AI @ BMI"]
