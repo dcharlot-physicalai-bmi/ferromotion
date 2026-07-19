@@ -64,6 +64,7 @@ mod tinympc;
 mod tube_mpc;
 mod topp;
 mod visual_servo;
+mod wahba;
 mod wbc;
 mod zmp;
 pub use alip::Alip;
@@ -122,6 +123,7 @@ pub use tinympc::TinyMpc;
 pub use topp::{topp, ToppPath, ToppResult};
 pub use tube_mpc::TubeMpc;
 pub use visual_servo::{ibvs_twist, interaction_matrix, Camera};
+pub use wahba::{davenport_q_method, triad};
 pub use wbc::{CartesianTask, WholeBody};
 pub use zmp::{capture_point, CartState, PreviewState, ZmpPreview};
 
