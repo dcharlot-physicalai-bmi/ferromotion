@@ -39,9 +39,9 @@ turns many Tier-1/2 items from "hard" into "assembly".
 
 | Infra module | Unlocks | Oracle |
 |---|---|---|
-| **`core::spatial`** — kd-tree + voxel-hash spatial index | KISS-ICP/NDT, ESDF mapping, GPMP2, VAMP-planning, large-cloud ICP/GICP | NN query == brute-force; range-query completeness |
-| **`core::sos`** — sum-of-squares / SDP layer over `clarabel` (PSD cone) | CCM, LQR-trees/funnels, C-IRIS certified regions | PSD Gram matrix recovers a known nonneg polynomial; LMI eigen ≤ 0; LTI case ⇒ Lyapunov `P` |
-| **`control::diff_solve`** — implicit differentiation through the QP/iLQR/DDP solvers (IFT on the KKT fixed point) | Differentiable-MPC-as-layer, learned-cost/dynamics MPC | IFT gradient == finite-diff; LQR has closed-form `∂U*/∂θ` via DARE sensitivity |
+| **`core::spatial`** ✅ — kd-tree + voxel-hash spatial index | KISS-ICP/NDT, ESDF mapping, GPMP2, VAMP-planning, large-cloud ICP/GICP | NN query == brute-force; range-query completeness |
+| **`core::lmi`** ✅ — Lyapunov/LMI certificates (pure `nalgebra`, wasm-clean) | CCM (LTI reduction), LQR-trees/funnels ROA | Hurwitz A ⇒ P≻0 with AᵀP+PA=−I; unstable ⇒ none. _(Note: clarabel's PSD cone needs BLAS → breaks wasm, so the general polynomial-SOS / inequality-LMI feasibility path is a follow-up needing a pure-Rust PSD interior point; the quadratic Lyapunov certificate covers the LTI reductions.)_ |
+| **`control::diff_qp`** ✅ — implicit differentiation through the equality QP (OptNet) (IFT on the KKT fixed point) | Differentiable-MPC-as-layer, learned-cost/dynamics MPC | IFT gradient == finite-diff; LQR has closed-form `∂U*/∂θ` via DARE sensitivity |
 | **`core::simd_collision`** — `portable_simd` / wasm `simd128` batched FK + collision | VAMP-style μs-planning force-multiplier across every sampling planner | **lane == scalar bit-exact** (also a determinism-doctrine win) |
 
 _The reverse-mode AD tape (`mpm::adjoint`) already exists and unlocks the structured-dynamics
