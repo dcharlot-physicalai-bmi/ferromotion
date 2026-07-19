@@ -79,7 +79,7 @@ pub use gnc::{gnc_solve, GncResult};
 pub use dubins::{dubins_shortest, DubinsPath, Pose as DubinsPose, Seg as DubinsSeg};
 pub use dyn_derivatives::{forward_dynamics_derivatives, id_derivatives};
 pub use iris::{ConvexRegion as IrisRegion, Iris};
-pub use icp::{umeyama, Icp, IcpResult};
+pub use icp::{covariance_from_normal, umeyama, Icp, IcpResult};
 pub use ipc::{barrier, barrier_grad, barrier_hess, IpcFloor};
 pub use isam::IncrementalLeastSquares;
 pub use ipm::{solve_lcp, solve_lcp_diff, solve_lcp_smoothed};

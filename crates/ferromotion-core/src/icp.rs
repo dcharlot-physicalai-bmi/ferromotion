@@ -46,6 +46,14 @@ pub fn umeyama(src: &[Vector3<f64>], dst: &[Vector3<f64>]) -> (Matrix3<f64>, Vec
     (r, t)
 }
 
+/// A GICP-style per-point covariance from a surface normal: flattened along `n` (variance `epsilon`) and
+/// unit in the tangent plane — `ε·nnᵀ + (I − nnᵀ)`. This is what turns ICP's point-to-point cost into
+/// GICP's plane-to-plane one.
+pub fn covariance_from_normal(n: &Vector3<f64>, epsilon: f64) -> Matrix3<f64> {
+    let nn = n.normalize() * n.normalize().transpose();
+    epsilon * nn + (Matrix3::identity() - nn)
+}
+
 /// Brute-force index of the nearest target point to `p`.
 fn nearest(p: &Vector3<f64>, target: &[Vector3<f64>]) -> usize {
     target
@@ -132,6 +140,52 @@ impl Icp {
     }
 }
 
+impl Icp {
+    /// **GICP — Generalized ICP** (Segal, Haehnel & Thrun, RSS 2009): plane-to-plane registration using a
+    /// per-point covariance for each cloud. Minimizes `Σ dᵢᵀ Mᵢ⁻¹ dᵢ` with `dᵢ = q_{match} − (R pᵢ + t)`
+    /// and `Mᵢ = C^target_{match} + R C^source_i Rᵀ`, a Gauss–Newton solve over SE(3). It subsumes
+    /// point-to-point (isotropic covariances) and point-to-plane (normal-flattened covariances) and is more
+    /// robust to sampling than either. Use [`covariance_from_normal`] to build the covariances.
+    pub fn gicp(&self, source: &[Vector3<f64>], src_cov: &[Matrix3<f64>], target: &[Vector3<f64>], tgt_cov: &[Matrix3<f64>]) -> IcpResult {
+        let (mut r, mut t) = (Matrix3::identity(), Vector3::zeros());
+        let mut converged = false;
+        let mut iterations = 0;
+        for _ in 0..self.max_iters {
+            iterations += 1;
+            let mut a = DMatrix::<f64>::zeros(6, 6);
+            let mut g = DVector::<f64>::zeros(6);
+            for (i, p) in source.iter().enumerate() {
+                let pw = r * p + t;
+                let j = nearest(&pw, target);
+                let d = target[j] - pw;
+                // Mahalanobis weight  M⁻¹ = (C_target + R C_source Rᵀ)⁻¹
+                let m = tgt_cov[j] + r * src_cov[i] * r.transpose();
+                let Some(w) = m.try_inverse() else { continue };
+                // residual d(δθ,δt): ∂d/∂δθ = [R̂ pᵢ]× , ∂d/∂δt = −I  → J = [ [R̂p]× , −I ] (3×6)
+                let mut jac = DMatrix::<f64>::zeros(3, 6);
+                let rp = r * p;
+                let sk = Matrix3::new(0.0, -rp.z, rp.y, rp.z, 0.0, -rp.x, -rp.y, rp.x, 0.0);
+                jac.view_mut((0, 0), (3, 3)).copy_from(&sk);
+                jac.view_mut((0, 3), (3, 3)).copy_from(&(-Matrix3::identity()));
+                let wd = DMatrix::from_row_slice(3, 3, w.as_slice()).transpose(); // W as DMatrix (symmetric)
+                a += jac.transpose() * &wd * &jac;
+                // normal equations A·δ = −Σ Jᵀ W d ; accumulate the RHS with its sign.
+                g -= jac.transpose() * &wd * DVector::from_row_slice(d.as_slice());
+            }
+            let Some(delta) = a.lu().solve(&g) else { break };
+            let dth = Vector3::new(delta[0], delta[1], delta[2]);
+            let dt = Vector3::new(delta[3], delta[4], delta[5]);
+            r = exp_so3(&dth) * r;
+            t += dt;
+            if dth.norm() + dt.norm() < self.tol {
+                converged = true;
+                break;
+            }
+        }
+        IcpResult { rmse: rmse(source, target, &r, &t), rotation: r, translation: t, iterations, converged }
+    }
+}
+
 /// Root-mean-square nearest-neighbour distance of the transformed source to the target.
 fn rmse(source: &[Vector3<f64>], target: &[Vector3<f64>], r: &Matrix3<f64>, t: &Vector3<f64>) -> f64 {
     let s: f64 = source
@@ -207,6 +261,35 @@ mod tests {
         assert!(plane.rmse < 1e-6, "point-to-plane should register to ~0: {}", plane.rmse);
         assert!((plane.rotation - r_true).abs().max() < 1e-4 && (plane.translation - t_true).norm() < 1e-4, "did not recover the transform");
         assert!(plane.iterations <= 10, "should converge quickly on a structured scene: {}", plane.iterations);
+    }
+
+    #[test]
+    fn gicp_recovers_a_transform_with_plane_covariances() {
+        // THE HEADLINE. Plane-to-plane GICP: each point's covariance is flattened along its surface normal
+        // (ε along the normal). On the wall scene GICP recovers a known SE(3) transform.
+        let (src, nrm) = walls();
+        let src_cov: Vec<Matrix3<f64>> = nrm.iter().map(|n| covariance_from_normal(n, 1e-3)).collect();
+        let r_true = rot(Vector3::new(0.2, 0.5, 0.9), 0.12);
+        let t_true = Vector3::new(0.06, -0.05, 0.04);
+        let target: Vec<Vector3<f64>> = src.iter().map(|p| r_true * p + t_true).collect();
+        let tgt_cov: Vec<Matrix3<f64>> = nrm.iter().map(|n| covariance_from_normal(&(r_true * n), 1e-3)).collect();
+        let res = Icp::default().gicp(&src, &src_cov, &target, &tgt_cov);
+        assert!(res.rmse < 1e-5, "GICP should register to ~0 RMSE: {}", res.rmse);
+        assert!((res.rotation - r_true).abs().max() < 1e-3 && (res.translation - t_true).norm() < 1e-3, "GICP did not recover the transform");
+    }
+
+    #[test]
+    fn gicp_with_isotropic_covariances_matches_point_to_point() {
+        // GICP subsumes point-to-point: with identity covariances the two agree.
+        let (src, _) = walls();
+        let iso: Vec<Matrix3<f64>> = src.iter().map(|_| Matrix3::identity()).collect();
+        let r_true = rot(Vector3::new(0.1, 0.3, 1.0), 0.1);
+        let t_true = Vector3::new(0.05, 0.04, -0.03);
+        let target: Vec<Vector3<f64>> = src.iter().map(|p| r_true * p + t_true).collect();
+        let tgt_iso = iso.clone();
+        let g = Icp::default().gicp(&src, &iso, &target, &tgt_iso);
+        let p = Icp::default().point_to_point(&src, &target);
+        assert!((g.rotation - p.rotation).abs().max() < 1e-4 && (g.translation - p.translation).norm() < 1e-4, "GICP(I) should equal point-to-point");
     }
 
     #[test]
