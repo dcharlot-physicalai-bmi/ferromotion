@@ -29,6 +29,7 @@ mod dyn_derivatives;
 mod dynamics;
 mod grasp;
 mod gnc;
+mod iris;
 mod ipc;
 mod ipm;
 mod kdl;
@@ -71,6 +72,7 @@ pub use dynamics::{forward_dynamics, gravity_vector, inverse_dynamics, mass_matr
 pub use grasp::{force_closure_q1, force_closure_soft, primitive_wrenches, GraspContact};
 pub use gnc::{gnc_solve, GncResult};
 pub use dyn_derivatives::{forward_dynamics_derivatives, id_derivatives};
+pub use iris::{ConvexRegion as IrisRegion, Iris};
 pub use ipc::{barrier, barrier_grad, barrier_hess, IpcFloor};
 pub use ipm::{solve_lcp, solve_lcp_diff, solve_lcp_smoothed};
 pub use kdl::resolved_rate;
