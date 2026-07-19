@@ -343,7 +343,7 @@ mod tests {
         let goals: Vec<DVector<f64>> = g.agents.iter().map(|a| g.stacked(&a.goal)).collect();
         let m = 2 * g.horizon;
         // a nontrivial profile
-        let mut u: Vec<DVector<f64>> = (0..3).map(|i| DVector::from_iterator(m, (0..m).map(|k| 0.05 * ((k + i) as f64).cos()))).collect();
+        let u: Vec<DVector<f64>> = (0..3).map(|i| DVector::from_iterator(m, (0..m).map(|k| 0.05 * ((k + i) as f64).cos()))).collect();
         let i = 1;
         let eps = 1e-6;
         for k in 0..m {
