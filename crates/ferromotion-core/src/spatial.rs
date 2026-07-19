@@ -50,6 +50,11 @@ impl KdTree {
         KdTree { pts, nodes, root }
     }
 
+    /// The stored point at index `i` (indices are those returned by the query methods).
+    pub fn point(&self, i: usize) -> Vector3<f64> {
+        self.pts[i]
+    }
+
     /// The nearest point to `q`: `(index, distance)`, or `None` if empty.
     pub fn nearest(&self, q: &Vector3<f64>) -> Option<(usize, f64)> {
         let mut best: Option<(usize, f64)> = None; // (idx, dist²)

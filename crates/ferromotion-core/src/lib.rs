@@ -21,6 +21,7 @@ mod contact_ipm;
 mod cosserat;
 mod costs;
 mod dex_retarget;
+mod esdf;
 mod foci;
 mod gjk;
 mod diffik;
@@ -66,6 +67,7 @@ pub use closed_loop::{Pin, PlanarLoop};
 pub use collision::{CapsuleCollisionCost, PlaneCollisionCost, SphereCollisionCost};
 pub use cosserat::CosseratRod;
 pub use foci::{collision_cost, collision_grad_p, collision_kernel, overlap_integral, plan as foci_plan, FociPlan, Gaussian3, RobotSplat};
+pub use esdf::Esdf;
 pub use gjk::{ccd_toi, gjk, intersects, Ball, ConvexPoints, Cuboid, GjkResult, Support, Translate};
 pub use contact_ipm::{solve_frictional_ipm, FrictionalStep, StFrictionContact};
 pub use contact::{
