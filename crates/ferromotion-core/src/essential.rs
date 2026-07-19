@@ -18,8 +18,9 @@ use nalgebra::{DMatrix, Matrix3, Vector2, Vector3};
 /// normalized (calibrated) image coordinates, projected onto the essential manifold.
 pub fn eight_point(x1: &[Vector2<f64>], x2: &[Vector2<f64>]) -> Matrix3<f64> {
     let n = x1.len();
-    // stack the epipolar constraint x₂ᵀ E x₁ = 0 as A·vec(E) = 0
-    let mut a = DMatrix::zeros(n, 9);
+    // stack the epipolar constraint x₂ᵀ E x₁ = 0 as A·vec(E) = 0. Allocate at least 9 rows so the (thin) SVD
+    // exposes the full 9×9 Vᵀ — with exactly 8 points the extra row stays zero and the null space is intact.
+    let mut a = DMatrix::zeros(n.max(9), 9);
     for (i, (p1, p2)) in x1.iter().zip(x2).enumerate() {
         let (u1, v1) = (p1.x, p1.y);
         let (u2, v2) = (p2.x, p2.y);
