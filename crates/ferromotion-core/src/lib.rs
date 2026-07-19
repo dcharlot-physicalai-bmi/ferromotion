@@ -23,6 +23,7 @@ mod cosserat;
 mod costs;
 mod dex_retarget;
 mod esdf;
+mod essential;
 mod foci;
 mod gjk;
 mod diffik;
@@ -74,6 +75,7 @@ pub use collision::{CapsuleCollisionCost, PlaneCollisionCost, SphereCollisionCos
 pub use cosserat::CosseratRod;
 pub use foci::{collision_cost, collision_grad_p, collision_kernel, overlap_integral, plan as foci_plan, FociPlan, Gaussian3, RobotSplat};
 pub use esdf::Esdf;
+pub use essential::{decompose_essential, eight_point, recover_pose};
 pub use gjk::{ccd_toi, gjk, intersects, Ball, ConvexPoints, Cuboid, GjkResult, Support, Translate};
 pub use contact_ipm::{solve_frictional_ipm, FrictionalStep, StFrictionContact};
 pub use contact::{
