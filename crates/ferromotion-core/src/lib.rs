@@ -13,6 +13,7 @@ use nalgebra::{DMatrix, DVector, Isometry3, Translation3, Unit, UnitQuaternion, 
 mod aba;
 mod bit_star;
 mod bspline;
+mod bundle;
 mod cfd_contact;
 mod chomp;
 mod closed_loop;
@@ -74,6 +75,7 @@ pub use aba::{floating_base_forward_dynamics, forward_dynamics_aba};
 pub use cfd_contact::{rollout_impulse, CfdContact};
 pub use bit_star::BitStar;
 pub use bspline::BSpline;
+pub use bundle::{BundleAdjustment, Camera, Observation};
 pub use chomp::{Chomp, ChompResult};
 pub use closed_loop::{Pin, PlanarLoop};
 pub use collision::{CapsuleCollisionCost, PlaneCollisionCost, SphereCollisionCost};
