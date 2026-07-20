@@ -43,6 +43,7 @@ mod homography;
 mod hybrid_astar;
 mod grasp;
 mod gcs;
+mod geodetic;
 mod gnc;
 mod iris;
 mod icp;
@@ -120,6 +121,7 @@ pub use geometry2d::{convex_hull, min_enclosing_circle, point_in_polygon, polygo
 pub use gpmp2::Gpmp2;
 pub use homography::{apply_homography, homography_dlt, transfer_error};
 pub use gcs::{Gcs, GcsPath, HPolytope};
+pub use geodetic::{ecef_to_enu, ecef_to_lla, enu_to_ecef, lla_to_ecef, lla_to_enu};
 pub use gnc::{gnc_solve, GncResult};
 pub use marginalize::{add_factor, GaussianInfo};
 pub use mestimator::{barron, RobustKernel};
