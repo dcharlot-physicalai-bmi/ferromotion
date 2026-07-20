@@ -16,6 +16,8 @@ pub enum Sdf {
     /// Half-space `n·p − offset` (with `n` unit).
     Plane { normal: Vector3<f64>, offset: f64 },
     Capsule { a: Vector3<f64>, b: Vector3<f64>, radius: f64 },
+    /// Torus around the `+y` axis at `center`: `major` tube-centre radius, `minor` tube radius.
+    Torus { center: Vector3<f64>, major: f64, minor: f64 },
 }
 
 impl Sdf {
@@ -32,6 +34,11 @@ impl Sdf {
                 let ab = b - a;
                 let t = ((p - a).dot(&ab) / ab.norm_squared()).clamp(0.0, 1.0);
                 (p - (a + t * ab)).norm() - radius
+            }
+            Sdf::Torus { center, major, minor } => {
+                let d = p - center;
+                let planar = (d.x * d.x + d.z * d.z).sqrt() - major;
+                (planar * planar + d.y * d.y).sqrt() - minor
             }
         }
     }
@@ -62,8 +69,39 @@ impl Sdf {
                 let t = ((p - a).dot(&ab) / ab.norm_squared()).clamp(0.0, 1.0);
                 safe_normalize(p - (a + t * ab))
             }
+            Sdf::Torus { center, major, .. } => {
+                let d = p - center;
+                let planar = (d.x * d.x + d.z * d.z).sqrt();
+                let q0 = planar - major;
+                let qn = (q0 * q0 + d.y * d.y).sqrt().max(1e-12);
+                let ps = planar.max(1e-12);
+                // exact eikonal gradient (already unit): (q0/qn)·∇planar + (d.y/qn)·ê_y
+                Vector3::new((q0 / qn) * (d.x / ps), d.y / qn, (q0 / qn) * (d.z / ps))
+            }
         }
     }
+}
+
+/// CSG **union** of two signed distances (the closer surface): `min(d1, d2)`.
+pub fn op_union(d1: f64, d2: f64) -> f64 {
+    d1.min(d2)
+}
+
+/// CSG **intersection** of two signed distances (inside both): `max(d1, d2)`.
+pub fn op_intersect(d1: f64, d2: f64) -> f64 {
+    d1.max(d2)
+}
+
+/// CSG **subtraction** `A − B` (inside `A`, outside `B`): `max(d1, −d2)`.
+pub fn op_subtract(d1: f64, d2: f64) -> f64 {
+    d1.max(-d2)
+}
+
+/// **Smooth union** (Quilez polynomial smin) with blend radius `k > 0`: a rounded, C¹ blend of two shapes
+/// that never exceeds their hard union `min(d1, d2)` and approaches it as `k → 0`.
+pub fn op_smooth_union(d1: f64, d2: f64, k: f64) -> f64 {
+    let h = (0.5 + 0.5 * (d2 - d1) / k).clamp(0.0, 1.0);
+    d2 * (1.0 - h) + d1 * h - k * h * (1.0 - h)
 }
 
 fn safe_normalize(v: Vector3<f64>) -> Vector3<f64> {
@@ -177,5 +215,48 @@ mod tests {
         // An overlapping sphere reports negative clearance.
         let overlap = [(Vector3::new(1.6, 0.0, 0.0), 0.3)]; // box face at x=1.5, sphere reaches 1.3
         assert!(scene.min_clearance(&overlap) < 0.0, "overlap should be a collision");
+    }
+
+    #[test]
+    fn the_torus_distance_and_gradient_are_exact() {
+        // THE ORACLE. Torus (major R=2, minor r=0.5) around +y. The outer-equator surface point (R+r,0,0)
+        // is on the surface (d=0); the centre is R−r inside the hole; and the gradient matches a finite
+        // difference (and is unit by the eikonal property).
+        let t = Sdf::Torus { center: Vector3::zeros(), major: 2.0, minor: 0.5 };
+        assert!(t.distance(&Vector3::new(2.5, 0.0, 0.0)).abs() < 1e-12, "outer equator on surface");
+        assert!((t.distance(&Vector3::new(0.0, 0.0, 0.0)) - 1.5).abs() < 1e-12, "centre distance R−r");
+        assert!(t.distance(&Vector3::new(2.0, 0.5, 0.0)).abs() < 1e-9, "top of the tube on surface");
+        for p in [Vector3::new(1.5, 0.3, 0.4), Vector3::new(-2.2, 0.1, 0.3), Vector3::new(0.5, 0.5, 1.9)] {
+            let g = t.gradient(&p);
+            assert!((g.norm() - 1.0).abs() < 1e-6, "gradient should be unit: {}", g.norm());
+            assert!((g - fd_grad(&t, &p)).norm() < 1e-4, "torus gradient vs finite diff");
+        }
+    }
+
+    #[test]
+    fn the_csg_operators_combine_shapes_correctly() {
+        let a = Sdf::Sphere { center: Vector3::new(-0.4, 0.0, 0.0), radius: 1.0 };
+        let b = Sdf::Sphere { center: Vector3::new(0.4, 0.0, 0.0), radius: 1.0 };
+        let inside_both = Vector3::new(0.0, 0.0, 0.0); // inside both spheres
+        let only_a = Vector3::new(-1.2, 0.0, 0.0); // inside a, outside b
+        // union: inside if inside either
+        assert!(op_union(a.distance(&only_a), b.distance(&only_a)) < 0.0, "union contains only_a");
+        // intersection: inside only where both are
+        assert!(op_intersect(a.distance(&inside_both), b.distance(&inside_both)) < 0.0, "intersection at center");
+        assert!(op_intersect(a.distance(&only_a), b.distance(&only_a)) > 0.0, "only_a is outside the intersection");
+        // subtraction A−B: inside a but outside b
+        assert!(op_subtract(a.distance(&only_a), b.distance(&only_a)) < 0.0, "A−B contains only_a");
+        assert!(op_subtract(a.distance(&inside_both), b.distance(&inside_both)) > 0.0, "A−B excludes the B region");
+    }
+
+    #[test]
+    fn smooth_union_bounds_and_limits_to_the_hard_union() {
+        let (d1, d2) = (0.4, 0.7);
+        // never exceeds the hard min
+        assert!(op_smooth_union(d1, d2, 0.3) <= d1.min(d2) + 1e-12, "smooth min ≤ hard min");
+        // approaches the hard min as k → 0
+        assert!((op_smooth_union(d1, d2, 1e-6) - d1.min(d2)).abs() < 1e-4, "k→0 recovers hard union");
+        // and it is a genuine rounding (strictly below min when the two are comparable)
+        assert!(op_smooth_union(0.5, 0.5, 0.4) < 0.5, "equal distances get rounded down");
     }
 }
