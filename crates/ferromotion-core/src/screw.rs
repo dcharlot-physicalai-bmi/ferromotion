@@ -137,12 +137,64 @@ pub fn poe_fk(screws: &[Vector6<f64>], theta: &[f64], m_home: &Matrix4<f64>) -> 
     t * m_home
 }
 
+/// **Screw linear interpolation (ScLERP)** between poses `a` and `b` at `t ∈ [0, 1]`:
+/// `T(t) = a · exp(t · log(a⁻¹ b))`. By Chasles' theorem `a⁻¹ b` is a screw motion (simultaneous rotation
+/// about and translation along one axis); ScLERP traverses it at constant twist — the SE(3) analogue of
+/// quaternion SLERP, and the frame-independent, minimum-twist way to blend Cartesian keyframes. Straight-
+/// line position + independently-slerped orientation, by contrast, is kinked and frame-dependent.
+pub fn sclerp(a: &Matrix4<f64>, b: &Matrix4<f64>, t: f64) -> Matrix4<f64> {
+    let rel = a.try_inverse().expect("pose invertible") * b;
+    a * exp_se3(&(log_se3(&rel) * t))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn approx(a: &Matrix4<f64>, b: &Matrix4<f64>, tol: f64) -> bool {
         (a - b).abs().max() < tol
+    }
+
+    fn sample(seed: f64) -> Matrix4<f64> {
+        let w = Vector3::new(0.3 * seed, -0.5 * seed, 0.2 + 0.1 * seed);
+        pose(&exp_so3(&w), &Vector3::new(1.0 + seed, -2.0 * seed, 0.5))
+    }
+
+    #[test]
+    fn sclerp_hits_both_endpoints() {
+        let (a, b) = (sample(0.5), sample(1.3));
+        assert!(approx(&sclerp(&a, &b, 0.0), &a, 1e-12), "T(0) = A");
+        assert!(approx(&sclerp(&a, &b, 1.0), &b, 1e-9), "T(1) = B");
+    }
+
+    #[test]
+    fn sclerp_moves_at_a_constant_screw_velocity() {
+        // THE DEFINING PROPERTY. Equal-time samples are related by the SAME incremental transform
+        // T(tᵢ)⁻¹ T(tᵢ₊₁) = exp(Δt·ξ): a constant screw twist along the whole path.
+        let (a, b) = (sample(0.4), sample(1.1));
+        let dt = 0.1;
+        let mut reference: Option<Vector6<f64>> = None;
+        let mut ti = 0.0;
+        while ti < 1.0 - 1e-9 {
+            let step = sclerp(&a, &b, ti).try_inverse().unwrap() * sclerp(&a, &b, ti + dt);
+            let xi = log_se3(&step);
+            match &reference {
+                None => reference = Some(xi),
+                Some(r) => assert!((xi - r).norm() < 1e-9, "screw step not constant at t={ti}"),
+            }
+            ti += dt;
+        }
+    }
+
+    #[test]
+    fn sclerp_pure_translation_is_a_straight_line() {
+        let a = pose(&Matrix3::identity(), &Vector3::zeros());
+        let b = pose(&Matrix3::identity(), &Vector3::new(4.0, -2.0, 6.0));
+        for &t in &[0.25, 0.5, 0.75] {
+            let mid = sclerp(&a, &b, t);
+            assert!((trans_of(&mid) - Vector3::new(4.0, -2.0, 6.0) * t).norm() < 1e-12, "straight line at t={t}");
+            assert!((rot_of(&mid) - Matrix3::identity()).abs().max() < 1e-12, "no spurious rotation");
+        }
     }
 
     #[test]

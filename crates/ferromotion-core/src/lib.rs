@@ -125,7 +125,7 @@ pub use pink::{
 };
 pub use leg_smoother::{LegSmoother, PriorPose2, RelPose2};
 pub use cspace_sdf::{CspaceField, PlanarArm};
-pub use screw::{ad, adjoint, exp_se3, exp_so3, hat3, log_se3, log_so3 as screw_log_so3, poe_fk, pose, revolute_axis, rot_of, trans_of, vee3};
+pub use screw::{ad, adjoint, exp_se3, exp_so3, hat3, log_se3, log_so3 as screw_log_so3, poe_fk, pose, revolute_axis, rot_of, sclerp, trans_of, vee3};
 pub use sdf::{Sdf, SdfScene};
 pub use sparse::{solve_factor_graph, SparseFactor, SparseResult};
 pub use lmi::{is_hurwitz, is_schur, lyapunov, lyapunov_discrete};
