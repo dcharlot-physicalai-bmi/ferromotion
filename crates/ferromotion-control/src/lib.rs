@@ -75,6 +75,7 @@ mod visual_servo;
 mod wahba;
 mod wbc;
 mod zmp;
+mod zonotope;
 pub use alip::Alip;
 pub use actuator::SeaJoint;
 pub use admittance::{Admittance, HybridForcePosition};
@@ -141,6 +142,7 @@ pub use visual_servo::{ibvs_twist, interaction_matrix, Camera};
 pub use wahba::{davenport_q_method, triad};
 pub use wbc::{CartesianTask, WholeBody};
 pub use zmp::{capture_point, CartState, PreviewState, ZmpPreview};
+pub use zonotope::{reach_linear, Zonotope};
 
 /// Classic PID over an n-dimensional error signal (anti-windup-free; the workhorse baseline).
 #[derive(Clone, Debug)]
