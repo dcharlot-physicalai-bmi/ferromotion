@@ -35,6 +35,7 @@ mod foci;
 mod gjk;
 mod diffik;
 mod dcol;
+mod despike;
 mod dubins;
 mod dyn_derivatives;
 mod dynamics;
@@ -143,6 +144,7 @@ pub use geodetic::{ecef_to_enu, ecef_to_lla, enu_to_ecef, lla_to_ecef, lla_to_en
 pub use gnc::{gnc_solve, GncResult};
 pub use marginalize::{add_factor, GaussianInfo};
 pub use mestimator::{barron, RobustKernel};
+pub use despike::{hampel_filter, median_filter};
 pub use dubins::{dubins_shortest, DubinsPath, Pose as DubinsPose, Seg as DubinsSeg};
 pub use dyn_derivatives::{forward_dynamics_derivatives, id_derivatives};
 pub use iris::{ConvexRegion as IrisRegion, Iris};
