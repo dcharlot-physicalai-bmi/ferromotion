@@ -80,6 +80,7 @@ mod sdf;
 mod lmi;
 mod spatial;
 mod sparse;
+mod spline_se3;
 mod sysid;
 mod teaser;
 mod tensegrity;
@@ -161,6 +162,7 @@ pub use pink::{
 pub use leg_smoother::{LegSmoother, PriorPose2, RelPose2};
 pub use cspace_sdf::{CspaceField, PlanarArm};
 pub use screw::{ad, adjoint, exp_se3, exp_so3, hat3, log_se3, log_so3 as screw_log_so3, poe_fk, pose, revolute_axis, rot_of, sclerp, trans_of, vee3};
+pub use spline_se3::SplineSE3;
 pub use sdf::{op_intersect, op_smooth_union, op_subtract, op_union, Sdf, SdfScene};
 pub use sparse::{solve_factor_graph, SparseFactor, SparseResult};
 pub use lmi::{is_hurwitz, is_schur, lyapunov, lyapunov_discrete};
