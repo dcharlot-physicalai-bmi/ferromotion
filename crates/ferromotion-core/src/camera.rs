@@ -83,6 +83,67 @@ impl PinholeCamera {
     }
 }
 
+// the Zhang constraint row v_ij from a homography's columns i, j (0-indexed)
+fn zhang_v(h: &nalgebra::Matrix3<f64>, i: usize, j: usize) -> nalgebra::SVector<f64, 6> {
+    nalgebra::SVector::<f64, 6>::from_row_slice(&[
+        h[(0, i)] * h[(0, j)],
+        h[(0, i)] * h[(1, j)] + h[(1, i)] * h[(0, j)],
+        h[(1, i)] * h[(1, j)],
+        h[(2, i)] * h[(0, j)] + h[(0, i)] * h[(2, j)],
+        h[(2, i)] * h[(1, j)] + h[(1, i)] * h[(2, j)],
+        h[(2, i)] * h[(2, j)],
+    ])
+}
+
+/// One calibration view: the planar target's object points (on `Z = 0`) paired with their observed pixels.
+pub type CalibrationView = (Vec<Vector2<f64>>, Vec<Vector2<f64>>);
+
+/// **Zhang's camera calibration** (Zhang, 2000): recover a pinhole's intrinsics `(fx, fy, cx, cy)` from
+/// `≥ 3` views of a **planar** target (a checkerboard on the `Z = 0` plane). Each view gives a plane→image
+/// homography (via [`crate::homography_dlt`]); each homography imposes two linear constraints on the image of
+/// the absolute conic `B = K⁻ᵀK⁻¹`, and stacking them over views solves for `B` (SVD null space), from which
+/// the intrinsics follow in closed form. Distortion is not estimated here (linear method); pass to a
+/// nonlinear refinement for that. `views[k] = (planar object points on Z=0, their pixels)`.
+pub fn calibrate(views: &[CalibrationView]) -> Option<PinholeCamera> {
+    use nalgebra::DMatrix;
+    if views.len() < 3 {
+        return None;
+    }
+    let mut a = DMatrix::zeros(2 * views.len(), 6);
+    for (k, (obj, img)) in views.iter().enumerate() {
+        let h = crate::homography::homography_dlt(obj, img);
+        let v01 = zhang_v(&h, 0, 1);
+        let v00 = zhang_v(&h, 0, 0);
+        let v11 = zhang_v(&h, 1, 1);
+        let d = v00 - v11;
+        for c in 0..6 {
+            a[(2 * k, c)] = v01[c];
+            a[(2 * k + 1, c)] = d[c];
+        }
+    }
+    let svd = a.svd(false, true);
+    let vt = svd.v_t?;
+    let mut b: Vec<f64> = (0..6).map(|c| vt[(5, c)]).collect();
+    if b[0] < 0.0 {
+        b.iter_mut().for_each(|x| *x = -*x); // fix sign so B11 > 0
+    }
+    let (b11, b12, b22, b13, b23, b33) = (b[0], b[1], b[2], b[3], b[4], b[5]);
+    let denom = b11 * b22 - b12 * b12;
+    if denom.abs() < 1e-15 {
+        return None;
+    }
+    let cy = (b12 * b13 - b11 * b23) / denom;
+    let lambda = b33 - (b13 * b13 + cy * (b12 * b13 - b11 * b23)) / b11;
+    if lambda / b11 <= 0.0 || lambda * b11 / denom <= 0.0 {
+        return None;
+    }
+    let fx = (lambda / b11).sqrt();
+    let fy = (lambda * b11 / denom).sqrt();
+    let gamma = -b12 * fx * fx * fy / lambda;
+    let cx = gamma * cy / fy - b13 * fx * fx / lambda;
+    Some(PinholeCamera::new(fx, fy, cx, cy))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,5 +206,54 @@ mod tests {
         let px = c.project(&Vector3::new(1.0, 0.5, 2.0));
         // x/z = 0.5 → 500·0.5 + 320 = 570 ; y/z = 0.25 → 500·0.25 + 240 = 365
         assert!((px - Vector2::new(570.0, 365.0)).norm() < 1e-9, "pixel {px}");
+    }
+
+    #[test]
+    fn zhang_calibration_recovers_known_intrinsics() {
+        // THE ORACLE. Render a planar checkerboard from several poses with a known camera, then Zhang's
+        // method must recover its intrinsics from the corner pixels alone.
+        use super::calibrate;
+        use nalgebra::{Matrix3, Vector3};
+        let truth = PinholeCamera::new(500.0, 520.0, 320.0, 240.0);
+        // a 7×7 planar grid of corners on Z=0, spaced 0.05 m
+        let obj: Vec<Vector2<f64>> = (0..7).flat_map(|i| (0..7).map(move |j| Vector2::new(i as f64 * 0.05, j as f64 * 0.05))).collect();
+        // small SO(3) exp for varied board orientations
+        let so3 = |w: Vector3<f64>| -> Matrix3<f64> {
+            let th = w.norm();
+            if th < 1e-12 {
+                return Matrix3::identity();
+            }
+            let k = w / th;
+            let kx = Matrix3::new(0.0, -k.z, k.y, k.z, 0.0, -k.x, -k.y, k.x, 0.0);
+            Matrix3::identity() + th.sin() * kx + (1.0 - th.cos()) * kx * kx
+        };
+        // six varied camera poses viewing the board ~0.5 m away
+        let poses = [
+            (Vector3::new(0.1, 0.0, 0.0), Vector3::new(-0.15, -0.15, 0.5)),
+            (Vector3::new(-0.2, 0.15, 0.0), Vector3::new(-0.1, -0.2, 0.55)),
+            (Vector3::new(0.15, -0.2, 0.1), Vector3::new(-0.2, -0.1, 0.45)),
+            (Vector3::new(-0.1, -0.25, -0.1), Vector3::new(-0.15, -0.15, 0.5)),
+            (Vector3::new(0.25, 0.1, 0.0), Vector3::new(-0.18, -0.12, 0.6)),
+            (Vector3::new(0.0, 0.3, 0.15), Vector3::new(-0.12, -0.18, 0.5)),
+        ];
+        let views: Vec<super::CalibrationView> = poses
+            .iter()
+            .map(|&(w, t)| {
+                let r = so3(w);
+                let img: Vec<Vector2<f64>> = obj
+                    .iter()
+                    .map(|p| {
+                        let pc = r * Vector3::new(p.x, p.y, 0.0) + t;
+                        truth.project(&pc)
+                    })
+                    .collect();
+                (obj.clone(), img)
+            })
+            .collect();
+        let est = calibrate(&views).expect("calibration should succeed");
+        assert!((est.fx - 500.0).abs() < 1.0, "fx {} vs 500", est.fx);
+        assert!((est.fy - 520.0).abs() < 1.0, "fy {} vs 520", est.fy);
+        assert!((est.cx - 320.0).abs() < 1.0, "cx {} vs 320", est.cx);
+        assert!((est.cy - 240.0).abs() < 1.0, "cy {} vs 240", est.cy);
     }
 }

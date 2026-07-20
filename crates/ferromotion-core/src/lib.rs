@@ -84,7 +84,7 @@ pub use cfd_contact::{rollout_impulse, CfdContact};
 pub use bit_star::BitStar;
 pub use bspline::BSpline;
 pub use bundle::{BundleAdjustment, Camera, Observation};
-pub use camera::PinholeCamera;
+pub use camera::{calibrate, PinholeCamera};
 pub use catmull_rom::CatmullRom;
 pub use chomp::{Chomp, ChompResult};
 pub use closed_loop::{Pin, PlanarLoop};
