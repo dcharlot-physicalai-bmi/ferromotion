@@ -8,6 +8,7 @@ use nalgebra::{DVector, Vector3};
 use ferromotion_core::{gravity_vector, inverse_dynamics, mass_matrix, LinkInertia, Robot};
 
 mod alip;
+mod abfilter;
 mod actuator;
 mod admittance;
 mod algames;
@@ -77,6 +78,7 @@ mod wbc;
 mod zmp;
 mod zonotope;
 pub use alip::Alip;
+pub use abfilter::{AlphaBeta, AlphaBetaGamma};
 pub use actuator::SeaJoint;
 pub use admittance::{Admittance, HybridForcePosition};
 pub use algames::{AlGames, AlGamesResult, Player};
