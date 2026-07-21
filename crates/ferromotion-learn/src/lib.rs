@@ -22,9 +22,11 @@ mod dual;
 mod hnn;
 mod nn;
 mod pinn;
+mod sindy;
 
 pub use autodiff::{Grad, Tape, Var};
 pub use dual::{Dual, HyperDual};
 pub use hnn::Hnn;
 pub use nn::Mlp;
 pub use pinn::Pinn;
+pub use sindy::{monomial_exponents, Sindy};
