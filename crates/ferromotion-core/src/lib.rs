@@ -68,6 +68,7 @@ mod mestimator;
 mod modal;
 mod occupancy;
 mod ode;
+mod orb;
 mod pink;
 mod planar_contact;
 mod pca;
@@ -160,6 +161,10 @@ pub use kiss_icp::KissIcp;
 pub use kmeans::{kmeans, KMeans};
 pub use occupancy::OccupancyGrid;
 pub use ode::{dopri5_step, integrate, OdeSolution};
+pub use orb::{
+    brief_descriptor, brief_pattern, detect_and_describe, fast_corners, match_descriptors, nms, orient,
+    Descriptor, GrayImage, Keypoint,
+};
 pub use pca::{obb_from_points, pca, Obb, Pca};
 pub use pnp::{pnp, pnp_dlt, pnp_gn, reprojection_error};
 pub use polyline::{polyline_length, rdp_simplify, resample_uniform};
