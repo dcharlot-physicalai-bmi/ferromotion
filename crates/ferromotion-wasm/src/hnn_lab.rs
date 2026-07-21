@@ -49,18 +49,23 @@ fn energy(q: f64, p: f64) -> f64 {
 impl HnnLab {
     #[wasm_bindgen(constructor)]
     pub fn new() -> HnnLab {
+        // Sparse + slightly noisy samples: this is where structure pays off. With few, noisy examples the
+        // black-box baseline learns a wrong vector field off-data and spirals, while the HNN's conservative-
+        // by-construction field still holds energy.
         let mut s = 12345u64;
+        let noise = |st: &mut u64| ((splitmix64(st) as f64 / u64::MAX as f64) * 2.0 - 1.0) * 0.12;
         let (mut q, mut p, mut qd, mut pd) = (vec![], vec![], vec![], vec![]);
         let (mut xs, mut ys) = (vec![], vec![]);
-        for _ in 0..80 {
+        for _ in 0..28 {
             let qi = (splitmix64(&mut s) as f64 / u64::MAX as f64) * 4.0 - 2.0;
             let pi = (splitmix64(&mut s) as f64 / u64::MAX as f64) * 4.0 - 2.0;
+            let (tqd, tpd) = (pi + noise(&mut s), -qi + noise(&mut s));
             q.push(qi);
             p.push(pi);
-            qd.push(pi);
-            pd.push(-qi);
+            qd.push(tqd);
+            pd.push(tpd);
             xs.push(vec![qi, pi]);
-            ys.push(vec![pi, -qi]);
+            ys.push(vec![tqd, tpd]);
         }
         let start = (1.6, 0.0);
         HnnLab {
