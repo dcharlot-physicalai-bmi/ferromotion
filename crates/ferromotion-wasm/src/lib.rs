@@ -87,6 +87,9 @@ pub use pinn_lab::PinnLab;
 mod hnn_lab;
 pub use hnn_lab::HnnLab;
 
+mod delan_lab;
+pub use delan_lab::DelanLab;
+
 fn iso(px: f64, py: f64, pz: f64, qw: f64, qx: f64, qy: f64, qz: f64) -> Iso {
     let q = UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(qw, qx, qy, qz));
     Isometry3::from_parts(Translation3::new(px, py, pz), q)

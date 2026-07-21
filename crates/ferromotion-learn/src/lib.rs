@@ -18,6 +18,7 @@
 //! verified against finite differences.
 
 mod autodiff;
+mod delan;
 mod dual;
 mod hnn;
 mod nn;
@@ -25,6 +26,7 @@ mod pinn;
 mod sindy;
 
 pub use autodiff::{Grad, Tape, Var};
+pub use delan::Delan;
 pub use dual::{Dual, HyperDual};
 pub use hnn::Hnn;
 pub use nn::Mlp;
