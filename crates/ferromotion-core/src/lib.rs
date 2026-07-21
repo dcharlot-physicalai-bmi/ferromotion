@@ -95,6 +95,7 @@ mod cspace_sdf;
 mod screw;
 mod sdf;
 mod sdp;
+mod sgm;
 mod lmi;
 mod spatial;
 mod sparse;
@@ -206,6 +207,7 @@ pub use screw::{ad, adjoint, exp_se3, exp_so3, hat3, log_se3, log_so3 as screw_l
 pub use spline_se3::SplineSE3;
 pub use sdf::{op_intersect, op_smooth_union, op_subtract, op_union, Sdf, SdfScene};
 pub use sdp::{project_psd, solve_sdp, SdpProblem, SdpSolution};
+pub use sgm::{census5x5, cost_volume, disparity_map, StereoParams};
 pub use sparse::{solve_factor_graph, SparseFactor, SparseResult};
 pub use lmi::{is_hurwitz, is_schur, lyapunov, lyapunov_discrete};
 pub use spatial::{KdTree, VoxelHash};
