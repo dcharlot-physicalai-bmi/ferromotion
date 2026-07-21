@@ -20,12 +20,22 @@ pub struct SindyLab {
     lambda: f64,
 }
 
-fn trajectory(x0: f64, y0: f64, n: usize, dt: f64, states: &mut Vec<Vec<f64>>, derivs: &mut Vec<Vec<f64>>) {
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E3779B97F4A7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^ (z >> 31)
+}
+
+fn trajectory(x0: f64, y0: f64, n: usize, dt: f64, seed: &mut u64, noise: f64, states: &mut Vec<Vec<f64>>, derivs: &mut Vec<Vec<f64>>) {
     let (mut x, mut y) = (x0, y0);
+    let mut nz = |s: &mut u64| ((splitmix64(s) as f64 / u64::MAX as f64) * 2.0 - 1.0) * noise;
     for _ in 0..n {
         let (dx, dy) = duffing(x, y);
         states.push(vec![x, y]);
-        derivs.push(vec![dx, dy]);
+        // measured derivatives carry noise, as they would if estimated from data
+        derivs.push(vec![dx + nz(seed), dy + nz(seed)]);
         let (k1x, k1y) = duffing(x, y);
         let (k2x, k2y) = duffing(x + 0.5 * dt * k1x, y + 0.5 * dt * k1y);
         let (k3x, k3y) = duffing(x + 0.5 * dt * k2x, y + 0.5 * dt * k2y);
@@ -40,9 +50,11 @@ impl SindyLab {
     #[wasm_bindgen(constructor)]
     pub fn new() -> SindyLab {
         let (mut states, mut derivs) = (vec![], vec![]);
-        trajectory(1.5, 0.0, 600, 0.01, &mut states, &mut derivs);
-        trajectory(0.3, 1.3, 600, 0.01, &mut states, &mut derivs);
-        let lambda = 0.05;
+        let mut seed = 4242u64;
+        // fewer samples + measurement noise → the sparsity knob genuinely matters
+        trajectory(1.5, 0.0, 90, 0.06, &mut seed, 0.25, &mut states, &mut derivs);
+        trajectory(0.3, 1.3, 90, 0.06, &mut seed, 0.25, &mut states, &mut derivs);
+        let lambda = 0.02; // opens dense (many spurious terms) — the reader tunes λ up to find the true model
         let sindy = Sindy::fit(&states, &derivs, 3, lambda);
         SindyLab { states, derivs, sindy, lambda }
     }
@@ -109,14 +121,14 @@ mod tests {
     #[test]
     fn the_sparsity_knob_finds_the_true_model_in_a_window() {
         let mut lab = SindyLab::new();
-        // a small λ keeps spurious terms
-        lab.set_lambda(0.005);
-        assert!(lab.n_active() >= 4, "small λ should keep extra terms");
+        // a small λ keeps many spurious terms (noisy data)
+        lab.set_lambda(0.01);
+        assert!(lab.n_active() > 4, "small λ should keep spurious terms, got {}", lab.n_active());
         // the sweet spot recovers exactly the Duffing system
-        lab.set_lambda(0.05);
-        assert!(lab.is_correct(), "λ=0.05 should recover Duffing: {} ; {}", lab.equation(0), lab.equation(1));
+        lab.set_lambda(0.08);
+        assert!(lab.is_correct(), "λ=0.08 should recover Duffing: {} ; {}", lab.equation(0), lab.equation(1));
         // too-large λ over-sparsifies
-        lab.set_lambda(0.5);
+        lab.set_lambda(0.3);
         assert!(lab.n_active() < 4, "large λ should drop real terms");
     }
 }
