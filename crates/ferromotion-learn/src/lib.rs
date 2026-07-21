@@ -18,6 +18,7 @@
 //! verified against finite differences.
 
 mod autodiff;
+mod capstone;
 mod delan;
 mod diff_control;
 mod dual;
@@ -29,6 +30,7 @@ mod pinn;
 mod sindy;
 
 pub use autodiff::{Grad, Tape, Var};
+pub use capstone::ModelBasedControl;
 pub use delan::Delan;
 pub use diff_control::PidController;
 pub use dual::{Dual, HyperDual};
