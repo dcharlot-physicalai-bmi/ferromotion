@@ -19,6 +19,7 @@
 
 mod autodiff;
 mod delan;
+mod diff_control;
 mod dual;
 mod hnn;
 mod msnn;
@@ -29,6 +30,7 @@ mod sindy;
 
 pub use autodiff::{Grad, Tape, Var};
 pub use delan::Delan;
+pub use diff_control::PidController;
 pub use dual::{Dual, HyperDual};
 pub use hnn::Hnn;
 pub use msnn::Msnn;
