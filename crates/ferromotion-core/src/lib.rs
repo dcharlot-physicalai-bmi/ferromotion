@@ -44,6 +44,7 @@ mod geometry2d;
 mod gpmp2;
 mod hand_eye;
 mod homography;
+mod hydroelastic;
 mod hybrid_astar;
 mod iir;
 mod grasp;
@@ -143,6 +144,9 @@ pub use hand_eye::hand_eye_calibration;
 pub use geometry2d::{convex_hull, min_enclosing_circle, point_in_polygon, polygon_area, polygon_centroid, signed_area, Circle};
 pub use gpmp2::Gpmp2;
 pub use homography::{apply_homography, homography_dlt, transfer_error};
+pub use hydroelastic::{
+    equal_spheres_contact, linear_pressure, sphere_plane_contact, sphere_plane_force_closed_form, HydroContact,
+};
 pub use iir::Biquad;
 pub use gcs::{Gcs, GcsPath, HPolytope};
 pub use geodetic::{ecef_to_enu, ecef_to_lla, enu_to_ecef, lla_to_ecef, lla_to_enu};
