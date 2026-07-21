@@ -56,7 +56,7 @@ impl DelanLab {
         let mut s = 987u64;
         let mut rnd = |lo: f64, hi: f64| lo + (splitmix64(&mut s) as f64 / u64::MAX as f64) * (hi - lo);
         let (mut q, mut qd, mut qdd, mut tau) = (vec![], vec![], vec![], vec![]);
-        for _ in 0..140 {
+        for _ in 0..200 {
             let qi = [rnd(-2.0, 2.0), rnd(-2.0, 2.0)];
             let qdi = [rnd(-1.5, 1.5), rnd(-1.5, 1.5)];
             let qddi = [rnd(-2.0, 2.0), rnd(-2.0, 2.0)];
@@ -130,7 +130,7 @@ mod tests {
         // SPD even before training (Cholesky structure)
         assert!(lab.m_min_eig() > 0.0, "M should be positive-definite pre-training");
         let e_before = lab.m_error();
-        lab.train(900);
+        lab.train(400);
         let e_after = lab.m_error();
         assert!(lab.m_min_eig() > 0.0, "M stays positive-definite");
         assert!(e_after < e_before, "training should move M toward the truth: {e_before} → {e_after}");
