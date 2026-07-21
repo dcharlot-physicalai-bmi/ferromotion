@@ -19,6 +19,8 @@
 
 mod autodiff;
 mod dual;
+mod nn;
 
 pub use autodiff::{Grad, Tape, Var};
 pub use dual::{Dual, HyperDual};
+pub use nn::Mlp;

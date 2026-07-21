@@ -72,6 +72,9 @@ pub use foci_lab::FociLab;
 mod autodiff_lab;
 pub use autodiff_lab::AutodiffLab;
 
+mod nn_lab;
+pub use nn_lab::NnLab;
+
 fn iso(px: f64, py: f64, pz: f64, qw: f64, qx: f64, qy: f64, qz: f64) -> Iso {
     let q = UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(qw, qx, qy, qz));
     Isometry3::from_parts(Translation3::new(px, py, pz), q)
