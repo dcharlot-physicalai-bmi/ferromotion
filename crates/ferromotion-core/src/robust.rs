@@ -40,7 +40,7 @@ pub fn solve_ik_robust(robot: &Robot, target: &Iso, opts: &IkOptions, restarts: 
         if res.converged && within_limits(robot, &res.q) {
             return res;
         }
-        if best.as_ref().map_or(true, |b| res.error < b.error) {
+        if best.as_ref().is_none_or(|b| res.error < b.error) {
             best = Some(res);
         }
     }

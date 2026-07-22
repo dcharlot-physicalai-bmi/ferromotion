@@ -159,7 +159,7 @@ impl Ukf {
 
     /// Time update: push sigma points through `f`, recover the predicted mean and covariance `+ Q`.
     pub fn predict<F: Fn(&DVector<f64>) -> DVector<f64>>(&mut self, f: F, q: &DMatrix<f64>) {
-        let prop: Vec<DVector<f64>> = self.sigma_points().iter().map(|s| f(s)).collect();
+        let prop: Vec<DVector<f64>> = self.sigma_points().iter().map(f).collect();
         let mut xm = DVector::zeros(self.n);
         for (w, p) in self.wm.iter().zip(&prop) {
             xm += p.scale(*w);
@@ -177,7 +177,7 @@ impl Ukf {
     pub fn update<H: Fn(&DVector<f64>) -> DVector<f64>>(&mut self, z: &DVector<f64>, h: H, r: &DMatrix<f64>) {
         let m = z.len();
         let pts = self.sigma_points();
-        let zpts: Vec<DVector<f64>> = pts.iter().map(|s| h(s)).collect();
+        let zpts: Vec<DVector<f64>> = pts.iter().map(h).collect();
         let mut zm = DVector::zeros(m);
         for (w, zp) in self.wm.iter().zip(&zpts) {
             zm += zp.scale(*w);

@@ -560,7 +560,7 @@ impl MacFluid {
     /// u-velocity sampled along the vertical centerline `x = 0.5`, as `(y, u)` from wall to wall.
     /// Requires `nx` even so a `u`-face lands exactly on `x = 0.5`.
     pub fn centerline_u(&self) -> Vec<(f64, f64)> {
-        assert!(self.nx % 2 == 0, "need even nx for an exact centerline face");
+        assert!(self.nx.is_multiple_of(2), "need even nx for an exact centerline face");
         let ic = self.nx / 2;
         let mut out = vec![(0.0, 0.0)]; // bottom wall
         for j in 0..self.ny {

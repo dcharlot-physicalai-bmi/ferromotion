@@ -10,6 +10,9 @@
 //!   sliding-mode, SRBD MPC, ZMP/capture-point, Kalman/EKF/UKF, and more.
 //! - [`ruckig`] — jerk-limited online trajectory generation.
 //! - [`policy`] — on-device runner for exported learned (RL/VLA) policies.
+//! - [`learn`] — differentiable physics-informed learning: reverse-mode autodiff, PINNs,
+//!   Lagrangian/Hamiltonian nets, Neural ODEs, SINDy, Koopman/DMD, structured stiffness nets,
+//!   differentiable control, and model-based capstones.
 //! - [`fluid`] — 2D incompressible Navier–Stokes (MAC projection) for fluid–robot interaction.
 //! - [`mpm`] — differentiable 2D Material Point Method for soft/elastic/granular material.
 //! - [`cloth`] — differentiable FEM thin-shell cloth (StVK membrane + bending).
@@ -20,6 +23,7 @@
 //! pure-Rust compute fabric).
 
 pub use ferromotion_control as control;
+pub use ferromotion_learn as learn;
 pub use ferromotion_core as core;
 pub use ferromotion_fluid as fluid;
 pub use ferromotion_cloth as cloth;
