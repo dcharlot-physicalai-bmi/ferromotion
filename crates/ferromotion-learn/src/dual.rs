@@ -229,3 +229,141 @@ mod tests {
         assert!((out.e2 - x0.sin() * 2.0 * y0).abs() < 1e-12, "∂/∂y");
     }
 }
+
+
+// ---- Dual numbers THROUGH the rigid-body dynamics ----
+
+/// The bridge that makes derivatives of dynamics free: `Dual` satisfies the generic-scalar contract
+/// of [`ferromotion_core::gendyn`], so seeding a dual in any state (`q`, `q̇`, `q̈`) or any inertial
+/// parameter (mass, COM, inertia entry) and running RNEA/forward dynamics yields the exact partial
+/// derivative in `eps` — no hand-derived derivative code, no finite-difference truncation error.
+/// This is the differentiation engine of gradient-based system identification and calibration.
+impl ferromotion_core::gendyn::Real for Dual {
+    fn from_f64(v: f64) -> Self {
+        Dual::constant(v)
+    }
+    fn sin(self) -> Self {
+        Dual::sin(self)
+    }
+    fn cos(self) -> Self {
+        Dual::cos(self)
+    }
+    fn sqrt(self) -> Self {
+        self.map(self.re.sqrt(), 0.5 / self.re.sqrt())
+    }
+}
+
+#[cfg(test)]
+mod gendyn_tests {
+    use super::*;
+    use ferromotion_core::gendyn::GenModel;
+    use ferromotion_core::{Iso, Joint, LinkInertia, Robot};
+    use nalgebra::{Matrix3, Translation3, UnitQuaternion, Vector3};
+
+    fn test_robot() -> (Robot, Vec<LinkInertia>) {
+        let mk = |xyz: [f64; 3], rpy: [f64; 3]| {
+            Iso::from_parts(
+                Translation3::new(xyz[0], xyz[1], xyz[2]),
+                UnitQuaternion::from_euler_angles(rpy[0], rpy[1], rpy[2]),
+            )
+        };
+        let joints = vec![
+            Joint::revolute(mk([0.0, 0.0, 0.3], [0.0, 0.0, 0.4]), Vector3::z()),
+            Joint::revolute(mk([0.1, 0.0, 0.2], [0.3, 0.0, 0.0]), Vector3::y()),
+            Joint::prismatic(mk([0.0, 0.05, 0.25], [0.0, 0.2, 0.0]), Vector3::x()),
+            Joint::revolute(mk([0.2, 0.0, 0.1], [0.0, 0.0, -0.3]), Vector3::y()),
+        ];
+        let inertia: Vec<LinkInertia> = (0..4)
+            .map(|i| {
+                let f = i as f64;
+                LinkInertia {
+                    mass: 1.5 + 0.3 * f,
+                    com: Vector3::new(0.02 * f, -0.01, 0.05 + 0.01 * f),
+                    inertia: Matrix3::new(
+                        0.02 + 0.005 * f, 0.001, 0.002,
+                        0.001, 0.03 + 0.002 * f, 0.0015,
+                        0.002, 0.0015, 0.025,
+                    ),
+                }
+            })
+            .collect();
+        (Robot { joints, ee_offset: Iso::identity() }, inertia)
+    }
+
+    /// ∂τ/∂q and ∂τ/∂q̇ through dual-RNEA must match the hand-derived analytical derivatives
+    /// (`dyn_derivatives::id_derivatives`) — the strongest available oracle.
+    #[test]
+    fn dual_rnea_matches_analytical_id_derivatives() {
+        let (robot, inertia) = test_robot();
+        let g = Vector3::new(0.0, 0.0, -9.81);
+        let q = [0.3, -0.7, 0.12, 1.1];
+        let qd = [0.5, -0.2, 0.3, -0.8];
+        let qdd = [1.2, 0.4, -0.9, 0.3];
+        let (dq_ref, dqd_ref) = ferromotion_core::id_derivatives(&robot, &inertia, &q, &qd, &qdd, g);
+        let m = GenModel::<Dual>::from_robot(&robot, &inertia, [0.0, 0.0, -9.81]);
+        let n = 4;
+        for j in 0..n {
+            let mk = |v: &[f64], active: Option<usize>| -> Vec<Dual> {
+                v.iter()
+                    .enumerate()
+                    .map(|(i, &x)| if Some(i) == active { Dual::var(x) } else { Dual::constant(x) })
+                    .collect()
+            };
+            // ∂τ/∂q_j
+            let tau = m.rnea(&mk(&q, Some(j)), &mk(&qd, None), &mk(&qdd, None));
+            for i in 0..n {
+                let (got, want) = (tau[i].eps, dq_ref[(i, j)]);
+                assert!((got - want).abs() < 1e-8 * want.abs().max(1.0), "dtau/dq ({i},{j}): {got} vs {want}");
+            }
+            // ∂τ/∂q̇_j
+            let tau = m.rnea(&mk(&q, None), &mk(&qd, Some(j)), &mk(&qdd, None));
+            for i in 0..n {
+                let (got, want) = (tau[i].eps, dqd_ref[(i, j)]);
+                assert!((got - want).abs() < 1e-8 * want.abs().max(1.0), "dtau/dqd ({i},{j}): {got} vs {want}");
+            }
+        }
+    }
+
+    /// ∂τ/∂(inertial parameter) — the calibration gradient — seeded through the MODEL, verified
+    /// against central finite differences of the f64 reference dynamics.
+    #[test]
+    fn dual_parameter_gradients_match_finite_differences() {
+        let (robot, inertia) = test_robot();
+        let g = Vector3::new(0.0, 0.0, -9.81);
+        let q = [0.3, -0.7, 0.12, 1.1];
+        let qd = [0.5, -0.2, 0.3, -0.8];
+        let qdd = [1.2, 0.4, -0.9, 0.3];
+        let eps = 1e-6;
+        // parameters to test: (link, kind) where kind: 0 = mass, 1 = com.y, 2 = inertia[0][0]
+        for &(link, kind) in &[(0usize, 0usize), (2, 0), (1, 1), (3, 2)] {
+            // dual: seed the parameter
+            let mut m = GenModel::<Dual>::from_robot(&robot, &inertia, [0.0, 0.0, -9.81]);
+            match kind {
+                0 => m.links[link].mass.eps = 1.0,
+                1 => m.links[link].com.0[1].eps = 1.0,
+                _ => m.links[link].inertia.0[0][0].eps = 1.0,
+            }
+            let mkc = |v: &[f64]| -> Vec<Dual> { v.iter().map(|&x| Dual::constant(x)).collect() };
+            let tau = m.rnea(&mkc(&q), &mkc(&qd), &mkc(&qdd));
+            // finite differences on the f64 reference
+            let perturb = |s: f64| -> Vec<f64> {
+                let mut li = inertia.clone();
+                match kind {
+                    0 => li[link].mass += s,
+                    1 => li[link].com[1] += s,
+                    _ => li[link].inertia[(0, 0)] += s,
+                }
+                ferromotion_core::inverse_dynamics(&robot, &li, &q, &qd, &qdd, g)
+            };
+            let (tp, tm) = (perturb(eps), perturb(-eps));
+            for i in 0..4 {
+                let want = (tp[i] - tm[i]) / (2.0 * eps);
+                let got = tau[i].eps;
+                assert!(
+                    (got - want).abs() < 1e-5 * want.abs().max(1.0),
+                    "dtau/dparam link={link} kind={kind} row {i}: {got} vs {want}"
+                );
+            }
+        }
+    }
+}

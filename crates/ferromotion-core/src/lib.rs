@@ -40,6 +40,7 @@ mod despike;
 mod dubins;
 mod dyn_derivatives;
 mod dynamics;
+pub mod gendyn;
 mod geometry2d;
 mod gpmp2;
 mod hand_eye;
