@@ -1,3 +1,70 @@
+# Ferromotion — Roadmap, v0.30.0 cycle (2026-07-22)
+
+_Fresh audit: full workspace inventory (185 modules / 12 crates / 754 tests) + two web sweeps
+(classical robotics stacks; differentiable physics & physics-informed learning, both mid-2026).
+Supersedes the v0.23-era plan below, whose Tier-1 list is now essentially shipped (iCEM, DIAL-MPC,
+CCM, differentiable MPC, BIT*, C3, CTR, FOCI, IPM contact, hydroelastic, GJK/EPA/DCOL, InEKF/MSCKF,
+GCS/IRIS, ALGAMES/DP-iLQR, …)._
+
+## The strategic read (both sweeps corroborate)
+
+- **The Rust model-based core is an open lane.** Mid-2026 web sweep verdict: no Rust-native
+  equivalent of Pinocchio exists — no crate with Featherstone dynamics + analytical derivatives +
+  constrained/contact dynamics + an optimal-control stack. Ferromotion is the closest thing; the
+  gaps below are what closes the claim.
+- **Differentiability found its real job: calibration, not policy learning.** The industry's fast
+  paths (MJWarp, Genesis rigid) dropped differentiability; gradient-based real-to-sim/sys-ID is the
+  validated 2026 use (1–2 orders over black-box). MuJoCo 3.5 shipped a SysID toolbox; actuator/sensor
+  fidelity (delays, electrical dynamics) is the sim-to-real agenda.
+- **Our unclaimed seams, named by the sweeps**: portable/deterministic/memory-lean differentiable
+  stack; maintained LNN/HNN/VIN model classes (ferromotion-learn IS this); a maintained
+  differentiable-NLS + Lie-group layer (theseus frozen since 2024-09); permissive answers to the
+  monetized choke points (Ruckig Pro waypoints). Sampling-MPC — where the field's momentum actually
+  is — we already cover (MPPI/CEM/iCEM/DIAL/tube/Tiny/SRBD).
+- **We do not out-FPS Newton on NVIDIA silicon.** GPU scale is not this library's axis; the
+  browser/wasm + determinism + structure axis is.
+
+## Ranked gaps (corroborated across sweeps + inventory)
+
+### Tier 1 — build next (each unlocks the tier below it)
+1. **Generic-scalar core dynamics** — make RNEA/ABA/kinematics generic over the scalar (nalgebra
+   `RealField`), so `learn::dual` forward-mode AD flows *through the dynamics* natively (the Rust
+   answer to Pinocchio's template/CasADi pipeline, capability #1/#3 of the classical list).
+   Oracle: matches `dyn_derivatives` analytical results + finite differences.
+2. **`calib` — turnkey gradient real-to-sim calibration** — fit {inertial params, joint friction
+   (Coulomb/viscous/Stribeck), actuator (SEA), payload} to recorded trajectories by gradient
+   through a differentiable rollout; identifiability report; pseudo-inertia consistency projection
+   (already in `sysid`); optional neural residual (`learn::neural_ode`). The single most validated
+   2026 use of differentiability, and pure assembly of in-house parts.
+
+### Tier 2 — high-value, independent
+3. **Waypoint OTG (Ruckig-Pro flank)** — jerk-limited trajectories through intermediate waypoints +
+   directional limits, permissive-licensed; our `ruckig` crate is the thinnest in the workspace.
+4. **Constraint-API modernization (the Pinocchio 4.0 bar)** — mimic joints, Delassus operator,
+   point/anchor/limit/friction constraint models with ADMM/PGS inside the dynamics layer.
+5. **MJCF ingestion** alongside URDF (labs + models interop; SDF later).
+6. **Differentiable-NLS-as-a-layer** on `sparse` (theseus-class niche: implicit differentiation of
+   the Gauss–Newton fixed point).
+7. **Actuator realism pack** — command/sensor delays, DC-motor electrical dynamics + cogging
+   (MuJoCo 3.5–3.7 direction; feeds `calib`).
+8. **Native Rerun logging (optional feature)** — Rust-native observability; the cheapest
+   ecosystem-grade move (capability #10).
+
+### Tier 3 — frontier / hygiene
+9. **Error-controlled contact integration (CENIC-class)** — convex time-stepping with accuracy
+   guarantees; the new trustworthy-contact bar.
+10. **Depth pass on thin crates** — cloth(3)/rod(3)/ruckig(4)/tactile(7)/fluid(8) tests vs scope;
+    volumetric Neo-Hookean FEM remains from the old Tier-2.
+
+## Positioning sentence
+Ferromotion does not race Newton's FPS; it owns the portable, deterministic, wasm-clean seam:
+structured mechanics (LNN/HNN/VIN) + certifiable control + gradient calibration, one pure-Rust
+source, browser to workstation.
+
+---
+
+# HISTORICAL — v0.23-era plan (superseded, kept for the record)
+
 # Ferromotion — Roadmap & Frontier Plan
 
 _A full review, fruition/integration audit, fresh SOTA sweep (6 parallel scouts against the
