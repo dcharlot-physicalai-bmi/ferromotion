@@ -251,6 +251,9 @@ impl ferromotion_core::gendyn::Real for Dual {
     fn sqrt(self) -> Self {
         self.map(self.re.sqrt(), 0.5 / self.re.sqrt())
     }
+    fn tanh(self) -> Self {
+        Dual::tanh(self)
+    }
 }
 
 #[cfg(test)]

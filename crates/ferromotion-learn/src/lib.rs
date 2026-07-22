@@ -22,6 +22,7 @@ mod capstone;
 mod delan;
 mod diff_control;
 mod dual;
+pub mod calib;
 mod hnn;
 mod msnn;
 mod neural_ode;

@@ -28,6 +28,8 @@ pub trait Real:
     fn sin(self) -> Self;
     fn cos(self) -> Self;
     fn sqrt(self) -> Self;
+    /// Smooth saturation — used by smoothed Coulomb friction models in calibration.
+    fn tanh(self) -> Self;
 }
 
 impl Real for f64 {
@@ -42,6 +44,9 @@ impl Real for f64 {
     }
     fn sqrt(self) -> Self {
         f64::sqrt(self)
+    }
+    fn tanh(self) -> Self {
+        f64::tanh(self)
     }
 }
 
