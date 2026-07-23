@@ -56,12 +56,26 @@ enum Model {
     /// `plane_p` with unit `normal`; Coulomb coefficient `mu`. Activated when the free motion
     /// would penetrate. 3 cone rows.
     PointContact { upto: usize, local: Vector3<f64>, plane_p: Vector3<f64>, normal: Vector3<f64>, mu: f64 },
+    /// Collision-driven contacts: every declared link sphere against a world plane. Each sphere
+    /// whose free motion would touch emits one cone group (sphere contact ≡ point contact at the
+    /// center against the plane shifted out by the radius).
+    SpheresVsPlane { plane_p: Vector3<f64>, normal: Vector3<f64>, mu: f64 },
+}
+
+/// A collision sphere decorating the kinematic chain (the cuRobo-style link-sphere model the
+/// `collision` costs also use): center `offset` in frame `upto`'s coordinates, radius `radius`.
+#[derive(Clone, Copy, Debug)]
+pub struct LinkSphere {
+    pub upto: usize,
+    pub offset: Vector3<f64>,
+    pub radius: f64,
 }
 
 /// A declared set of constraint models (assembly happens per step, at the current state).
 #[derive(Default, Debug)]
 pub struct ConstraintSet {
     models: Vec<Model>,
+    spheres: Vec<LinkSphere>,
 }
 
 /// One assembled row group: its law and the indices of its rows in the stacked Jacobian.
@@ -105,6 +119,17 @@ impl ConstraintSet {
     /// Frictional point-vs-plane contact (see [`Law::Cone`]); `normal` need not be unit.
     pub fn point_contact(&mut self, upto: usize, local: Vector3<f64>, plane_p: Vector3<f64>, normal: Vector3<f64>, mu: f64) -> &mut Self {
         self.models.push(Model::PointContact { upto, local, plane_p, normal: normal.normalize(), mu });
+        self
+    }
+    /// Declare a collision sphere on the chain (used by [`Self::spheres_vs_plane`]).
+    pub fn link_sphere(&mut self, upto: usize, offset: Vector3<f64>, radius: f64) -> &mut Self {
+        self.spheres.push(LinkSphere { upto, offset, radius });
+        self
+    }
+    /// Collision-driven contact generation: every declared link sphere against a world plane —
+    /// touching spheres emit frictional cone contacts automatically, step by step.
+    pub fn spheres_vs_plane(&mut self, plane_p: Vector3<f64>, normal: Vector3<f64>, mu: f64) -> &mut Self {
+        self.models.push(Model::SpheresVsPlane { plane_p, normal: normal.normalize(), mu });
         self
     }
     pub fn is_empty(&self) -> bool {
@@ -154,6 +179,42 @@ impl Delassus {
         }
         Delassus { g, minv_jt }
     }
+}
+
+/// Emit one frictional plane-contact cone group for a chain point, if its free motion would touch.
+#[allow(clippy::too_many_arguments)]
+fn emit_plane_contact(
+    robot: &Robot,
+    q: &[f64],
+    v_free: &[f64],
+    h: f64,
+    upto: usize,
+    local: Vector3<f64>,
+    plane_p: Vector3<f64>,
+    normal: Vector3<f64>,
+    mu: f64,
+    jrows: &mut Vec<DVector<f64>>,
+    brows: &mut Vec<f64>,
+    groups: &mut Vec<Group>,
+) {
+    let (jp, p_w) = point_jacobian(robot, q, upto, local);
+    let gap = normal.dot(&(p_w - plane_p));
+    let vfree_vec = DVector::from_column_slice(v_free);
+    let vn_free = normal.transpose() * (&jp * &vfree_vec);
+    if gap + h * vn_free[0] > 0.0 {
+        return; // free motion separates — inactive this step
+    }
+    let t1 = if normal.x.abs() < 0.9 { Vector3::x() } else { Vector3::y() };
+    let t1 = (t1 - normal * normal.dot(&t1)).normalize();
+    let t2 = normal.cross(&t1);
+    let start = jrows.len();
+    for dir in [&normal, &t1, &t2] {
+        jrows.push((dir.transpose() * &jp).transpose());
+    }
+    brows.push(BAUMGARTE / h * gap.min(0.0));
+    brows.push(0.0);
+    brows.push(0.0);
+    groups.push(Group { law: Law::Cone { mu }, rows: start..start + 3, kind: "contact" });
 }
 
 /// One velocity-impulse step under the declared constraints (projected Gauss–Seidel).
@@ -230,25 +291,14 @@ pub fn constrained_step_with(
                 groups.push(Group { law: Law::Equality, rows: start..start + 1, kind: "mimic" });
             }
             Model::PointContact { upto, local, plane_p, normal, mu } => {
-                let (jp, p_w) = point_jacobian(robot, q, *upto, *local);
-                let gap = normal.dot(&(p_w - plane_p));
-                let vfree_vec = DVector::from_column_slice(&v_free);
-                let vn_free = normal.transpose() * (&jp * &vfree_vec);
-                if gap + h * vn_free[0] > 0.0 {
-                    continue; // free motion separates — inactive this step
+                emit_plane_contact(robot, q, &v_free, h, *upto, *local, *plane_p, *normal, *mu, &mut jrows, &mut brows, &mut groups);
+            }
+            Model::SpheresVsPlane { plane_p, normal, mu } => {
+                for sp in &cs.spheres {
+                    // sphere-vs-plane ≡ its center vs the plane shifted out by the radius
+                    let shifted = plane_p + normal * sp.radius;
+                    emit_plane_contact(robot, q, &v_free, h, sp.upto, sp.offset, shifted, *normal, *mu, &mut jrows, &mut brows, &mut groups);
                 }
-                // orthonormal tangent basis of the plane
-                let t1 = if normal.x.abs() < 0.9 { Vector3::x() } else { Vector3::y() };
-                let t1 = (t1 - normal * normal.dot(&t1)).normalize();
-                let t2 = normal.cross(&t1);
-                let start = jrows.len();
-                for dir in [normal, &t1, &t2] {
-                    jrows.push((dir.transpose() * &jp).transpose());
-                }
-                brows.push(BAUMGARTE / h * gap.min(0.0));
-                brows.push(0.0);
-                brows.push(0.0);
-                groups.push(Group { law: Law::Cone { mu: *mu }, rows: start..start + 3, kind: "contact" });
             }
             Model::JointLimits => {
                 for (j, joint) in robot.joints.iter().enumerate() {
@@ -635,6 +685,37 @@ mod tests {
             assert!(err < prev_err * 0.5, "error must shrink with h: {err} vs {prev_err}");
             prev_err = err;
         }
+    }
+
+    /// Collision-driven contacts: a "dumbbell" (two spheres on one link) resting on the ground —
+    /// both contacts activate, together they support the weight exactly, and a sphere lifted off
+    /// the plane emits nothing.
+    #[test]
+    fn sphere_contacts_generate_and_support_the_weight() {
+        let mk = |z: f64| Iso::from_parts(Translation3::new(0.0, 0.0, z), UnitQuaternion::identity());
+        // one vertical slide joint carrying a body with two ground spheres + one lifted sphere
+        let robot = Robot { joints: vec![Joint::prismatic(mk(0.0), Vector3::z())], ee_offset: Iso::identity() };
+        let m_body = 3.0;
+        let inertia = vec![LinkInertia { mass: m_body, com: Vector3::zeros(), inertia: Matrix3::identity() * 0.01 }];
+        let (h, r) = (1e-3, 0.05);
+        let mut cs = ConstraintSet::new();
+        cs.link_sphere(1, Vector3::new(0.2, 0.0, r), r)   // touching (center at height r)
+            .link_sphere(1, Vector3::new(-0.2, 0.0, r), r) // touching
+            .link_sphere(1, Vector3::new(0.0, 0.0, 0.8), r) // well above the ground
+            .spheres_vs_plane(Vector3::zeros(), Vector3::z(), 0.6);
+        let res = constrained_step(&robot, &inertia, &[0.0], &[0.0], &[0.0], h, G, &cs);
+        // exactly two contact groups assembled
+        let contacts = res.groups.iter().filter(|g| g.kind == "contact").count();
+        assert_eq!(contacts, 2, "two touching spheres, one lifted: {contacts} contacts");
+        // the body rests: v⁺ = 0, and the normal impulses sum to the weight impulse
+        assert!(res.v_next[0].abs() < 1e-10, "resting: v⁺ = {}", res.v_next[0]);
+        let n_sum: f64 = res
+            .groups
+            .iter()
+            .filter(|g| g.kind == "contact")
+            .map(|g| res.lambda[g.rows.start])
+            .sum();
+        assert!((n_sum - h * m_body * 9.81).abs() < 1e-9, "N sum {} vs weight impulse {}", n_sum, h * m_body * 9.81);
     }
 
     /// Mixed problem: anchor + friction + limits assemble and solve together without interference

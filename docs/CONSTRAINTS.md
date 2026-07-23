@@ -112,12 +112,27 @@ the right first trade, and the API does not change when the backend does.
   **CP-consistent** sequential cone projection (normal, then tangents capped at `μλn`) — the exact
   SOC projection would solve the plain convex cone-QP, whose known artifact is pulling extra
   normal force during sliding (observed on the Coulomb block before the fix).
+## Differentiating the constrained step (the semantics decision)
+
+For the `gendyn` instantiation, the decision is made here so the implementation can be honest:
+differentiate the solution **with the active set frozen** — the OptNet/theseus convention. At the
+solved step, active unilateral/cone rows are treated as equalities (sliding cone rows as the
+boundary equality `‖λ_t‖ = μλ_n` in the slip direction), inactive rows are dropped, and the
+sensitivity is the implicit derivative of the resulting *equality-constrained* system — exact
+everywhere except exactly at activation boundaries, where the true map is nondifferentiable and
+any consistent one-sided (sub)gradient is acceptable. What this buys: gradients of a contact-rich
+step w.r.t. states and parameters at the cost of one factored solve; what it forgoes: smoothing
+of the stick-slip/make-break switches themselves (randomized smoothing or stochastic relaxations
+are a research add-on, out of scope). Implementation slots into `nls`-style machinery: the frozen
+active set makes the step a differentiable equality solve.
+
 - **Stage 3 — four-bar oracle + MJCF ingestion SHIPPED:** the parallelogram cut-joint matches the
   `closed_loop` KKT path to first order with the error shrinking linearly in `h` (the two
   formulations differ by the `J̇q̇` term inside a step — the honest assertion), completing the
   oracle list; `from_mjcf_constrained` loads `<equality><connect>` as world welds (anchored at the
   qpos-0 configuration, MuJoCo's semantics) and `<joint polycoef>` as linear mimic couplings, both
-  verified dynamically through `constrained_step`. **Remaining tail (open):** collision-driven
-  contact generation (`gjk`/`sdf` → `point_contact`), sparse/O(n) Delassus backends, and the
-  `gendyn` instantiation of the step (differentiable constrained dynamics — needs a
-  projection-differentiation semantics decision first).
+  verified dynamically through `constrained_step`. **Tail update:** collision-driven contact
+  generation SHIPPED (link spheres vs plane → auto cone groups; the dumbbell oracle splits the
+  weight across generated contacts exactly). Remaining open: sparse/O(n) Delassus backends, and
+  the `gendyn` differentiable step — its semantics decision is now MADE (frozen active set,
+  above); implementation is the next slice.
