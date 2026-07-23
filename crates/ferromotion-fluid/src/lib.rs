@@ -32,6 +32,9 @@
 //! position sensitivity (`∂w/∂X`) is carried through interpolation and spreading — the moving-boundary
 //! (shape) derivative, verified against finite differences to ~0.1 %. Pure Rust → WASM-clean.
 
+
+pub mod lbm;
+pub use lbm::{LbmBc, LbmD2Q9};
 use faer::linalg::solvers::Solve;
 use faer::sparse::linalg::solvers::Llt;
 use faer::sparse::{SparseColMat, Triplet};
