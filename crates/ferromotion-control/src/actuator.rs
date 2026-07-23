@@ -59,6 +59,101 @@ impl SeaJoint {
     }
 }
 
+/// **DC-motor electrical dynamics + cogging** — the actuator fidelity layer the 2026 sim-to-real
+/// agenda demands (MuJoCo 3.6 added exactly this). A voltage-commanded brushed/BLDC-equivalent
+/// motor: winding `L di/dt = V − R·i − k_e·ω` with torque `τ = k_t·i − τ_cog(θ)`, where the cogging
+/// ripple `τ_cog = A·sin(p·θ)` has the pole-pair periodicity `p` and zero mean over a revolution.
+/// The electrical time constant `L/R` makes torque LAG voltage — the effect ideal-torque models
+/// hide and calibration must capture. Pure Rust → WASM-clean.
+#[derive(Clone, Copy, Debug)]
+pub struct DcMotor {
+    /// Winding resistance (Ω).
+    pub resistance: f64,
+    /// Winding inductance (H).
+    pub inductance: f64,
+    /// Back-EMF constant (V·s/rad).
+    pub ke: f64,
+    /// Torque constant (N·m/A). For SI-consistent motors `kt = ke`.
+    pub kt: f64,
+    /// Cogging amplitude (N·m); 0 disables.
+    pub cogging_amp: f64,
+    /// Cogging periodicity (cycles per output revolution — pole pairs × slots harmonics).
+    pub cogging_per: f64,
+    /// Winding current state (A).
+    pub current: f64,
+}
+
+impl DcMotor {
+    pub fn new(resistance: f64, inductance: f64, ke: f64, kt: f64) -> Self {
+        Self { resistance, inductance, ke, kt, cogging_amp: 0.0, cogging_per: 0.0, current: 0.0 }
+    }
+
+    pub fn with_cogging(mut self, amp: f64, per: f64) -> Self {
+        self.cogging_amp = amp;
+        self.cogging_per = per;
+        self
+    }
+
+    /// The electrical time constant `L/R` (s).
+    pub fn tau_electrical(&self) -> f64 {
+        self.inductance / self.resistance
+    }
+
+    /// Steady-state current at voltage `v` and shaft speed `omega`: `(V − k_e·ω)/R`.
+    pub fn steady_current(&self, v: f64, omega: f64) -> f64 {
+        (v - self.ke * omega) / self.resistance
+    }
+
+    /// Advance the winding one step (semi-implicit in the current, so large `dt/τ_e` stays stable)
+    /// and return the delivered shaft torque at angle `theta`, speed `omega`.
+    pub fn step(&mut self, dt: f64, voltage: f64, theta: f64, omega: f64) -> f64 {
+        // implicit Euler on L di/dt = V − R i − ke ω  →  i⁺ = (i + dt(V − ke ω)/L) / (1 + dt R/L)
+        let di = dt * (voltage - self.ke * omega) / self.inductance;
+        self.current = (self.current + di) / (1.0 + dt * self.resistance / self.inductance);
+        self.kt * self.current - self.cogging(theta)
+    }
+
+    /// The cogging ripple torque at shaft angle `theta`.
+    pub fn cogging(&self, theta: f64) -> f64 {
+        self.cogging_amp * (self.cogging_per * theta).sin()
+    }
+}
+
+/// **Pure transport delay** — command or sensor latency as a ring-buffer history (MuJoCo 3.5's
+/// delay modeling). Push one value per control tick; read back the value from `delay_steps` ago
+/// (the buffer's fill value until enough history exists). Fixed capacity, no allocation after
+/// construction — control-loop clean.
+#[derive(Clone, Debug)]
+pub struct Delay {
+    buf: Vec<f64>,
+    head: usize,
+    delay_steps: usize,
+    filled: usize,
+}
+
+impl Delay {
+    /// A delay of `delay_steps` ticks, initially outputting `initial`.
+    pub fn new(delay_steps: usize, initial: f64) -> Self {
+        Self { buf: vec![initial; delay_steps.max(1)], head: 0, delay_steps, filled: 0 }
+    }
+
+    /// Push this tick's value; returns the value from `delay_steps` ticks ago.
+    pub fn step(&mut self, x: f64) -> f64 {
+        if self.delay_steps == 0 {
+            return x;
+        }
+        let out = self.buf[self.head];
+        self.buf[self.head] = x;
+        self.head = (self.head + 1) % self.delay_steps;
+        self.filled = (self.filled + 1).min(self.delay_steps);
+        out
+    }
+
+    pub fn delay_steps(&self) -> usize {
+        self.delay_steps
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,5 +242,62 @@ mod tests {
         }
         let e1 = 0.5 * f.k_spring * f.theta * f.theta + 0.5 * f.reflected_inertia() * f.omega * f.omega;
         assert!(e1 < 0.05 * e0, "friction did not dissipate: {e1} vs {e0}");
+    }
+
+    /// DC motor: steady-state current/torque match the analytic values, the transient follows the
+    /// electrical time constant, and cogging is periodic with zero mean over a revolution.
+    #[test]
+    fn dc_motor_electrical_dynamics_are_exact() {
+        let mut m = DcMotor::new(1.2, 0.006, 0.08, 0.08);
+        let (v, omega) = (12.0, 40.0);
+        let i_ss = m.steady_current(v, omega);
+        assert!((i_ss - (12.0 - 0.08 * 40.0) / 1.2).abs() < 1e-12);
+        // converge: after 8 time constants the current is within 0.1% of steady state
+        let dt = 1e-4;
+        let steps = (8.0 * m.tau_electrical() / dt) as usize;
+        let mut tau = 0.0;
+        for _ in 0..steps {
+            tau = m.step(dt, v, 0.0, omega);
+        }
+        assert!((m.current - i_ss).abs() < 1e-3 * i_ss.abs().max(1.0), "i {} vs ss {}", m.current, i_ss);
+        assert!((tau - m.kt * i_ss).abs() < 1e-3, "torque at steady state");
+        // transient: at t = τe the gap to steady state has decayed to ~1/e
+        let mut m2 = DcMotor::new(1.2, 0.006, 0.08, 0.08);
+        let n_tau = (m2.tau_electrical() / dt) as usize;
+        for _ in 0..n_tau {
+            m2.step(dt, v, 0.0, omega);
+        }
+        let frac = m2.current / i_ss;
+        assert!((frac - (1.0 - (-1.0f64).exp())).abs() < 0.02, "1-1/e at τe, got {frac}");
+    }
+
+    #[test]
+    fn cogging_is_periodic_and_zero_mean() {
+        let m = DcMotor::new(1.0, 0.01, 0.05, 0.05).with_cogging(0.03, 12.0);
+        let n = 1200;
+        let mean: f64 = (0..n).map(|k| m.cogging(k as f64 / n as f64 * std::f64::consts::TAU)).sum::<f64>() / n as f64;
+        assert!(mean.abs() < 1e-9, "zero mean over a revolution: {mean}");
+        let period = std::f64::consts::TAU / 12.0;
+        for k in 0..24 {
+            let th = k as f64 * 0.17;
+            assert!((m.cogging(th) - m.cogging(th + period)).abs() < 1e-9, "periodicity");
+        }
+    }
+
+    /// Delay: exact shift after fill; initial value before; zero-delay is identity.
+    #[test]
+    fn transport_delay_is_an_exact_shift() {
+        let mut d = Delay::new(5, -1.0);
+        let inputs: Vec<f64> = (0..20).map(|k| k as f64 * 0.5).collect();
+        let mut outs = Vec::new();
+        for &x in &inputs {
+            outs.push(d.step(x));
+        }
+        for (k, &o) in outs.iter().enumerate() {
+            let want = if k < 5 { -1.0 } else { inputs[k - 5] };
+            assert!((o - want).abs() < 1e-12, "tick {k}: {o} vs {want}");
+        }
+        let mut d0 = Delay::new(0, 0.0);
+        assert_eq!(d0.step(3.25), 3.25);
     }
 }

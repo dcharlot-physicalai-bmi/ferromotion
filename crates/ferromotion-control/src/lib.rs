@@ -79,7 +79,7 @@ mod zmp;
 mod zonotope;
 pub use alip::Alip;
 pub use abfilter::{AlphaBeta, AlphaBetaGamma};
-pub use actuator::SeaJoint;
+pub use actuator::{DcMotor, Delay, SeaJoint};
 pub use admittance::{Admittance, HybridForcePosition};
 pub use algames::{AlGames, AlGamesResult, Player};
 pub use assignment::{hungarian, Assignment};
