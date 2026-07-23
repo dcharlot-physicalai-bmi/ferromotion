@@ -11,6 +11,14 @@
 //! the standard cavity setup. Working in lattice units keeps the scheme exact; verification maps
 //! to physics through the usual scalings (diffusive scaling for convergence studies, so the
 //! O(Ma²) compressibility error shrinks with the grid).
+//!
+//! **Differentiable by construction** (Honest Fluids stage 3): the whole solver is generic over
+//! [`ferromotion_core::gendyn::Real`] — collide is a rational polynomial, streaming a
+//! permutation, bounce-back linear — so a dual number seeded in `τ`, the lid speed, or any
+//! initial-condition parameter flows through the *entire simulation* and emerges as an exact
+//! gradient of any observable. [`LbmD2Q9`] (= `GenLbm<f64>`) keeps the plain API. The verified
+//! payoff (tests): identifying the lattice viscosity from observed decay data by gradient — the
+//! calibration pattern that is differentiability's real job.
 
 /// D2Q9 lattice velocities, weights, and opposite-direction table.
 const CX: [i32; 9] = [0, 1, 0, -1, 0, 1, -1, -1, 1];
@@ -28,97 +36,108 @@ const W: [f64; 9] = [
 ];
 const OPP: [usize; 9] = [0, 3, 4, 1, 2, 7, 8, 5, 6];
 
+use ferromotion_core::gendyn::Real;
+
 /// Boundary handling for the box.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum LbmBc {
+pub enum LbmBc<T = f64> {
     /// Fully periodic in x and y.
     Periodic,
     /// No-slip bounce-back walls; the top wall translates at `lid_u` (lattice units).
-    Cavity { lid_u: f64 },
+    Cavity { lid_u: T },
 }
 
-/// A D2Q9 BGK lattice-Boltzmann solver on an `nx × ny` lattice.
-pub struct LbmD2Q9 {
+/// A D2Q9 BGK lattice-Boltzmann solver on an `nx × ny` lattice, generic over the scalar
+/// (`GenLbm<f64>` for plain numerics — aliased as [`LbmD2Q9`]; a dual type for exact gradients).
+pub struct GenLbm<T = f64> {
     pub nx: usize,
     pub ny: usize,
-    pub tau: f64,
-    bc: LbmBc,
-    f: Vec<f64>,    // nx*ny*9, index (x*ny + y)*9 + k
-    tmp: Vec<f64>,  // streaming target
+    pub tau: T,
+    bc: LbmBc<T>,
+    f: Vec<T>,    // nx*ny*9, index (x*ny + y)*9 + k
+    tmp: Vec<T>,  // streaming target
 }
 
-impl LbmD2Q9 {
+/// The plain-`f64` lattice.
+pub type LbmD2Q9 = GenLbm<f64>;
+
+impl<T: Real> GenLbm<T> {
     /// Lattice with relaxation time `tau` (`ν = (τ − ½)/3`), initialized at rest, unit density.
-    pub fn new(nx: usize, ny: usize, tau: f64, bc: LbmBc) -> Self {
-        assert!(tau > 0.5, "τ must exceed ½ (positive viscosity)");
-        let mut f = vec![0.0; nx * ny * 9];
+    pub fn new(nx: usize, ny: usize, tau: T, bc: LbmBc<T>) -> Self {
+        let mut f = vec![T::from_f64(0.0); nx * ny * 9];
         for c in f.chunks_mut(9) {
-            c.copy_from_slice(&W);
+            for (k, v) in c.iter_mut().enumerate() {
+                *v = T::from_f64(W[k]);
+            }
         }
         Self { nx, ny, tau, bc, tmp: f.clone(), f }
     }
 
     /// Lattice kinematic viscosity `(τ − ½)/3`.
-    pub fn nu(&self) -> f64 {
-        (self.tau - 0.5) / 3.0
+    pub fn nu(&self) -> T {
+        (self.tau - T::from_f64(0.5)) / T::from_f64(3.0)
     }
 
     /// Set the velocity field from a function of lattice coordinates (equilibrium initialization
     /// at unit density) — initial conditions for verification cases.
-    pub fn set_velocity(&mut self, fu: impl Fn(f64, f64) -> (f64, f64)) {
+    pub fn set_velocity(&mut self, fu: impl Fn(f64, f64) -> (T, T)) {
         for x in 0..self.nx {
             for y in 0..self.ny {
                 let (ux, uy) = fu(x as f64, y as f64);
                 let base = (x * self.ny + y) * 9;
                 for k in 0..9 {
-                    self.f[base + k] = feq(k, 1.0, ux, uy);
+                    self.f[base + k] = feq(k, T::from_f64(1.0), ux, uy);
                 }
             }
         }
     }
 
     /// Macroscopic density and velocity at a lattice site.
-    pub fn macroscopic(&self, x: usize, y: usize) -> (f64, f64, f64) {
+    pub fn macroscopic(&self, x: usize, y: usize) -> (T, T, T) {
         let base = (x * self.ny + y) * 9;
-        let mut rho = 0.0;
-        let mut mx = 0.0;
-        let mut my = 0.0;
+        let mut rho = T::from_f64(0.0);
+        let mut mx = T::from_f64(0.0);
+        let mut my = T::from_f64(0.0);
         for k in 0..9 {
             let fk = self.f[base + k];
-            rho += fk;
-            mx += fk * CX[k] as f64;
-            my += fk * CY[k] as f64;
+            rho = rho + fk;
+            mx = mx + fk * T::from_f64(CX[k] as f64);
+            my = my + fk * T::from_f64(CY[k] as f64);
         }
         (rho, mx / rho, my / rho)
     }
 
     /// Total mass on the lattice (conserved exactly by collision; by streaming under periodic and
     /// plain bounce-back — the moving lid exchanges momentum, not mass).
-    pub fn total_mass(&self) -> f64 {
-        self.f.iter().sum()
+    pub fn total_mass(&self) -> T {
+        let mut m = T::from_f64(0.0);
+        for &v in &self.f {
+            m = m + v;
+        }
+        m
     }
 
     /// One collide-and-stream step.
     pub fn step(&mut self) {
         let (nx, ny) = (self.nx, self.ny);
-        let om = 1.0 / self.tau;
+        let om = T::from_f64(1.0) / self.tau;
         // collide in place
         for x in 0..nx {
             for y in 0..ny {
                 let base = (x * ny + y) * 9;
-                let mut rho = 0.0;
-                let mut mx = 0.0;
-                let mut my = 0.0;
+                let mut rho = T::from_f64(0.0);
+                let mut mx = T::from_f64(0.0);
+                let mut my = T::from_f64(0.0);
                 for k in 0..9 {
                     let fk = self.f[base + k];
-                    rho += fk;
-                    mx += fk * CX[k] as f64;
-                    my += fk * CY[k] as f64;
+                    rho = rho + fk;
+                    mx = mx + fk * T::from_f64(CX[k] as f64);
+                    my = my + fk * T::from_f64(CY[k] as f64);
                 }
                 let (ux, uy) = (mx / rho, my / rho);
                 for k in 0..9 {
                     let eq = feq(k, rho, ux, uy);
-                    self.f[base + k] += om * (eq - self.f[base + k]);
+                    self.f[base + k] = self.f[base + k] + om * (eq - self.f[base + k]);
                 }
             }
         }
@@ -147,8 +166,8 @@ impl LbmD2Q9 {
                                 // half-way bounce-back; the top wall carries the lid momentum
                                 let mut fb = self.f[base + k];
                                 if yn >= ny as i32 {
-                                    let rho = 1.0; // standard first-order wall-density closure
-                                    fb -= 6.0 * W[k] * rho * (CX[k] as f64 * lid_u);
+                                    // standard first-order wall-density closure (ρ_wall = 1)
+                                    fb = fb - T::from_f64(6.0 * W[k] * CX[k] as f64) * lid_u;
                                 }
                                 self.tmp[base + OPP[k]] = fb;
                             } else {
@@ -163,11 +182,11 @@ impl LbmD2Q9 {
     }
 
     /// `u_x/lid_u` along the vertical centerline (cavity verification), as `(y_normalized, u)`.
-    pub fn centerline_u(&self) -> Vec<(f64, f64)> {
+    pub fn centerline_u(&self) -> Vec<(f64, T)> {
         let x = self.nx / 2;
         let lid = match self.bc {
             LbmBc::Cavity { lid_u } => lid_u,
-            LbmBc::Periodic => 1.0,
+            LbmBc::Periodic => T::from_f64(1.0),
         };
         (0..self.ny)
             .map(|y| {
@@ -179,10 +198,11 @@ impl LbmD2Q9 {
 }
 
 /// D2Q9 equilibrium distribution.
-fn feq(k: usize, rho: f64, ux: f64, uy: f64) -> f64 {
-    let cu = CX[k] as f64 * ux + CY[k] as f64 * uy;
+fn feq<T: Real>(k: usize, rho: T, ux: T, uy: T) -> T {
+    let cu = T::from_f64(CX[k] as f64) * ux + T::from_f64(CY[k] as f64) * uy;
     let uu = ux * ux + uy * uy;
-    W[k] * rho * (1.0 + 3.0 * cu + 4.5 * cu * cu - 1.5 * uu)
+    T::from_f64(W[k]) * rho
+        * (T::from_f64(1.0) + T::from_f64(3.0) * cu + T::from_f64(4.5) * cu * cu - T::from_f64(1.5) * uu)
 }
 
 #[cfg(test)]
@@ -285,5 +305,137 @@ mod verification {
         }
         assert!(worst < 0.03, "LBM cavity vs Ghia: worst deviation {worst:.4}");
         eprintln!("LBM cavity Re=100 vs Ghia: worst centerline deviation {worst:.4}");
+    }
+}
+
+#[cfg(test)]
+mod gradients {
+    use super::*;
+    use ferromotion_learn::Dual;
+    use std::f64::consts::PI;
+
+    fn tg_lattice<T: Real>(n: usize, tau: T, u0: T) -> GenLbm<T> {
+        let mut l = GenLbm::new(n, n, tau, LbmBc::Periodic);
+        let k = 2.0 * PI / n as f64;
+        l.set_velocity(|x, y| {
+            (
+                u0 * T::from_f64((k * x).sin() * (k * y).cos()),
+                T::from_f64(-1.0) * u0 * T::from_f64((k * x).cos() * (k * y).sin()),
+            )
+        });
+        l
+    }
+
+    /// A probe observable after S steps, as a function of τ.
+    fn probe<T: Real>(tau: T, steps: usize) -> T {
+        let mut l = tg_lattice(24, tau, T::from_f64(0.08));
+        for _ in 0..steps {
+            l.step();
+        }
+        let (_, ux, _) = l.macroscopic(5, 11);
+        ux
+    }
+
+    /// d(observable)/dτ through the ENTIRE simulation — dual vs central finite differences.
+    #[test]
+    fn dual_gradient_through_the_simulation_matches_fd() {
+        let (tau, steps, eps) = (0.8f64, 60usize, 1e-6);
+        let got = probe(Dual { re: tau, eps: 1.0 }, steps).eps;
+        let want = (probe(tau + eps, steps) - probe(tau - eps, steps)) / (2.0 * eps);
+        assert!(
+            (got - want).abs() < 1e-7 * want.abs().max(1e-3),
+            "d(probe)/dτ: dual {got} vs FD {want}"
+        );
+        // and through the lid boundary condition too
+        let lid_probe = |lid: Dual| -> Dual {
+            let mut l = GenLbm::new(24, 24, Dual::constant(0.7), LbmBc::Cavity { lid_u: lid });
+            for _ in 0..80 {
+                l.step();
+            }
+            l.macroscopic(12, 20).1
+        };
+        let lid = 0.08;
+        let got = lid_probe(Dual { re: lid, eps: 1.0 }).eps;
+        let f = |l: f64| -> f64 {
+            let mut s = GenLbm::new(24, 24, 0.7, LbmBc::Cavity { lid_u: l });
+            for _ in 0..80 {
+                s.step();
+            }
+            s.macroscopic(12, 20).1
+        };
+        let want = (f(lid + eps) - f(lid - eps)) / (2.0 * eps);
+        assert!((got - want).abs() < 1e-7 * want.abs().max(1e-6), "d/d(lid): dual {got} vs FD {want}");
+    }
+
+    /// The payoff — viscosity identification from observed decay: generate an energy trace with a
+    /// hidden true τ*, start 20% wrong, and let exact dual gradients through the simulation pull τ
+    /// onto the truth. Differentiability's real job, on a real solver.
+    #[test]
+    fn viscosity_identifies_from_decay_by_gradient() {
+        let (n, steps_per_obs, n_obs) = (24usize, 25usize, 6usize);
+        let energy_trace = |tau: f64| -> Vec<f64> {
+            let mut l = tg_lattice(n, tau, 0.08);
+            let mut out = Vec::new();
+            for _ in 0..n_obs {
+                for _ in 0..steps_per_obs {
+                    l.step();
+                }
+                let mut e = 0.0;
+                for x in 0..n {
+                    for y in 0..n {
+                        let (_, ux, uy) = l.macroscopic(x, y);
+                        e += ux * ux + uy * uy;
+                    }
+                }
+                out.push(e);
+            }
+            out
+        };
+        let tau_true = 0.85;
+        let obs = energy_trace(tau_true);
+
+        // loss and its exact gradient at a candidate τ, via one dual run
+        let loss_grad = |tau: f64| -> (f64, f64) {
+            let mut l = tg_lattice(n, Dual { re: tau, eps: 1.0 }, Dual::constant(0.08));
+            let (mut loss, mut grad) = (0.0, 0.0);
+            for ob in &obs {
+                for _ in 0..steps_per_obs {
+                    l.step();
+                }
+                let mut e = Dual::constant(0.0);
+                for x in 0..n {
+                    for y in 0..n {
+                        let (_, ux, uy) = l.macroscopic(x, y);
+                        e = e + ux * ux + uy * uy;
+                    }
+                }
+                let r = e.re - ob;
+                loss += r * r;
+                grad += 2.0 * r * e.eps;
+            }
+            (loss, grad)
+        };
+
+        let mut tau = 0.68; // 20% wrong
+        let mut lr = 0.5;
+        let (mut best_loss, _) = loss_grad(tau);
+        for _ in 0..60 {
+            let (_, g) = loss_grad(tau);
+            let cand = (tau - lr * g).max(0.55);
+            let (cl, _) = loss_grad(cand);
+            if cl < best_loss {
+                tau = cand;
+                best_loss = cl;
+                lr *= 1.2;
+            } else {
+                lr *= 0.5;
+            }
+            if best_loss < 1e-18 {
+                break;
+            }
+        }
+        let rel = (tau - tau_true).abs() / tau_true;
+        assert!(rel < 0.01, "τ identification: {tau} vs {tau_true} (rel {rel:.4})");
+        eprintln!("viscosity identified: τ {tau:.5} vs true {tau_true} (rel err {rel:.2e})");
     }
 }
