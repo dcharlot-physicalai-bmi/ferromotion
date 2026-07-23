@@ -238,6 +238,12 @@ impl<T: Real> GenModel<T> {
 
     /// Forward kinematics: end of the chain (before any tool offset) — position only.
     pub fn fk_position(&self, q: &[T]) -> V3<T> {
+        self.fk_frame(q).1
+    }
+
+    /// Forward kinematics of the chain-end frame: `(rotation, position)` — what pose-target
+    /// residuals and tool offsets need.
+    pub fn fk_frame(&self, q: &[T]) -> (M3<T>, V3<T>) {
         let mut r = M3::identity();
         let mut p = V3::zero();
         for (i, &qi) in q.iter().enumerate().take(self.dof()) {
@@ -245,7 +251,7 @@ impl<T: Real> GenModel<T> {
             p = p.add(r.mul_v(jp));
             r = r.mul_m(jr);
         }
-        p
+        (r, p)
     }
 
     /// Inverse dynamics via Recursive Newton–Euler — the generic mirror of

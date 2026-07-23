@@ -23,6 +23,7 @@ mod delan;
 mod diff_control;
 mod dual;
 pub mod calib;
+pub mod nls;
 mod hnn;
 mod msnn;
 mod neural_ode;
