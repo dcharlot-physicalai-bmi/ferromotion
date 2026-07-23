@@ -104,8 +104,14 @@ the right first trade, and the API does not change when the backend does.
 
 ## Staging
 
-- **Stage 1 (this arc):** laws + `Delassus` + PGS + `ConstraintSet` with anchor / joint-limit /
+- **Stage 1 — SHIPPED:** laws + `Delassus` + PGS + `ConstraintSet` with anchor / joint-limit /
   dry-friction / mimic + `constrained_step` + oracles 1–5.
-- **Stage 2:** friction-cone point contact (reusing `gjk`/`sdf` queries) + ADMM + oracle 6.
-- **Stage 3:** four-bar cut-joint workflows, MJCF `<equality>` ingestion, sparse/O(n) Delassus
-  backends, `gendyn` instantiation of the step (differentiable constrained dynamics).
+- **Stage 2 — SHIPPED:** `Cone` law + point-vs-plane frictional contact (gap-activated) + ADMM
+  (`Solver::Admm`, factored `G+ρI`, dual-residual-gated) + the Coulomb-block analytic oracle and
+  PGS↔ADMM agreement. One semantics decision made and documented in code: both solvers use the
+  **CP-consistent** sequential cone projection (normal, then tangents capped at `μλn`) — the exact
+  SOC projection would solve the plain convex cone-QP, whose known artifact is pulling extra
+  normal force during sliding (observed on the Coulomb block before the fix).
+- **Stage 3:** four-bar cut-joint workflows, general collision-driven contacts (via `gjk`/`sdf`),
+  MJCF `<equality>` ingestion, sparse/O(n) Delassus backends, `gendyn` instantiation of the step
+  (differentiable constrained dynamics).

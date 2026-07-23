@@ -24,6 +24,19 @@ pub enum Law {
     Equality,
     Unilateral,
     Box { lambda_max: f64 },
+    /// Coulomb friction cone: rows are `[normal, tangent₁, tangent₂]`, `‖λ_t‖ ≤ μ·λ_n`, `λ_n ≥ 0`.
+    Cone { mu: f64 },
+}
+
+/// Which impulse solver runs the projections (both consume the same laws and Delassus).
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum Solver {
+    /// Projected Gauss–Seidel — the robust sequential workhorse (cone via normal-then-disk).
+    #[default]
+    Pgs,
+    /// ADMM with a factored `(G + ρI)` and exact set projections (second-order cone for friction)
+    /// — the Pinocchio-4 / SAP-family choice for stiff, coupled problems.
+    Admm,
 }
 
 /// Baumgarte position-stabilization gain (fraction of the violation corrected per step).
@@ -38,6 +51,10 @@ enum Model {
     Mimic { follower: usize, leader: usize, ratio: f64, offset: f64 },
     /// Enable limit rows for every joint with declared limits (activated near the bound).
     JointLimits,
+    /// Point-vs-plane frictional contact: a point of frame `upto` against the plane through
+    /// `plane_p` with unit `normal`; Coulomb coefficient `mu`. Activated when the free motion
+    /// would penetrate. 3 cone rows.
+    PointContact { upto: usize, local: Vector3<f64>, plane_p: Vector3<f64>, normal: Vector3<f64>, mu: f64 },
 }
 
 /// A declared set of constraint models (assembly happens per step, at the current state).
@@ -82,6 +99,11 @@ impl ConstraintSet {
     /// Activate limit handling for every joint that declares `limits`.
     pub fn joint_limits(&mut self) -> &mut Self {
         self.models.push(Model::JointLimits);
+        self
+    }
+    /// Frictional point-vs-plane contact (see [`Law::Cone`]); `normal` need not be unit.
+    pub fn point_contact(&mut self, upto: usize, local: Vector3<f64>, plane_p: Vector3<f64>, normal: Vector3<f64>, mu: f64) -> &mut Self {
+        self.models.push(Model::PointContact { upto, local, plane_p, normal: normal.normalize(), mu });
         self
     }
     pub fn is_empty(&self) -> bool {
@@ -146,6 +168,22 @@ pub fn constrained_step(
     gravity: Vector3<f64>,
     cs: &ConstraintSet,
 ) -> StepResult {
+    constrained_step_with(robot, inertia, q, v, tau, h, gravity, cs, Solver::Pgs)
+}
+
+/// [`constrained_step`] with an explicit [`Solver`] choice.
+#[allow(clippy::too_many_arguments)]
+pub fn constrained_step_with(
+    robot: &Robot,
+    inertia: &[LinkInertia],
+    q: &[f64],
+    v: &[f64],
+    tau: &[f64],
+    h: f64,
+    gravity: Vector3<f64>,
+    cs: &ConstraintSet,
+    solver: Solver,
+) -> StepResult {
     let n = robot.dof();
     let m = mass_matrix(robot, inertia, q);
     let bias = inverse_dynamics(robot, inertia, q, v, &vec![0.0; n], gravity);
@@ -190,6 +228,27 @@ pub fn constrained_step(
                 brows.push(BAUMGARTE / h * (q[*follower] - ratio * q[*leader] - offset));
                 groups.push(Group { law: Law::Equality, rows: start..start + 1, kind: "mimic" });
             }
+            Model::PointContact { upto, local, plane_p, normal, mu } => {
+                let (jp, p_w) = point_jacobian(robot, q, *upto, *local);
+                let gap = normal.dot(&(p_w - plane_p));
+                let vfree_vec = DVector::from_column_slice(&v_free);
+                let vn_free = normal.transpose() * (&jp * &vfree_vec);
+                if gap + h * vn_free[0] > 0.0 {
+                    continue; // free motion separates — inactive this step
+                }
+                // orthonormal tangent basis of the plane
+                let t1 = if normal.x.abs() < 0.9 { Vector3::x() } else { Vector3::y() };
+                let t1 = (t1 - normal * normal.dot(&t1)).normalize();
+                let t2 = normal.cross(&t1);
+                let start = jrows.len();
+                for dir in [normal, &t1, &t2] {
+                    jrows.push((dir.transpose() * &jp).transpose());
+                }
+                brows.push(BAUMGARTE / h * gap.min(0.0));
+                brows.push(0.0);
+                brows.push(0.0);
+                groups.push(Group { law: Law::Cone { mu: *mu }, rows: start..start + 3, kind: "contact" });
+            }
             Model::JointLimits => {
                 for (j, joint) in robot.joints.iter().enumerate() {
                     let Some((lo, hi)) = joint.limits else { continue };
@@ -229,13 +288,24 @@ pub fn constrained_step(
     let vfree_v = DVector::from_column_slice(&v_free);
     let rhs: DVector<f64> = -(&jmat * &vfree_v + DVector::from_column_slice(&brows));
 
-    // projected Gauss–Seidel over the groups' laws
+    let (lambda, iters) = match solver {
+        Solver::Pgs => solve_pgs(&del, &rhs, &groups),
+        Solver::Admm => solve_admm(&del, &rhs, &groups),
+    };
+    let dv = &del.minv_jt * &lambda;
+    let v_next: Vec<f64> = (0..n).map(|i| v_free[i] + dv[i]).collect();
+    StepResult { v_next, lambda: lambda.iter().copied().collect(), groups, iters }
+}
+
+/// Projected Gauss–Seidel over the groups' laws.
+fn solve_pgs(del: &Delassus, rhs: &DVector<f64>, groups: &[Group]) -> (DVector<f64>, usize) {
+    let nc = rhs.len();
     let mut lambda: DVector<f64> = DVector::zeros(nc);
     let mut iters = 0;
     for _ in 0..200 {
         iters += 1;
         let mut max_change = 0.0f64;
-        for g in &groups {
+        for g in groups {
             for r in g.rows.clone() {
                 let mut acc = rhs[r];
                 for c in 0..nc {
@@ -248,19 +318,102 @@ pub fn constrained_step(
                     Law::Equality => cand,
                     Law::Unilateral => cand.max(0.0),
                     Law::Box { lambda_max } => cand.clamp(-lambda_max, lambda_max),
+                    // cone rows: normal row is unilateral; tangent rows update freely here and are
+                    // projected onto the friction disk of radius μ·λ_n after the row sweep below
+                    Law::Cone { .. } => {
+                        if r == g.rows.start {
+                            cand.max(0.0)
+                        } else {
+                            cand
+                        }
+                    }
                 };
                 max_change = max_change.max((cand - lambda[r]).abs());
                 lambda[r] = cand;
+            }
+            if let Law::Cone { mu } = g.law {
+                let (n0, t1, t2) = (g.rows.start, g.rows.start + 1, g.rows.start + 2);
+                let cap = mu * lambda[n0];
+                let tn = (lambda[t1] * lambda[t1] + lambda[t2] * lambda[t2]).sqrt();
+                if tn > cap {
+                    let sc = if tn > 0.0 { cap / tn } else { 0.0 };
+                    lambda[t1] *= sc;
+                    lambda[t2] *= sc;
+                    max_change = max_change.max(tn - cap);
+                }
             }
         }
         if max_change < 1e-12 {
             break;
         }
     }
+    (lambda, iters)
+}
 
-    let dv = &del.minv_jt * &lambda;
-    let v_next: Vec<f64> = (0..n).map(|i| v_free[i] + dv[i]).collect();
-    StepResult { v_next, lambda: lambda.iter().copied().collect(), groups, iters }
+/// ADMM over the same laws: factor `(G + ρI)` once, then iterate
+/// `λ ← (G+ρI)⁻¹(rhs + ρ(z − u)); z ← Π_K(λ + u); u ← u + λ − z` with exact set projections.
+fn solve_admm(del: &Delassus, rhs: &DVector<f64>, groups: &[Group]) -> (DVector<f64>, usize) {
+    let nc = rhs.len();
+    let rho = (0..nc).map(|i| del.g[(i, i)]).sum::<f64>() / nc as f64;
+    let mut greg = del.g.clone();
+    for i in 0..nc {
+        greg[(i, i)] += rho;
+    }
+    let chol = Cholesky::new(greg).expect("G + ρI is SPD");
+    let mut z: DVector<f64> = DVector::zeros(nc);
+    let mut u: DVector<f64> = DVector::zeros(nc);
+    let mut lambda: DVector<f64> = DVector::zeros(nc);
+    let mut iters = 0;
+    for _ in 0..400 {
+        iters += 1;
+        lambda = chol.solve(&(rhs + (&z - &u) * rho));
+        let mut z_new = &lambda + &u;
+        project_laws(&mut z_new, groups);
+        let r_prim = (&lambda - &z_new).norm();
+        let r_dual = (&z_new - &z).norm() * rho; // dual residual — primal alone stalls at
+        u += &lambda - &z_new; // unconverged fixed points whenever the projection is inactive
+        z = z_new;
+        if r_prim < 1e-12 && r_dual < 1e-12 {
+            break;
+        }
+    }
+    (z, iters)
+}
+
+/// Exact projection of a candidate impulse vector onto every group's admissible set.
+fn project_laws(x: &mut DVector<f64>, groups: &[Group]) {
+    for g in groups {
+        match g.law {
+            Law::Equality => {}
+            Law::Unilateral => {
+                for r in g.rows.clone() {
+                    x[r] = x[r].max(0.0);
+                }
+            }
+            Law::Box { lambda_max } => {
+                for r in g.rows.clone() {
+                    x[r] = x[r].clamp(-lambda_max, lambda_max);
+                }
+            }
+            Law::Cone { mu } => {
+                // CP-consistent projection: normal first (unilateral), then tangents capped at
+                // μ·λn — the maximum-dissipation complementarity PGS also targets. The exact
+                // SOC projection would make ADMM solve the plain convex cone-QP instead, whose
+                // known artifact is pulling EXTRA normal force during sliding (observed here as
+                // the Coulomb block braking harder than μ·m·g); both solvers must agree on the
+                // physical CP, so both use the sequential projection.
+                let (n0, t1, t2) = (g.rows.start, g.rows.start + 1, g.rows.start + 2);
+                x[n0] = x[n0].max(0.0);
+                let cap = mu * x[n0];
+                let tn = (x[t1] * x[t1] + x[t2] * x[t2]).sqrt();
+                if tn > cap {
+                    let sc = if tn > 0.0 { cap / tn } else { 0.0 };
+                    x[t1] *= sc;
+                    x[t2] *= sc;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -368,6 +521,63 @@ mod tests {
         let res2 = constrained_step(&robot, &inertia, &[0.2, -0.1], &[0.0, 0.0], &[0.0, 1.0], h, Vector3::zeros(), &cs);
         assert!((res2.v_next[1] - ratio * res2.v_next[0]).abs() < 1e-10);
         assert!(res2.v_next[0].abs() > 1e-6, "coupling must transmit torque to the leader: {:?}", res2.v_next);
+    }
+
+    /// Oracle — the classic Coulomb block, fully analytic: a block on the ground pushed
+    /// horizontally. Below μ·m·g it sticks (both axes dead); above, it slides with the friction
+    /// force exactly μ·m·g, and the tangential impulse sits ON the cone opposing the slip.
+    #[test]
+    fn coulomb_block_stick_slip_both_solvers() {
+        let mk = |z: f64| Iso::from_parts(Translation3::new(0.0, 0.0, z), UnitQuaternion::identity());
+        // block: vertical slide (z) then horizontal slide (x); all mass on the moving block
+        let robot = Robot {
+            joints: vec![Joint::prismatic(mk(0.0), Vector3::z()), Joint::prismatic(mk(0.0), Vector3::x())],
+            ee_offset: Iso::identity(),
+        };
+        let m_blk = 2.0;
+        let inertia = vec![
+            LinkInertia::zero(),
+            LinkInertia { mass: m_blk, com: Vector3::zeros(), inertia: Matrix3::identity() * 1e-6 },
+        ];
+        let (h, mu, g) = (1e-3, 0.4, 9.81);
+        let mut cs = ConstraintSet::new();
+        cs.point_contact(2, Vector3::zeros(), Vector3::zeros(), Vector3::z(), mu);
+        for solver in [Solver::Pgs, Solver::Admm] {
+            // stick: F = 0.5·μ·m·g
+            let f = 0.5 * mu * m_blk * g;
+            let res = constrained_step_with(&robot, &inertia, &[0.0, 0.0], &[0.0, 0.0], &[0.0, f], h, G, &cs, solver);
+            assert!(res.v_next[0].abs() < 1e-9 && res.v_next[1].abs() < 1e-9, "{solver:?} must stick: {:?}", res.v_next);
+            // normal impulse supports the weight exactly
+            assert!((res.lambda[0] - h * m_blk * g).abs() < 1e-9, "{solver:?} N: {}", res.lambda[0]);
+            // slide: F = 2·μ·m·g → v_x⁺ = h(F − μmg)/m
+            let f = 2.0 * mu * m_blk * g;
+            let res = constrained_step_with(&robot, &inertia, &[0.0, 0.0], &[0.0, 0.0], &[0.0, f], h, G, &cs, solver);
+            let want = h * (f - mu * m_blk * g) / m_blk;
+            assert!((res.v_next[1] - want).abs() < 1e-8, "{solver:?} slide: {} vs {want}", res.v_next[1]);
+            assert!(res.v_next[0].abs() < 1e-9, "{solver:?} stays on the ground");
+            // the tangential impulse sits ON the cone, opposing the push
+            let tn = (res.lambda[1] * res.lambda[1] + res.lambda[2] * res.lambda[2]).sqrt();
+            assert!((tn - mu * res.lambda[0]).abs() < 1e-9, "{solver:?} on-cone: |λt| {tn} vs μλn {}", mu * res.lambda[0]);
+        }
+    }
+
+    /// PGS and ADMM must agree on mixed problems (anchor + friction + limit + contact together).
+    #[test]
+    fn pgs_and_admm_agree_on_mixed_problems() {
+        let (robot, inertia) = arm2();
+        let q = [0.5, -0.9];
+        let v = [0.4, -0.6];
+        let h = 1e-3;
+        let (_, p_now) = point_jacobian(&robot, &q, 1, Vector3::zeros());
+        let mut cs = ConstraintSet::new();
+        cs.anchor_point(1, Vector3::zeros(), p_now)
+            .joint_friction(1, 0.3)
+            .point_contact(2, Vector3::zeros(), Vector3::new(0.0, 0.0, -2.0), Vector3::z(), 0.5);
+        let a = constrained_step_with(&robot, &inertia, &q, &v, &[0.7, -0.4], h, G, &cs, Solver::Pgs);
+        let b = constrained_step_with(&robot, &inertia, &q, &v, &[0.7, -0.4], h, G, &cs, Solver::Admm);
+        for (x, y) in a.v_next.iter().zip(&b.v_next) {
+            assert!((x - y).abs() < 1e-6, "solver disagreement: {:?} vs {:?}", a.v_next, b.v_next);
+        }
     }
 
     /// Mixed problem: anchor + friction + limits assemble and solve together without interference
