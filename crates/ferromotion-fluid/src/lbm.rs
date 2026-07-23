@@ -21,9 +21,9 @@
 //! calibration pattern that is differentiability's real job.
 
 /// D2Q9 lattice velocities, weights, and opposite-direction table.
-const CX: [i32; 9] = [0, 1, 0, -1, 0, 1, -1, -1, 1];
-const CY: [i32; 9] = [0, 0, 1, 0, -1, 1, 1, -1, -1];
-const W: [f64; 9] = [
+pub(crate) const CX: [i32; 9] = [0, 1, 0, -1, 0, 1, -1, -1, 1];
+pub(crate) const CY: [i32; 9] = [0, 0, 1, 0, -1, 1, 1, -1, -1];
+pub(crate) const W: [f64; 9] = [
     4.0 / 9.0,
     1.0 / 9.0,
     1.0 / 9.0,
@@ -198,7 +198,7 @@ impl<T: Real> GenLbm<T> {
 }
 
 /// D2Q9 equilibrium distribution.
-fn feq<T: Real>(k: usize, rho: T, ux: T, uy: T) -> T {
+pub(crate) fn feq<T: Real>(k: usize, rho: T, ux: T, uy: T) -> T {
     let cu = T::from_f64(CX[k] as f64) * ux + T::from_f64(CY[k] as f64) * uy;
     let uu = ux * ux + uy * uy;
     T::from_f64(W[k]) * rho
