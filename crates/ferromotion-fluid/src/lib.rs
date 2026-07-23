@@ -46,6 +46,10 @@ pub struct MacFluid {
     nu: f64,
     dt: f64,
     lid_u: f64,
+    /// Free-slip walls (mirror tangential ghosts) instead of the default no-slip cavity walls —
+    /// the boundary condition under which the Taylor–Green vortex is an EXACT solution on the
+    /// unit box (all normal velocities vanish at the walls), enabling analytic verification.
+    free_slip: bool,
     /// x-velocity on vertical faces: `(nx+1) × ny`, index `i*ny + j`.
     u: Vec<f64>,
     /// y-velocity on horizontal faces: `nx × (ny+1)`, index `i*(ny+1) + j`.
@@ -71,6 +75,7 @@ impl MacFluid {
             nu,
             dt,
             lid_u,
+            free_slip: false,
             u: vec![0.0; (nx + 1) * ny],
             v: vec![0.0; nx * (ny + 1)],
             p: vec![0.0; nx * ny],
@@ -128,9 +133,11 @@ impl MacFluid {
         let (nx, ny) = (self.nx as i32, self.ny as i32);
         debug_assert!((0..=nx).contains(&i));
         if j < 0 {
-            -self.u[(i as usize) * self.ny] // bottom wall no-slip: u_ghost = -u(i,0)
+            let w = self.u[(i as usize) * self.ny];
+            if self.free_slip { w } else { -w } // no-slip: u_ghost = −u; free-slip: mirror
         } else if j >= ny {
-            2.0 * self.lid_u - self.u[(i as usize) * self.ny + (ny as usize - 1)] // lid
+            let w = self.u[(i as usize) * self.ny + (ny as usize - 1)];
+            if self.free_slip { w } else { 2.0 * self.lid_u - w } // lid drives the no-slip cavity
         } else {
             self.u[(i as usize) * self.ny + j as usize]
         }
@@ -141,15 +148,47 @@ impl MacFluid {
         let (nx, ny) = (self.nx as i32, self.ny as i32);
         debug_assert!((0..=ny).contains(&j));
         if i < 0 {
-            -self.v[j as usize] // left wall: v_ghost = -v(0,j)
+            let w = self.v[j as usize];
+            if self.free_slip { w } else { -w }
         } else if i >= nx {
-            -self.v[(nx as usize - 1) * (self.ny + 1) + j as usize] // right wall
+            let w = self.v[(nx as usize - 1) * (self.ny + 1) + j as usize];
+            if self.free_slip { w } else { -w }
         } else {
             self.v[(i as usize) * (self.ny + 1) + j as usize]
         }
     }
 
     /// Advance one timestep and return the max per-step velocity change (a steady-state monitor).
+    /// Switch the walls to free-slip (see the field doc) — for analytic verification cases.
+    pub fn with_free_slip(mut self) -> Self {
+        self.free_slip = true;
+        self
+    }
+
+    /// Set the velocity field from continuous functions `u(x, y)`, `v(x, y)` sampled at the
+    /// staggered face centers (initial conditions for verification cases).
+    pub fn set_velocity(&mut self, fu: impl Fn(f64, f64) -> f64, fv: impl Fn(f64, f64) -> f64) {
+        let (nx, ny, h) = (self.nx, self.ny, self.h);
+        for i in 0..=nx {
+            for j in 0..ny {
+                self.u[i * ny + j] = fu(i as f64 * h, (j as f64 + 0.5) * h);
+            }
+        }
+        for i in 0..nx {
+            for j in 0..=ny {
+                self.v[i * (ny + 1) + j] = fv((i as f64 + 0.5) * h, j as f64 * h);
+            }
+        }
+    }
+
+    /// Kinetic energy `½∫|u|²` (uniform-cell quadrature) — for decay/budget checks.
+    pub fn kinetic_energy(&self) -> f64 {
+        let cell = self.h * self.h;
+        let eu: f64 = self.u.iter().map(|x| x * x).sum();
+        let ev: f64 = self.v.iter().map(|x| x * x).sum();
+        0.5 * (eu + ev) * cell
+    }
+
     pub fn step(&mut self) -> f64 {
         let (us, vs) = self.predict();
         self.project_and_correct(us, vs)
@@ -661,6 +700,141 @@ fn phi_prime(r: f64) -> f64 {
 }
 
 /// Linear interpolation of a monotone-in-`x` `(x, y)` table.
+// ---------------------------------------------------------------------------------------------
+// Verification suite — the benchmarks that turn a demo into a citable solver (Honest Fluids
+// stage 1): Taylor–Green decay vs the analytic solution with MEASURED convergence order, the
+// lid-driven cavity vs the Ghia–Ghia–Shin (1982) table, and discrete conservation receipts.
+// ---------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod verification {
+    use super::*;
+    use std::f64::consts::PI;
+
+    /// Max-norm error of the field against the Taylor–Green solution at time `t`.
+    fn tg_error(f: &MacFluid, t: f64) -> f64 {
+        let decay = (-2.0 * f.nu * PI * PI * t).exp();
+        let (nx, ny, h) = (f.nx, f.ny, f.h);
+        let mut err = 0.0f64;
+        for i in 0..=nx {
+            for j in 0..ny {
+                let (x, y) = (i as f64 * h, (j as f64 + 0.5) * h);
+                let want = (PI * x).sin() * (PI * y).cos() * decay;
+                err = err.max((f.u[i * ny + j] - want).abs());
+            }
+        }
+        for i in 0..nx {
+            for j in 0..=ny {
+                let (x, y) = ((i as f64 + 0.5) * h, j as f64 * h);
+                let want = -(PI * x).cos() * (PI * y).sin() * decay;
+                err = err.max((f.v[i * (ny + 1) + j] - want).abs());
+            }
+        }
+        err
+    }
+
+    fn run_tg(n: usize, nu: f64, t_end: f64) -> f64 {
+        // dt ∝ h² keeps the explicit diffusion stable and the temporal error at the spatial order
+        let dt = 0.1 * (1.0 / n as f64).powi(2) / nu;
+        let mut f = MacFluid::new(n, n, nu, dt, 0.0).with_free_slip();
+        f.set_velocity(
+            |x, y| (PI * x).sin() * (PI * y).cos(),
+            |x, y| -(PI * x).cos() * (PI * y).sin(),
+        );
+        let steps = (t_end / dt).round() as usize;
+        for _ in 0..steps {
+            f.step();
+        }
+        tg_error(&f, steps as f64 * dt)
+    }
+
+    /// Taylor–Green: the solver must track the analytic decaying vortex, the error must SHRINK
+    /// at ~2nd order in h, and the velocity field must stay discretely divergence-free.
+    #[test]
+    fn taylor_green_decay_and_convergence_order() {
+        let (nu, t_end) = (0.02, 0.5);
+        let e32 = run_tg(32, nu, t_end);
+        let e64 = run_tg(64, nu, t_end);
+        assert!(e32 < 0.02, "N=32 error {e32} too large");
+        let order = (e32 / e64).log2();
+        assert!(order > 1.6, "convergence order {order:.2} must be ~2 (e32={e32:.2e}, e64={e64:.2e})");
+        eprintln!("Taylor–Green: e32 {e32:.3e}, e64 {e64:.3e}, observed order {order:.2}");
+    }
+
+    /// The kinetic energy of the Taylor–Green vortex decays as e^{−4νπ²t}; the discrete energy
+    /// must follow it, and no step may create energy (viscous flows only dissipate).
+    #[test]
+    fn taylor_green_energy_budget() {
+        let (n, nu) = (64usize, 0.02);
+        let dt = 0.1 * (1.0 / n as f64).powi(2) / nu;
+        let mut f = MacFluid::new(n, n, nu, dt, 0.0).with_free_slip();
+        f.set_velocity(
+            |x, y| (PI * x).sin() * (PI * y).cos(),
+            |x, y| -(PI * x).cos() * (PI * y).sin(),
+        );
+        let e0 = f.kinetic_energy();
+        let mut prev = e0;
+        let steps = 400;
+        for _ in 0..steps {
+            f.step();
+            let e = f.kinetic_energy();
+            assert!(e <= prev * (1.0 + 1e-12), "energy must never grow: {e} > {prev}");
+            prev = e;
+        }
+        let t = steps as f64 * dt;
+        let want = e0 * (-4.0 * nu * PI * PI * t).exp();
+        let rel = (prev - want).abs() / want;
+        assert!(rel < 0.02, "energy decay off by {rel:.3} (got {prev:.5e}, want {want:.5e})");
+        assert!(f.max_divergence() < 1e-10, "divergence-free: {}", f.max_divergence());
+    }
+
+    /// Lid-driven cavity at Re = 100 vs Ghia, Ghia & Shin (1982), Table I: u on the vertical
+    /// centerline. The canonical incompressible benchmark.
+    #[test]
+    fn lid_driven_cavity_matches_ghia_re100() {
+        // (y, u) sample points from Ghia et al., Re = 100, 129² reference solution
+        const GHIA: &[(f64, f64)] = &[
+            (0.0547, -0.03717),
+            (0.1016, -0.06434),
+            (0.2813, -0.15662),
+            (0.4531, -0.21090),
+            (0.5000, -0.20581),
+            (0.6172, -0.13641),
+            (0.7344, 0.00332),
+            (0.8516, 0.23151),
+            (0.9531, 0.68717),
+            (0.9766, 0.84123),
+        ];
+        let n = 96;
+        let (lid, nu) = (1.0, 0.01); // Re = lid·L/ν = 100
+        let dt = 0.25 / n as f64 / lid; // advective CFL ~ 0.25
+        let mut f = MacFluid::new(n, n, nu, dt, lid);
+        f.run_to_steady(200_000, 1e-8);
+        let profile = f.centerline_u();
+        let interp = |y: f64| -> f64 {
+            let mut best = (f64::INFINITY, 0.0);
+            for w in profile.windows(2) {
+                let ((y0, u0), (y1, u1)) = (w[0], w[1]);
+                if (y0..=y1).contains(&y) {
+                    return u0 + (u1 - u0) * (y - y0) / (y1 - y0);
+                }
+                let d = (y0 - y).abs();
+                if d < best.0 {
+                    best = (d, u0);
+                }
+            }
+            best.1
+        };
+        let mut worst = 0.0f64;
+        for &(y, u_ref) in GHIA {
+            let u = interp(y);
+            worst = worst.max((u - u_ref).abs());
+        }
+        assert!(worst < 0.03, "cavity vs Ghia: worst deviation {worst:.4}");
+        eprintln!("cavity Re=100 vs Ghia: worst centerline deviation {worst:.4}");
+    }
+}
+
 #[cfg(test)]
 fn interp(table: &[(f64, f64)], x: f64) -> f64 {
     if x <= table[0].0 {
