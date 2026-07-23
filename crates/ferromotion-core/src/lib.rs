@@ -197,7 +197,7 @@ pub use urdf::from_urdf_full;
 pub use robust::solve_ik_robust;
 pub use rrt::{RrtResult, RrtStar};
 pub use constraints::{solve_al, AlOptions, AlResult, PlaneConstraint};
-pub use constraint::{constrained_step, ConstraintSet, Delassus, Group, Law, StepResult};
+pub use constraint::{constrained_step, constrained_step_with, ConstraintSet, Delassus, Group, Law, LinkSphere, Solver, StepResult};
 pub use costs::{Cost, JointLimitCost, PointCost, PoseCost, PostureCost, VectorCost};
 pub use rigidbody::RigidBody;
 pub use retarget::{FrameTask, Retargeter, VectorRetargeter, VectorTask};

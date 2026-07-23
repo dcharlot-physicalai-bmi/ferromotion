@@ -413,11 +413,10 @@ fn solve_admm(del: &Delassus, rhs: &DVector<f64>, groups: &[Group]) -> (DVector<
     let chol = Cholesky::new(greg).expect("G + ρI is SPD");
     let mut z: DVector<f64> = DVector::zeros(nc);
     let mut u: DVector<f64> = DVector::zeros(nc);
-    let mut lambda: DVector<f64> = DVector::zeros(nc);
     let mut iters = 0;
     for _ in 0..400 {
         iters += 1;
-        lambda = chol.solve(&(rhs + (&z - &u) * rho));
+        let lambda = chol.solve(&(rhs + (&z - &u) * rho));
         let mut z_new = &lambda + &u;
         project_laws(&mut z_new, groups);
         let r_prim = (&lambda - &z_new).norm();
