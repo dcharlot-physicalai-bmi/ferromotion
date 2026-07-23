@@ -42,6 +42,7 @@ pub enum Solver {
 /// Baumgarte position-stabilization gain (fraction of the violation corrected per step).
 pub const BAUMGARTE: f64 = 0.2;
 
+#[derive(Debug)]
 enum Model {
     /// Weld a point (given in frame `upto`'s coordinates) to a world target: 3 equality rows.
     AnchorPoint { upto: usize, local: Vector3<f64>, target: Vector3<f64> },
@@ -58,7 +59,7 @@ enum Model {
 }
 
 /// A declared set of constraint models (assembly happens per step, at the current state).
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct ConstraintSet {
     models: Vec<Model>,
 }
@@ -577,6 +578,62 @@ mod tests {
         let b = constrained_step_with(&robot, &inertia, &q, &v, &[0.7, -0.4], h, G, &cs, Solver::Admm);
         for (x, y) in a.v_next.iter().zip(&b.v_next) {
             assert!((x - y).abs() < 1e-6, "solver disagreement: {:?} vs {:?}", a.v_next, b.v_next);
+        }
+    }
+
+    /// Oracle 7 — the four-bar: a parallelogram linkage as a 3-joint spanning tree + a cut-joint
+    /// anchor, against the acceleration-level KKT path (`closed_loop::PlanarLoop`). The two
+    /// formulations differ by the J̇q̇ term inside the step, so the honest assertion is FIRST-ORDER
+    /// agreement that tightens linearly as h shrinks.
+    #[test]
+    fn four_bar_cut_joint_matches_the_kkt_path_to_first_order() {
+        use crate::closed_loop::{Pin, PlanarLoop};
+        let mk = |x: f64| Iso::from_parts(Translation3::new(x, 0.0, 0.0), UnitQuaternion::identity());
+        // parallelogram in the x-y plane: L1 = L3 = 1, coupler L2 = ground d = 1.5, joints about z
+        let robot = Robot {
+            joints: vec![
+                Joint::revolute(mk(0.0), Vector3::z()),
+                Joint::revolute(mk(1.0), Vector3::z()),
+                Joint::revolute(mk(1.5), Vector3::z()),
+            ],
+            ee_offset: mk(1.0),
+        };
+        let inertia = vec![
+            LinkInertia { mass: 1.0, com: Vector3::new(0.5, 0.0, 0.0), inertia: Matrix3::identity() * 0.02 },
+            LinkInertia { mass: 1.5, com: Vector3::new(0.75, 0.0, 0.0), inertia: Matrix3::identity() * 0.04 },
+            LinkInertia { mass: 1.0, com: Vector3::new(0.5, 0.0, 0.0), inertia: Matrix3::identity() * 0.02 },
+        ];
+        // consistent parallelogram state: q = (θ, −θ, θ+π), q̇ = (w, −w, w)
+        let (th, w) = (0.6, 0.8);
+        let q = [th, -th, th + std::f64::consts::PI];
+        let v = [w, -w, w];
+        let tau = [0.4, -0.2, 0.1];
+        let grav = Vector3::new(0.0, -9.81, 0.0);
+        let closure_target = Vector3::new(1.5, 0.0, 0.0);
+
+        // KKT reference (no Baumgarte: the state is exactly consistent)
+        let kkt = PlanarLoop {
+            robot: &robot,
+            inertia: &inertia,
+            pins: vec![Pin { frame: 3, offset: Vector3::new(1.0, 0.0, 0.0), target: [1.5, 0.0] }],
+            omega: 0.0,
+        };
+        let mut prev_err = f64::INFINITY;
+        for h in [1e-3, 1e-4] {
+            let (qdd, _lam) = kkt.forward_dynamics(&q, &v, &tau, grav);
+            let v_kkt: Vec<f64> = (0..3).map(|i| v[i] + h * qdd[i]).collect();
+            let mut cs = ConstraintSet::new();
+            cs.anchor_point(3, Vector3::new(1.0, 0.0, 0.0), closure_target);
+            let res = constrained_step(&robot, &inertia, &q, &v, &tau, h, grav, &cs);
+            let err = res
+                .v_next
+                .iter()
+                .zip(&v_kkt)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f64, f64::max);
+            assert!(err < 5.0 * h, "h={h}: |Δv| = {err} must be O(h)");
+            assert!(err < prev_err * 0.5, "error must shrink with h: {err} vs {prev_err}");
+            prev_err = err;
         }
     }
 

@@ -112,6 +112,12 @@ the right first trade, and the API does not change when the backend does.
   **CP-consistent** sequential cone projection (normal, then tangents capped at `μλn`) — the exact
   SOC projection would solve the plain convex cone-QP, whose known artifact is pulling extra
   normal force during sliding (observed on the Coulomb block before the fix).
-- **Stage 3:** four-bar cut-joint workflows, general collision-driven contacts (via `gjk`/`sdf`),
-  MJCF `<equality>` ingestion, sparse/O(n) Delassus backends, `gendyn` instantiation of the step
-  (differentiable constrained dynamics).
+- **Stage 3 — four-bar oracle + MJCF ingestion SHIPPED:** the parallelogram cut-joint matches the
+  `closed_loop` KKT path to first order with the error shrinking linearly in `h` (the two
+  formulations differ by the `J̇q̇` term inside a step — the honest assertion), completing the
+  oracle list; `from_mjcf_constrained` loads `<equality><connect>` as world welds (anchored at the
+  qpos-0 configuration, MuJoCo's semantics) and `<joint polycoef>` as linear mimic couplings, both
+  verified dynamically through `constrained_step`. **Remaining tail (open):** collision-driven
+  contact generation (`gjk`/`sdf` → `point_contact`), sparse/O(n) Delassus backends, and the
+  `gendyn` instantiation of the step (differentiable constrained dynamics — needs a
+  projection-differentiation semantics decision first).

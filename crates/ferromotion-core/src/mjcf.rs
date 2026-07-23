@@ -200,6 +200,16 @@ fn inertial(el: Option<&El>, deg: f64) -> Result<LinkInertia, String> {
 /// Build an actuated serial [`Robot`] + link inertias from MJCF text. See the module doc for the
 /// honored subset and conventions.
 pub fn from_mjcf_full(xml: &str) -> Result<(Robot, Vec<LinkInertia>), String> {
+    let (robot, inertias, _cs) = from_mjcf_constrained(xml)?;
+    Ok((robot, inertias))
+}
+
+/// [`from_mjcf_full`] plus the model's `<equality>` constraints as a ready
+/// [`crate::constraint::ConstraintSet`]: `<connect body1 anchor>` welds the anchor point (in the
+/// named body's frame) to its world position at `qpos = 0` — the MuJoCo semantics — and
+/// `<joint joint1 joint2 polycoef="a0 a1 …">` becomes a mimic coupling `q₁ = a0 + a1·q₂`
+/// (higher polynomial coefficients are outside the subset and fail loudly).
+pub fn from_mjcf_constrained(xml: &str) -> Result<(Robot, Vec<LinkInertia>, crate::constraint::ConstraintSet), String> {
     let root = parse_xml(xml)?;
     if root.name != "mujoco" {
         return Err(format!("root element is <{}>, expected <mujoco>", root.name));
@@ -214,6 +224,8 @@ pub fn from_mjcf_full(xml: &str) -> Result<(Robot, Vec<LinkInertia>), String> {
 
     let mut joints = Vec::new();
     let mut inertias = Vec::new();
+    let mut body_names: Vec<(String, usize, Vector3<f64>)> = Vec::new(); // (name, upto, joint pos shift)
+    let mut joint_names: Vec<(String, usize)> = Vec::new();
     // carry: transform from the last joint's frame to the current body's parent frame
     let mut carry = Iso::identity();
     let mut body = world.child("body");
@@ -245,6 +257,12 @@ pub fn from_mjcf_full(xml: &str) -> Result<(Robot, Vec<LinkInertia>), String> {
                 }
             }
             joints.push(joint);
+            if let Some(nm) = j.attr("name") {
+                joint_names.push((nm.to_string(), joints.len() - 1));
+            }
+            if let Some(nm) = b.attr("name") {
+                body_names.push((nm.to_string(), joints.len(), jpos));
+            }
             // link frame = joint frame; body-frame quantities shift by −jpos
             let mut li = inertial(b.child("inertial"), deg)?;
             li.com -= jpos;
@@ -271,7 +289,46 @@ pub fn from_mjcf_full(xml: &str) -> Result<(Robot, Vec<LinkInertia>), String> {
     if joints.is_empty() {
         return Err("no actuated joints found".into());
     }
-    Ok((Robot { joints, ee_offset: carry }, inertias))
+    let robot = Robot { joints, ee_offset: carry };
+
+    let mut cs = crate::constraint::ConstraintSet::new();
+    if let Some(eq) = root.child("equality") {
+        for c in eq.children_named("connect") {
+            let b1 = c.attr("body1").ok_or("connect needs body1")?;
+            if c.attr("body2").is_some() {
+                return Err("connect body2 (body-body welds) is outside the subset — world welds only".into());
+            }
+            let anchor = c.attr("anchor").map(vec3).transpose()?.unwrap_or_else(Vector3::zeros);
+            let &(_, upto, jpos) = body_names
+                .iter()
+                .find(|(n, _, _)| n == b1)
+                .ok_or_else(|| format!("connect body1 '{b1}' not found among jointed bodies"))?;
+            // anchor is in the BODY frame; the link frame is shifted by the joint pos
+            let local = anchor - jpos;
+            // MuJoCo welds at the model configuration (qpos = 0): target = world point there
+            let q0 = vec![0.0; robot.dof()];
+            let target = (robot.frame_pose(&q0, upto) * nalgebra::Point3::from(local)).coords;
+            cs.anchor_point(upto, local, target);
+        }
+        for jq in eq.children_named("joint") {
+            let j1 = jq.attr("joint1").ok_or("equality joint needs joint1")?;
+            let j2 = jq.attr("joint2").ok_or("only two-joint couplings are in the subset (joint2 required)")?;
+            let poly = jq.attr("polycoef").map(floats).transpose()?.unwrap_or_else(|| vec![0.0, 1.0]);
+            if poly.iter().skip(2).any(|&c| c != 0.0) {
+                return Err("nonlinear polycoef couplings are outside the subset".into());
+            }
+            let (a0, a1) = (poly.first().copied().unwrap_or(0.0), poly.get(1).copied().unwrap_or(1.0));
+            let find = |name: &str| {
+                joint_names
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|&(_, i)| i)
+                    .ok_or_else(|| format!("equality joint '{name}' not found"))
+            };
+            cs.mimic(find(j1)?, find(j2)?, a1, a0);
+        }
+    }
+    Ok((robot, inertias, cs))
 }
 
 /// Kinematics-only variant of [`from_mjcf_full`].
@@ -358,6 +415,73 @@ mod tests {
         // the joint axis (1,0,0) in a frame yawed 90° points along world +y
         let jac = robot.jacobian(&[0.0]);
         assert!((jac[(4, 0)] - 1.0).abs() < 1e-6, "axis should be world +y, jac col {:?}", jac.column(0));
+    }
+
+    /// `<equality>` ingestion: a connect weld becomes a working anchor (the four-bar pattern) and
+    /// a joint polycoef coupling becomes a working mimic — verified DYNAMICALLY through
+    /// constrained_step, not just structurally.
+    #[test]
+    fn equality_connect_and_joint_become_working_constraints() {
+        let xml = r#"
+<mujoco><compiler angle="radian"/>
+  <worldbody>
+    <body name="l1" pos="0 0 0">
+      <joint name="j1" axis="0 0 1"/>
+      <inertial pos="0.5 0 0" mass="1" diaginertia="0.02 0.02 0.02"/>
+      <body name="l2" pos="1 0 0">
+        <joint name="j2" axis="0 0 1"/>
+        <inertial pos="0.75 0 0" mass="1.5" diaginertia="0.04 0.04 0.04"/>
+        <body name="l3" pos="1.5 0 0">
+          <joint name="j3" axis="0 0 1"/>
+          <inertial pos="0.5 0 0" mass="1" diaginertia="0.02 0.02 0.02"/>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+  <equality>
+    <connect body1="l3" anchor="1 0 0"/>
+    <joint joint1="j2" joint2="j1" polycoef="0 -1 0 0 0"/>
+  </equality>
+</mujoco>"#;
+        let (robot, inertia, cs) = from_mjcf_constrained(xml).expect("parse");
+        assert!(!cs.is_empty());
+        // dynamics under the loaded constraints: the anchored point must not move, and the mimic
+        // must couple the first two joints, from the weld configuration q = 0
+        let q = [0.0; 3];
+        let v = [0.3, -0.3, 0.3]; // consistent with the mimic (v2 = −v1) at q0
+        let res = crate::constraint::constrained_step(
+            &robot,
+            &inertia,
+            &q,
+            &v,
+            &[0.5, 0.1, -0.2],
+            1e-3,
+            Vector3::new(0.0, -9.81, 0.0),
+            &cs,
+        );
+        // mimic holds on the next velocities
+        assert!((res.v_next[1] + res.v_next[0]).abs() < 1e-8, "mimic v2 = −v1: {:?}", res.v_next);
+        // the welded point's velocity vanishes
+        let jq: Vec<f64> = res.v_next.clone();
+        let p_dot = {
+            // finite-difference the anchor point's position along v_next
+            let eps = 1e-7;
+            let q2: Vec<f64> = q.iter().zip(&jq).map(|(a, b)| a + eps * b).collect();
+            let p0 = (robot.frame_pose(&q, 3) * nalgebra::Point3::new(1.0, 0.0, 0.0)).coords;
+            let p1 = (robot.frame_pose(&q2, 3) * nalgebra::Point3::new(1.0, 0.0, 0.0)).coords;
+            (p1 - p0) / eps
+        };
+        assert!(p_dot.norm() < 1e-6, "welded point must be stationary: |ṗ| = {}", p_dot.norm());
+    }
+
+    #[test]
+    fn equality_out_of_subset_fails_loudly() {
+        let nonlinear = r#"
+<mujoco><worldbody><body name="a"><joint name="j1"/><inertial pos="0 0 0" mass="1" diaginertia="1 1 1"/>
+  <body name="b"><joint name="j2"/><inertial pos="0 0 0" mass="1" diaginertia="1 1 1"/></body>
+</body></worldbody>
+<equality><joint joint1="j1" joint2="j2" polycoef="0 1 0.5 0 0"/></equality></mujoco>"#;
+        assert!(from_mjcf_constrained(nonlinear).unwrap_err().contains("nonlinear"));
     }
 
     /// Out-of-subset constructs fail loudly, not silently wrong.
