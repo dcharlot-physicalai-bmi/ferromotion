@@ -34,6 +34,7 @@
 
 
 pub mod lbm;
+pub mod mac_adjoint;
 #[cfg(feature = "gpu")]
 pub mod lbm_gpu;
 pub use lbm::{LbmBc, LbmD2Q9};
