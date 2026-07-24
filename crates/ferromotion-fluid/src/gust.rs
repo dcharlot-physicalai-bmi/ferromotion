@@ -91,6 +91,7 @@ fn lstsq(features: &[Vec<f64>], target: &[f64]) -> (Vec<f64>, f64) {
 }
 
 /// Gaussian elimination with partial pivoting for a tiny SPD-ish system.
+#[allow(clippy::needless_range_loop)] // index-arithmetic elimination — iterators would obscure it
 fn solve_dense(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Vec<f64> {
     let n = b.len();
     for col in 0..n {
@@ -132,6 +133,7 @@ pub struct GustFit {
 }
 
 /// Fit the nested hierarchy to a trace.
+#[allow(clippy::needless_range_loop)] // Basset convolution needs the (k−j) index arithmetic
 pub fn fit_unsteady(trace: &[GustSample], dt: f64) -> GustFit {
     let f: Vec<f64> = trace.iter().map(|s| s.f).collect();
     let quad: Vec<f64> = trace.iter().map(|s| -s.u.abs() * s.u).collect(); // quasi-steady drag basis
@@ -146,7 +148,7 @@ pub fn fit_unsteady(trace: &[GustSample], dt: f64) -> GustFit {
         hist[k] = -acc_sum;
     }
 
-    let (_, qs) = lstsq(&[quad.clone()], &f);
+    let (_, qs) = lstsq(std::slice::from_ref(&quad), &f);
     let (_, am) = lstsq(&[quad.clone(), acc.clone()], &f);
     let (_, hi) = lstsq(&[quad, acc, hist], &f);
     let frms = (f.iter().map(|x| x * x).sum::<f64>() / f.len() as f64).sqrt();
