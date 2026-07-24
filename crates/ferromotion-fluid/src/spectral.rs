@@ -20,13 +20,13 @@ impl Cplx {
     pub fn new(re: f64, im: f64) -> Self {
         Cplx { re, im }
     }
-    fn add(self, o: Cplx) -> Cplx {
+    pub(crate) fn add(self, o: Cplx) -> Cplx {
         Cplx::new(self.re + o.re, self.im + o.im)
     }
-    fn sub(self, o: Cplx) -> Cplx {
+    pub(crate) fn sub(self, o: Cplx) -> Cplx {
         Cplx::new(self.re - o.re, self.im - o.im)
     }
-    fn mul(self, o: Cplx) -> Cplx {
+    pub(crate) fn mul(self, o: Cplx) -> Cplx {
         Cplx::new(self.re * o.re - self.im * o.im, self.re * o.im + self.im * o.re)
     }
 }
@@ -118,7 +118,7 @@ pub fn poisson_2d(f: &[f64], n: usize, l: f64) -> Vec<f64> {
 }
 
 /// 2-D FFT of a row-major `n×n` array: transform each row, then each column.
-fn fft2(a: &mut [Cplx], n: usize, inverse: bool) {
+pub(crate) fn fft2(a: &mut [Cplx], n: usize, inverse: bool) {
     let mut row = vec![Cplx::new(0.0, 0.0); n];
     for i in 0..n {
         row.copy_from_slice(&a[i * n..i * n + n]);
