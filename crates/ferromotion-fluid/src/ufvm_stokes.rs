@@ -89,13 +89,15 @@ fn p2_grad(l: [f64; 3], g: [[f64; 2]; 3]) -> [[f64; 2]; 6] {
 /// Solve steady Stokes `−ν∇²u + ∇p = f`, `∇·u = 0` with no-slip Dirichlet velocity on the boundary
 /// (values from `u_bc`), body force `force`, and pressure pinned at node 0 to `p_pin`. Returns
 /// `(u, v, p)` — velocity at the `nv+n_edges` P2 nodes and pressure at the `nv` P1 vertices.
-#[allow(clippy::needless_range_loop, clippy::type_complexity)]
-pub fn solve_stokes(
+#[allow(clippy::needless_range_loop, clippy::type_complexity, clippy::too_many_arguments)]
+pub fn solve_oseen(
     mesh: &TriMesh,
     nu: f64,
     force: impl Fn(f64, f64) -> (f64, f64),
     u_bc: impl Fn(f64, f64) -> (f64, f64),
     p_pin: f64,
+    adv_u: &[f64],
+    adv_v: &[f64],
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let p2 = P2Mesh::build(mesh);
     let nu_nodes = p2.n_unodes;
@@ -130,11 +132,14 @@ pub fn solve_stokes(
         let un = p2.tri_nodes[e]; // 6 velocity nodes
         let pn = [t[0], t[1], t[2]]; // 3 pressure nodes
 
-        // element viscous stiffness K_ab and divergence Bx_{p,a}, By_{p,a}; element load.
+        // element viscous stiffness K_ab, Oseen convection C_ab (with the current advecting
+        // velocity), divergence Bx/By, and element load.
         let mut kmat = [[0.0f64; 6]; 6];
+        let mut cmat = [[0.0f64; 6]; 6];
         let mut bx = [[0.0f64; 6]; 3];
         let mut by = [[0.0f64; 6]; 3];
         let mut fload = [[0.0f64; 2]; 6];
+        let advect = !adv_u.is_empty();
         for q in &qpts {
             let sh = p2_shape(*q);
             let gr = p2_grad(*q, g);
@@ -142,9 +147,21 @@ pub fn solve_stokes(
             // physical coordinates of the quadrature point
             let xy = [q[0] * p[0][0] + q[1] * p[1][0] + q[2] * p[2][0], q[0] * p[0][1] + q[1] * p[1][1] + q[2] * p[2][1]];
             let (fx, fy) = force(xy[0], xy[1]);
+            // interpolate the advecting velocity at this quadrature point (P2)
+            let (mut au, mut av) = (0.0, 0.0);
+            if advect {
+                for c in 0..6 {
+                    au += adv_u[un[c]] * sh[c];
+                    av += adv_v[un[c]] * sh[c];
+                }
+            }
             for a in 0..6 {
                 for b in 0..6 {
                     kmat[a][b] += w * nu * (gr[a][0] * gr[b][0] + gr[a][1] * gr[b][1]);
+                    if advect {
+                        // C_ab = ∫ (u^k·∇N_b) N_a  — the Oseen (Picard-linearized) convection
+                        cmat[a][b] += w * (au * gr[b][0] + av * gr[b][1]) * sh[a];
+                    }
                 }
                 // pressure basis = barycentric λp at the vertices (linear)
                 for pp in 0..3 {
@@ -157,10 +174,10 @@ pub fn solve_stokes(
         }
 
         for a in 0..6 {
-            // viscous block (both components)
+            // viscous + convection block (both components share the same scalar operator)
             for b in 0..6 {
-                add(un[a], un[b], kmat[a][b]);
-                add(off_v + un[a], off_v + un[b], kmat[a][b]);
+                add(un[a], un[b], kmat[a][b] + cmat[a][b]);
+                add(off_v + un[a], off_v + un[b], kmat[a][b] + cmat[a][b]);
             }
             // pressure coupling: momentum has −∫ p ∂N_a/∂x = −Bxᵀ p ; continuity row = B u
             for pp in 0..3 {
@@ -248,6 +265,47 @@ pub fn solve_stokes(
     (u, v, pr)
 }
 
+/// Steady **Stokes** flow — the coupled solve with no advection (`solve_oseen` with an empty
+/// advecting field). Velocity at P2 nodes, pressure at P1 vertices.
+pub fn solve_stokes(
+    mesh: &TriMesh,
+    nu: f64,
+    force: impl Fn(f64, f64) -> (f64, f64),
+    u_bc: impl Fn(f64, f64) -> (f64, f64),
+    p_pin: f64,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    solve_oseen(mesh, nu, force, u_bc, p_pin, &[], &[])
+}
+
+/// Steady **incompressible Navier–Stokes** on the unstructured mesh by a Picard (Oseen) iteration:
+/// start from the Stokes solution, then repeatedly freeze the advecting velocity at the current
+/// iterate and re-solve the linear Oseen system, until the velocity update falls below `tol` (or
+/// `max_iter` is hit). Returns `(u, v, p, iters)`. Convergent for moderate Reynolds numbers.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+pub fn solve_navier_stokes(
+    mesh: &TriMesh,
+    nu: f64,
+    force: impl Fn(f64, f64) -> (f64, f64) + Copy,
+    u_bc: impl Fn(f64, f64) -> (f64, f64) + Copy,
+    p_pin: f64,
+    tol: f64,
+    max_iter: usize,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>, usize) {
+    let (mut u, mut v, mut p) = solve_stokes(mesh, nu, force, u_bc, p_pin);
+    for it in 1..=max_iter {
+        let (un, vn, pn) = solve_oseen(mesh, nu, force, u_bc, p_pin, &u, &v);
+        let du: f64 = un.iter().zip(&u).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt();
+        let scale: f64 = un.iter().map(|x| x * x).sum::<f64>().sqrt().max(1e-12);
+        u = un;
+        v = vn;
+        p = pn;
+        if du / scale < tol {
+            return (u, v, p, it);
+        }
+    }
+    (u, v, p, max_iter)
+}
+
 /// Velocity-node coordinates for a mesh (vertices then edge midpoints) — the layout of the returned
 /// `u`, `v` from [`solve_stokes`].
 pub fn velocity_node_coords(mesh: &TriMesh) -> Vec<[f64; 2]> {
@@ -333,5 +391,48 @@ mod verification {
         }
         eprintln!("Taylor–Hood Stokes: worst element divergence {worst:.2e}");
         assert!(worst < 5e-2, "solution not divergence-free: {worst}");
+    }
+
+    // Analytic velocity gradients of the manufactured u* (for the nonlinear convection source).
+    fn grad_u(x: f64, y: f64) -> (f64, f64, f64, f64) {
+        let dudx = PI * PI * (2.0 * PI * x).sin() * (2.0 * PI * y).sin();
+        let dudy = 2.0 * PI * PI * (PI * x).sin().powi(2) * (2.0 * PI * y).cos();
+        let dvdx = -2.0 * PI * PI * (2.0 * PI * x).cos() * (PI * y).sin().powi(2);
+        let dvdy = -PI * PI * (2.0 * PI * x).sin() * (2.0 * PI * y).sin();
+        (dudx, dudy, dvdx, dvdy)
+    }
+    // Full Navier–Stokes source: (u·∇)u − ν∇²u + ∇p.
+    fn ns_force(nu: f64, x: f64, y: f64) -> (f64, f64) {
+        let (u, v) = u_exact(x, y);
+        let (dudx, dudy, dvdx, dvdy) = grad_u(x, y);
+        let (sx, sy) = force(nu, x, y); // −ν∇²u + ∇p from the Stokes case
+        (sx + u * dudx + v * dudy, sy + u * dvdx + v * dvdy)
+    }
+
+    /// **The full incompressible Navier–Stokes solve on the unstructured mesh.** The Picard/Oseen
+    /// iteration converges from the Stokes solution to the manufactured NS solution, recovering the
+    /// velocity at high order — the coupled Taylor–Hood solver is now a genuine NS solver, not just
+    /// Stokes.
+    #[test]
+    fn navier_stokes_mms_converges() {
+        let nu = 1.0; // moderate Reynolds ( |u*| ~ π, so Re ~ few ) — Picard converges
+        let solve = |n: usize| -> (f64, usize) {
+            let mesh = TriMesh::unit_square(n, 0.0);
+            let coords = velocity_node_coords(&mesh);
+            let (u, v, _, iters) = solve_navier_stokes(&mesh, nu, |x, y| ns_force(nu, x, y), u_exact, p_exact(0.0, 0.0), 1e-10, 30);
+            let mut se = 0.0;
+            for i in 0..coords.len() {
+                let (ue, ve) = u_exact(coords[i][0], coords[i][1]);
+                se += (u[i] - ue).powi(2) + (v[i] - ve).powi(2);
+            }
+            ((se / coords.len() as f64).sqrt(), iters)
+        };
+        let (e9, it9) = solve(9);
+        let (e17, _) = solve(17);
+        let order = (e9 / e17).log2();
+        eprintln!("Navier–Stokes MMS velocity: e9 {e9:.3e} ({it9} Picard iters)  e17 {e17:.3e}  order {order:.2}");
+        assert!(it9 < 30, "Picard did not converge: {it9} iters");
+        assert!(e17 < 5e-3, "NS velocity error too large: {e17}");
+        assert!(order > 2.3, "NS solve not high-order: {order}");
     }
 }
