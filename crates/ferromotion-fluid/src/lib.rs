@@ -34,6 +34,7 @@
 
 
 pub mod dmd;
+pub mod env;
 pub mod euler;
 pub mod fvm;
 pub mod gust;
