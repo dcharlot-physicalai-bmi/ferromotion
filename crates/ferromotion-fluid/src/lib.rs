@@ -33,6 +33,7 @@
 //! (shape) derivative, verified against finite differences to ~0.1 %. Pure Rust → WASM-clean.
 
 
+pub mod gust;
 pub mod lbm;
 pub mod lbm3d;
 pub mod mac_adjoint;
