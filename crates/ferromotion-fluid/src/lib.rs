@@ -40,6 +40,7 @@ pub mod lbm;
 pub mod lbm3d;
 pub mod mac_adjoint;
 pub mod sph;
+pub mod spectral;
 pub mod swimmer;
 pub mod vof;
 #[cfg(feature = "gpu")]
