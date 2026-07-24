@@ -381,3 +381,80 @@ impl HarnessLab {
         ferromotion_fluid::harness::grade(self.field(which), &self.reference, 3.0).passes
     }
 }
+
+/// **Environment-scale flow + planning** — the fluids→robot-planning seam, live. A divergence-free
+/// wind field with a no-fly obstacle; a Zermelo min-time planner routes around the headwind pockets,
+/// and the page shows the wind, the flow-aware path, and the naive straight line it beats.
+#[wasm_bindgen]
+pub struct EnvLab {
+    n: usize,
+    wind: ferromotion_fluid::env::Wind,
+    obstacle: ferromotion_fluid::env::Obstacle,
+    path: Vec<(usize, usize)>,
+    opt_time: f64,
+    naive_time: f64,
+    start: (usize, usize),
+    goal: (usize, usize),
+}
+
+#[wasm_bindgen]
+impl EnvLab {
+    #[wasm_bindgen(constructor)]
+    pub fn new(amp: f64) -> EnvLab {
+        use ferromotion_fluid::env::{Obstacle, Planner, Wind};
+        let n = 64;
+        let wind = Wind { ux: 0.0, uy: 0.0, amp };
+        let obstacle = Obstacle { cx: 0.5, cy: 0.42, r: 0.1 };
+        let start = (5, n / 2);
+        let goal = (n - 6, n / 2);
+        let planner = Planner { n, wind, obstacles: vec![obstacle], airspeed: 3.0 };
+        let (opt_time, path) = planner.plan(start, goal).unwrap_or((f64::INFINITY, vec![start, goal]));
+        let naive_time = planner.straight_line_time(start, goal, 200);
+        EnvLab { n, wind, obstacle, path, opt_time, naive_time, start, goal }
+    }
+
+    pub fn grid(&self) -> usize {
+        self.n
+    }
+
+    /// Wind speed `|w|` field, row-major `n×n` (for the heatmap).
+    pub fn wind_speed(&self) -> Vec<f64> {
+        let mut out = vec![0.0; self.n * self.n];
+        for i in 0..self.n {
+            for j in 0..self.n {
+                let (x, y) = ((i as f64 + 0.5) / self.n as f64, (j as f64 + 0.5) / self.n as f64);
+                let (u, v) = self.wind.at(x, y);
+                out[j * self.n + i] = (u * u + v * v).sqrt();
+            }
+        }
+        out
+    }
+
+    /// Flow-aware path as flat normalized `[x0,y0, x1,y1, …]`.
+    pub fn path(&self) -> Vec<f64> {
+        self.path.iter().flat_map(|&(i, j)| [(i as f64 + 0.5) / self.n as f64, (j as f64 + 0.5) / self.n as f64]).collect()
+    }
+
+    /// Straight-line naive path endpoints `[x0,y0, x1,y1]`.
+    pub fn straight(&self) -> Vec<f64> {
+        let n = self.n as f64;
+        vec![
+            (self.start.0 as f64 + 0.5) / n,
+            (self.start.1 as f64 + 0.5) / n,
+            (self.goal.0 as f64 + 0.5) / n,
+            (self.goal.1 as f64 + 0.5) / n,
+        ]
+    }
+
+    /// Obstacle `[cx, cy, r]`.
+    pub fn obstacle(&self) -> Vec<f64> {
+        vec![self.obstacle.cx, self.obstacle.cy, self.obstacle.r]
+    }
+
+    pub fn opt_time(&self) -> f64 {
+        self.opt_time
+    }
+    pub fn naive_time(&self) -> f64 {
+        self.naive_time
+    }
+}
