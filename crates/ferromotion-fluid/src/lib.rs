@@ -33,6 +33,7 @@
 //! (shape) derivative, verified against finite differences to ~0.1 %. Pure Rust → WASM-clean.
 
 
+pub mod euler;
 pub mod fvm;
 pub mod gust;
 pub mod harness;
