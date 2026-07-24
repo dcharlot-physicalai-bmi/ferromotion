@@ -37,3 +37,7 @@ optional = true
 [[example]]
 name = "lbm_mlups"
 required-features = ["gpu"]
+
+[[example]]
+name = "lbm3d_mlups"
+required-features = ["gpu"]

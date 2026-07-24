@@ -50,6 +50,8 @@ pub mod ufvm;
 pub mod vof;
 #[cfg(feature = "gpu")]
 pub mod lbm_gpu;
+#[cfg(feature = "gpu")]
+pub mod lbm3d_gpu;
 pub use lbm::{LbmBc, LbmD2Q9};
 use faer::linalg::solvers::Solve;
 use faer::sparse::linalg::solvers::Llt;
