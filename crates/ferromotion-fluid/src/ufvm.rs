@@ -265,6 +265,99 @@ pub fn conductivity_gradient(mesh: &TriMesh, k_elem: &[f64], source: impl Fn(f64
     (j, grad)
 }
 
+/// Solve the steady **advection–diffusion** transport equation `u·∇φ − D∇²φ = S` on the
+/// unstructured mesh, with a divergence-free velocity field `vel` and Dirichlet boundaries. This is
+/// the scalar-transport workhorse that unstructured incompressible NS (SIMPLE/PISO) is built on: the
+/// Galerkin convection matrix `∫(u·∇λ_j)λ_i` is added to the diffusion stiffness, giving a
+/// NON-symmetric system solved with a sparse LU (Cholesky no longer applies once advection enters).
+/// Stable and 2nd-order in the resolved (cell-Péclet ≲ 1) regime.
+#[allow(clippy::needless_range_loop)]
+pub fn solve_advection_diffusion(
+    mesh: &TriMesh,
+    vel: impl Fn(f64, f64) -> (f64, f64),
+    d: f64,
+    source: impl Fn(f64, f64) -> f64,
+    bc: impl Fn(f64, f64) -> f64,
+) -> Vec<f64> {
+    let nv = mesh.verts.len();
+    use std::collections::BTreeMap;
+    let mut rows = vec![BTreeMap::<usize, f64>::new(); nv];
+    let mut b = vec![0.0f64; nv];
+
+    for t in &mesh.tris {
+        let p = [mesh.verts[t[0]], mesh.verts[t[1]], mesh.verts[t[2]]];
+        let two_a = (p[1][0] - p[0][0]) * (p[2][1] - p[0][1]) - (p[2][0] - p[0][0]) * (p[1][1] - p[0][1]);
+        let area = two_a.abs() * 0.5;
+        // barycentric gradients ∇λ_j = (bj, cj)/(2A)
+        let bc_ = [
+            (p[1][1] - p[2][1], p[2][0] - p[1][0]),
+            (p[2][1] - p[0][1], p[0][0] - p[2][0]),
+            (p[0][1] - p[1][1], p[1][0] - p[0][0]),
+        ];
+        let grad = |j: usize| (bc_[j].0 / two_a, bc_[j].1 / two_a); // signed 2A cancels the abs sign
+        let cen = [(p[0][0] + p[1][0] + p[2][0]) / 3.0, (p[0][1] + p[1][1] + p[2][1]) / 3.0];
+        let (uc, vc) = vel(cen[0], cen[1]);
+        for a in 0..3 {
+            for j in 0..3 {
+                let (gjx, gjy) = grad(j);
+                let (gix, giy) = grad(a);
+                // diffusion D·∇λ_a·∇λ_j·area  +  convection (u·∇λ_j)·∫λ_a  (∫λ_a = area/3)
+                let diff = d * (gix * gjx + giy * gjy) * area;
+                let conv = (uc * gjx + vc * gjy) * (area / 3.0);
+                *rows[t[a]].entry(t[j]).or_insert(0.0) += diff + conv;
+            }
+            b[t[a]] += area / 3.0 * source(p[a][0], p[a][1]);
+        }
+    }
+
+    // Dirichlet: pin boundary rows to the exact value, move their columns to the RHS.
+    let mut phi = vec![0.0f64; nv];
+    for v in 0..nv {
+        if mesh.boundary[v] {
+            phi[v] = bc(mesh.verts[v][0], mesh.verts[v][1]);
+        }
+    }
+    for v in 0..nv {
+        if mesh.boundary[v] {
+            continue;
+        }
+        let cols: Vec<(usize, f64)> = rows[v].iter().map(|(&c, &val)| (c, val)).collect();
+        for (c, val) in cols {
+            if mesh.boundary[c] {
+                b[v] -= val * phi[c];
+            }
+        }
+    }
+    let mut interior = Vec::new();
+    let mut idx_of = vec![usize::MAX; nv];
+    for v in 0..nv {
+        if !mesh.boundary[v] {
+            idx_of[v] = interior.len();
+            interior.push(v);
+        }
+    }
+    let ni = interior.len();
+    let mut trips: Vec<Triplet<usize, usize, f64>> = Vec::new();
+    for (ri, &v) in interior.iter().enumerate() {
+        for (&c, &val) in &rows[v] {
+            if !mesh.boundary[c] {
+                trips.push(Triplet::new(ri, idx_of[c], val)); // full (non-symmetric) matrix
+            }
+        }
+    }
+    let mat = SparseColMat::<usize, f64>::try_new_from_triplets(ni, ni, &trips).expect("assemble");
+    let lu = mat.sp_lu().expect("LU");
+    let mut rhs = Mat::<f64>::zeros(ni, 1);
+    for (ri, &v) in interior.iter().enumerate() {
+        rhs[(ri, 0)] = b[v];
+    }
+    lu.solve_in_place(rhs.as_mut());
+    for (ri, &v) in interior.iter().enumerate() {
+        phi[v] = rhs[(ri, 0)];
+    }
+    phi
+}
+
 #[cfg(test)]
 mod verification {
     use super::*;
@@ -335,5 +428,36 @@ mod verification {
         }
         eprintln!("unstructured adjoint dJ/dk vs FD: worst rel {worst:.2e}");
         assert!(worst < 1e-5, "discrete adjoint gradient off: {worst}");
+    }
+
+    /// Steady advection–diffusion on the unstructured mesh, MMS-verified at 2nd order with a
+    /// divergence-free swirl velocity — the transport equation SIMPLE/PISO builds on, on triangles.
+    #[test]
+    fn advection_diffusion_mms_second_order() {
+        let d = 0.1;
+        // divergence-free velocity from ψ = sin(πx)sin(πy): u = ∂ψ/∂y, v = −∂ψ/∂x.
+        let vel = |x: f64, y: f64| (PI * (PI * x).sin() * (PI * y).cos(), -PI * (PI * x).cos() * (PI * y).sin());
+        let exact = |x: f64, y: f64| (PI * x).sin() * (PI * y).sin();
+        // S = u·∇φ* − D∇²φ* ; ∇²φ* = −2π²φ* ; ∇φ* = (π cos(πx)sin(πy), π sin(πx)cos(πy))
+        let source = |x: f64, y: f64| {
+            let (u, v) = vel(x, y);
+            let gx = PI * (PI * x).cos() * (PI * y).sin();
+            let gy = PI * (PI * x).sin() * (PI * y).cos();
+            (u * gx + v * gy) + d * 2.0 * PI * PI * exact(x, y)
+        };
+        let err = |n: usize| -> f64 {
+            let mesh = TriMesh::unit_square(n, 0.15);
+            let phi = solve_advection_diffusion(&mesh, vel, d, source, exact);
+            let mut se = 0.0;
+            for v in 0..mesh.verts.len() {
+                se += (phi[v] - exact(mesh.verts[v][0], mesh.verts[v][1])).powi(2);
+            }
+            (se / mesh.verts.len() as f64).sqrt()
+        };
+        let e17 = err(17);
+        let e33 = err(33);
+        let order = (e17 / e33).log2();
+        eprintln!("unstructured advection–diffusion MMS: e17 {e17:.3e}  e33 {e33:.3e}  order {order:.2}");
+        assert!(order > 1.7, "advection–diffusion not 2nd order: {order}");
     }
 }
