@@ -293,3 +293,91 @@ impl SphLab {
         self.sph.n_fluid
     }
 }
+
+/// **The honesty harness** — the doctrine flagship, live. Builds a divergence-free ground truth and
+/// two predictions with IDENTICAL error budget: one honest, one that cheats (injects divergence or
+/// high-frequency noise). Exposes the shared MSE and the physics receipts so the page can show the
+/// audit catching what the error metric cannot.
+#[wasm_bindgen]
+pub struct HarnessLab {
+    n: usize,
+    truth: ferromotion_fluid::harness::FlowField,
+    honest: ferromotion_fluid::harness::FlowField,
+    cheat: ferromotion_fluid::harness::FlowField,
+    reference: ferromotion_fluid::harness::Receipts,
+}
+
+#[wasm_bindgen]
+impl HarnessLab {
+    /// `mode` 0 = divergence cheat, 1 = spectral (high-frequency) cheat.
+    #[wasm_bindgen(constructor)]
+    pub fn new(mode: u32) -> HarnessLab {
+        use ferromotion_fluid::harness::{audit, FlowField};
+        use std::f64::consts::PI;
+        let n = 72;
+        let k = 2.0 * PI;
+        let truth = FlowField::sample(n, |x, y| ((k * x).sin() * (k * y).cos(), -(k * x).cos() * (k * y).sin()));
+        let reference = audit(&truth);
+        let norm = truth.norm();
+        let budget = 0.13 * norm;
+        let scaled = |mut f: FlowField, target: f64| {
+            let s = target / f.norm();
+            for i in 0..f.u.len() {
+                f.u[i] *= s;
+                f.v[i] *= s;
+            }
+            f
+        };
+        let honest_p = scaled(FlowField::sample(n, |x, y| ((2.0 * k * x).sin() * (2.0 * k * y).cos(), -(2.0 * k * x).cos() * (2.0 * k * y).sin())), budget);
+        let cheat_p = if mode == 0 {
+            // pure gradient — all divergence
+            scaled(FlowField::sample(n, |x, y| (-(k * x).sin() * (k * y).cos(), -(k * x).cos() * (k * y).sin())), budget)
+        } else {
+            // high-frequency mode — all roughness
+            scaled(FlowField::sample(n, |x, y| ((10.0 * k * x).sin() * (10.0 * k * y).cos(), -(10.0 * k * x).cos() * (10.0 * k * y).sin())), budget)
+        };
+        let mut honest = truth.clone();
+        honest.add_scaled(&honest_p, 1.0);
+        let mut cheat = truth.clone();
+        cheat.add_scaled(&cheat_p, 1.0);
+        HarnessLab { n, truth, honest, cheat, reference }
+    }
+
+    pub fn grid(&self) -> usize {
+        self.n
+    }
+
+    fn field(&self, which: u32) -> &ferromotion_fluid::harness::FlowField {
+        match which {
+            0 => &self.truth,
+            1 => &self.honest,
+            _ => &self.cheat,
+        }
+    }
+
+    /// Speed field `|u|` for truth(0)/honest(1)/cheat(2), row-major `n×n`.
+    pub fn speed(&self, which: u32) -> Vec<f64> {
+        let f = self.field(which);
+        (0..self.n * self.n).map(|k| (f.u[k] * f.u[k] + f.v[k] * f.v[k]).sqrt()).collect()
+    }
+
+    /// RMS error of honest(1)/cheat(2) vs the truth — equal by construction.
+    pub fn mse(&self, which: u32) -> f64 {
+        self.field(which).rms_diff(&self.truth)
+    }
+
+    /// Divergence receipt of a field.
+    pub fn divergence(&self, which: u32) -> f64 {
+        ferromotion_fluid::harness::audit(self.field(which)).divergence_rms
+    }
+
+    /// Roughness receipt of a field.
+    pub fn roughness(&self, which: u32) -> f64 {
+        ferromotion_fluid::harness::audit(self.field(which)).roughness
+    }
+
+    /// Whether a field passes the physics audit (graded against the truth's receipts).
+    pub fn passes(&self, which: u32) -> bool {
+        ferromotion_fluid::harness::grade(self.field(which), &self.reference, 3.0).passes
+    }
+}
