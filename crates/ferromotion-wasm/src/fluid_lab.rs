@@ -458,3 +458,58 @@ impl EnvLab {
         self.naive_time
     }
 }
+
+/// **The Sod shock tube** — compressible Euler, the hyperbolic regime. Live shock, contact, and
+/// rarefaction; the page renders density/velocity/pressure and reads the star-region state against
+/// the exact Riemann solution.
+#[wasm_bindgen]
+pub struct EulerLab {
+    euler: ferromotion_fluid::euler::Euler1d,
+    t: f64,
+}
+
+#[wasm_bindgen]
+impl EulerLab {
+    #[wasm_bindgen(constructor)]
+    pub fn new(n: usize) -> EulerLab {
+        EulerLab { euler: ferromotion_fluid::euler::Euler1d::sod(n), t: 0.0 }
+    }
+
+    pub fn reset(&mut self) {
+        let n = self.euler.n;
+        self.euler = ferromotion_fluid::euler::Euler1d::sod(n);
+        self.t = 0.0;
+    }
+
+    /// Advance physical time by `dt` (internal CFL substeps).
+    pub fn advance(&mut self, dt: f64) {
+        let target = self.t + dt;
+        while self.t < target {
+            let s = self.euler.max_speed();
+            let step = (0.4 * self.euler.h / s).min(target - self.t);
+            if step <= 0.0 {
+                break;
+            }
+            self.euler.step(step);
+            self.t += step;
+        }
+    }
+
+    pub fn n(&self) -> usize {
+        self.euler.n
+    }
+    pub fn time(&self) -> f64 {
+        self.t
+    }
+
+    /// Density / velocity / pressure per cell.
+    pub fn density(&self) -> Vec<f64> {
+        (0..self.euler.n).map(|i| self.euler.state(i).0).collect()
+    }
+    pub fn velocity(&self) -> Vec<f64> {
+        (0..self.euler.n).map(|i| self.euler.state(i).1).collect()
+    }
+    pub fn pressure(&self) -> Vec<f64> {
+        (0..self.euler.n).map(|i| self.euler.state(i).2).collect()
+    }
+}
