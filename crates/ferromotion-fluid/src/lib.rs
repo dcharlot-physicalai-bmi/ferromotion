@@ -46,6 +46,7 @@ pub mod sph;
 pub mod spectral;
 pub mod spectral_ns;
 pub mod swimmer;
+pub mod ufvm;
 pub mod vof;
 #[cfg(feature = "gpu")]
 pub mod lbm_gpu;
