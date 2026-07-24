@@ -6,6 +6,7 @@
 //! resolved solver reveal the fix, live.
 
 use ferromotion_fluid::gust::{fit_unsteady, run_gust, Gust};
+use ferromotion_fluid::sph::Sph;
 use ferromotion_fluid::swimmer::{DiffSwimmer, Swimmer};
 use ferromotion_fluid::MacFluid;
 use wasm_bindgen::prelude::*;
@@ -237,5 +238,58 @@ impl SwimLab {
 
     pub fn grid(&self) -> usize {
         self.n
+    }
+}
+
+/// **The dam break** — smoothed particle hydrodynamics, the Lagrangian solver. A column of fluid
+/// collapses and surges across the box; the page renders the particles and reads the exact mass
+/// conservation and released kinetic energy as it goes.
+#[wasm_bindgen]
+pub struct SphLab {
+    sph: Sph,
+    dt: f64,
+    m0: f64,
+}
+
+#[wasm_bindgen]
+impl SphLab {
+    #[allow(clippy::new_without_default)]
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> SphLab {
+        let sph = Sph::dam_break(0.02);
+        let dt = sph.cfl_dt();
+        let m0 = sph.n_fluid as f64 * sph.mass;
+        SphLab { sph, dt, m0 }
+    }
+
+    /// Advance `k` SPH steps.
+    pub fn step(&mut self, k: usize) {
+        for _ in 0..k {
+            self.sph.step(self.dt);
+        }
+    }
+
+    /// Fluid particle positions as a flat `[x0,y0, x1,y1, …]` array (fluid only; box is ≈1.0 wide).
+    pub fn particles(&self) -> Vec<f64> {
+        self.sph.pos[..self.sph.n_fluid].iter().flat_map(|p| [p[0], p[1]]).collect()
+    }
+
+    /// Boundary particle positions (the box walls), flat `[x,y,…]`.
+    pub fn walls(&self) -> Vec<f64> {
+        self.sph.pos[self.sph.n_fluid..].iter().flat_map(|p| [p[0], p[1]]).collect()
+    }
+
+    /// Relative mass drift from the start (should stay at machine zero — fixed particle count).
+    pub fn mass_drift(&self) -> f64 {
+        let m = self.sph.n_fluid as f64 * self.sph.mass;
+        (m - self.m0).abs() / self.m0
+    }
+
+    pub fn kinetic_energy(&self) -> f64 {
+        self.sph.kinetic_energy()
+    }
+
+    pub fn n_fluid(&self) -> usize {
+        self.sph.n_fluid
     }
 }

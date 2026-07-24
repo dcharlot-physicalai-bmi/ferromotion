@@ -137,6 +137,54 @@ impl Sph {
         }
     }
 
+    /// A canonical **dam break**: a tall column of fluid on the left of a closed box, released under
+    /// gravity. Particle spacing `dx`; column `0.25 × 0.5`, box `1.0 × 0.6` with three boundary
+    /// layers on the floor and both side walls. The iconic free-surface SPH demonstration.
+    pub fn dam_break(dx: f64) -> Sph {
+        let (rho0, g) = (1.0f64, 2.0f64);
+        let (bw, bh) = (1.0f64, 0.6f64);
+        let mut pos = Vec::new();
+        // fluid column [0.02, 0.27] × [0.02, 0.52]
+        let (cnx, cny) = ((0.25 / dx) as usize, (0.5 / dx) as usize);
+        for i in 0..cnx {
+            for j in 0..cny {
+                pos.push([0.02 + i as f64 * dx, 0.02 + j as f64 * dx]);
+            }
+        }
+        let n_fluid = pos.len();
+        let rows = (bh / dx) as usize + 4;
+        let cols = (bw / dx) as usize + 1;
+        for k in 1..=3 {
+            for j in 0..rows {
+                pos.push([-(k as f64) * dx, (j as f64) * dx - 3.0 * dx]); // left wall
+                pos.push([bw + (k as f64 - 1.0) * dx, (j as f64) * dx - 3.0 * dx]); // right wall
+            }
+            for i in 0..cols {
+                pos.push([i as f64 * dx, -(k as f64) * dx]); // floor
+            }
+        }
+        let n = pos.len();
+        let c0 = 10.0 * (g * 0.5f64).sqrt();
+        Sph {
+            vel: vec![[0.0, 0.0]; n],
+            rho: vec![rho0; n],
+            n_fluid,
+            mass: rho0 * dx * dx,
+            h: 1.3 * dx,
+            rho0,
+            c0,
+            gamma: 7.0,
+            gravity: g,
+            alpha: 0.3,
+            pos,
+        }
+    }
+
+    /// Fluid kinetic energy `½ Σ m|v|²` (a live monitor of the collapse).
+    pub fn kinetic_energy(&self) -> f64 {
+        (0..self.n_fluid).map(|i| 0.5 * self.mass * (self.vel[i][0].powi(2) + self.vel[i][1].powi(2))).sum()
+    }
+
     /// Total linear momentum of the fluid (Σ m v).
     pub fn momentum(&self) -> [f64; 2] {
         let mut m = [0.0, 0.0];
@@ -222,6 +270,34 @@ mod verification {
         let drift = ((p1[0] - p0[0]).powi(2) + (p1[1] - p0[1]).powi(2)).sqrt();
         eprintln!("SPH momentum drift over 300 steps: {drift:.2e}");
         assert!(drift < 1e-12, "momentum not conserved: drift {drift}");
+    }
+
+    /// The dam break stays stable and conserves mass while the front surges — a smoke test for the
+    /// iconic free-surface demo the live bench renders (no NaNs, particles stay in the box, the
+    /// collapse releases then dissipates kinetic energy).
+    #[test]
+    fn dam_break_is_stable_and_surges() {
+        let mut s = Sph::dam_break(0.025);
+        let m0 = s.n_fluid as f64 * s.mass;
+        let dt = s.cfl_dt();
+        let mut ke_peak = 0.0f64;
+        let mut max_x = 0.0f64;
+        for step in 0..3000 {
+            s.step(dt);
+            if step > 200 {
+                ke_peak = ke_peak.max(s.kinetic_energy());
+            }
+            for i in 0..s.n_fluid {
+                assert!(s.pos[i][0].is_finite() && s.pos[i][1].is_finite(), "NaN at step {step}");
+                max_x = max_x.max(s.pos[i][0]);
+            }
+        }
+        let mass = s.n_fluid as f64 * s.mass; // fixed particle count → exact
+        eprintln!("dam break: front reached x={max_x:.3}, peak KE={ke_peak:.3e}, mass drift={:.1e}", (mass - m0).abs());
+        assert!((mass - m0).abs() < 1e-12, "mass not conserved");
+        assert!(max_x > 0.5, "front did not surge across the box: {max_x}");
+        assert!(max_x < 1.1, "fluid escaped the box: {max_x}"); // DBC allows a little wall penetration
+        assert!(ke_peak > 0.0, "no collapse energy released");
     }
 
     /// A fluid column in a box settles to hydrostatic equilibrium: the pressure profile is linear in
