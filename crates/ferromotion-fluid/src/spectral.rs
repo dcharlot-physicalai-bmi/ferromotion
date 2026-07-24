@@ -16,6 +16,7 @@ pub struct Cplx {
     pub re: f64,
     pub im: f64,
 }
+#[allow(clippy::should_implement_trait)] // tiny internal complex helper; std ops not worth the boilerplate
 impl Cplx {
     pub fn new(re: f64, im: f64) -> Self {
         Cplx { re, im }
