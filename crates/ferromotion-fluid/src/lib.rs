@@ -37,6 +37,7 @@ pub mod gust;
 pub mod lbm;
 pub mod lbm3d;
 pub mod mac_adjoint;
+pub mod sph;
 pub mod swimmer;
 #[cfg(feature = "gpu")]
 pub mod lbm_gpu;
