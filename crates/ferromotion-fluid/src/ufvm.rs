@@ -141,6 +141,130 @@ pub fn solve_poisson(mesh: &TriMesh, source: impl Fn(f64, f64) -> f64, bc: impl 
     phi
 }
 
+/// The 3×3 element stiffness matrix of a triangle (geometry only; scaled by conductivity later).
+fn element_ke(p: [[f64; 2]; 3]) -> [[f64; 3]; 3] {
+    let two_a = (p[1][0] - p[0][0]) * (p[2][1] - p[0][1]) - (p[2][0] - p[0][0]) * (p[1][1] - p[0][1]);
+    let area = two_a.abs() * 0.5;
+    let bc = [
+        (p[1][1] - p[2][1], p[2][0] - p[1][0]),
+        (p[2][1] - p[0][1], p[0][0] - p[2][0]),
+        (p[0][1] - p[1][1], p[1][0] - p[0][0]),
+    ];
+    let mut ke = [[0.0; 3]; 3];
+    for a in 0..3 {
+        for b in 0..3 {
+            ke[a][b] = (bc[a].0 * bc[b].0 + bc[a].1 * bc[b].1) / (4.0 * area);
+        }
+    }
+    ke
+}
+
+/// **Discrete adjoint on the unstructured mesh.** For `−∇·(k∇φ) = S` with homogeneous Dirichlet
+/// boundaries and a per-element conductivity `k`, and objective `J = ½‖φ − target‖²` over interior
+/// vertices, return `(J, ∂J/∂k)`. The operator `K(k)` is SPD and self-adjoint, so the adjoint solve
+/// `K λ = (φ − target)` reuses the *same* factored Cholesky — one extra solve for the whole gradient
+/// field, exactly as the MAC pressure-projection adjoint reused its factor.
+#[allow(clippy::needless_range_loop)]
+pub fn conductivity_gradient(mesh: &TriMesh, k_elem: &[f64], source: impl Fn(f64, f64) -> f64, target: &[f64]) -> (f64, Vec<f64>) {
+    let nv = mesh.verts.len();
+    let kes: Vec<[[f64; 3]; 3]> = mesh.tris.iter().map(|t| element_ke([mesh.verts[t[0]], mesh.verts[t[1]], mesh.verts[t[2]]])).collect();
+
+    // interior numbering
+    let mut interior = Vec::new();
+    let mut idx_of = vec![usize::MAX; nv];
+    for v in 0..nv {
+        if !mesh.boundary[v] {
+            idx_of[v] = interior.len();
+            interior.push(v);
+        }
+    }
+    let ni = interior.len();
+
+    // assemble K(k) over interior dofs + source load b
+    use std::collections::BTreeMap;
+    let mut rows = vec![BTreeMap::<usize, f64>::new(); ni];
+    let mut b = vec![0.0f64; ni];
+    for (e, t) in mesh.tris.iter().enumerate() {
+        for a in 0..3 {
+            if mesh.boundary[t[a]] {
+                continue;
+            }
+            let ra = idx_of[t[a]];
+            for bb in 0..3 {
+                if mesh.boundary[t[bb]] {
+                    continue; // homogeneous Dirichlet: boundary φ = 0, no elimination term
+                }
+                *rows[ra].entry(idx_of[t[bb]]).or_insert(0.0) += k_elem[e] * kes[e][a][bb];
+            }
+        }
+    }
+    for v in 0..nv {
+        if !mesh.boundary[v] {
+            // lumped source split across the element vertices happens per-element below
+        }
+    }
+    for (e, t) in mesh.tris.iter().enumerate() {
+        let p = [mesh.verts[t[0]], mesh.verts[t[1]], mesh.verts[t[2]]];
+        let two_a = (p[1][0] - p[0][0]) * (p[2][1] - p[0][1]) - (p[2][0] - p[0][0]) * (p[1][1] - p[0][1]);
+        let area = two_a.abs() * 0.5;
+        let _ = e;
+        for a in 0..3 {
+            if !mesh.boundary[t[a]] {
+                b[idx_of[t[a]]] += area / 3.0 * source(p[a][0], p[a][1]);
+            }
+        }
+    }
+
+    let mut trips: Vec<Triplet<usize, usize, f64>> = Vec::new();
+    for ri in 0..ni {
+        for (&ci, &val) in &rows[ri] {
+            if ci <= ri {
+                trips.push(Triplet::new(ri, ci, val));
+            }
+        }
+    }
+    let mat = SparseColMat::<usize, f64>::try_new_from_triplets(ni, ni, &trips).expect("assemble");
+    let llt = mat.sp_cholesky(Side::Lower).expect("SPD");
+
+    // forward solve φ
+    let mut rhs = Mat::<f64>::zeros(ni, 1);
+    for ri in 0..ni {
+        rhs[(ri, 0)] = b[ri];
+    }
+    llt.solve_in_place(rhs.as_mut());
+    let mut phi = vec![0.0f64; nv];
+    for ri in 0..ni {
+        phi[interior[ri]] = rhs[(ri, 0)];
+    }
+
+    // objective + adjoint RHS (φ − target) on interior; self-adjoint ⇒ same factor
+    let mut j = 0.0;
+    let mut ar = Mat::<f64>::zeros(ni, 1);
+    for ri in 0..ni {
+        let d = phi[interior[ri]] - target[interior[ri]];
+        j += 0.5 * d * d;
+        ar[(ri, 0)] = d;
+    }
+    llt.solve_in_place(ar.as_mut());
+    let mut lam = vec![0.0f64; nv];
+    for ri in 0..ni {
+        lam[interior[ri]] = ar[(ri, 0)];
+    }
+
+    // gradient: ∂J/∂k[e] = −λᵀ (∂K/∂k[e]) φ = −Σ_ab λ[t_a] Ke[a][b] φ[t_b]  (boundary λ=φ=0)
+    let mut grad = vec![0.0f64; mesh.tris.len()];
+    for (e, t) in mesh.tris.iter().enumerate() {
+        let mut g = 0.0;
+        for a in 0..3 {
+            for bb in 0..3 {
+                g += lam[t[a]] * kes[e][a][bb] * phi[t[bb]];
+            }
+        }
+        grad[e] = -g;
+    }
+    (j, grad)
+}
+
 #[cfg(test)]
 mod verification {
     use super::*;
@@ -180,5 +304,36 @@ mod verification {
         eprintln!("unstructured FVM MMS (jittered): e17 {e17:.3e}  e33 {e33:.3e}  order {order:.2}");
         assert!(e17 < 5e-3, "irregular-mesh error too large: {e17}");
         assert!(order > 1.6, "convergence lost on an irregular mesh: {order}");
+    }
+
+    /// The discrete adjoint gradient of the objective w.r.t. the per-element conductivity, checked
+    /// against central finite differences on a jittered mesh — the exact gradient through the
+    /// assembled sparse solve, at O(1) solves regardless of the number of conductivities.
+    #[test]
+    fn conductivity_adjoint_matches_fd() {
+        let mesh = TriMesh::unit_square(13, 0.2);
+        let ne = mesh.tris.len();
+        let k: Vec<f64> = (0..ne).map(|e| 1.0 + 0.3 * ((e % 5) as f64)).collect(); // heterogeneous
+        let target = vec![0.0; mesh.verts.len()]; // J = ½‖φ‖²
+        let src = |x: f64, y: f64| (PI * x).sin() * (PI * y).sin();
+
+        let (_, grad) = conductivity_gradient(&mesh, &k, src, &target);
+
+        // FD on a handful of elements spread across the mesh.
+        let eps = 1e-6;
+        let mut worst = 0.0f64;
+        for &e in &[0usize, ne / 3, ne / 2, 2 * ne / 3, ne - 1] {
+            let mut kp = k.clone();
+            kp[e] += eps;
+            let mut km = k.clone();
+            km[e] -= eps;
+            let jp = conductivity_gradient(&mesh, &kp, src, &target).0;
+            let jm = conductivity_gradient(&mesh, &km, src, &target).0;
+            let fd = (jp - jm) / (2.0 * eps);
+            let rel = (grad[e] - fd).abs() / fd.abs().max(1e-9);
+            worst = worst.max(rel);
+        }
+        eprintln!("unstructured adjoint dJ/dk vs FD: worst rel {worst:.2e}");
+        assert!(worst < 1e-5, "discrete adjoint gradient off: {worst}");
     }
 }
