@@ -35,6 +35,7 @@
 
 pub mod fvm;
 pub mod gust;
+pub mod harness;
 pub mod lbm;
 pub mod lbm3d;
 pub mod mac_adjoint;
