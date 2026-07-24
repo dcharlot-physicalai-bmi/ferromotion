@@ -513,3 +513,57 @@ impl EulerLab {
         (0..self.euler.n).map(|i| self.euler.state(i).2).collect()
     }
 }
+
+/// **Spectral Navier–Stokes vortex dynamics** — the pseudo-spectral solver on real nonlinear flow.
+/// A handful of vortices interact and merge; the page renders the vorticity field and reads the
+/// enstrophy, which must decay monotonically (viscous dissipation) — the physics receipt.
+#[wasm_bindgen]
+pub struct SpectralLab {
+    ns: ferromotion_fluid::spectral_ns::SpectralNs,
+    n: usize,
+}
+
+#[wasm_bindgen]
+impl SpectralLab {
+    #[wasm_bindgen(constructor)]
+    pub fn new(n: usize) -> SpectralLab {
+        use std::f64::consts::PI;
+        let l = 2.0 * PI;
+        // deterministic vortex field: four vortices of alternating sign.
+        let centers = [(0.35, 0.5, 1.0), (0.65, 0.5, 1.0), (0.5, 0.32, -1.0), (0.5, 0.68, -1.0)];
+        let r2 = 0.02;
+        let mut w0 = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let (x, y) = (i as f64 / n as f64, j as f64 / n as f64);
+                let mut s = 0.0;
+                for &(cx, cy, sgn) in &centers {
+                    let d2 = (x - cx).powi(2) + (y - cy).powi(2);
+                    s += sgn * 6.0 * (-d2 / r2).exp();
+                }
+                w0[i * n + j] = s;
+            }
+        }
+        let ns = ferromotion_fluid::spectral_ns::SpectralNs::new(&w0, n, l, 0.002);
+        SpectralLab { ns, n }
+    }
+
+    pub fn step(&mut self, k: usize) {
+        for _ in 0..k {
+            self.ns.step(0.004);
+        }
+    }
+
+    pub fn n(&self) -> usize {
+        self.n
+    }
+
+    /// Vorticity field, row-major `n×n` (signed).
+    pub fn vorticity(&self) -> Vec<f64> {
+        self.ns.vorticity()
+    }
+
+    pub fn enstrophy(&self) -> f64 {
+        self.ns.enstrophy()
+    }
+}
