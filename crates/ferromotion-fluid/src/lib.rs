@@ -41,6 +41,7 @@ pub mod lbm3d;
 pub mod mac_adjoint;
 pub mod sph;
 pub mod swimmer;
+pub mod vof;
 #[cfg(feature = "gpu")]
 pub mod lbm_gpu;
 pub use lbm::{LbmBc, LbmD2Q9};
