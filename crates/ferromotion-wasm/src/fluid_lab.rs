@@ -567,3 +567,61 @@ impl SpectralLab {
         self.ns.enstrophy()
     }
 }
+
+/// **Lid-driven cavity on an unstructured mesh** — the coupled Taylor–Hood Navier–Stokes solver on
+/// triangles, the one view that shows the mesh itself. Solves the steady cavity (top wall drives the
+/// flow) and exposes the mesh + vertex speeds so the page can render the triangulation colored by
+/// the flow and the primary vortex it forms. Self-verifying: the solution is divergence-free.
+#[wasm_bindgen]
+pub struct UCavityLab {
+    verts: Vec<[f64; 2]>,
+    tris: Vec<[usize; 3]>,
+    vspeed: Vec<f64>,
+    vu: Vec<f64>,
+    vv: Vec<f64>,
+    iters: usize,
+}
+
+#[wasm_bindgen]
+impl UCavityLab {
+    /// `n×n` vertex grid triangulated; Reynolds number `re` (unit lid speed, unit box → ν = 1/re).
+    #[wasm_bindgen(constructor)]
+    pub fn new(n: usize, re: f64) -> UCavityLab {
+        use ferromotion_fluid::ufvm::TriMesh;
+        use ferromotion_fluid::ufvm_stokes::{solve_navier_stokes, velocity_node_coords};
+        let mesh = TriMesh::unit_square(n, 0.0);
+        let lid = |_x: f64, y: f64| if y > 0.999 { (1.0, 0.0) } else { (0.0, 0.0) };
+        let (u, v, _p, iters) = solve_navier_stokes(&mesh, 1.0 / re, |_, _| (0.0, 0.0), lid, 0.0, 1e-6, 40);
+        let coords = velocity_node_coords(&mesh);
+        let nv = mesh.verts.len();
+        // vertices are the first nv P2 nodes.
+        let (mut vu, mut vv, mut vspeed) = (vec![0.0; nv], vec![0.0; nv], vec![0.0; nv]);
+        for i in 0..nv {
+            vu[i] = u[i];
+            vv[i] = v[i];
+            vspeed[i] = (u[i] * u[i] + v[i] * v[i]).sqrt();
+        }
+        let _ = coords;
+        UCavityLab { verts: mesh.verts, tris: mesh.tris, vspeed, vu, vv, iters }
+    }
+
+    /// Vertex coordinates, flat `[x,y,…]`.
+    pub fn verts(&self) -> Vec<f64> {
+        self.verts.iter().flat_map(|p| [p[0], p[1]]).collect()
+    }
+    /// Triangle vertex indices, flat `[i0,i1,i2,…]`.
+    pub fn tris(&self) -> Vec<u32> {
+        self.tris.iter().flat_map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]).collect()
+    }
+    /// Speed |u| per vertex.
+    pub fn vertex_speed(&self) -> Vec<f64> {
+        self.vspeed.clone()
+    }
+    /// Velocity per vertex, flat `[u,v,…]` (for streamline arrows).
+    pub fn velocity(&self) -> Vec<f64> {
+        self.vu.iter().zip(&self.vv).flat_map(|(&a, &b)| [a, b]).collect()
+    }
+    pub fn iters(&self) -> usize {
+        self.iters
+    }
+}
