@@ -27,6 +27,7 @@ pub use ferromotion_learn as learn;
 pub use ferromotion_core as core;
 pub use ferromotion_fluid as fluid;
 pub use ferromotion_cloth as cloth;
+pub use ferromotion_fem as fem;
 pub use ferromotion_mpm as mpm;
 pub use ferromotion_policy as policy;
 pub use ferromotion_ruckig as ruckig;
