@@ -1384,6 +1384,8 @@ version = "0.32.0"
 dependencies = [
  "ferromotion-control",
  "ferromotion-core",
+ "ferromotion-dem",
+ "ferromotion-fem",
  "ferromotion-fluid",
  "ferromotion-learn",
  "nalgebra",
