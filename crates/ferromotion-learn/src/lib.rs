@@ -24,6 +24,7 @@ mod diff_control;
 mod dual;
 pub mod calib;
 pub mod nls;
+pub mod smoothed;
 mod hnn;
 mod msnn;
 mod neural_ode;
