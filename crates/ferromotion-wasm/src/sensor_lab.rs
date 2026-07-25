@@ -128,11 +128,11 @@ impl SensorLab {
         self.range_err
     }
 
-    /// A top-down lidar slice (single elevation ring) from the scene center height, returning hit
-    /// points as flat `[x, y, …]` in world coordinates.
+    /// A top-down lidar slice (single elevation ring) from a sensor placed outside the objects,
+    /// returning hit points as flat `[x, y, …]` in world coordinates.
     pub fn lidar_topdown(&self, n_rays: usize) -> Vec<f64> {
         let lidar = Lidar {
-            pose: Isometry3::from_parts(Translation3::new(0.0, 0.0, 0.55), UnitQuaternion::identity()),
+            pose: Isometry3::from_parts(Translation3::new(0.0, -2.6, 0.5), UnitQuaternion::identity()),
             n_azimuth: n_rays,
             n_elevation: 1,
             az_min: 0.0,
