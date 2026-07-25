@@ -126,6 +126,16 @@ impl SdfScene {
         nearest.map(|s| s.gradient(p)).unwrap_or_else(|| Vector3::new(0.0, 0.0, 1.0))
     }
 
+    /// The nearest primitive's index and its signed distance (`None` if the scene is empty). The
+    /// index is the per-object segmentation label for sensor rendering.
+    pub fn nearest(&self, p: &Vector3<f64>) -> Option<(usize, f64)> {
+        self.prims
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (i, s.distance(p)))
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+    }
+
     /// Minimum clearance of a set of collision spheres `(center, radius)` (negative ⇒ penetration).
     pub fn min_clearance(&self, spheres: &[(Vector3<f64>, f64)]) -> f64 {
         spheres.iter().map(|&(c, r)| self.distance(&c) - r).fold(f64::INFINITY, f64::min)
