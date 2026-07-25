@@ -1,5 +1,35 @@
 # Ferromotion — the SOTA Frontier Map
 
+> **⚑ CURRENT STATUS (v0.32.0, 2026-07-25 — supersedes everything below).** The detailed
+> sections that follow are the historical v0.21-era sweep; **many items marked 🔲 missing in
+> them are in fact shipped.** A full 2026-07-25 re-review (capability-map over all crates +
+> global landscape: Pinocchio/Parry/Rapier/Dojo/Newton/Genesis/cuRobo/OMPL/GTSAM/Isaac) found
+> ferromotion is the closest thing to a Rust-native Pinocchio + control + estimation + planning +
+> differentiable-physics stack, wasm-clean. Scale: **15 crates, ~860 test fns, v0.32.0 on
+> crates.io.**
+>
+> **Shipped (confirmed in source), not to rebuild:** FK/Jac/RNEA/ABA/floating-base + analytic
+> dynamics derivatives + generic-scalar `gendyn` + **CRBA**; constraint/contact (Delassus, PGS,
+> ADMM, IPC/LCP/IPM/hydroelastic, C3); collision **GJK/EPA/CCD/DiffCol/SDF/ESDF/C-space-SDF** +
+> **BVH broadphase**; URDF **and MJCF and SDFormat**; the ~64-controller stack (iLQR/FDDP/boxDDP/
+> ALGAMES, MPPI/CEM/iCEM/DIAL, tube/SRBD/centroidal MPC, CBF/HJ, CCM, WBC/OSC/HQP, ZMP/DCM/ALIP/
+> SLIP) + **batched/data-parallel rollouts**; estimation EKF/UKF/InEKF/MSCKF/iSAM/pose-graph/GNC +
+> **particle filter + moving-horizon estimation**; planning RRT*/BIT*/CHOMP/GPMP2/IRIS/GCS/
+> Hybrid-A*/Dubins/Reeds-Shepp + **PRM***; deformables MPM/cloth/rod/tactile + **volumetric
+> tetrahedral Neo-Hookean FEM** + **DEM granular**; the full verified fluid suite (MAC/LBM-2D&3D+GPU/
+> SPH/VOF/spectral/Euler/FVM/unstructured-NS/DMD/harness); geometric vision PnP/essential/homography/
+> BA/ORB/AprilTag/SGM/ICP/KISS-ICP/TEASER; learn AD (reverse+forward+hyperdual)/PINN/DeLaN/HNN/
+> Neural-ODE/SINDy/calib + **smoothed (randomized) differentiable contact**; **sensor rendering**
+> (depth-camera/lidar/segmentation by SDF sphere-tracing); **3-D mesh** (area/volume/convex hull).
+>
+> **Genuinely remaining (short):** SIMPLE/PISO unstructured incompressible momentum (fluids have
+> incompressible NS via MAC + spectral + Taylor-Hood already); interactively-authenticated MCP
+> caveats aside — nothing else is a *capability* gap. Residual polish: WebGPU throughput legs
+> (sensor render, batched rollouts), tetrahedral-mesh generation, non-frozen-active-set contact for
+> the constraint solver proper (the smoothing estimator exists in `learn`), MPR narrowphase.
+
+---
+
 *What a complete, state-of-the-art Rust library for the motion of physical AI needs — and where we stand.*
 
 This document is the canonical roadmap. It was produced by sweeping the full research
