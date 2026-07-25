@@ -7,6 +7,8 @@
 use nalgebra::{DVector, Vector3};
 use ferromotion_core::{gravity_vector, inverse_dynamics, mass_matrix, LinkInertia, Robot};
 
+mod batch;
+pub use batch::{batch_rollout, Cartpole};
 mod alip;
 mod abfilter;
 mod actuator;
