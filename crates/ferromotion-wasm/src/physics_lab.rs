@@ -23,17 +23,15 @@ pub struct FemLab {
 impl FemLab {
     #[wasm_bindgen(constructor)]
     pub fn new() -> FemLab {
-        let mut sim = FemSim::box_grid(3, 3, 3, 0.28, 0.6, 3.0e3, 1.5e3, 2e-4);
-        sim.damping = 0.01;
+        let mut sim = FemSim::box_grid(3, 3, 3, 0.28, 0.5, 3.0e3, 1.5e3, 2e-4);
+        sim.damping = 0.004;
         sim.gravity = Vector3::new(0.0, 0.0, -9.81);
-        // pin the top face (max z) so the block hangs and wobbles
-        let zmax = sim.x.iter().map(|p| p.z).fold(f64::NEG_INFINITY, f64::max);
+        sim.floor = Some(0.0);
+        sim.k_contact = 3.0e4;
+        // lift the block above the floor and give it a slight tumble, then drop it
         for i in 0..sim.n_verts() {
-            if sim.x[i].z > zmax - 1e-6 {
-                sim.pinned[i] = true;
-            } else {
-                sim.v[i] = Vector3::new(1.2, 0.0, 0.0); // kick it sideways to start the wobble
-            }
+            sim.x[i].z += 0.55;
+            sim.v[i] = Vector3::new(0.6, 0.0, 0.0);
         }
         // unique tet edges for the wireframe
         use std::collections::HashSet;
