@@ -33,7 +33,7 @@ pub(crate) fn motion_transform(r: Matrix3<f64>, p: Vector3<f64>) -> Matrix6<f64>
 }
 
 /// Spatial inertia (6×6) of a link about its frame origin, from mass, COM `c`, and COM-inertia `ic`.
-fn spatial_inertia(li: &LinkInertia) -> Matrix6<f64> {
+pub(crate) fn spatial_inertia(li: &LinkInertia) -> Matrix6<f64> {
     let (m, c) = (li.mass, li.com);
     let cx = skew(c);
     block6(li.inertia - m * cx * cx, m * cx, -m * cx, m * Matrix3::identity())

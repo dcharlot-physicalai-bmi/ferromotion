@@ -11,6 +11,7 @@
 use nalgebra::{DMatrix, DVector, Isometry3, Translation3, Unit, UnitQuaternion, Vector3, Vector6};
 
 mod aba;
+mod crba;
 mod apriltag;
 mod bit_star;
 mod bspline;
@@ -114,6 +115,7 @@ mod urdf;
 mod xcorr;
 mod xpbd;
 pub use aba::{floating_base_forward_dynamics, forward_dynamics_aba};
+pub use crba::crba;
 pub use apriltag::{decode_payload, tag_pose};
 pub use cfd_contact::{rollout_impulse, CfdContact};
 pub use bit_star::BitStar;
