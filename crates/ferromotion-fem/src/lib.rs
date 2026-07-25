@@ -31,6 +31,10 @@ pub struct FemSim {
     pub damping: f64,
     pub dt: f64,
     pub gravity: Vector3<f64>,
+    /// Optional penalty floor at `z = floor`; vertices below it are pushed up by a spring–dashpot
+    /// contact of stiffness `k_contact` (so the body can land, rest, and bounce on the ground).
+    pub floor: Option<f64>,
+    pub k_contact: f64,
 }
 
 /// Rest edge matrix of a tet (columns = edges from vertex 0), and its signed volume `det/6`.
@@ -62,6 +66,8 @@ impl FemSim {
             damping: 0.0,
             dt,
             gravity: Vector3::new(0.0, 0.0, -9.81),
+            floor: None,
+            k_contact: 0.0,
         }
     }
 
@@ -165,10 +171,22 @@ impl FemSim {
         f
     }
 
-    /// One semi-implicit (symplectic) Euler step under gravity + elasticity, pins held fixed.
+    /// One semi-implicit (symplectic) Euler step under gravity + elasticity + optional floor
+    /// contact, pins held fixed.
     #[allow(clippy::needless_range_loop)] // vertex index addresses forces/x/v/pinned together
     pub fn step(&mut self) {
-        let forces = self.forces();
+        let mut forces = self.forces();
+        // penalty floor contact: spring–dashpot on vertices below the floor
+        if let Some(fz) = self.floor {
+            let gamma = 0.7 * (self.k_contact * self.mass).sqrt(); // near-critical contact damping
+            for i in 0..self.x.len() {
+                let pen = fz - self.x[i].z;
+                if pen > 0.0 {
+                    let vn = self.v[i].z.min(0.0); // dissipate only while approaching
+                    forces[i].z += self.k_contact * pen - gamma * vn;
+                }
+            }
+        }
         let inv_m = 1.0 / self.mass;
         for i in 0..self.x.len() {
             if self.pinned[i] {
@@ -293,6 +311,29 @@ mod verification {
         eprintln!("free fall: mean vz {vz:.5} (expect {expect:.5}), lateral drift {vxy:.2e}");
         assert!((vz - expect).abs() < 1e-6, "not free-falling at g: {vz} vs {expect}");
         assert!(vxy < 1e-9, "spurious lateral motion in rigid free-fall: {vxy}");
+    }
+
+    /// A free soft body dropped onto the penalty floor lands, deforms, and settles to rest above it —
+    /// no vertex tunnels through, and the motion damps out.
+    #[test]
+    fn dropped_soft_body_lands_and_settles() {
+        let mut sim = FemSim::box_grid(2, 2, 2, 0.3, 0.4, 4.0e3, 2.0e3, 3e-4);
+        sim.damping = 0.003;
+        sim.floor = Some(0.0);
+        sim.k_contact = 3.0e4;
+        // lift it above the floor
+        for p in &mut sim.x {
+            p.z += 0.5;
+        }
+        for _ in 0..9000 {
+            sim.step();
+        }
+        let lowest = sim.x.iter().map(|p| p.z).fold(f64::INFINITY, f64::min);
+        let ke: f64 = sim.v.iter().map(|v| 0.5 * sim.mass * v.norm_squared()).sum();
+        eprintln!("dropped soft body: lowest z {lowest:.4}, residual KE {ke:.2e}");
+        assert!(lowest > -0.02, "a vertex tunneled through the floor: {lowest}");
+        assert!(lowest < 0.05, "the body never reached the floor: {lowest}");
+        assert!(ke < 5e-3, "the body did not settle: KE {ke}"); // near-rest (small elastic jiggle is physical)
     }
 
     /// A stretched box builds a static energy that grows monotonically with the stretch — sanity on
