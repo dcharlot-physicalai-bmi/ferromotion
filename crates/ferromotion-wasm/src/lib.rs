@@ -104,6 +104,7 @@ pub use pid_lab::PidLab;
 
 mod calib_lab;
 mod fluid_lab;
+mod sensor_lab;
 mod capstone_lab;
 pub use capstone_lab::CapstoneLab;
 
