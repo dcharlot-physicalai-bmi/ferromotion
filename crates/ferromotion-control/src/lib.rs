@@ -7,6 +7,10 @@
 use nalgebra::{DVector, Vector3};
 use ferromotion_core::{gravity_vector, inverse_dynamics, mass_matrix, LinkInertia, Robot};
 
+mod pf;
+mod mhe;
+pub use pf::ParticleFilter;
+pub use mhe::{batch_estimate, LinearModel};
 mod batch;
 pub use batch::{batch_rollout, Cartpole};
 mod alip;
