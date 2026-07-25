@@ -13,6 +13,7 @@ use nalgebra::{DMatrix, DVector, Isometry3, Translation3, Unit, UnitQuaternion, 
 mod aba;
 mod crba;
 mod apriltag;
+mod bvh;
 mod bit_star;
 mod bspline;
 mod bundle;
@@ -120,6 +121,7 @@ pub use crba::crba;
 pub use apriltag::{decode_payload, tag_pose};
 pub use cfd_contact::{rollout_impulse, CfdContact};
 pub use bit_star::BitStar;
+pub use bvh::{Aabb, Bvh};
 pub use bspline::BSpline;
 pub use bundle::{BundleAdjustment, Camera, Observation};
 pub use camera::{calibrate, PinholeCamera};
