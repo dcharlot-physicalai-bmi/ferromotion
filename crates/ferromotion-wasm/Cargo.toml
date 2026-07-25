@@ -14,9 +14,9 @@ description = "Universal WebAssembly bindings for ferromotion — robot IK/kinem
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-ferromotion-core = { path = "../ferromotion-core", version = "0.31.0" }
-ferromotion-control = { path = "../ferromotion-control", version = "0.31.0" }
-ferromotion-learn = { path = "../ferromotion-learn", version = "0.31.0" }
-ferromotion-fluid = { path = "../ferromotion-fluid", version = "0.31.0" }
+ferromotion-core = { path = "../ferromotion-core", version = "0.32.0" }
+ferromotion-control = { path = "../ferromotion-control", version = "0.32.0" }
+ferromotion-learn = { path = "../ferromotion-learn", version = "0.32.0" }
+ferromotion-fluid = { path = "../ferromotion-fluid", version = "0.32.0" }
 wasm-bindgen = "0.2"
 nalgebra.workspace = true
