@@ -37,6 +37,8 @@ pub struct SeeReachGrasp {
     pub grasp: GraspFemSim,
     pub radius: f64,       // nominal object radius (for the SDF perception proxy)
     pub rest_center: Vector3<f64>,
+    pub distractor_c: Vector3<f64>, // a decoy object beside the target (perception clutter, label 1)
+    pub distractor_h: Vector3<f64>,
     pub cam: DepthCamera, // fixed eye-to-hand camera
     pub phase: u8,
     pub t: u32,
@@ -93,6 +95,10 @@ impl SeeReachGrasp {
             grasp,
             radius,
             rest_center: center,
+            // a larger decoy just beyond the target (off the reach path, still in the camera's view):
+            // a naive "grab the biggest blob" would take this, but segmentation targets label 0.
+            distractor_c: Vector3::new(0.55, 0.03, 0.42),
+            distractor_h: Vector3::new(0.11, 0.11, 0.13),
             cam,
             phase: APPROACH,
             t: 0,
@@ -128,7 +134,14 @@ impl SeeReachGrasp {
             lo = lo.inf(p);
             hi = hi.sup(p);
         }
-        let proxy = SdfScene { prims: vec![Sdf::Box { center: 0.5 * (lo + hi), half: 0.5 * (hi - lo) }] };
+        // prim 0 = the target (what we grasp); prim 1 = a decoy the camera also sees. `perceive`
+        // segments label 0 out of the raytraced image, so the arm is never fooled by the clutter.
+        let proxy = SdfScene {
+            prims: vec![
+                Sdf::Box { center: 0.5 * (lo + hi), half: 0.5 * (hi - lo) },
+                Sdf::Box { center: self.distractor_c, half: self.distractor_h },
+            ],
+        };
         let p = perceive(&self.cam, &proxy, 0);
         if p.seen {
             let cam_pos = self.cam.pose.translation.vector;
@@ -322,6 +335,10 @@ impl SeeReachGraspLab {
         let c = self.sim.object_centroid();
         vec![c.x, c.z]
     }
+    /// The decoy object `[center_x, center_z, half_x, half_z]` (perception clutter the arm ignores).
+    pub fn decoy_xz(&self) -> Vec<f64> {
+        vec![self.sim.distractor_c.x, self.sim.distractor_c.z, self.sim.distractor_h.x, self.sim.distractor_h.z]
+    }
     /// Perceived-vs-true centre error — the live perception receipt (metres).
     pub fn perc_err(&self) -> f64 {
         (self.sim.center_est - self.sim.object_centroid()).norm()
@@ -356,9 +373,12 @@ mod tests {
         // perception fidelity (before the object is disturbed): estimate vs ground truth
         sim.perceive_object();
         let perc_err = (sim.center_est - sim.object_centroid()).norm();
+        let dist_to_decoy = (sim.center_est - sim.distractor_c).norm();
         assert!(sim.perceived.seen, "the camera did not see the object");
-        eprintln!("integrated: perceived centre err {perc_err:.3} m");
+        eprintln!("integrated: perceived centre err {perc_err:.3} m; distance from the decoy {dist_to_decoy:.3} m");
         assert!(perc_err < 0.04, "perceived centre off by {perc_err:.3} m");
+        // discrimination: it locked onto the target, not the larger decoy beside it
+        assert!(dist_to_decoy > 0.15, "perception was fooled by the decoy: only {dist_to_decoy:.3} m from it");
 
         let mut reached_grasp = false;
         for _ in 0..1500 {

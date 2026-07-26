@@ -113,6 +113,8 @@ mod grasp_fem_lab;
 pub use grasp_fem_lab::GraspFemLab;
 mod see_reach_grasp;
 pub use see_reach_grasp::SeeReachGraspLab;
+mod obstacle_reach;
+pub use obstacle_reach::ObstacleReachLab;
 mod physics_lab;
 mod capstone_lab;
 pub use capstone_lab::CapstoneLab;
