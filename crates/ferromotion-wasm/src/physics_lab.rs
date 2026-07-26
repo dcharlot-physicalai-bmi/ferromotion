@@ -208,3 +208,84 @@ impl Default for CartpoleLab {
         Self::new()
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Multiphysics — two-way FEM<->DEM: grains raining onto a compliant soft slab.
+// ---------------------------------------------------------------------------------------------
+#[wasm_bindgen]
+pub struct CoupledLab {
+    sim: ferromotion_coupled::CoupledFemDem,
+    edges: Vec<[usize; 2]>,
+}
+
+#[wasm_bindgen]
+impl CoupledLab {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> CoupledLab {
+        use ferromotion_dem::{DemSim, Grain};
+        use ferromotion_fem::FemSim;
+        let fem = FemSim::box_grid(4, 1, 1, 0.2, 0.5, 3.0e3, 1.5e3, 2e-4);
+        // grains dropped above the slab
+        let grains: Vec<Grain> = (0..12)
+            .map(|k| Grain {
+                x: Vector3::new(0.05 + (k % 4) as f64 * 0.19 + ((k * 7) % 3) as f64 * 0.02, 0.1, 0.7 + (k / 4) as f64 * 0.22),
+                v: Vector3::zeros(),
+                r: 0.075,
+                m: 0.2,
+            })
+            .collect();
+        let dem = DemSim::new(grains, 4.0e4, 70.0, 0.5, 2e-4);
+        let mut sim = ferromotion_coupled::CoupledFemDem::new(fem, dem, 0.08, 4.0e4);
+        sim.floor = Some(0.0);
+        sim.fem.damping = 0.03;
+        // pin the slab's base so it acts as a compliant mat the grains land on
+        let zmin = sim.fem.x.iter().map(|p| p.z).fold(f64::INFINITY, f64::min);
+        for i in 0..sim.fem.n_verts() {
+            if sim.fem.x[i].z < zmin + 1e-6 {
+                sim.fem.pinned[i] = true;
+            }
+        }
+        // FEM wireframe edges (grid proximity)
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        for a in 0..sim.fem.n_verts() {
+            for b in (a + 1)..sim.fem.n_verts() {
+                if (sim.fem.x[a] - sim.fem.x[b]).norm() < 1.05 * 0.2 {
+                    set.insert((a, b));
+                }
+            }
+        }
+        let edges = set.into_iter().map(|(a, b)| [a, b]).collect();
+        CoupledLab { sim, edges }
+    }
+
+    pub fn step(&mut self, k: usize) {
+        for _ in 0..k {
+            self.sim.step();
+        }
+    }
+
+    /// FEM vertices as flat `[x, z, …]` (front x–z view).
+    pub fn fem_verts(&self) -> Vec<f64> {
+        self.sim.fem.x.iter().flat_map(|p| [p.x, p.z]).collect()
+    }
+    pub fn fem_edges(&self) -> Vec<u32> {
+        self.edges.iter().flat_map(|e| [e[0] as u32, e[1] as u32]).collect()
+    }
+    /// Grain centers as flat `[x, z, …]`.
+    pub fn grains(&self) -> Vec<f64> {
+        self.sim.dem.grains.iter().flat_map(|g| [g.x.x, g.x.z]).collect()
+    }
+    pub fn grain_radius(&self) -> f64 {
+        self.sim.dem.grains.first().map(|g| g.r).unwrap_or(0.08)
+    }
+    pub fn kinetic_energy(&self) -> f64 {
+        self.sim.kinetic_energy()
+    }
+}
+
+impl Default for CoupledLab {
+    fn default() -> Self {
+        Self::new()
+    }
+}
