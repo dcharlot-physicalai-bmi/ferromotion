@@ -118,6 +118,24 @@ impl FemSim {
         Self::new(x, tets, mass, mu, lambda, dt)
     }
 
+    /// Build a soft body from an **implicit region** — voxelize `[lo, hi]` into `res³` cells, keep
+    /// those whose center is `inside`, and tetrahedralize (5 tets/cell). This lifts the solver off
+    /// the box grid onto arbitrary shapes (a sphere, an SDF, any predicate).
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_implicit(
+        lo: Vector3<f64>,
+        hi: Vector3<f64>,
+        res: usize,
+        inside: impl Fn(Vector3<f64>) -> bool,
+        mass: f64,
+        mu: f64,
+        lambda: f64,
+        dt: f64,
+    ) -> Self {
+        let (verts, tets) = tet_mesh_implicit(lo, hi, res, inside);
+        Self::new(verts, tets, mass, mu, lambda, dt)
+    }
+
     pub fn n_verts(&self) -> usize {
         self.x.len()
     }
@@ -205,10 +223,99 @@ impl FemSim {
     }
 }
 
+/// Tetrahedralize the interior of an implicit region. Voxelize `[lo, hi]` into `res³` cells; for
+/// each cell whose center satisfies `inside`, emit its 8 corners (shared corners deduplicated) and
+/// a 5-tet split. Returns `(vertices, tets)`.
+pub fn tet_mesh_implicit(lo: Vector3<f64>, hi: Vector3<f64>, res: usize, inside: impl Fn(Vector3<f64>) -> bool) -> (Vec<Vector3<f64>>, Vec<[usize; 4]>) {
+    use std::collections::HashMap;
+    let h = Vector3::new((hi.x - lo.x) / res as f64, (hi.y - lo.y) / res as f64, (hi.z - lo.z) / res as f64);
+    let mut verts: Vec<Vector3<f64>> = Vec::new();
+    let mut vmap: HashMap<(usize, usize, usize), usize> = HashMap::new();
+    let mut vid = |i: usize, j: usize, k: usize, verts: &mut Vec<Vector3<f64>>| -> usize {
+        *vmap.entry((i, j, k)).or_insert_with(|| {
+            verts.push(Vector3::new(lo.x + i as f64 * h.x, lo.y + j as f64 * h.y, lo.z + k as f64 * h.z));
+            verts.len() - 1
+        })
+    };
+    let mut tets = Vec::new();
+    for k in 0..res {
+        for j in 0..res {
+            for i in 0..res {
+                let center = Vector3::new(lo.x + (i as f64 + 0.5) * h.x, lo.y + (j as f64 + 0.5) * h.y, lo.z + (k as f64 + 0.5) * h.z);
+                if !inside(center) {
+                    continue;
+                }
+                let c = [
+                    vid(i, j, k, &mut verts),
+                    vid(i + 1, j, k, &mut verts),
+                    vid(i + 1, j + 1, k, &mut verts),
+                    vid(i, j + 1, k, &mut verts),
+                    vid(i, j, k + 1, &mut verts),
+                    vid(i + 1, j, k + 1, &mut verts),
+                    vid(i + 1, j + 1, k + 1, &mut verts),
+                    vid(i, j + 1, k + 1, &mut verts),
+                ];
+                if (i + j + k) % 2 == 0 {
+                    tets.push([c[0], c[1], c[3], c[4]]);
+                    tets.push([c[1], c[2], c[3], c[6]]);
+                    tets.push([c[1], c[3], c[4], c[6]]);
+                    tets.push([c[1], c[4], c[5], c[6]]);
+                    tets.push([c[3], c[4], c[6], c[7]]);
+                } else {
+                    tets.push([c[0], c[1], c[2], c[5]]);
+                    tets.push([c[0], c[2], c[3], c[7]]);
+                    tets.push([c[0], c[2], c[5], c[7]]);
+                    tets.push([c[0], c[4], c[5], c[7]]);
+                    tets.push([c[2], c[5], c[6], c[7]]);
+                }
+            }
+        }
+    }
+    (verts, tets)
+}
+
 #[cfg(test)]
 mod verification {
     use super::*;
     use nalgebra::{Rotation3, Vector3};
+
+    /// The implicit tetrahedralizer meshes a sphere: total tet volume converges to 4⁄3πr³ as the
+    /// resolution rises, every tet is non-degenerate, and a body built from it runs in the solver —
+    /// the FEM solver now works on arbitrary shapes, not just box grids.
+    #[test]
+    fn implicit_tet_mesh_meshes_a_sphere() {
+        let (c, r) = (Vector3::new(0.0, 0.0, 0.0), 1.0);
+        let inside = |p: Vector3<f64>| (p - c).norm() < r;
+        let lo = Vector3::new(-1.2, -1.2, -1.2);
+        let hi = Vector3::new(1.2, 1.2, 1.2);
+        let exact = 4.0 / 3.0 * std::f64::consts::PI * r * r * r;
+        let vol_at = |res: usize| -> f64 {
+            let (v, t) = tet_mesh_implicit(lo, hi, res, inside);
+            t.iter()
+                .map(|te| {
+                    let m = Matrix3::from_columns(&[v[te[1]] - v[te[0]], v[te[2]] - v[te[0]], v[te[3]] - v[te[0]]]);
+                    (m.determinant() / 6.0).abs()
+                })
+                .sum()
+        };
+        let (v16, v32) = (vol_at(16), vol_at(32));
+        eprintln!("implicit sphere mesh volume: res16 {v16:.4}, res32 {v32:.4}, exact {exact:.4}");
+        let (verts, tets) = tet_mesh_implicit(lo, hi, 20, inside);
+        let worst = tets
+            .iter()
+            .map(|te| {
+                let m = Matrix3::from_columns(&[verts[te[1]] - verts[te[0]], verts[te[2]] - verts[te[0]], verts[te[3]] - verts[te[0]]]);
+                (m.determinant() / 6.0).abs()
+            })
+            .fold(f64::INFINITY, f64::min);
+        assert!(worst > 0.0, "a tet is degenerate: {worst}");
+        assert!((v32 - exact).abs() < 0.05 * exact, "res32 volume off: {v32} vs {exact}");
+        assert!((v32 - exact).abs() < (v16 - exact).abs(), "not converging: {v16} → {v32}");
+        let mut sim = FemSim::from_implicit(lo, hi, 12, inside, 0.4, 3.0e3, 1.5e3, 3e-4);
+        assert!(sim.n_tets() > 100, "too few tets: {}", sim.n_tets());
+        sim.step();
+        assert!(sim.energy().is_finite(), "solver blew up on the meshed sphere");
+    }
 
     fn single_tet(mu: f64, lambda: f64) -> FemSim {
         // a unit reference tetrahedron
