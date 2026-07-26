@@ -14,6 +14,9 @@ use ferromotion_dem::DemSim;
 use ferromotion_fem::FemSim;
 use nalgebra::Vector3;
 
+mod grasp;
+pub use grasp::GraspFemSim;
+
 /// A coupled soft-body + granular simulation over an optional shared floor.
 pub struct CoupledFemDem {
     pub fem: FemSim,
