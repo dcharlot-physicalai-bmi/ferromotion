@@ -21,5 +21,6 @@ ferromotion-mpm = { path = "../ferromotion-mpm", version = "0.32.0" }
 ferromotion-cloth = { path = "../ferromotion-cloth", version = "0.32.0" }
 ferromotion-fem = { path = "../ferromotion-fem", version = "0.32.0" }
 ferromotion-dem = { path = "../ferromotion-dem", version = "0.32.0" }
+ferromotion-coupled = { path = "../ferromotion-coupled", version = "0.32.0" }
 ferromotion-tactile = { path = "../ferromotion-tactile", version = "0.32.0" }
 ferromotion-rod = { path = "../ferromotion-rod", version = "0.32.0" }

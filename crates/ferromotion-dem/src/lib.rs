@@ -51,6 +51,36 @@ impl DemSim {
         f_normal + ft
     }
 
+    /// Grain–grain contact forces only (no gravity, no floor) — the internal pairwise forces, for
+    /// composing the granular medium with another solver (e.g. two-way FEM↔DEM coupling). Every
+    /// entry is part of an equal-and-opposite pair, so it conserves momentum.
+    #[allow(clippy::needless_range_loop)]
+    pub fn pair_forces(&self) -> Vec<Vector3<f64>> {
+        let n = self.grains.len();
+        let mut f = vec![Vector3::zeros(); n];
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let d = self.grains[i].x - self.grains[j].x;
+                let dist = d.norm();
+                let overlap = self.grains[i].r + self.grains[j].r - dist;
+                if overlap > 0.0 && dist > 1e-12 {
+                    let nrm = d / dist;
+                    let vrel = self.grains[i].v - self.grains[j].v;
+                    let fc = self.contact_force(overlap, nrm, vrel);
+                    f[i] += fc;
+                    f[j] -= fc;
+                }
+            }
+        }
+        f
+    }
+
+    /// The spring–dashpot contact law, exposed so a coupling layer can build cross-body contacts
+    /// with the same physics.
+    pub fn contact_law(&self, delta: f64, n: Vector3<f64>, vrel: Vector3<f64>) -> Vector3<f64> {
+        self.contact_force(delta, n, vrel)
+    }
+
     /// Total force on every grain (gravity + grain–grain + grain–floor).
     #[allow(clippy::needless_range_loop)] // pairwise contact indices address the force array
     fn forces(&self) -> Vec<Vector3<f64>> {

@@ -1262,6 +1262,7 @@ dependencies = [
  "ferromotion-cloth",
  "ferromotion-control",
  "ferromotion-core",
+ "ferromotion-coupled",
  "ferromotion-dem",
  "ferromotion-fem",
  "ferromotion-fluid",
@@ -1297,6 +1298,15 @@ dependencies = [
  "faer",
  "nalgebra",
  "urdf-rs",
+]
+
+[[package]]
+name = "ferromotion-coupled"
+version = "0.32.0"
+dependencies = [
+ "ferromotion-dem",
+ "ferromotion-fem",
+ "nalgebra",
 ]
 
 [[package]]

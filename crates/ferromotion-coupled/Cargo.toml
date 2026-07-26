@@ -1,0 +1,16 @@
+[package]
+name = "ferromotion-coupled"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Two-way multiphysics coupling (soft-body FEM <-> granular DEM) for physical AI. WASM-clean."
+
+[dependencies]
+nalgebra.workspace = true
+ferromotion-fem = { path = "../ferromotion-fem", version = "0.32.0" }
+ferromotion-dem = { path = "../ferromotion-dem", version = "0.32.0" }
