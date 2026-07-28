@@ -121,6 +121,8 @@ mod bimanual;
 pub use bimanual::BimanualLab;
 mod planned_grasp;
 pub use planned_grasp::PlannedGraspLab;
+mod gpu_sensor;
+pub use gpu_sensor::GpuSensorRef;
 mod physics_lab;
 mod capstone_lab;
 pub use capstone_lab::CapstoneLab;
