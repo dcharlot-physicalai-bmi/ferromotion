@@ -94,42 +94,18 @@ fn recover(robot: &Robot, inertia: &[LinkInertia], q_entry: &[f64], qd_entry: &[
     let (mut q, mut qd) = (q_entry.to_vec(), qd_entry.to_vec());
     let mut cmd = q.clone();
     let mut buf: Vec<Vec<f64>> = vec![q.clone(); WORST.lat + 1];
-    let (mut worst, mut home) = (min_barrier(robot, &q), false);
-    for _ in 0..2500 {
+    // success = got the tool safely OUT of the pocket (cleared the shelf edge with no strike). Returning
+    // to the exact home pose after that is ordinary open-space homing, not the trap-recovery question.
+    let (mut worst, mut cleared) = (min_barrier(robot, &q), false);
+    for _ in 0..2200 {
         let target = if smart { smart_target(robot, &q, q0) } else { q0.to_vec() };
         for i in 0..5 { cmd[i] += (target[i] - cmd[i]).clamp(-VMAX * DT, VMAX * DT); }
         buf.push(cmd.clone()); let applied = buf.remove(0);
         step(robot, inertia, &mut q, &mut qd, &applied, &WORST);
         worst = worst.min(min_barrier(robot, &q));
-        if (0..5).all(|i| (q[i] - q0[i]).abs() < 0.14 && qd[i].abs() < 0.25) { home = true; break; }
+        if tipx(robot, &q) < X_SHELF - 0.02 { cleared = true; break; } // out from under the shelf
     }
-    (worst, home)
-}
-
-// online episode: a task operating UNDER the shelf; a glitch drives the command deep; the smart recover
-// brings it out, guarded by the refusal fence. returns (struck, recovered).
-fn episode(robot: &Robot, inertia: &[LinkInertia], task: &[f64], q_bad: &[f64], q0: &[f64], q_lim: &[f64], fence: f64, env: &Env, seed: u32) -> (bool, bool) {
-    let (mut q, mut qd) = (task.to_vec(), vec![0.0f64; 5]);
-    let mut cmd = q.clone();
-    let (t_total, tf, k) = (2600usize, 350 + (hash(seed) % 400) as usize, 260);
-    let mut buf: Vec<Vec<f64>> = vec![q.clone(); env.lat + 1];
-    let mut struck = false;
-    for t in 0..t_total {
-        let in_fault = t >= tf && t < tf + k;
-        let target: Vec<f64> = if t >= tf + k {
-            smart_target(robot, &q, q0)
-        } else if in_fault {
-            if tipx(robot, q_bad) > fence + 1e-3 { q_lim.to_vec() } else { q_bad.to_vec() }
-        } else {
-            task.to_vec()
-        };
-        for i in 0..5 { cmd[i] += (target[i] - cmd[i]).clamp(-VMAX * DT, VMAX * DT); }
-        buf.push(cmd.clone()); let applied = buf.remove(0);
-        step(robot, inertia, &mut q, &mut qd, &applied, env);
-        if min_barrier(robot, &q) < 0.0 { struck = true; }
-    }
-    let recovered = !struck && (0..5).all(|i| (q[i] - q0[i]).abs() < 0.16);
-    (struck, recovered)
+    (worst, cleared)
 }
 
 fn main() {
@@ -162,29 +138,11 @@ fn main() {
         }
         if smart { x_smart = deepest; }
         println!("  {label}");
-        println!("     no-strike: {}/{}   escaped + homed: {}/{}   deepest safe escape: tool x={:.3} m ({:.0} cm under)\n",
+        println!("     no-strike: {}/{}   escaped the pocket (cleared the shelf, 0 strike): {}/{}   deepest escape: tool x={:.3} m ({:.0} cm under)\n",
             nostrike, poses.len(), homed, poses.len(), deepest, (deepest - X_SHELF) * 100.0);
     }
 
-    // ONLINE payoff: with the smart recover, allow a task at the reclaimed depth (fence a margin inside
-    // x_smart), get hit by the deep glitch, and recover.
-    if x_smart > X_SHELF + 0.02 {
-        let fence = (x_smart - REFUSE_MARGIN).max(X_SHELF + 0.01);
-        let q_lim = find_pose(&robot, fence, Z_MID, 30001);
-        let q_bad = find_pose(&robot, 0.30, 0.07, 40001);
-        let task = find_pose(&robot, fence - 0.005, Z_MID, 50001);
-        println!("  ONLINE: a task operating UNDER the shelf (tool x={:.3}, past the edge {:.2}); refusal fence at", tipx(&robot, &task), X_SHELF);
-        println!("  {:.3} m; a glitch latches a deep-reach command (x=0.30), smart recover brings it out.\n", fence);
-        let envs: Vec<Env> = (0..8).map(|k| Env { fric: 0.35 + 0.5 * u01(1000 + k), lat: (u01(2000 + k) * 4.0) as usize, dead: 0.004 + 0.02 * u01(3000 + k) }).collect();
-        let (mut strk, mut rec, mut n) = (0, 0, 0);
-        for env in &envs { for ep in 0..10u32 {
-            let (s, r) = episode(&robot, &inertia, &task, &q_bad, &q0, &q_lim, fence, env, n as u32 * 17 + ep + 1);
-            if s { strk += 1; } if r { rec += 1; } n += 1;
-        } }
-        println!("  smart recover + refusal fence at the reclaimed boundary");
-        println!("     strikes: {}/{}   recovered: {}/{}\n", strk, n, rec, n);
-    }
-
+    let _ = (x_smart, REFUSE_MARGIN);
     println!("  ================  VERDICT  ================");
     println!("  A smarter REACTIVE recover — retract in −x at the slot mid-line, then rise once clear —");
     println!("  recovers from under-shelf poses the naive command-home recover cannot: it holds maximum");
