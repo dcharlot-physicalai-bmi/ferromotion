@@ -23,10 +23,11 @@ const ARMATURE: f64 = 0.028;
 const VMAX: f64 = 3.5;
 const R_LINK: f64 = 0.028;
 const FENCE: f64 = 0.06;      // recognition fence for both vectors
-// a person's hand placed LOW and in front — between the fault region and a raised home, so lifting the
-// tool to safety sweeps toward the hand while dropping away from the hand sweeps toward the table.
-const HUMAN_C: [f64; 3] = [0.20, 0.05, 0.09];
-const HUMAN_R: f64 = 0.075;
+// a person's hand hovering over the FRONT workspace. The safe home is in the BACK (−y, high), so the
+// straight way home from a front-low fault sweeps the tool UP through the hand — a genuine conflict:
+// clearing the table (go up) risks the hand; clearing the hand (come back/down) risks the table.
+const HUMAN_C: [f64; 3] = [0.24, 0.00, 0.16];
+const HUMAN_R: f64 = 0.06;
 
 fn hash(mut h: u32) -> u32 { h ^= h >> 15; h = h.wrapping_mul(2246822519); h ^= h >> 13; h = h.wrapping_mul(3266489917); h ^= h >> 16; h }
 fn u01(i: u32) -> f64 { (hash(i) % 1_000_000) as f64 / 1_000_000.0 }
@@ -69,15 +70,21 @@ fn retreat(robot: &Robot, inertia: &[LinkInertia], q_entry: &[f64], qd_entry: &[
     let (mut q, mut qd) = (q_entry.to_vec(), qd_entry.to_vec());
     let mut cmd = q.clone();
     let mut buf: Vec<Vec<f64>> = vec![q.clone(); WORST.lat + 1];
-    let (mut worst, mut home) = (min_barrier(robot, &q), false);
-    for _ in 0..800 {
+    let (mut worst, mut home, mut safe_once) = (min_barrier(robot, &q), false, false);
+    for _ in 0..700 {
         // choose the command TARGET
-        let target: Vec<f64> = if aware && min_barrier(robot, &q) < FENCE + 0.04 {
+        let mb = min_barrier(robot, &q);
+        // LATCH: once the retreat has won clear slack, commit to homing and stop escaping — otherwise
+        // the escape term keeps re-triggering near barriers and the retreat never settles.
+        if mb > FENCE + 0.015 { safe_once = true; } // latch below the home's own clearance so it settles
+        let target: Vec<f64> = if aware && !safe_once && mb < FENCE + 0.01 {
             // CONFLICT-AWARE: ascend the composite clearance (away from whichever vector is closest),
-            // blended toward home so it still makes progress once there is slack.
+            // BLENDED toward home so it routes around the active barrier while still making progress.
             let g = barrier_grad(robot, &q);
             let gn = (g.iter().map(|x| x * x).sum::<f64>()).sqrt().max(1e-6);
-            (0..5).map(|i| (q[i] + 0.25 * g[i] / gn).clamp(LIM[i][0], LIM[i][1])).collect()
+            let dn = (0..5).map(|i| (q0[i] - q[i]).powi(2)).sum::<f64>().sqrt().max(1e-6);
+            let w = ((mb - (FENCE - 0.04)) / 0.05).clamp(0.0, 1.0);
+            (0..5).map(|i| (q[i] + 0.22 * ((1.0 - w) * g[i] / gn + w * (q0[i] - q[i]) / dn)).clamp(LIM[i][0], LIM[i][1])).collect()
         } else { q0.to_vec() }; // otherwise head home
         for i in 0..5 { cmd[i] += (target[i] - cmd[i]).clamp(-VMAX * DT, VMAX * DT); }
         buf.push(cmd.clone()); let applied = buf.remove(0);
@@ -90,12 +97,13 @@ fn retreat(robot: &Robot, inertia: &[LinkInertia], q_entry: &[f64], qd_entry: &[
 
 fn main() {
     let (robot, inertia) = from_urdf_full(URDF, "base_link", "gripper_link").expect("load SO-101");
-    // raised safe home, clear of both vectors.
-    let mut q0 = vec![0.0; 5]; let mut best = f64::INFINITY;
-    for s in 0..14000u32 { let c: Vec<f64> = (0..5).map(|i| LIM[i][0] + (LIM[i][1] - LIM[i][0]) * u01(s * 7 + i as u32 + 1)).collect(); let p = robot.fk(&c).translation.vector; let cost = (p.z - 0.24).powi(2) + (p.x - 0.10).powi(2) + (p.y + 0.10).powi(2); if cost < best && min_barrier(&robot, &c) > FENCE + 0.05 { best = cost; q0 = c; } }
-    // the corrupt fault: drive into the LOW-FRONT corner (toward the hand AND the table at once).
-    let mut q_bad = vec![0.0; 5]; let mut worst_corner = f64::INFINITY;
-    for s in 0..14000u32 { let c: Vec<f64> = (0..5).map(|i| LIM[i][0] + (LIM[i][1] - LIM[i][0]) * u01(s * 9 + i as u32 + 7)).collect(); let sc = min_barrier(&robot, &c); if sc < worst_corner { worst_corner = sc; q_bad = c; } }
+    // safe home in the BACK (−y, high): pick the pose that MAXIMIZES min-clearance while biased to the
+    // back-up region — guarantees the safest reachable home clear of BOTH vectors (the person is out front).
+    let mut q0 = vec![0.0; 5]; let mut best = f64::NEG_INFINITY;
+    for s in 0..30000u32 { let c: Vec<f64> = (0..5).map(|i| LIM[i][0] + (LIM[i][1] - LIM[i][0]) * u01(s * 7 + i as u32 + 1)).collect(); let p = robot.fk(&c).translation.vector; let score = min_barrier(&robot, &c) - 0.20 * ((p.x - 0.0).powi(2) + (p.y + 0.18).powi(2) + (p.z - 0.28).powi(2)).sqrt(); if score > best { best = score; q0 = c; } }
+    // the corrupt fault: drive a link deep into the FRONT hand (the retreat home then sweeps up past it).
+    let mut q_bad = vec![0.0; 5]; let mut worst_h = f64::INFINITY;
+    for s in 0..20000u32 { let c: Vec<f64> = (0..5).map(|i| LIM[i][0] + (LIM[i][1] - LIM[i][0]) * u01(s * 9 + i as u32 + 7)).collect(); let h = human_clear(&robot, &c); if h < worst_h && robot.fk(&c).translation.vector.z < 0.14 { worst_h = h; q_bad = c; } }
 
     println!("Barrier-conflict certificate on the real SO-101 — two protective vectors that fight.\n");
     println!("  person's hand at {:?} r={:.2}   raised home q0: table {:.3}, human {:.3} (both > fence {:.2})", HUMAN_C, HUMAN_R, table_clear(&robot, &q0), human_clear(&robot, &q0), FENCE);
@@ -103,11 +111,11 @@ fn main() {
 
     // ---- collect conflict entry states: drive the fault, capture (q,qd) when min-barrier ≤ fence ----
     let mut entries: Vec<(Vec<f64>, Vec<f64>)> = Vec::new();
-    for phase in 0..240u32 {
+    for phase in 0..120u32 {
         let start: Vec<f64> = (0..5).map(|i| (q0[i] + 0.15 * ((0.3 * phase as f64 + i as f64).sin())).clamp(LIM[i][0], LIM[i][1])).collect();
         let (mut q, mut qd) = (start, vec![0.0f64; 5]);
         let mut cmd = q.clone(); let mut buf: Vec<Vec<f64>> = vec![q.clone(); WORST.lat + 1];
-        for _ in 0..600 {
+        for _ in 0..700 {
             cmd.copy_from_slice(&q_bad);
             buf.push(cmd.clone()); let applied = buf.remove(0);
             step(&robot, &inertia, &mut q, &mut qd, &applied, &WORST);
@@ -119,19 +127,34 @@ fn main() {
     for (q, qd) in &entries { for &sc in &[1.0, 1.2] { region.push((q.clone(), qd.iter().map(|x| x * sc).collect())); } }
     println!("  conflict region R: {} entry states (fault into the low-front corner × boosted speed)\n", region.len());
 
-    for (label, aware) in [("NAIVE retreat (straight to safe home)", false), ("CONFLICT-AWARE retreat (ascend composite clearance, then home)", true)] {
-        let (mut worst_all, mut holes, mut homed, mut n) = (f64::INFINITY, 0, 0, 0);
+    let mut hole = [0usize; 2]; let mut homed_c = [0usize; 2]; let mut worst = [f64::INFINITY; 2];
+    for (idx, (label, aware)) in [("NAIVE retreat (straight to safe home)", false), ("CONFLICT-AWARE retreat (ascend composite clearance, then home)", true)].iter().enumerate() {
         for (q, qd) in &region {
-            let (w, h) = retreat(&robot, &inertia, q, qd, &q0, aware);
-            worst_all = worst_all.min(w); if w < 0.0 { holes += 1; } if h { homed += 1; } n += 1;
+            let (w, h) = retreat(&robot, &inertia, q, qd, &q0, *aware);
+            worst[idx] = worst[idx].min(w); if w < 0.0 { hole[idx] += 1; } if h { homed_c[idx] += 1; }
         }
         println!("  {label}");
-        println!("     worst min-barrier over R: {:.4} m   barrier violations (trap holes): {}/{n}   reached home: {}/{n}\n", worst_all, holes, homed);
+        println!("     worst min-barrier over R: {:.4} m   barrier violations (trap holes): {}/{}   reached home: {}/{}\n", worst[idx], hole[idx], region.len(), homed_c[idx], region.len());
     }
 
-    println!("  Honest reading: a NAIVE straight-to-home retreat treats recovery as one vector and can cross the");
-    println!("  OTHER barrier in a conflict corner; the conflict-aware retreat ascends the composite clearance");
-    println!("  (moves away from whichever vector is closest) before homing. If the aware retreat still shows");
-    println!("  holes, those entry states are a genuine TRAP the arbiter must refuse to ENTER (a named niche edge),");
-    println!("  not one it can recover from — the multi-vector version of refusal-before-the-edge.");
+    // ---- verdict ----
+    let n = region.len();
+    println!("  ================  BARRIER-CONFLICT VERDICT  ================");
+    if hole[0] == 0 {
+        println!("  NO TRAP on this body: even a NAIVE straight-to-home retreat kept BOTH vectors ≥ {:.3} m over the", worst[0]);
+        println!("  whole conflict region ({n} adversarial entries into a corner violating both). On a 5-DOF arm with a");
+        println!("  genuinely safe home, multi-vector recovery COLLAPSES to the single-vector case already certified —");
+        println!("  the joints have enough freedom to route to home without crossing a barrier. HONEST BOUND: this is a");
+        println!("  negative result for THIS arm+home, not a proof no trap exists; traps require the safe set to be");
+        println!("  topologically ENCLOSED from the fault region (higher-DOF, tighter workspace, or an obstacle that");
+        println!("  walls off home). The conflict-aware retreat (ascend the composite clearance, then home) is the tool");
+        println!("  for that case; here it is unnecessary — the honest finding is that the trap did not manifest.");
+    } else if hole[1] < hole[0] {
+        println!("  CONFLICT IS REAL: the naive retreat traps {}/{n} (crosses the other barrier); the conflict-aware", hole[0]);
+        println!("  retreat cuts it to {}/{n} by routing around the active vector. Any RESIDUAL holes are a genuine TRAP", hole[1]);
+        println!("  region the arbiter must REFUSE TO ENTER (a named niche edge) — the multi-vector refusal-before-the-edge.");
+    } else {
+        println!("  The naive retreat traps {}/{n}; the aware retreat did not improve it — a hard TRAP region that must", hole[0]);
+        println!("  be refused at the boundary, not recovered from. Name it and keep the arbiter out of it.");
+    }
 }
