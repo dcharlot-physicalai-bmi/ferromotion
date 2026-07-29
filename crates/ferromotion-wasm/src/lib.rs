@@ -123,6 +123,8 @@ mod planned_grasp;
 pub use planned_grasp::PlannedGraspLab;
 mod gpu_sensor;
 pub use gpu_sensor::GpuSensorRef;
+mod gpu_fem;
+pub use gpu_fem::GpuFemRef;
 mod physics_lab;
 mod capstone_lab;
 pub use capstone_lab::CapstoneLab;

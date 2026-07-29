@@ -143,6 +143,19 @@ impl FemSim {
         self.tets.len()
     }
 
+    /// Tet connectivity (four vertex indices per tet) — for GPU ports and meshing.
+    pub fn tets(&self) -> &[[usize; 4]] {
+        &self.tets
+    }
+    /// Per-tet inverse rest edge matrix `Dm⁻¹` (column-major 3×3) — the reference shape.
+    pub fn dm_inv(&self) -> &[Matrix3<f64>] {
+        &self.dm_inv
+    }
+    /// Per-tet signed rest volume `det/6`.
+    pub fn vol(&self) -> &[f64] {
+        &self.vol
+    }
+
     /// Deformation gradient `F = Ds·Dm⁻¹` of tet `e` at the current positions.
     fn deformation_gradient(&self, e: usize) -> Matrix3<f64> {
         let t = &self.tets[e];
