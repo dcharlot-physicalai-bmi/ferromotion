@@ -424,10 +424,208 @@ impl SensorGpu {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// LidarGpu — the scanning-lidar point cloud on the GPU (one thread per azimuth×elevation ray).
+// ---------------------------------------------------------------------------------------------
+
+const LIDAR_WGSL: &str = r#"
+@group(0) @binding(0) var<storage, read> PRIMS: array<f32>;     // 8 per prim: type + params
+@group(0) @binding(1) var<storage, read> PRM: array<f32>;       // lidar params + pose, see LidarGpu
+@group(0) @binding(2) var<storage, read_write> RANGE: array<f32>;
+@group(0) @binding(3) var<storage, read_write> SEG: array<i32>;
+@group(0) @binding(4) var<storage, read_write> PTS: array<f32>; // 3 per ray (world hit point; 0 on miss)
+
+fn prim_sdf(p: vec3<f32>, b: u32) -> f32 {
+  let ty = PRIMS[b];
+  if (ty < 0.5) {
+    return length(p - vec3<f32>(PRIMS[b+1u], PRIMS[b+2u], PRIMS[b+3u])) - PRIMS[b+4u];
+  } else if (ty < 1.5) {
+    let q = abs(p - vec3<f32>(PRIMS[b+1u], PRIMS[b+2u], PRIMS[b+3u])) - vec3<f32>(PRIMS[b+4u], PRIMS[b+5u], PRIMS[b+6u]);
+    return length(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
+  } else if (ty < 2.5) {
+    return dot(vec3<f32>(PRIMS[b+1u], PRIMS[b+2u], PRIMS[b+3u]), p) - PRIMS[b+4u];
+  } else if (ty < 3.5) {
+    let a = vec3<f32>(PRIMS[b+1u], PRIMS[b+2u], PRIMS[b+3u]);
+    let e = vec3<f32>(PRIMS[b+4u], PRIMS[b+5u], PRIMS[b+6u]);
+    let ab = e - a;
+    let t = clamp(dot(p - a, ab) / dot(ab, ab), 0.0, 1.0);
+    return length(p - (a + t * ab)) - PRIMS[b+7u];
+  } else {
+    let d = p - vec3<f32>(PRIMS[b+1u], PRIMS[b+2u], PRIMS[b+3u]);
+    let planar = sqrt(d.x*d.x + d.z*d.z) - PRIMS[b+4u];
+    return sqrt(planar*planar + d.y*d.y) - PRIMS[b+5u];
+  }
+}
+fn scene_sdf(p: vec3<f32>, n: u32) -> f32 { var d = 1e30; for (var i = 0u; i < n; i = i + 1u) { d = min(d, prim_sdf(p, i*8u)); } return d; }
+fn nearest(p: vec3<f32>, n: u32) -> i32 { var bi = -1; var bd = 1e30; for (var i = 0u; i < n; i = i + 1u) { let d = prim_sdf(p, i*8u); if (d < bd) { bd = d; bi = i32(i); } } return bi; }
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) g: vec3<u32>) {
+  let naz = u32(PRM[0]); let nel = u32(PRM[1]);
+  if (g.x >= naz || g.y >= nel) { return; }         // g.x = azimuth index, g.y = elevation index
+  let az_min = PRM[2]; let az_max = PRM[3]; let el_min = PRM[4]; let el_max = PRM[5]; let far = PRM[6];
+  let o = vec3<f32>(PRM[7], PRM[8], PRM[9]);
+  let r0 = vec3<f32>(PRM[10], PRM[11], PRM[12]);     // pose rotation, row-major
+  let r1 = vec3<f32>(PRM[13], PRM[14], PRM[15]);
+  let r2 = vec3<f32>(PRM[16], PRM[17], PRM[18]);
+  let nprims = u32(PRM[19]);
+  let da = select(0.0, (az_max - az_min) / f32(naz - 1u), naz > 1u);
+  let de = select(0.0, (el_max - el_min) / f32(nel - 1u), nel > 1u);
+  let az = az_min + f32(g.x) * da;
+  let el = el_min + f32(g.y) * de;
+  let ds = vec3<f32>(cos(el) * cos(az), cos(el) * sin(az), sin(el));   // +x forward, azimuth about +z
+  let dir = vec3<f32>(dot(r0, ds), dot(r1, ds), dot(r2, ds));
+  var t = 0.0; var range = far; var seg = -1; var pt = vec3<f32>(0.0);
+  for (var k = 0; k < 512; k = k + 1) {
+    let p = o + t * dir;
+    let d = scene_sdf(p, nprims);
+    if (d < 1e-6) { range = t; seg = nearest(p, nprims); pt = p; break; }
+    t = t + max(d, 1e-6);
+    if (t > far) { break; }
+  }
+  let idx = g.y * naz + g.x;                          // row-major (elevation outer, azimuth inner)
+  RANGE[idx] = range; SEG[idx] = seg;
+  PTS[idx*3u] = pt.x; PTS[idx*3u+1u] = pt.y; PTS[idx*3u+2u] = pt.z;
+}
+"#;
+
+/// A scanning-lidar point cloud on the GPU — the same azimuth×elevation sphere-trace as
+/// [`Lidar::scan`], one GPU thread per ray, over the full [`SdfScene`].
+pub struct LidarGpu {
+    n_az: usize,
+    n_el: usize,
+    far: f64,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    pso: wgpu::ComputePipeline,
+    bind: wgpu::BindGroup,
+    range_buf: wgpu::Buffer,
+    seg_buf: wgpu::Buffer,
+    pts_buf: wgpu::Buffer,
+    range_stage: wgpu::Buffer,
+    seg_stage: wgpu::Buffer,
+    pts_stage: wgpu::Buffer,
+}
+
+impl LidarGpu {
+    /// Build a scanner for `lidar` viewing `scene` (both baked in). `None` when there is no GPU.
+    pub fn new(lidar: &crate::Lidar, scene: &SdfScene) -> Option<Self> {
+        let (n_az, n_el) = (lidar.n_azimuth, lidar.n_elevation);
+        let n_prims = scene.prims.len();
+        let prims: Vec<f32> = scene.prims.iter().flat_map(prim_floats).collect();
+        let prims = if prims.is_empty() { vec![0.0f32; 8] } else { prims };
+
+        let m = lidar.pose.rotation.to_rotation_matrix();
+        let rot = m.matrix();
+        let o = lidar.pose.translation.vector;
+        let mut prm = vec![
+            n_az as f32, n_el as f32,
+            lidar.az_min as f32, lidar.az_max as f32, lidar.el_min as f32, lidar.el_max as f32, lidar.far as f32,
+            o.x as f32, o.y as f32, o.z as f32,
+        ];
+        for i in 0..3 {
+            for j in 0..3 {
+                prm.push(rot[(i, j)] as f32); // row-major
+            }
+        }
+        prm.push(n_prims as f32);
+
+        let instance = wgpu::Instance::default();
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
+
+        let init = |label, data: &[u8]| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: data, usage: wgpu::BufferUsages::STORAGE })
+        };
+        let prims_buf = init("lidar-prims", bytemuck::cast_slice(&prims));
+        let prm_buf = init("lidar-prm", bytemuck::cast_slice(&prm));
+        let n = (n_az * n_el).max(1);
+        let sbuf = |label, elems: usize| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: (elems * 4) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+        let stg = |label, elems: usize| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: (elems * 4) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let range_buf = sbuf("lidar-range", n);
+        let seg_buf = sbuf("lidar-seg", n);
+        let pts_buf = sbuf("lidar-pts", n * 3);
+        let range_stage = stg("lidar-range-stage", n);
+        let seg_stage = stg("lidar-seg-stage", n);
+        let pts_stage = stg("lidar-pts-stage", n * 3);
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("lidar"), source: wgpu::ShaderSource::Wgsl(LIDAR_WGSL.into()) });
+        let ro = |binding| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None };
+        let rw = |binding| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None };
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("lidar-bgl"), entries: &[ro(0), ro(1), rw(2), rw(3), rw(4)] });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("lidar-layout"), bind_group_layouts: &[Some(&bgl)], immediate_size: 0 });
+        let pso = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("lidar"), layout: Some(&layout), module: &shader, entry_point: Some("main"), compilation_options: Default::default(), cache: None });
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lidar-bind"),
+            layout: &bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: prims_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: prm_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: range_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: seg_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: pts_buf.as_entire_binding() },
+            ],
+        });
+
+        Some(Self { n_az, n_el, far: lidar.far, device, queue, pso, bind, range_buf, seg_buf, pts_buf, range_stage, seg_stage, pts_stage })
+    }
+
+    fn read_bytes(&self, buf: &wgpu::Buffer) -> Vec<u8> {
+        let slice = buf.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        rx.recv().expect("map").expect("map ok");
+        let v = slice.get_mapped_range().expect("mapped").to_vec();
+        buf.unmap();
+        v
+    }
+
+    /// The dense grid over every ray (row-major elevation×azimuth): per-ray range (`far` on miss),
+    /// segmentation label (`-1` on miss), and world hit point (`(0,0,0)` on miss).
+    pub fn dense(&self) -> (Vec<f32>, Vec<i32>, Vec<[f32; 3]>) {
+        let n = self.n_az * self.n_el;
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = enc.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.pso);
+            pass.set_bind_group(0, &self.bind, &[]);
+            pass.dispatch_workgroups((self.n_az as u32).div_ceil(8), (self.n_el as u32).div_ceil(8), 1);
+        }
+        enc.copy_buffer_to_buffer(&self.range_buf, 0, &self.range_stage, 0, (n * 4) as u64);
+        enc.copy_buffer_to_buffer(&self.seg_buf, 0, &self.seg_stage, 0, (n * 4) as u64);
+        enc.copy_buffer_to_buffer(&self.pts_buf, 0, &self.pts_stage, 0, (n * 3 * 4) as u64);
+        self.queue.submit([enc.finish()]);
+        let range: Vec<f32> = bytemuck::cast_slice(&self.read_bytes(&self.range_stage)).to_vec();
+        let seg: Vec<i32> = bytemuck::cast_slice(&self.read_bytes(&self.seg_stage)).to_vec();
+        let pf: Vec<f32> = bytemuck::cast_slice(&self.read_bytes(&self.pts_stage)).to_vec();
+        let pts: Vec<[f32; 3]> = pf.chunks(3).map(|c| [c[0], c[1], c[2]]).collect();
+        (range, seg, pts)
+    }
+
+    /// The compacted hit point cloud — only rays that hit, in the same order as [`Lidar::scan`].
+    pub fn scan(&self) -> crate::LidarScan {
+        use nalgebra::Vector3;
+        let (range, seg, pts) = self.dense();
+        let far = self.far as f32;
+        let mut points = Vec::new();
+        let mut ranges = Vec::new();
+        let mut segl = Vec::new();
+        for i in 0..self.n_az * self.n_el {
+            if range[i] < far {
+                points.push(Vector3::new(pts[i][0] as f64, pts[i][1] as f64, pts[i][2] as f64));
+                ranges.push(range[i] as f64);
+                segl.push(seg[i].max(0) as usize);
+            }
+        }
+        crate::LidarScan { points, ranges, seg: segl }
+    }
+}
+
 #[cfg(test)]
 mod verification {
     use super::*;
-    use crate::{arm_clearance, from_urdf_str, DepthCamera};
+    use crate::{arm_clearance, from_urdf_str, raymarch, DepthCamera, Lidar};
     use nalgebra::{Isometry3, Vector3};
 
     const ARM: &str = r#"<robot name="a"><link name="world"/><link name="base"/>
@@ -525,5 +723,76 @@ mod verification {
         eprintln!("GPU vs CPU sensor render: median range {:.3e} m over {} surface px, seg agreement {:.3}%", med, errs.len(), 100.0 * seg_frac);
         assert!(med < 1e-3, "GPU depth diverged from the CPU render: median {med}");
         assert!(seg_frac > 0.97, "GPU segmentation disagreed too much: {seg_frac}");
+    }
+
+    /// The GPU lidar reproduces `Lidar::scan`: dense per-ray range/point matches the CPU raymarch,
+    /// and the compacted GPU scan has the same hit count as the CPU scan (± silhouette rays).
+    #[test]
+    fn gpu_lidar_matches_cpu() {
+        let scene = SdfScene {
+            prims: vec![
+                Sdf::Sphere { center: Vector3::new(2.0, 0.0, 0.0), radius: 0.5 },
+                Sdf::Box { center: Vector3::new(0.0, 2.0, 0.0), half: Vector3::new(0.4, 0.4, 0.6) },
+                Sdf::Plane { normal: Vector3::new(0.0, 0.0, 1.0), offset: -0.8 },
+            ],
+        };
+        let lidar = Lidar {
+            pose: Isometry3::identity(),
+            n_azimuth: 128,
+            n_elevation: 64,
+            az_min: -std::f64::consts::PI,
+            az_max: std::f64::consts::PI,
+            el_min: -0.4,
+            el_max: 0.4,
+            far: 6.0,
+        };
+
+        let Some(g) = LidarGpu::new(&lidar, &scene) else {
+            eprintln!("no GPU — skipping");
+            return;
+        };
+        let (range, _seg, pts) = g.dense();
+
+        // dense CPU reference: the same ray grid, calling the verified raymarch per ray
+        let da = (lidar.az_max - lidar.az_min) / (lidar.n_azimuth - 1) as f64;
+        let de = (lidar.el_max - lidar.el_min) / (lidar.n_elevation - 1) as f64;
+        let o = lidar.pose.translation.vector;
+        let mut range_errs = Vec::new();
+        let mut pt_worst = 0.0f64;
+        let mut hit_mismatch = 0;
+        for ie in 0..lidar.n_elevation {
+            let el = lidar.el_min + ie as f64 * de;
+            for ia in 0..lidar.n_azimuth {
+                let az = lidar.az_min + ia as f64 * da;
+                let ds = Vector3::new(el.cos() * az.cos(), el.cos() * az.sin(), el.sin());
+                let dir = lidar.pose.rotation * ds;
+                let idx = ie * lidar.n_azimuth + ia;
+                let cpu = raymarch(&scene, o, dir, lidar.far);
+                let gpu_hit = range[idx] < lidar.far as f32 - 1e-3;
+                match (cpu, gpu_hit) {
+                    (Some(hit), true) => {
+                        range_errs.push((range[idx] - hit.t as f32).abs());
+                        let p = pts[idx];
+                        pt_worst = pt_worst.max(((p[0] as f64 - hit.point.x).powi(2) + (p[1] as f64 - hit.point.y).powi(2) + (p[2] as f64 - hit.point.z).powi(2)).sqrt());
+                    }
+                    (None, false) => {}
+                    _ => hit_mismatch += 1,
+                }
+            }
+        }
+        range_errs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let med = if range_errs.is_empty() { 0.0 } else { range_errs[range_errs.len() / 2] };
+        let total = lidar.n_azimuth * lidar.n_elevation;
+
+        // the compacted API matches the CPU scan's hit count (± silhouette flips)
+        let gpu_scan = g.scan();
+        let cpu_scan = lidar.scan(&scene);
+        let count_diff = (gpu_scan.points.len() as i64 - cpu_scan.points.len() as i64).abs();
+
+        eprintln!("GPU vs CPU lidar ({total} rays): median range {med:.3e} m, worst point {pt_worst:.3e} m, hit mismatches {hit_mismatch}/{total}; scan hits GPU {} vs CPU {} (Δ{count_diff})", gpu_scan.points.len(), cpu_scan.points.len());
+        assert!(med < 1e-3, "GPU lidar range diverged: median {med}");
+        assert!(pt_worst < 2e-3, "GPU lidar point diverged: {pt_worst}");
+        assert!(hit_mismatch * 200 < total, "too many GPU/CPU hit disagreements: {hit_mismatch}/{total}");
+        assert!(count_diff * 200 < total as i64, "GPU/CPU scan hit-count diverged: {count_diff}");
     }
 }
