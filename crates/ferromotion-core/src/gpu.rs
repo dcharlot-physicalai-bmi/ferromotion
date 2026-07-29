@@ -255,11 +255,180 @@ impl ClearanceGpu {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// SensorGpu — the signed-distance depth/segmentation renderer on the GPU (one thread per pixel).
+// ---------------------------------------------------------------------------------------------
+
+const SENSOR_WGSL: &str = r#"
+@group(0) @binding(0) var<storage, read> PRIMS: array<f32>;     // 8 per prim: type + params
+@group(0) @binding(1) var<storage, read> PRM: array<f32>;       // camera + pose, see SensorGpu
+@group(0) @binding(2) var<storage, read_write> RANGE: array<f32>;
+@group(0) @binding(3) var<storage, read_write> SEG: array<i32>;
+
+fn prim_sdf(p: vec3<f32>, b: u32) -> f32 {
+  let ty = PRIMS[b];
+  if (ty < 0.5) {
+    return length(p - vec3<f32>(PRIMS[b+1u], PRIMS[b+2u], PRIMS[b+3u])) - PRIMS[b+4u];
+  } else if (ty < 1.5) {
+    let q = abs(p - vec3<f32>(PRIMS[b+1u], PRIMS[b+2u], PRIMS[b+3u])) - vec3<f32>(PRIMS[b+4u], PRIMS[b+5u], PRIMS[b+6u]);
+    return length(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
+  } else if (ty < 2.5) {
+    return dot(vec3<f32>(PRIMS[b+1u], PRIMS[b+2u], PRIMS[b+3u]), p) - PRIMS[b+4u];
+  } else if (ty < 3.5) {
+    let a = vec3<f32>(PRIMS[b+1u], PRIMS[b+2u], PRIMS[b+3u]);
+    let e = vec3<f32>(PRIMS[b+4u], PRIMS[b+5u], PRIMS[b+6u]);
+    let ab = e - a;
+    let t = clamp(dot(p - a, ab) / dot(ab, ab), 0.0, 1.0);
+    return length(p - (a + t * ab)) - PRIMS[b+7u];
+  } else {
+    let d = p - vec3<f32>(PRIMS[b+1u], PRIMS[b+2u], PRIMS[b+3u]);
+    let planar = sqrt(d.x*d.x + d.z*d.z) - PRIMS[b+4u];
+    return sqrt(planar*planar + d.y*d.y) - PRIMS[b+5u];
+  }
+}
+fn scene_sdf(p: vec3<f32>, n: u32) -> f32 { var d = 1e30; for (var i = 0u; i < n; i = i + 1u) { d = min(d, prim_sdf(p, i*8u)); } return d; }
+fn nearest(p: vec3<f32>, n: u32) -> i32 { var bi = -1; var bd = 1e30; for (var i = 0u; i < n; i = i + 1u) { let d = prim_sdf(p, i*8u); if (d < bd) { bd = d; bi = i32(i); } } return bi; }
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) g: vec3<u32>) {
+  let W = u32(PRM[4]); let H = u32(PRM[5]);
+  if (g.x >= W || g.y >= H) { return; }
+  let fx = PRM[0]; let fy = PRM[1]; let cx = PRM[2]; let cy = PRM[3]; let far = PRM[6];
+  let o = vec3<f32>(PRM[7], PRM[8], PRM[9]);
+  let r0 = vec3<f32>(PRM[10], PRM[11], PRM[12]);   // pose rotation, row-major
+  let r1 = vec3<f32>(PRM[13], PRM[14], PRM[15]);
+  let r2 = vec3<f32>(PRM[16], PRM[17], PRM[18]);
+  let nprims = u32(PRM[19]);
+  let fu = f32(g.x) + 0.5; let fv = f32(g.y) + 0.5;
+  let dc = normalize(vec3<f32>((fu - cx) / fx, (fv - cy) / fy, 1.0));
+  let dir = vec3<f32>(dot(r0, dc), dot(r1, dc), dot(r2, dc));
+  var t = 0.0; var range = far; var seg = -1;
+  for (var k = 0; k < 512; k = k + 1) {
+    let p = o + t * dir;
+    let d = scene_sdf(p, nprims);
+    if (d < 1e-6) { range = t; seg = nearest(p, nprims); break; }
+    t = t + max(d, 1e-6);
+    if (t > far) { break; }
+  }
+  let idx = g.y * W + g.x;
+  RANGE[idx] = range; SEG[idx] = seg;
+}
+"#;
+
+/// A signed-distance depth + segmentation renderer on the GPU — the same sphere-tracer as
+/// [`DepthCamera::render`], one GPU thread per pixel, over the full [`SdfScene`].
+pub struct SensorGpu {
+    width: usize,
+    height: usize,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    pso: wgpu::ComputePipeline,
+    bind: wgpu::BindGroup,
+    range_buf: wgpu::Buffer,
+    seg_buf: wgpu::Buffer,
+    range_stage: wgpu::Buffer,
+    seg_stage: wgpu::Buffer,
+}
+
+impl SensorGpu {
+    /// Build a renderer for `cam` viewing `scene` (both baked in). `None` when there is no GPU.
+    pub fn new(cam: &crate::DepthCamera, scene: &SdfScene) -> Option<Self> {
+        let (width, height) = (cam.width, cam.height);
+        let n_prims = scene.prims.len();
+        let prims: Vec<f32> = scene.prims.iter().flat_map(prim_floats).collect();
+        let prims = if prims.is_empty() { vec![0.0f32; 8] } else { prims };
+
+        let m = cam.pose.rotation.to_rotation_matrix();
+        let rot = m.matrix();
+        let o = cam.pose.translation.vector;
+        let mut prm = vec![
+            cam.fx as f32, cam.fy as f32, cam.cx as f32, cam.cy as f32,
+            width as f32, height as f32, cam.far as f32,
+            o.x as f32, o.y as f32, o.z as f32,
+        ];
+        for i in 0..3 {
+            for j in 0..3 {
+                prm.push(rot[(i, j)] as f32); // row-major
+            }
+        }
+        prm.push(n_prims as f32);
+
+        let instance = wgpu::Instance::default();
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
+
+        let init = |label, data: &[u8]| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: data, usage: wgpu::BufferUsages::STORAGE })
+        };
+        let prims_buf = init("sensor-prims", bytemuck::cast_slice(&prims));
+        let prm_buf = init("sensor-prm", bytemuck::cast_slice(&prm));
+        let px = width * height;
+        let range_buf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("sensor-range"), size: (px * 4) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+        let seg_buf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("sensor-seg"), size: (px * 4) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+        let range_stage = device.create_buffer(&wgpu::BufferDescriptor { label: Some("sensor-range-stage"), size: (px * 4) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let seg_stage = device.create_buffer(&wgpu::BufferDescriptor { label: Some("sensor-seg-stage"), size: (px * 4) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("sensor"), source: wgpu::ShaderSource::Wgsl(SENSOR_WGSL.into()) });
+        let ro = |binding| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None };
+        let mut rw = ro(0);
+        rw.ty = wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None };
+        let mut rw2 = rw.clone();
+        rw2.binding = 3;
+        let mut rw_range = rw.clone();
+        rw_range.binding = 2;
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("sensor-bgl"), entries: &[ro(0), ro(1), rw_range, rw2] });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("sensor-layout"), bind_group_layouts: &[Some(&bgl)], immediate_size: 0 });
+        let pso = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("sensor"), layout: Some(&layout), module: &shader, entry_point: Some("main"), compilation_options: Default::default(), cache: None });
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sensor-bind"),
+            layout: &bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: prims_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: prm_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: range_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: seg_buf.as_entire_binding() },
+            ],
+        });
+
+        Some(Self { width, height, device, queue, pso, bind, range_buf, seg_buf, range_stage, seg_stage })
+    }
+
+    /// Render range + segmentation (row-major `height × width`): per-pixel Euclidean range (`far`
+    /// where nothing was hit) and nearest-primitive label (`-1` background). Matches `DepthCamera::render`.
+    pub fn render(&self) -> (Vec<f32>, Vec<i32>) {
+        let px = self.width * self.height;
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = enc.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.pso);
+            pass.set_bind_group(0, &self.bind, &[]);
+            pass.dispatch_workgroups((self.width as u32).div_ceil(8), (self.height as u32).div_ceil(8), 1);
+        }
+        enc.copy_buffer_to_buffer(&self.range_buf, 0, &self.range_stage, 0, (px * 4) as u64);
+        enc.copy_buffer_to_buffer(&self.seg_buf, 0, &self.seg_stage, 0, (px * 4) as u64);
+        self.queue.submit([enc.finish()]);
+
+        let read_bytes = |buf: &wgpu::Buffer| -> Vec<u8> {
+            let slice = buf.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+            rx.recv().expect("map").expect("map ok");
+            let v = slice.get_mapped_range().expect("mapped").to_vec();
+            buf.unmap();
+            v
+        };
+        let range: Vec<f32> = bytemuck::cast_slice(&read_bytes(&self.range_stage)).to_vec();
+        let seg: Vec<i32> = bytemuck::cast_slice(&read_bytes(&self.seg_stage)).to_vec();
+        (range, seg)
+    }
+}
+
 #[cfg(test)]
 mod verification {
     use super::*;
-    use crate::{arm_clearance, from_urdf_str};
-    use nalgebra::Vector3;
+    use crate::{arm_clearance, from_urdf_str, DepthCamera};
+    use nalgebra::{Isometry3, Vector3};
 
     const ARM: &str = r#"<robot name="a"><link name="world"/><link name="base"/>
       <link name="l1"/><link name="l2"/><link name="l3"/><link name="l4"/><link name="l5"/><link name="l6"/><link name="tool"/>
@@ -316,5 +485,45 @@ mod verification {
         eprintln!("GPU vs CPU arm_clearance ({n} configs): worst {worst:.3e} m, collision-decision mismatches {decision_mismatch}");
         assert!(worst < 1e-4, "GPU clearance diverged from the CPU reference: {worst}");
         assert_eq!(decision_mismatch, 0, "GPU/CPU disagreed on collision for {decision_mismatch} configs");
+    }
+
+    /// The GPU sphere-tracer reproduces `DepthCamera::render` — median range within the f32 float
+    /// gap over surface pixels, and segmentation labels agreeing on all but the silhouette edges.
+    #[test]
+    fn gpu_sensor_matches_cpu() {
+        let scene = SdfScene {
+            prims: vec![
+                Sdf::Sphere { center: Vector3::new(-0.9, 0.0, 2.8), radius: 0.40 },
+                Sdf::Box { center: Vector3::new(0.0, 0.1, 4.0), half: Vector3::new(0.35, 0.35, 0.35) },
+                Sdf::Sphere { center: Vector3::new(0.9, 0.0, 2.2), radius: 0.38 },
+                Sdf::Plane { normal: Vector3::new(0.0, -1.0, 0.0), offset: -1.2 },
+            ],
+        };
+        let cam = DepthCamera { pose: Isometry3::identity(), fx: 96.0, fy: 96.0, cx: 79.5, cy: 59.5, width: 160, height: 120, far: 8.0 };
+
+        let Some(g) = SensorGpu::new(&cam, &scene) else {
+            eprintln!("no GPU — skipping");
+            return;
+        };
+        let (range, seg) = g.render();
+        let cpu = cam.render(&scene);
+
+        let far = cam.far as f32;
+        let mut errs = Vec::new();
+        let mut seg_agree = 0usize;
+        for i in 0..cam.width * cam.height {
+            if range[i] < far - 1e-3 && (cpu.range[i] as f32) < far - 1e-3 {
+                errs.push((range[i] - cpu.range[i] as f32).abs());
+            }
+            if seg[i] == cpu.seg[i] {
+                seg_agree += 1;
+            }
+        }
+        errs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let med = if errs.is_empty() { 0.0 } else { errs[errs.len() / 2] };
+        let seg_frac = seg_agree as f64 / (cam.width * cam.height) as f64;
+        eprintln!("GPU vs CPU sensor render: median range {:.3e} m over {} surface px, seg agreement {:.3}%", med, errs.len(), 100.0 * seg_frac);
+        assert!(med < 1e-3, "GPU depth diverged from the CPU render: median {med}");
+        assert!(seg_frac > 0.97, "GPU segmentation disagreed too much: {seg_frac}");
     }
 }
