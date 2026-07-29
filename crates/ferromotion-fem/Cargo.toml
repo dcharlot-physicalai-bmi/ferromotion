@@ -12,3 +12,19 @@ description = "Differentiable volumetric tetrahedral FEM (stable Neo-Hookean) fo
 
 [dependencies]
 nalgebra.workspace = true
+
+[features]
+## The wgpu GPU path: portable compute FEM (Metal/Vulkan/DX12 native, WebGPU in the browser).
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+
+[dependencies.wgpu]
+version = "30"
+optional = true
+
+[dependencies.pollster]
+version = "0.4"
+optional = true
+
+[dependencies.bytemuck]
+version = "1"
+optional = true

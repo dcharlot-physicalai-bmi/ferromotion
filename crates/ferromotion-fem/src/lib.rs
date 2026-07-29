@@ -16,6 +16,9 @@
 
 use nalgebra::{Matrix3, Vector3};
 
+#[cfg(feature = "gpu")]
+pub mod gpu;
+
 /// A tetrahedral-mesh soft body with a stable Neo-Hookean material.
 #[derive(Clone)]
 pub struct FemSim {
