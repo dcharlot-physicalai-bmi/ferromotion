@@ -127,6 +127,8 @@ mod gpu_fem;
 pub use gpu_fem::GpuFemRef;
 mod gpu_plan;
 pub use gpu_plan::GpuPlanRef;
+mod gpu_cartpole;
+pub use gpu_cartpole::GpuCartpoleRef;
 mod physics_lab;
 mod capstone_lab;
 pub use capstone_lab::CapstoneLab;
