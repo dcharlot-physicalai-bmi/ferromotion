@@ -129,6 +129,8 @@ mod gpu_plan;
 pub use gpu_plan::GpuPlanRef;
 mod gpu_cartpole;
 pub use gpu_cartpole::GpuCartpoleRef;
+mod gpu_lbm;
+pub use gpu_lbm::GpuLbmRef;
 mod physics_lab;
 mod capstone_lab;
 pub use capstone_lab::CapstoneLab;
