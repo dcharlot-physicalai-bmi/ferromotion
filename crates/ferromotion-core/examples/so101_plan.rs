@@ -1,14 +1,18 @@
-//! GLOBAL PLANNER for the deep pocket — the last (a)-branch of the trap boundary.
+//! GLOBAL PLANNER for the deep pocket — and the finding that plan existence is NOT the bottleneck.
 //!
-//! so101_reach.rs showed a smarter REACTIVE recover reclaims under-shelf recovery to ~13 cm, but the
-//! deepest pockets (and 5/40 poses) stay unrecoverable: local control cannot see the way out. This is
-//! the constructive answer for those: a barrier-respecting RRT in configuration space plans a
-//! collision-free retreat from a deep-pocket pose to home (every sampled point on every edge keeps the
-//! whole arm's min-clearance above a margin), and we EXECUTE the plan under the worst-corner envelope
-//! (servo-tracked waypoints, real dynamics) to confirm 0 strikes and escape. Compared head-to-head with
-//! the reactive smart recover on the deepest safe under-shelf poses: reactive strikes, the plan escapes.
-//! This closes the arc — trap (reactive insufficient) → refuse → earn-back (better reactive) → PLAN
-//! (global, for the rest). Floor + shelf-underside barriers on swept-sphere links; worst envelope; twin.
+//! so101_reach.rs reclaimed under-shelf recovery to ~13 cm with a smarter reactive recover; the deepest
+//! pockets stay unrecoverable by local control. The natural next lever is a global plan, so this builds a
+//! barrier-respecting RRT in configuration space that plans a collision-free retreat from a deep-pocket
+//! pose to home (every sampled point on every edge keeps the whole arm's min-clearance above a margin),
+//! then EXECUTES it (servo-tracked, smoothed, slow, with a safety hold). THE HONEST RESULT: a plan exists
+//! for every deep pocket, but under the WORST-corner envelope it cannot be executed — a pocket under a
+//! 15 cm shelf offers only ~3 cm of clearance (the arm's own links crowd it), and the servo's tracking
+//! error under latency + deadband + low damping exceeds that corridor, so planned execution strikes just
+//! like reactive. The bottleneck is EXECUTION PRECISION vs CORRIDOR CLEARANCE, not plan existence. The
+//! lever that opens the deep pocket is SHRINKING THE ENVELOPE (system-ID): the SAME plans execute under a
+//! tight, identified envelope. So sys-ID does not just tighten the certificate, it enlarges the
+//! executable-and-recoverable workspace; where it can't reach, the pocket is refused. Floor + shelf on
+//! swept-sphere links; the twin, not hardware.
 use ferromotion_core::{forward_dynamics, from_urdf_full, mass_matrix, LinkInertia, Robot};
 use nalgebra::{DVector, Vector3};
 
@@ -99,7 +103,8 @@ fn plan_rrt(robot: &Robot, start: &[f64], goal: &[f64], seed: u32) -> Option<Vec
 }
 
 struct Env { fric: f64, lat: usize, dead: f64 }
-const WORST: Env = Env { fric: 0.35, lat: 4, dead: 0.024 };
+const WORST: Env = Env { fric: 0.35, lat: 4, dead: 0.024 };  // the wide, un-identified reality envelope
+const TIGHT: Env = Env { fric: 0.60, lat: 1, dead: 0.006 };  // a well system-ID'd unit: less lag, tighter tracking
 fn servo(cmd: &[f64], q: &[f64], qd: &[f64], dead: f64) -> Vec<f64> {
     (0..5).map(|i| { let mut e = cmd[i] - q[i]; if e.abs() < dead { e = 0.0; } (KP * e - KV * qd[i]).clamp(-TAUMAX, TAUMAX) }).collect()
 }
@@ -126,20 +131,20 @@ fn find_pose(robot: &Robot, tx: f64, tz: f64, salt: u32) -> Vec<f64> {
 // EXECUTE a (smoothed) planned path under the worst envelope: track waypoints SLOWLY and TIGHTLY so the
 // lagging servo stays on the collision-free path, with a safety hold that freezes motion if clearance
 // dips (plan globally, filter locally). returns (worst min-barrier, cleared the pocket).
-fn execute_path(robot: &Robot, inertia: &[LinkInertia], path: &[Vec<f64>], qd0: &[f64]) -> (f64, bool) {
+fn execute_path(robot: &Robot, inertia: &[LinkInertia], path: &[Vec<f64>], qd0: &[f64], env: &Env) -> (f64, bool) {
     let (mut q, mut qd) = (path[0].clone(), qd0.to_vec());
     let mut cmd = q.clone();
-    let mut buf: Vec<Vec<f64>> = vec![q.clone(); WORST.lat + 1];
+    let mut buf: Vec<Vec<f64>> = vec![q.clone(); env.lat + 1];
     let (mut worst, mut wi, mut cleared) = (min_barrier(robot, &q), 1usize.min(path.len() - 1), false);
     let slew = 0.25 * VMAX; // move well below servo speed so actual q hugs the command (minimal lag)
-    for _ in 0..18000 {
+    for _ in 0..9000 {
         if dist(&q, &path[wi]) < 0.03 && wi < path.len() - 1 { wi += 1; } // advance only when actually close
         // safety filter: if clearance dips, hold position (freeze the target at q) so tracking error can't
         // drive the arm through a barrier; otherwise track the current waypoint.
         let target: Vec<f64> = if min_barrier(robot, &q) < 0.02 { q.clone() } else { path[wi].clone() };
         for i in 0..5 { cmd[i] += (target[i] - cmd[i]).clamp(-slew * DT, slew * DT); }
         buf.push(cmd.clone()); let applied = buf.remove(0);
-        step(robot, inertia, &mut q, &mut qd, &applied, &WORST);
+        step(robot, inertia, &mut q, &mut qd, &applied, env);
         worst = worst.min(min_barrier(robot, &q));
         if tipx(robot, &q) < X_SHELF - 0.02 && wi >= path.len() - 1 { cleared = true; break; }
     }
@@ -193,34 +198,42 @@ fn main() {
         deep.len(), dd.iter().cloned().fold(9.0, f64::min), dd.iter().cloned().fold(0.0, f64::max),
         (dd.iter().cloned().fold(9.0, f64::min) - X_SHELF) * 100.0, (dd.iter().cloned().fold(0.0, f64::max) - X_SHELF) * 100.0);
 
-    let (mut r_ok, mut p_ok, mut planned) = (0, 0, 0);
+    let (mut r_ok, mut pw_ok, mut pt_ok, mut planned) = (0, 0, 0, 0);
+    println!("  (reactive = smart recover, worst env; plan run twice: executed under the WORST env and a TIGHT,");
+    println!("   system-ID'd env. A plan exists for every pose; the question is whether it can be EXECUTED.)\n");
     for (i, q) in deep.iter().enumerate() {
         let qd: Vec<f64> = (0..5).map(|j| 0.15 * (u01(j as u32 + 7) - 0.5)).collect();
-        // reactive
         let (rw, rc) = reactive_recover(&robot, &inertia, q, &qd, &q0);
         let react = rw >= 0.0 && rc;
         if react { r_ok += 1; }
-        // planned
-        let (pw, pc, plen) = match plan_rrt(&robot, q, &q0, 1234 + i as u32 * 97) {
-            Some(raw) => { planned += 1; let path = shortcut(&robot, &raw); let (w, c) = execute_path(&robot, &inertia, &path, &qd); (w, c, path.len()) }
-            None => (f64::NAN, false, 0),
+        let (pw_ex, pt_ex, plen) = match plan_rrt(&robot, q, &q0, 1234 + i as u32 * 97) {
+            Some(raw) => {
+                planned += 1; let path = shortcut(&robot, &raw);
+                let (w1, c1) = execute_path(&robot, &inertia, &path, &qd, &WORST);
+                let (w2, c2) = execute_path(&robot, &inertia, &path, &qd, &TIGHT);
+                ((w1 >= 0.0 && c1), (w2 >= 0.0 && c2), path.len())
+            }
+            None => (false, false, 0),
         };
-        let plan_ok = pw >= 0.0 && pc;
-        if plan_ok { p_ok += 1; }
-        println!("  pose {:>2} (tool x={:.3}, {:.0} cm under): reactive {:<12} | planned {:<10} (path {} nodes)",
-            i, tipx(&robot, q), (tipx(&robot, q) - X_SHELF) * 100.0,
-            if react { "ESCAPES" } else { "strikes/stuck" },
-            if plan_ok { "ESCAPES" } else if plen == 0 { "no plan" } else { "exec-strike" }, plen);
+        if pw_ex { pw_ok += 1; } if pt_ex { pt_ok += 1; }
+        println!("  pose {:>2} ({:>2.0} cm under): reactive {:<7} | plan+exec WORST {:<7} | plan+exec TIGHT {:<7} ({} nodes)",
+            i, (tipx(&robot, q) - X_SHELF) * 100.0,
+            if react { "escape" } else { "strike" }, if pw_ex { "escape" } else { "strike" }, if pt_ex { "escape" } else { "strike" }, plen);
     }
-    println!("\n  reactive smart recover: {}/{} escaped   |   RRT plan + execute: {}/{} escaped ({} plans found)",
-        r_ok, deep.len(), p_ok, deep.len(), planned);
+    println!("\n  reactive (worst): {}/{} escape   |   plan+exec WORST: {}/{}   |   plan+exec TIGHT: {}/{}   ({} plans found)",
+        r_ok, deep.len(), pw_ok, deep.len(), pt_ok, deep.len(), planned);
 
     println!("\n  ================  VERDICT  ================");
-    println!("  On the deepest pockets, the reactive recover strikes or strands ({}/{} escape), but a barrier-", r_ok, deep.len());
-    println!("  respecting RRT that plans a collision-free retreat and executes it under the worst envelope");
-    println!("  escapes {}/{}. This is the (a)-branch: where LOCAL control cannot see the exit, a GLOBAL plan", p_ok, deep.len());
-    println!("  finds it. The full boundary is now covered — reactive recovery for the shallow, certified pocket");
-    println!("  (fast, no planning); a planned retreat for the deep pocket; refusal only where neither is available.");
-    println!("\n  Scope: swept-sphere links; RRT plans in C-space against the barrier at {:.0} cm margin; execution", PLAN_MARGIN * 100.0);
-    println!("  is servo-tracked under the worst-corner envelope; the twin, not hardware; empirical, not a proof.");
+    println!("  A plan EXISTS for every deep pocket (RRT finds a collision-free retreat, {}/{}), so plan", planned, deep.len());
+    println!("  existence is NOT the bottleneck. The bottleneck is EXECUTION PRECISION vs CORRIDOR CLEARANCE:");
+    println!("  a pocket under a 15 cm shelf offers ≤{:.0} cm of clearance (the arm's own links crowd it), and", PLAN_MARGIN * 100.0);
+    println!("  under the WORST envelope (latency, deadband, low damping) the servo cannot track a reference");
+    println!("  within that corridor — planned execution escapes only {}/{}, no better than reactive ({}/{}).", pw_ok, deep.len(), r_ok, deep.len());
+    println!("  Under a TIGHT, system-ID'd envelope the SAME plans execute and escape {}/{}. So the lever that", pt_ok, deep.len());
+    println!("  opens the deep pocket is NOT a cleverer controller — it is SHRINKING THE ENVELOPE (system-ID),");
+    println!("  which shrinks tracking error below the corridor width. Absent that, the deep pocket is REFUSED.");
+    println!("  This ties the whole program together: sys-ID does not just tighten the certificate, it ENLARGES");
+    println!("  the executable-and-recoverable workspace. Reactive for the shallow pocket; a plan for the deep");
+    println!("  pocket ONLY once the envelope is tight enough to execute it; refusal otherwise.");
+    println!("\n  Scope: swept-sphere links; RRT in C-space at {:.0} cm margin; servo-tracked execution; the twin.", PLAN_MARGIN * 100.0);
 }

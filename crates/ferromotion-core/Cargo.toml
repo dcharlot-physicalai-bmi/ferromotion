@@ -15,3 +15,19 @@ nalgebra.workspace = true
 urdf-rs = "0.9"
 clarabel = "0.11"
 faer = { version = "0.24", default-features = false, features = ["std"] }
+
+[features]
+## The wgpu GPU path: portable batch collision-checking (Metal/Vulkan/DX12 native, WebGPU in the browser).
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+
+[dependencies.wgpu]
+version = "30"
+optional = true
+
+[dependencies.pollster]
+version = "0.4"
+optional = true
+
+[dependencies.bytemuck]
+version = "1"
+optional = true

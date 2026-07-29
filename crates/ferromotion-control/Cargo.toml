@@ -11,6 +11,22 @@ categories.workspace = true
 description = "Control schemes for physical AI, in Rust — PID, computed-torque, Cartesian impedance, and more. WASM-clean."
 
 [dependencies]
-ferromotion-core = { path = "../ferromotion-core", version = "0.42.0" }
+ferromotion-core = { path = "../ferromotion-core", version = "0.43.0" }
 nalgebra.workspace = true
 clarabel = "0.11"
+
+[features]
+## The wgpu GPU path: portable batched rollouts (Metal/Vulkan/DX12 native, WebGPU in the browser).
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+
+[dependencies.wgpu]
+version = "30"
+optional = true
+
+[dependencies.pollster]
+version = "0.4"
+optional = true
+
+[dependencies.bytemuck]
+version = "1"
+optional = true

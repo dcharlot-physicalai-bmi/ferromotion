@@ -96,6 +96,8 @@ mod retarget;
 mod rigidbody;
 mod robot_contact;
 mod robot_plan;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 mod robust;
 mod prm;
 mod rrt;

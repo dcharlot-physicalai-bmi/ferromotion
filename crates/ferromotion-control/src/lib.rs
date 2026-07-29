@@ -13,6 +13,8 @@ pub use pf::ParticleFilter;
 pub use mhe::{batch_estimate, LinearModel};
 mod batch;
 pub use batch::{batch_rollout, Cartpole};
+#[cfg(feature = "gpu")]
+pub mod gpu;
 mod alip;
 mod abfilter;
 mod actuator;
