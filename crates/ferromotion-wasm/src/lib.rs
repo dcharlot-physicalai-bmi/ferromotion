@@ -125,6 +125,8 @@ mod gpu_sensor;
 pub use gpu_sensor::GpuSensorRef;
 mod gpu_fem;
 pub use gpu_fem::GpuFemRef;
+mod gpu_plan;
+pub use gpu_plan::GpuPlanRef;
 mod physics_lab;
 mod capstone_lab;
 pub use capstone_lab::CapstoneLab;
