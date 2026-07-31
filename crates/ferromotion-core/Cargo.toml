@@ -31,3 +31,7 @@ optional = true
 [dependencies.bytemuck]
 version = "1"
 optional = true
+
+[[example]]
+name = "gpu_floating_gait_rl"
+required-features = ["gpu"]

@@ -11,6 +11,7 @@
 use nalgebra::{DMatrix, DVector, Isometry3, Translation3, Unit, UnitQuaternion, Vector3, Vector6};
 
 mod aba;
+mod tree_dynamics;
 mod crba;
 mod apriltag;
 mod bvh;
@@ -95,6 +96,7 @@ mod savgol;
 mod retarget;
 mod rigidbody;
 mod robot_contact;
+mod floating_contact;
 mod robot_plan;
 #[cfg(feature = "gpu")]
 pub mod gpu;
@@ -121,7 +123,8 @@ mod mjcf;
 mod urdf;
 mod xcorr;
 mod xpbd;
-pub use aba::{floating_base_forward_dynamics, forward_dynamics_aba};
+pub use aba::{floating_base_forward_dynamics, floating_base_forward_dynamics_ext, forward_dynamics_aba};
+pub use tree_dynamics::tree_floating_forward_dynamics;
 pub use crba::crba;
 pub use apriltag::{decode_payload, tag_pose};
 pub use cfd_contact::{rollout_impulse, CfdContact};
@@ -221,6 +224,7 @@ pub use dex_retarget::{
 };
 pub use planar_contact::PlanarBody;
 pub use robot_contact::RobotContactSim;
+pub use floating_contact::{floating_contact_step, quadruped, tree_floating_contact_step, FootContact};
 pub use pink::{
     solve_pink, FramePoseTask, PinkOptions, PinkResult, PinkSolver, PinkTask, PostureTask, TaskStack,
 };

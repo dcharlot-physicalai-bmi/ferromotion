@@ -116,7 +116,7 @@ pub fn forward_dynamics_aba(robot: &Robot, inertia: &[LinkInertia], q: &[f64], q
 
 /// Gravity as a spatial force on a body: the wrench that would produce the gravitational spatial
 /// acceleration `[0; g_frame]`, i.e. `I·a_g`. `r_to_frame` rotates a base-frame vector into this frame.
-fn gravity_wrench( inertia_sp: &Matrix6<f64>, gravity: Vector3<f64>, r_to_frame: &Matrix3<f64>) -> Vector6<f64> {
+pub(crate) fn gravity_wrench( inertia_sp: &Matrix6<f64>, gravity: Vector3<f64>, r_to_frame: &Matrix3<f64>) -> Vector6<f64> {
     let mut a_g = Vector6::zeros();
     a_g.fixed_rows_mut::<3>(3).copy_from(&(r_to_frame * gravity));
     inertia_sp * a_g
@@ -128,15 +128,27 @@ fn gravity_wrench( inertia_sp: &Matrix6<f64>, gravity: Vector3<f64>, r_to_frame:
 /// external wrench (a uniform field), so it works for the free base too. This is the gate to
 /// humanoid/quadruped dynamics, where the base is unactuated and floats.
 pub fn floating_base_forward_dynamics(robot: &Robot, inertia: &[LinkInertia], base_inertia: &LinkInertia, v0: Vector6<f64>, q: &[f64], qd: &[f64], tau: &[f64], gravity: Vector3<f64>) -> (Vector6<f64>, Vec<f64>) {
+    let zero = vec![Vector6::zeros(); robot.dof()];
+    floating_base_forward_dynamics_ext(robot, inertia, base_inertia, v0, q, qd, tau, Vector6::zeros(), &zero, gravity)
+}
+
+/// Floating-base forward dynamics with **external spatial forces**: `f_ext_base` on the free base and
+/// `f_ext[i]` on link `i`, each a spatial force `[torque; force]` expressed in that body's own frame.
+/// This is how ground contact / applied wrenches enter a floating-base sim — a contact force at a foot
+/// becomes an external spatial force on that link, and ABA propagates its reaction to the base and
+/// joints. With all forces zero it is exactly [`floating_base_forward_dynamics`].
+#[allow(clippy::too_many_arguments)]
+pub fn floating_base_forward_dynamics_ext(robot: &Robot, inertia: &[LinkInertia], base_inertia: &LinkInertia, v0: Vector6<f64>, q: &[f64], qd: &[f64], tau: &[f64], f_ext_base: Vector6<f64>, f_ext: &[Vector6<f64>], gravity: Vector3<f64>) -> (Vector6<f64>, Vec<f64>) {
     let n = robot.dof();
     let (mut xm, mut s) = (Vec::with_capacity(n), Vec::with_capacity(n));
     let (mut v, mut c) = (vec![Vector6::zeros(); n], vec![Vector6::zeros(); n]);
     let (mut ia, mut pa) = (Vec::with_capacity(n), vec![Vector6::zeros(); n]);
 
     // Base body seeds (base frame == identity rotation to itself, so gravity is expressed directly).
+    // An external spatial force subtracts from the bias (Featherstone: pᴬ = v×*·I·v − f_ext − f_grav).
     let ib = spatial_inertia(base_inertia);
     let mut ia_base = ib;
-    let mut pa_base = crf(v0) * (ib * v0) - gravity_wrench(&ib, gravity, &Matrix3::identity());
+    let mut pa_base = crf(v0) * (ib * v0) - gravity_wrench(&ib, gravity, &Matrix3::identity()) - f_ext_base;
 
     // Pass 1 (outward). `r_bi` = rotation base→frame i, to express gravity in each frame.
     let mut r_parent = Matrix3::identity(); // base→parent
@@ -151,7 +163,7 @@ pub fn floating_base_forward_dynamics(robot: &Robot, inertia: &[LinkInertia], ba
         c[i] = crm(v[i]) * (si * qd[i]);
         let ii = spatial_inertia(&inertia[i]);
         let r_bi = r.transpose() * r_parent; // base→frame i
-        pa[i] = crf(v[i]) * (ii * v[i]) - gravity_wrench(&ii, gravity, &r_bi);
+        pa[i] = crf(v[i]) * (ii * v[i]) - gravity_wrench(&ii, gravity, &r_bi) - f_ext[i];
         ia.push(ii);
         xm.push(x);
         s.push(si);
