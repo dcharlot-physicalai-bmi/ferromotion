@@ -6,7 +6,7 @@
 //! spheres, and min-reduces their signed distance to the [`SdfScene`] — exactly the CPU reference,
 //! which is the oracle it is verified against. wgpu-portable (Metal/Vulkan/DX12 + WebGPU). Feature `gpu`.
 
-use crate::{JointKind, Robot, Sdf, SdfScene};
+use crate::{JointKind, Robot, Sdf, SdfScene, StFrictionContact};
 use wgpu::util::DeviceExt;
 
 const WGSL: &str = r#"
@@ -2280,19 +2280,32 @@ fn gait_step(@builtin(global_invocation_id) g: vec3<u32>) {
   for (var i=0u;i<N;i=i+1u){ QSTATE[sb+i]=o.q[i]; QSTATE[sb+N+i]=o.qd[i]; }
 }
 
-// Linear feedback → joint torques. Features: [base_z, up-alignment, forward world velocity, q, qd].
-fn policy_tau(st: GState, pol: u32) -> array<f32,N> {
-  let in_dim = u32(PRM[26]); let taumax = PRM[24];
-  let vfwd = (st.R0 * st.v0.b).x;                         // base forward (world +x) velocity
+// One-hidden-layer MLP policy with a gait clock. Features: [base_z, up-alignment, forward world
+// velocity, q, qd, sin(phase), cos(phase)]. The phase clock lets the policy be time-periodic — a real
+// gait cycle — and the tanh hidden layer adds the nonlinearity a rhythmic dynamic gait needs.
+const HID: u32 = {HID}u;
+fn policy_tau(st: GState, pol: u32, phs: f32, phc: f32) -> array<f32,N> {
+  let in_dim = {IN}u; let taumax = PRM[24];
+  let vfwd = (st.R0 * st.v0.b).x;
   var feat: array<f32, {IN}>;
   feat[0] = st.p0.z; feat[1] = st.R0[2][2]; feat[2] = vfwd;
   for (var i=0u;i<N;i=i+1u){ feat[3u+i] = st.q[i]; feat[3u+N+i] = st.qd[i]; }
-  let base = pol * (N*in_dim + N);
+  feat[3u+2u*N] = phs; feat[4u+2u*N] = phc;
+  let base = pol * {PD}u;
+  // layer 1: h = tanh(W1·feat + b1), W1 is HID×in_dim then b1(HID)
+  var h: array<f32, {HID}>;
+  for (var hh=0u; hh<HID; hh=hh+1u){
+    var s = POLICY[base + HID*in_dim + hh];
+    for (var k=0u;k<in_dim;k=k+1u){ s = s + POLICY[base + hh*in_dim + k] * feat[k]; }
+    h[hh] = tanh(s);
+  }
+  // layer 2: tau = clamp(W2·h + b2), W2 is N×HID then b2(N), after W1(HID·in_dim)+b1(HID)
+  let o2 = HID*in_dim + HID;
   var tau: array<f32,N>;
   for (var j=0u;j<N;j=j+1u){
-    var sm = POLICY[base + N*in_dim + j];
-    for (var k=0u;k<in_dim;k=k+1u){ sm = sm + POLICY[base + j*in_dim + k] * feat[k]; }
-    tau[j] = clamp(sm, -taumax, taumax);
+    var s = POLICY[base + o2 + N*HID + j];
+    for (var k=0u;k<HID;k=k+1u){ s = s + POLICY[base + o2 + j*HID + k] * h[k]; }
+    tau[j] = clamp(s, -taumax, taumax);
   }
   return tau;
 }
@@ -2301,7 +2314,7 @@ fn policy_tau(st: GState, pol: u32) -> array<f32,N> {
 fn gait_rollout(@builtin(global_invocation_id) g: vec3<u32>) {
   let pol = g.x; let n_policies = u32(PRM[27]);
   if (pol >= n_policies) { return; }
-  let effort_w = PRM[23]; let steps = u32(PRM[25]);
+  let effort_w = PRM[23]; let steps = u32(PRM[25]); let dt = PRM[21]; let freq = PRM[28];
   var st: GState;
   st.R0 = mat3x3<f32>(vec3<f32>(INIT[0],INIT[1],INIT[2]), vec3<f32>(INIT[3],INIT[4],INIT[5]), vec3<f32>(INIT[6],INIT[7],INIT[8]));
   st.p0 = vec3<f32>(INIT[9],INIT[10],INIT[11]);
@@ -2309,7 +2322,8 @@ fn gait_rollout(@builtin(global_invocation_id) g: vec3<u32>) {
   for (var i=0u;i<N;i=i+1u){ st.q[i]=INIT[18u+i]; st.qd[i]=INIT[18u+N+i]; }
   var reward = 0.0;
   for (var t=0u;t<steps;t=t+1u){
-    let tau = policy_tau(st, pol);
+    let clock = 6.2831853 * freq * f32(t) * dt;           // gait phase clock
+    let tau = policy_tau(st, pol, sin(clock), cos(clock));
     st = tree_gait_advance(st, tau);
     // reward: FORWARD progress (world +x), gated by staying upright so it can't win by toppling.
     var eff = 0.0; for (var j=0u;j<N;j=j+1u){ eff = eff + tau[j]*tau[j]; }
@@ -2318,7 +2332,10 @@ fn gait_rollout(@builtin(global_invocation_id) g: vec3<u32>) {
   REWARD[pol] = reward;
 }
 "#;
-    src.replace("{LIST}", &list).replace("{IN}", &(3 + 2 * n).to_string()).replace("{N}", &n.to_string())
+    let in_dim = 5 + 2 * n; // base_z, up, fwd_vel, q, qd, sin, cos
+    let hid = 8usize;
+    let pd = hid * in_dim + hid + n * hid + n;
+    src.replace("{LIST}", &list).replace("{HID}", &hid.to_string()).replace("{IN}", &in_dim.to_string()).replace("{PD}", &pd.to_string()).replace("{N}", &n.to_string())
 }
 
 /// The branched-tree contact simulator on the GPU (tree FK + multi-foot contact + tree spatial ABA +
@@ -2368,9 +2385,10 @@ impl TreeGaitGpu {
         let mut prm = vec![n as f32, n_envs as f32, gravity.x as f32, gravity.y as f32, gravity.z as f32, base.mass as f32, base.com.x as f32, base.com.y as f32, base.com.z as f32];
         prm.extend(base.inertia.as_slice().iter().map(|&v| v as f32));
         prm.extend_from_slice(&[floor_z as f32, kn as f32, kd as f32, dt as f32, contacts.len() as f32]);
-        let in_dim = 3 + 2 * n;
-        let policy_dim = n * in_dim + n;
-        prm.extend_from_slice(&[0.0, 0.0, 0.0, in_dim as f32, 0.0]); // rollout params (23..27)
+        let in_dim = 5 + 2 * n; // base_z, up, fwd_vel, q, qd, sin, cos
+        let hid = 8;
+        let policy_dim = hid * in_dim + hid + n * hid + n; // 1-hidden-layer MLP
+        prm.extend_from_slice(&[0.0, 0.0, 0.0, in_dim as f32, 0.0, 0.0]); // rollout params 23..28 (28 = gait freq)
         let mut cflat: Vec<f32> = contacts.iter().flat_map(|&(b, off, mu)| [b as f32, off.x as f32, off.y as f32, off.z as f32, mu as f32]).collect();
         if cflat.is_empty() { cflat = vec![0.0; 5]; }
 
@@ -2432,14 +2450,14 @@ impl TreeGaitGpu {
     /// policies (`W(n×in_dim), b(n)`, `in_dim=3+2n`); all roll out `steps` from the shared `init =
     /// [R0(9,col-major), p0(3), v0(6), q(n), qd(n)]` under `τ=clamp(W·[base_z, up, forward-vel, q, qd]+b,
     /// ±taumax)`. Returns the per-policy forward-progress return `Σ x·max(up,0) − w‖τ‖²`. One thread/policy.
-    pub fn rollout_rewards(&self, policies: &[f64], init: &[f64], effort_w: f64, taumax: f64, steps: usize) -> Vec<f64> {
+    pub fn rollout_rewards(&self, policies: &[f64], init: &[f64], effort_w: f64, taumax: f64, freq: f64, steps: usize) -> Vec<f64> {
         let n_policies = policies.len() / self.policy_dim;
         assert_eq!(init.len(), 18 + 2 * self.n, "init state size mismatch");
         let f = |s: &[f64]| -> Vec<f32> { s.iter().map(|&v| v as f32).collect() };
         self.queue.write_buffer(&self.policy_buf, 0, bytemuck::cast_slice(&f(policies)));
         self.queue.write_buffer(&self.init_buf, 0, bytemuck::cast_slice(&f(init)));
         let mut prm = self.base_prm.clone();
-        prm[23] = effort_w as f32; prm[24] = taumax as f32; prm[25] = steps as f32; prm[27] = n_policies as f32;
+        prm[23] = effort_w as f32; prm[24] = taumax as f32; prm[25] = steps as f32; prm[27] = n_policies as f32; prm[28] = freq as f32;
         self.queue.write_buffer(&self.prm_buf, 0, bytemuck::cast_slice(&prm));
         let mut enc = self.device.create_command_encoder(&Default::default());
         {
@@ -2517,6 +2535,317 @@ impl TreeGaitGpu {
             }
         }
         (bp, vv, qo, qdo)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// FrictionalContactGpu — the interior-point (Dojo-style) HARD frictional contact solve, batched.
+// One GPU thread per environment runs the full central-path LCP Newton of `solve_frictional_ipm`:
+// invert M, form the Stewart-Trinkle LCP `M_lcp = BᵀM⁻¹B + E`, solve `0 ≤ z ⟂ M_lcp z + q` by damped
+// Newton with fraction-to-boundary, and return v⁺ = v_free + M⁻¹B z. This is the non-penetration +
+// Coulomb-cone contact model (vs the penalty spring-damper the gait benches use), on the local GPU.
+// ---------------------------------------------------------------------------------------------
+
+/// Bake the frictional-LCP kernel for a FIXED contact structure: `nv` velocity DOF, `nz` LCP
+/// variables, `nc` contacts, and the per-contact normal-slot indices `normal_idx`.
+fn frictional_wgsl(nv: usize, nz: usize, nc: usize, normal_idx: &[usize]) -> String {
+    let normals = normal_idx.iter().map(|i| format!("{i}")).collect::<Vec<_>>().join(", ");
+    let src = r#"
+// PRM: [n_envs, dt, kappa, pad] (16-byte aligned uniform)
+struct Prm { n_envs: f32, dt: f32, kappa: f32, pad: f32 };
+@group(0) @binding(0) var<uniform> prm: Prm;
+@group(0) @binding(1) var<storage, read> B: array<f32>;      // NV x NZ, row-major
+@group(0) @binding(2) var<storage, read> E: array<f32>;      // NZ x NZ, row-major
+@group(0) @binding(3) var<storage, read> M: array<f32>;      // n_envs x (NV x NV)
+@group(0) @binding(4) var<storage, read> VF: array<f32>;     // n_envs x NV
+@group(0) @binding(5) var<storage, read> PHI: array<f32>;    // n_envs x NC
+@group(0) @binding(6) var<storage, read_write> VN: array<f32>; // n_envs x NV
+
+const NORMAL: array<i32, {NC}> = array<i32, {NC}>({NORMALS});
+
+// Gauss-Jordan inverse of an SPD NV x NV (the mass matrix), env e -> Minv (row-major).
+fn invert_m(e: u32, minv: ptr<function, array<f32, {NVNV}>>) {
+    var a: array<f32, {NVNV}>;
+    for (var i = 0u; i < {NV}u; i = i + 1u) {
+        for (var j = 0u; j < {NV}u; j = j + 1u) {
+            a[i * {NV}u + j] = M[e * {NVNV}u + i * {NV}u + j];
+            (*minv)[i * {NV}u + j] = select(0.0, 1.0, i == j);
+        }
+    }
+    for (var col = 0u; col < {NV}u; col = col + 1u) {
+        let d = a[col * {NV}u + col];
+        let inv = 1.0 / d;
+        for (var k = 0u; k < {NV}u; k = k + 1u) {
+            a[col * {NV}u + k] = a[col * {NV}u + k] * inv;
+            (*minv)[col * {NV}u + k] = (*minv)[col * {NV}u + k] * inv;
+        }
+        for (var r = 0u; r < {NV}u; r = r + 1u) {
+            if (r == col) { continue; }
+            let f = a[r * {NV}u + col];
+            for (var k = 0u; k < {NV}u; k = k + 1u) {
+                a[r * {NV}u + k] = a[r * {NV}u + k] - f * a[col * {NV}u + k];
+                (*minv)[r * {NV}u + k] = (*minv)[r * {NV}u + k] - f * (*minv)[col * {NV}u + k];
+            }
+        }
+    }
+}
+
+// Solve J x = rhs (NZ x NZ, general) by Gaussian elimination with partial pivoting; J, rhs consumed.
+// Returns false if the system is (numerically) singular — the caller then stops Newton, matching the
+// CPU `lu().solve()` returning None.
+fn lu_solve(j: ptr<function, array<f32, {NZNZ}>>, rhs: ptr<function, array<f32, {NZ}>>, x: ptr<function, array<f32, {NZ}>>) -> bool {
+    for (var col = 0u; col < {NZ}u; col = col + 1u) {
+        var piv = col;
+        var mx = abs((*j)[col * {NZ}u + col]);
+        for (var r = col + 1u; r < {NZ}u; r = r + 1u) {
+            let v = abs((*j)[r * {NZ}u + col]);
+            if (v > mx) { mx = v; piv = r; }
+        }
+        if (mx < 1e-20) { return false; }
+        if (piv != col) {
+            for (var k = 0u; k < {NZ}u; k = k + 1u) {
+                let t = (*j)[col * {NZ}u + k]; (*j)[col * {NZ}u + k] = (*j)[piv * {NZ}u + k]; (*j)[piv * {NZ}u + k] = t;
+            }
+            let tr = (*rhs)[col]; (*rhs)[col] = (*rhs)[piv]; (*rhs)[piv] = tr;
+        }
+        let d = (*j)[col * {NZ}u + col];
+        for (var r = col + 1u; r < {NZ}u; r = r + 1u) {
+            let f = (*j)[r * {NZ}u + col] / d;
+            for (var k = col; k < {NZ}u; k = k + 1u) { (*j)[r * {NZ}u + k] = (*j)[r * {NZ}u + k] - f * (*j)[col * {NZ}u + k]; }
+            (*rhs)[r] = (*rhs)[r] - f * (*rhs)[col];
+        }
+    }
+    for (var ii = 0u; ii < {NZ}u; ii = ii + 1u) {
+        let i = {NZ}u - 1u - ii;
+        var s = (*rhs)[i];
+        for (var k = i + 1u; k < {NZ}u; k = k + 1u) { s = s - (*j)[i * {NZ}u + k] * (*x)[k]; }
+        (*x)[i] = s / (*j)[i * {NZ}u + i];
+    }
+    return true;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let e = gid.x;
+    if (f32(e) >= prm.n_envs) { return; }
+
+    var minv: array<f32, {NVNV}>;
+    invert_m(e, &minv);
+
+    // tmp = Minv * B  (NV x NZ)
+    var tmp: array<f32, {NVNZ}>;
+    for (var r = 0u; r < {NV}u; r = r + 1u) {
+        for (var c = 0u; c < {NZ}u; c = c + 1u) {
+            var s = 0.0;
+            for (var k = 0u; k < {NV}u; k = k + 1u) { s = s + minv[r * {NV}u + k] * B[k * {NZ}u + c]; }
+            tmp[r * {NZ}u + c] = s;
+        }
+    }
+    // Mlcp = Bᵀ tmp + E  (NZ x NZ)
+    var mlcp: array<f32, {NZNZ}>;
+    for (var i = 0u; i < {NZ}u; i = i + 1u) {
+        for (var jc = 0u; jc < {NZ}u; jc = jc + 1u) {
+            var s = E[i * {NZ}u + jc];
+            for (var r = 0u; r < {NV}u; r = r + 1u) { s = s + B[r * {NZ}u + i] * tmp[r * {NZ}u + jc]; }
+            mlcp[i * {NZ}u + jc] = s;
+        }
+    }
+    // q = Bᵀ v_free + q0(phi)
+    var q: array<f32, {NZ}>;
+    for (var i = 0u; i < {NZ}u; i = i + 1u) {
+        var s = 0.0;
+        for (var r = 0u; r < {NV}u; r = r + 1u) { s = s + B[r * {NZ}u + i] * VF[e * {NV}u + r]; }
+        q[i] = s;
+    }
+    for (var c = 0u; c < {NC}u; c = c + 1u) { q[NORMAL[c]] = q[NORMAL[c]] + PHI[e * {NC}u + c] / prm.dt; }
+
+    // central-path Newton: lam ∘ (Mlcp lam + q) = kappa, lam > 0
+    var lam: array<f32, {NZ}>;
+    for (var i = 0u; i < {NZ}u; i = i + 1u) { lam[i] = 1.0; }
+    for (var it = 0u; it < 100u; it = it + 1u) {
+        var w: array<f32, {NZ}>;
+        for (var i = 0u; i < {NZ}u; i = i + 1u) {
+            var s = q[i];
+            for (var k = 0u; k < {NZ}u; k = k + 1u) { s = s + mlcp[i * {NZ}u + k] * lam[k]; }
+            w[i] = s;
+        }
+        var f: array<f32, {NZ}>;
+        var fn2 = 0.0;
+        for (var i = 0u; i < {NZ}u; i = i + 1u) { f[i] = lam[i] * w[i] - prm.kappa; fn2 = fn2 + f[i] * f[i]; }
+        if (fn2 < 1e-16) { break; }
+        // J = diag(w) + diag(lam) Mlcp
+        var jm: array<f32, {NZNZ}>;
+        for (var i = 0u; i < {NZ}u; i = i + 1u) {
+            for (var k = 0u; k < {NZ}u; k = k + 1u) { jm[i * {NZ}u + k] = lam[i] * mlcp[i * {NZ}u + k]; }
+            jm[i * {NZ}u + i] = jm[i * {NZ}u + i] + w[i];
+        }
+        var step: array<f32, {NZ}>;
+        if (!lu_solve(&jm, &f, &step)) { break; }
+        var alpha = 1.0;
+        for (var i = 0u; i < {NZ}u; i = i + 1u) {
+            if (step[i] > 0.0) { alpha = min(alpha, 0.99 * lam[i] / step[i]); }
+        }
+        for (var i = 0u; i < {NZ}u; i = i + 1u) { lam[i] = lam[i] - alpha * step[i]; }
+    }
+
+    // v_next = v_free + Minv B lam
+    var bl: array<f32, {NV}>;
+    for (var r = 0u; r < {NV}u; r = r + 1u) {
+        var s = 0.0;
+        for (var i = 0u; i < {NZ}u; i = i + 1u) { s = s + B[r * {NZ}u + i] * lam[i]; }
+        bl[r] = s;
+    }
+    for (var r = 0u; r < {NV}u; r = r + 1u) {
+        var s = VF[e * {NV}u + r];
+        for (var k = 0u; k < {NV}u; k = k + 1u) { s = s + minv[r * {NV}u + k] * bl[k]; }
+        VN[e * {NV}u + r] = s;
+    }
+}
+"#;
+    src.replace("{NVNV}", &(nv * nv).to_string())
+        .replace("{NVNZ}", &(nv * nz).to_string())
+        .replace("{NZNZ}", &(nz * nz).to_string())
+        .replace("{NORMALS}", &normals)
+        .replace("{NV}", &nv.to_string())
+        .replace("{NZ}", &nz.to_string())
+        .replace("{NC}", &nc.to_string())
+}
+
+/// Batched hard frictional contact — one GPU thread per environment solving the differentiable
+/// Stewart-Trinkle LCP of [`solve_frictional_ipm`] on the central path. The contact STRUCTURE (normal
+/// + friction-facet directions, `mu`) is fixed at construction; the mass matrix `M`, free velocity
+/// `v_free`, and signed gaps `phi` vary per environment. Feature `gpu`. Verified against the CPU
+/// oracle. HONEST SCOPE: per-thread private arrays scale as `nv²+nz²`, so this is for small–moderate
+/// contact sets (a handful of contacts); at large `nv`/`nz` register/occupancy pressure dominates.
+pub struct FrictionalContactGpu {
+    nv: usize,
+    nc: usize,
+    n_envs: usize,
+    dt: f64,
+    kappa: f64,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    pso: wgpu::ComputePipeline,
+    bgl: wgpu::BindGroupLayout,
+    b_buf: wgpu::Buffer,
+    e_buf: wgpu::Buffer,
+    prm_buf: wgpu::Buffer,
+    m_buf: wgpu::Buffer,
+    vf_buf: wgpu::Buffer,
+    phi_buf: wgpu::Buffer,
+    vn_buf: wgpu::Buffer,
+    staging: wgpu::Buffer,
+}
+
+impl FrictionalContactGpu {
+    /// Build a solver for the fixed contact set `contacts` (their `jn`/`jt`/`mu` define the LCP;
+    /// `phi` is supplied per environment at solve time), sized for batches of exactly `n_envs`.
+    /// `None` when there is no GPU.
+    pub fn new(contacts: &[StFrictionContact], dt: f64, kappa: f64, n_envs: usize) -> Option<Self> {
+        let nv = contacts.first().map(|c| c.jn.len())?;
+        let nc = contacts.len();
+        // per-contact block layout [λₙ, β₁…β_d, s]; record normal-slot indices and total nz.
+        let mut starts = Vec::with_capacity(nc);
+        let mut nz = 0usize;
+        for c in contacts {
+            starts.push(nz);
+            nz += 2 + c.jt.len();
+        }
+        // B (nv×nz) and E (nz×nz), row-major — the phi-free part of solve_frictional_ipm.
+        let mut bmat = vec![0.0f32; nv * nz];
+        let mut emat = vec![0.0f32; nz * nz];
+        for (i, c) in contacts.iter().enumerate() {
+            let d = c.jt.len();
+            let ln = starts[i];
+            let s_idx = ln + 1 + d;
+            for r in 0..nv {
+                bmat[r * nz + ln] = c.jn[r] as f32;
+            }
+            for (kf, dir) in c.jt.iter().enumerate() {
+                let bk = ln + 1 + kf;
+                for r in 0..nv {
+                    bmat[r * nz + bk] = dir[r] as f32;
+                }
+                emat[bk * nz + s_idx] = 1.0;
+                emat[s_idx * nz + bk] = -1.0;
+            }
+            emat[s_idx * nz + ln] = c.mu as f32;
+        }
+
+        let instance = wgpu::Instance::default();
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
+
+        let init = |label, data: &[u8]| device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: data, usage: wgpu::BufferUsages::STORAGE });
+        let b_buf = init("fr-b", bytemuck::cast_slice(&bmat));
+        let e_buf = init("fr-e", bytemuck::cast_slice(&emat));
+        let prm = [n_envs as f32, dt as f32, kappa as f32, 0.0f32];
+        let prm_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("fr-prm"), contents: bytemuck::cast_slice(&prm), usage: wgpu::BufferUsages::UNIFORM });
+        let store_dst = |label, size: usize| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: (size * 4).max(4) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let m_buf = store_dst("fr-m", n_envs * nv * nv);
+        let vf_buf = store_dst("fr-vf", n_envs * nv);
+        let phi_buf = store_dst("fr-phi", n_envs * nc.max(1));
+        let vn_buf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("fr-vn"), size: (n_envs * nv * 4).max(4) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+        let staging = device.create_buffer(&wgpu::BufferDescriptor { label: Some("fr-staging"), size: (n_envs * nv * 4).max(4) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("frictional"), source: wgpu::ShaderSource::Wgsl(frictional_wgsl(nv, nz, nc, &starts).into()) });
+        let uni = wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None };
+        let ro = |binding| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None };
+        let mut rw = ro(6);
+        rw.ty = wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None };
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("fr-bgl"), entries: &[uni, ro(1), ro(2), ro(3), ro(4), ro(5), rw] });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("fr-layout"), bind_group_layouts: &[Some(&bgl)], immediate_size: 0 });
+        let pso = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("frictional"), layout: Some(&layout), module: &shader, entry_point: Some("main"), compilation_options: Default::default(), cache: None });
+
+        Some(Self { nv, nc, n_envs, dt, kappa, device, queue, pso, bgl, b_buf, e_buf, prm_buf, m_buf, vf_buf, phi_buf, vn_buf, staging })
+    }
+
+    /// Post-contact velocity `v⁺` for each of `n_envs` environments. `m` is the flattened per-env mass
+    /// matrices (`n_envs·nv·nv`, row-major), `v_free` the free velocities (`n_envs·nv`), `phi` the
+    /// signed gaps (`n_envs·nc`). Matches [`solve_frictional_ipm`]`(…).v_next` at the same `kappa`.
+    pub fn solve(&self, m: &[f64], v_free: &[f64], phi: &[f64]) -> Vec<f64> {
+        assert_eq!(m.len(), self.n_envs * self.nv * self.nv, "mass-matrix batch size mismatch");
+        assert_eq!(v_free.len(), self.n_envs * self.nv, "v_free batch size mismatch");
+        assert_eq!(phi.len(), self.n_envs * self.nc, "phi batch size mismatch");
+        let f = |s: &[f64]| -> Vec<f32> { s.iter().map(|&v| v as f32).collect() };
+        self.queue.write_buffer(&self.m_buf, 0, bytemuck::cast_slice(&f(m)));
+        self.queue.write_buffer(&self.vf_buf, 0, bytemuck::cast_slice(&f(v_free)));
+        self.queue.write_buffer(&self.phi_buf, 0, bytemuck::cast_slice(&f(phi)));
+
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fr-bind"),
+            layout: &self.bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.prm_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: self.b_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: self.e_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: self.m_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: self.vf_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: self.phi_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: self.vn_buf.as_entire_binding() },
+            ],
+        });
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = enc.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.pso);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups((self.n_envs as u32).div_ceil(64), 1, 1);
+        }
+        enc.copy_buffer_to_buffer(&self.vn_buf, 0, &self.staging, 0, (self.n_envs * self.nv * 4) as u64);
+        self.queue.submit([enc.finish()]);
+
+        let slice = self.staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        rx.recv().expect("map").expect("map ok");
+        let view = slice.get_mapped_range().expect("mapped range");
+        let data: Vec<f32> = bytemuck::cast_slice(&view).to_vec();
+        drop(view);
+        self.staging.unmap();
+        let _ = (self.dt, self.kappa); // captured in prm at build time
+        data.iter().map(|&v| v as f64).collect()
     }
 }
 
@@ -3163,27 +3492,38 @@ mod verification {
     /// CPU forward-locomotion rollout reward — mirrors the GPU `gait_rollout` (same features, policy,
     /// reward) — the port reference and CEM baseline.
     #[allow(clippy::too_many_arguments)]
-    fn cpu_tree_gait_reward(joints: &[crate::Joint], inertia: &[LinkInertia], base_inertia: &LinkInertia, parent: &[isize], contacts: &[crate::FootContact], floor: f64, kn: f64, kd: f64, dt: f64, g: Vector3<f64>, init: &[f64], policy: &[f64], effort_w: f64, taumax: f64, steps: usize, n: usize) -> f64 {
+    fn cpu_tree_gait_reward(joints: &[crate::Joint], inertia: &[LinkInertia], base_inertia: &LinkInertia, parent: &[isize], contacts: &[crate::FootContact], floor: f64, kn: f64, kd: f64, dt: f64, g: Vector3<f64>, init: &[f64], policy: &[f64], effort_w: f64, taumax: f64, freq: f64, steps: usize, n: usize) -> f64 {
         use nalgebra::Rotation3;
-        let in_dim = 3 + 2 * n;
+        let in_dim = 5 + 2 * n;
+        let hid = 8;
         let rmat = Matrix3::from_column_slice(&init[0..9]);
         let mut base = Isometry3::from_parts(Translation3::from(Vector3::new(init[9], init[10], init[11])), UnitQuaternion::from_rotation_matrix(&Rotation3::from_matrix_unchecked(rmat)));
         let mut v0 = Vector6::from_row_slice(&init[12..18]);
         let mut q = init[18..18 + n].to_vec();
         let mut qd = init[18 + n..18 + 2 * n].to_vec();
         let mut reward = 0.0;
-        for _ in 0..steps {
+        for t in 0..steps {
+            let clock = 6.2831853 * freq * t as f64 * dt;
             let r0 = *base.rotation.to_rotation_matrix().matrix();
             let up = r0[(2, 2)];
             let vfwd = (r0 * v0.fixed_rows::<3>(3).into_owned()).x;
             let mut feat = vec![0.0; in_dim];
             feat[0] = base.translation.z; feat[1] = up; feat[2] = vfwd;
             for i in 0..n { feat[3 + i] = q[i]; feat[3 + n + i] = qd[i]; }
+            feat[3 + 2 * n] = clock.sin(); feat[4 + 2 * n] = clock.cos();
+            // 1-hidden-layer MLP (tanh), matching the GPU policy_tau
+            let mut h = vec![0.0; hid];
+            for hh in 0..hid {
+                let mut s = policy[hid * in_dim + hh];
+                for k in 0..in_dim { s += policy[hh * in_dim + k] * feat[k]; }
+                h[hh] = s.tanh();
+            }
+            let o2 = hid * in_dim + hid;
             let mut tau = vec![0.0; n];
             for j in 0..n {
-                let mut sv = policy[n * in_dim + j];
-                for k in 0..in_dim { sv += policy[j * in_dim + k] * feat[k]; }
-                tau[j] = sv.clamp(-taumax, taumax);
+                let mut s = policy[o2 + n * hid + j];
+                for k in 0..hid { s += policy[o2 + j * hid + k] * h[k]; }
+                tau[j] = s.clamp(-taumax, taumax);
             }
             let (b, v, qn, qdn) = tree_floating_contact_step(joints, inertia, parent, base_inertia, base, v0, &q, &qd, &tau, contacts, floor, kn, kd, dt, g);
             base = b; v0 = v; q = qn; qd = qdn;
@@ -3204,15 +3544,15 @@ mod verification {
         let base_inertia = LinkInertia { mass: 8.0, com: Vector3::zeros(), inertia: Matrix3::from_diagonal(&Vector3::new(0.08, 0.08, 0.12)) };
         let g = Vector3::new(0.0, 0.0, -9.81);
         let (floor, kn, kd, dt) = (0.0, 1.5e4, 120.0, 1e-3);
-        let (effort_w, taumax, steps) = (1e-5, 25.0, 200usize);
+        let (effort_w, taumax, freq, steps) = (1e-5, 25.0, 2.0, 200usize);
 
         // stance: straight legs (q=0), base at 0.6 so feet just touch — a stable standing start
         let mut init = vec![0.0f64; 18 + 2 * n];
         for (k, v) in Matrix3::<f64>::identity().as_slice().iter().enumerate() { init[k] = *v; }
         init[11] = 0.60;
 
-        let pop = 256usize;
-        let gens = 50usize;
+        let pop = 512usize;
+        let gens = 60usize;
         let Some(gp) = TreeGaitGpu::new(&joints, &inertia, &parent, &base_inertia, &contacts, floor, kn, kd, g, dt, pop) else {
             eprintln!("no GPU — skipping");
             return;
@@ -3226,19 +3566,19 @@ mod verification {
             (((z ^ (z >> 31)) as f64) / (u64::MAX as f64)) * 2.0 - 1.0
         };
         let mut mean = vec![0.0f64; dim];
-        let mut sigma = vec![0.4f64; dim];
+        let mut sigma = vec![0.3f64; dim];
         let (mut first_best, mut last_best) = (f64::NEG_INFINITY, 0.0);
         let mut best_policy = mean.clone();
         for giter in 0..gens {
             let mut batch = vec![0.0f64; pop * dim];
             for p in 0..pop { for d in 0..dim { batch[p * dim + d] = mean[d] + sigma[d] * rng(); } }
-            let rewards = gp.rollout_rewards(&batch, &init, effort_w, taumax, steps);
+            let rewards = gp.rollout_rewards(&batch, &init, effort_w, taumax, freq, steps);
             let mut idx: Vec<usize> = (0..pop).collect();
             idx.sort_by(|&a, &b| rewards[b].partial_cmp(&rewards[a]).unwrap());
             if giter == 0 { first_best = rewards[idx[0]]; }
             last_best = rewards[idx[0]];
             best_policy = batch[idx[0] * dim..(idx[0] + 1) * dim].to_vec();
-            let elite = (pop as f64 * 0.15) as usize;
+            let elite = (pop as f64 * 0.12) as usize;
             for d in 0..dim {
                 let mut m = 0.0;
                 for &e in idx.iter().take(elite) { m += batch[e * dim + d]; }
@@ -3250,16 +3590,16 @@ mod verification {
         }
 
         let zero = vec![0.0f64; dim];
-        let base_reward = cpu_tree_gait_reward(&joints, &inertia, &base_inertia, &parent, &contacts, floor, kn, kd, dt, g, &init, &zero, effort_w, taumax, steps, n);
-        let learned_cpu = cpu_tree_gait_reward(&joints, &inertia, &base_inertia, &parent, &contacts, floor, kn, kd, dt, g, &init, &best_policy, effort_w, taumax, steps, n);
+        let base_reward = cpu_tree_gait_reward(&joints, &inertia, &base_inertia, &parent, &contacts, floor, kn, kd, dt, g, &init, &zero, effort_w, taumax, freq, steps, n);
+        let learned_cpu = cpu_tree_gait_reward(&joints, &inertia, &base_inertia, &parent, &contacts, floor, kn, kd, dt, g, &init, &best_policy, effort_w, taumax, freq, steps, n);
         let filled: Vec<f64> = (0..pop).flat_map(|_| best_policy.clone()).collect();
-        let grew = gp.rollout_rewards(&filled, &init, effort_w, taumax, steps)[0];
+        let grew = gp.rollout_rewards(&filled, &init, effort_w, taumax, freq, steps)[0];
         let port_rel = ((grew - learned_cpu) / learned_cpu.abs().max(1.0)).abs();
 
-        eprintln!("CEM quadruped forward-locomotion ({pop} policies × {gens} gens): best reward {first_best:.3} → {last_best:.3}; learned {learned_cpu:.3} vs do-nothing {base_reward:.3}; GPU vs CPU reward rel {port_rel:.2e}");
+        eprintln!("CEM quadruped MLP+phase locomotion ({pop} policies × {gens} gens, {dim}-param MLP): best reward {first_best:.3} → {last_best:.3}; learned {learned_cpu:.3} vs do-nothing {base_reward:.3}; GPU vs CPU reward rel {port_rel:.2e}");
         assert!(port_rel < 2e-2, "GPU rollout reward diverged from the CPU reference: {port_rel}");
         assert!(last_best > first_best + 0.1, "CEM did not improve: {first_best} → {last_best}");
-        assert!(learned_cpu > base_reward + 0.1, "learned policy did not out-walk do-nothing: {learned_cpu} vs {base_reward}");
+        assert!(learned_cpu > base_reward + 0.1, "learned MLP policy did not out-walk do-nothing: {learned_cpu} vs {base_reward}");
     }
 
     /// The floating-base ABA with **external spatial forces** (the ground-contact / applied-wrench
@@ -3506,5 +3846,67 @@ mod verification {
         assert!(port_rel < 2e-2, "GPU rollout reward diverged from the CPU reference: {port_rel}");
         assert!(last_best > first_best + 0.2, "CEM did not improve: {first_best} → {last_best}");
         assert!(learned_cpu > base_reward + 0.02 * base_reward.abs(), "learned policy did not beat do-nothing: {learned_cpu} vs {base_reward}");
+    }
+
+    // The GPU interior-point frictional contact solve matches the CPU `solve_frictional_ipm` oracle
+    // across a batch of environments: a 3-DoF block on a floor with a 4-facet Coulomb friction pyramid,
+    // each env a different free velocity / gap / mass. This is HARD (non-penetration + cone) contact,
+    // batched on the local GPU — the Dojo mechanism, verified.
+    #[test]
+    fn gpu_frictional_contact_matches_cpu_ipm() {
+        use crate::solve_frictional_ipm;
+        use nalgebra::{DMatrix, DVector};
+        let row = |a: [f64; 3]| DVector::from_row_slice(&a);
+        // fixed contact structure: normal +z, pyramid ±x ±y, mu 0.6
+        let structure = StFrictionContact {
+            jn: row([0.0, 0.0, 1.0]),
+            jt: vec![row([1.0, 0.0, 0.0]), row([-1.0, 0.0, 0.0]), row([0.0, 1.0, 0.0]), row([0.0, -1.0, 0.0])],
+            phi: 0.0,
+            mu: 0.6,
+        };
+        let (dt, kappa, n_envs) = (0.01, 1e-3, 256usize);
+        let Some(gpu) = FrictionalContactGpu::new(std::slice::from_ref(&structure), dt, kappa, n_envs) else {
+            eprintln!("no GPU adapter; skipping gpu_frictional_contact_matches_cpu_ipm");
+            return;
+        };
+
+        // deterministic per-env batch: varied mass, free velocity, and gap.
+        let (mut mflat, mut vf, mut phi) = (Vec::new(), Vec::new(), Vec::new());
+        let mut cpu_vn = Vec::new();
+        for e in 0..n_envs {
+            let t = e as f64 / n_envs as f64;
+            let mass = 0.5 + 1.5 * t; // 0.5 → 2.0 kg
+            let m = DMatrix::from_diagonal(&DVector::from_row_slice(&[mass, mass, mass]));
+            let vfree = DVector::from_row_slice(&[
+                1.6 * (0.3 + 0.9 * t) * ((e % 7) as f64 - 3.0) / 3.0,
+                1.2 * (0.2 + 0.8 * t) * ((e % 5) as f64 - 2.0) / 2.0,
+                -0.1 - 0.4 * ((e % 3) as f64),
+            ]);
+            let gap = -0.002 * (e % 4) as f64; // small penetration
+            let mut c = structure.clone();
+            c.phi = gap;
+            let s = solve_frictional_ipm(&m, &vfree, std::slice::from_ref(&c), dt, kappa);
+            cpu_vn.extend(s.v_next.iter().copied());
+            // row-major mass matrix
+            for r in 0..3 {
+                for cc in 0..3 {
+                    mflat.push(m[(r, cc)]);
+                }
+            }
+            vf.extend(vfree.iter().copied());
+            phi.push(gap);
+        }
+
+        let gpu_vn = gpu.solve(&mflat, &vf, &phi);
+        assert_eq!(gpu_vn.len(), cpu_vn.len());
+        let finite = gpu_vn.iter().all(|v| v.is_finite());
+        assert!(finite, "GPU produced non-finite velocities");
+        let mut diffs: Vec<f64> = gpu_vn.iter().zip(&cpu_vn).map(|(g, c)| (g - c).abs()).collect();
+        let worst = diffs.iter().cloned().fold(0.0f64, f64::max);
+        diffs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = diffs[diffs.len() / 2];
+        eprintln!("GPU frictional IPM vs CPU: {n_envs} envs (3-DoF block, 4-facet pyramid), median |Δv⁺| {median:.2e}, worst {worst:.2e}");
+        assert!(median < 2e-3, "GPU IPM contact diverged from CPU (median {median})");
+        assert!(worst < 2e-2, "GPU IPM contact worst-case too large ({worst})");
     }
 }

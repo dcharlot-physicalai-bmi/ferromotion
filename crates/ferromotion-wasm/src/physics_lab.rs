@@ -5,9 +5,10 @@
 //! by parallel random shooting.
 
 use ferromotion_control::{batch_rollout, Cartpole};
+use ferromotion_core::{quadruped, quadruped_trot_tau, tree_floating_contact_step, FootContact, Joint, LinkInertia};
 use ferromotion_dem::{DemSim, Grain};
 use ferromotion_fem::FemSim;
-use nalgebra::Vector3;
+use nalgebra::{Isometry3, Matrix3, Point3, Rotation3, Vector3, Vector6};
 use wasm_bindgen::prelude::*;
 
 // ---------------------------------------------------------------------------------------------
@@ -204,6 +205,144 @@ impl CartpoleLab {
 }
 
 impl Default for CartpoleLab {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Legged locomotion — a QUADRUPED (torso + four 2-joint legs) walking forward on the ground by a
+// scripted static crawl gait, integrated with tree-structured floating-base dynamics + penalty
+// contact. All on your own device, no cloud: the same tree ABA the RL benches use, run per-frame.
+// ---------------------------------------------------------------------------------------------
+#[wasm_bindgen]
+pub struct QuadrupedLab {
+    joints: Vec<Joint>,
+    inertia: Vec<LinkInertia>,
+    parent: Vec<isize>,
+    contacts: Vec<FootContact>,
+    base_inertia: LinkInertia,
+    base: Isometry3<f64>,
+    v0: Vector6<f64>,
+    q: Vec<f64>,
+    qd: Vec<f64>,
+    dt: f64,
+    freq: f64,
+    t: u64,
+}
+
+// leg attachment corners (front-left, front-right, back-left, back-right) and the 0.3 m segments,
+// mirroring `ferromotion_core::quadruped`.
+const QCORNERS: [(f64, f64); 4] = [(0.15, 0.1), (0.15, -0.1), (-0.15, 0.1), (-0.15, -0.1)];
+const QSEG: f64 = 0.3;
+
+#[wasm_bindgen]
+impl QuadrupedLab {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> QuadrupedLab {
+        let (joints, inertia, parent, contacts) = quadruped();
+        let n = joints.len();
+        let base_inertia = LinkInertia {
+            mass: 8.0,
+            com: Vector3::zeros(),
+            inertia: Matrix3::from_diagonal(&Vector3::new(0.08, 0.08, 0.12)),
+        };
+        QuadrupedLab {
+            joints,
+            inertia,
+            parent,
+            contacts,
+            base_inertia,
+            base: Isometry3::translation(0.0, 0.0, 0.62),
+            v0: Vector6::zeros(),
+            q: vec![0.0; n],
+            qd: vec![0.0; n],
+            dt: 2e-4,
+            freq: 1.0,
+            t: 0,
+        }
+    }
+
+    /// Advance the walk by `k` physics substeps (dt = 0.2 ms each). The gait clock drives a scripted
+    /// crawl; the tree floating-base dynamics + penalty ground contact do the rest.
+    pub fn step(&mut self, k: usize) {
+        let g = Vector3::new(0.0, 0.0, -9.81);
+        let (floor, kn, kd) = (0.0, 1.5e4, 120.0);
+        for _ in 0..k {
+            let phase = std::f64::consts::TAU * self.freq * self.t as f64 * self.dt;
+            let tau = quadruped_trot_tau(&self.q, &self.qd, phase);
+            let (b, v, qn, qdn) = tree_floating_contact_step(
+                &self.joints,
+                &self.inertia,
+                &self.parent,
+                &self.base_inertia,
+                self.base,
+                self.v0,
+                &self.q,
+                &self.qd,
+                &tau,
+                &self.contacts,
+                floor,
+                kn,
+                kd,
+                self.dt,
+                g,
+            );
+            self.base = b;
+            self.v0 = v;
+            self.q = qn;
+            self.qd = qdn;
+            self.t += 1;
+        }
+    }
+
+    /// World-frame joint positions, flat `[hip.xyz, knee.xyz, foot.xyz]` per leg (4 legs → 36 floats).
+    /// The island projects these to the screen (a slight y-shear gives the near/far legs depth).
+    pub fn joints_world(&self) -> Vec<f64> {
+        let mut out = Vec::with_capacity(36);
+        for leg in 0..4 {
+            let (cx, cy) = QCORNERS[leg];
+            let (qh, qk) = (self.q[leg * 2], self.q[leg * 2 + 1]);
+            let hip = Point3::new(cx, cy, 0.0);
+            let rh = Rotation3::from_axis_angle(&Vector3::y_axis(), qh);
+            let knee = hip + rh * Vector3::new(0.0, 0.0, -QSEG);
+            let rk = Rotation3::from_axis_angle(&Vector3::y_axis(), qh + qk);
+            let foot = knee + rk * Vector3::new(0.0, 0.0, -QSEG);
+            for p in [hip, knee, foot] {
+                let w = self.base.transform_point(&p);
+                out.extend_from_slice(&[w.x, w.y, w.z]);
+            }
+        }
+        out
+    }
+
+    /// Torso centre `[x, y, z]` (world).
+    pub fn base_pos(&self) -> Vec<f64> {
+        let t = self.base.translation.vector;
+        vec![t.x, t.y, t.z]
+    }
+    /// Forward distance travelled (metres) — the receipt.
+    pub fn forward_x(&self) -> f64 {
+        self.base.translation.x
+    }
+    pub fn base_z(&self) -> f64 {
+        self.base.translation.z
+    }
+    /// Upright alignment (world-up · body-up); 1.0 = perfectly level.
+    pub fn up_alignment(&self) -> f64 {
+        self.base.rotation.to_rotation_matrix().matrix()[(2, 2)]
+    }
+    pub fn reset(&mut self) {
+        let n = self.joints.len();
+        self.base = Isometry3::translation(0.0, 0.0, 0.62);
+        self.v0 = Vector6::zeros();
+        self.q = vec![0.0; n];
+        self.qd = vec![0.0; n];
+        self.t = 0;
+    }
+}
+
+impl Default for QuadrupedLab {
     fn default() -> Self {
         Self::new()
     }

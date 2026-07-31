@@ -166,6 +166,36 @@ pub fn tree_floating_contact_step(
     (base * step, v0n, qn, qdn)
 }
 
+/// A scripted **crawl** gait for the [`quadruped`] — a statically stable walk. Only one foot swings at a
+/// time (the other three stay planted, keeping the centre of mass inside the support triangle), so the
+/// body never tips even open-loop. Each stance leg sweeps its hip backward to push the base forward;
+/// the swing leg lifts its knee to clear the ground and repositions. PD torques track the phase-varying
+/// targets. `phase` is the gait clock in radians (2π per full 4-step cycle).
+pub fn quadruped_trot_tau(q: &[f64], qd: &[f64], phase: f64) -> Vec<f64> {
+    let (kp, kv) = (60.0, 5.0);
+    let (a_sweep, a_lift, duty) = (0.22, 0.5, 0.75); // hip amplitude, knee lift, stance fraction
+    // lift order over one cycle: FL, BR, FR, BL — each leg airborne for (1-duty) of the cycle
+    let order = [0.0f64, 0.5, 0.75, 0.25];
+    let mut tau = vec![0.0; 8];
+    for leg in 0..4 {
+        let (hip, knee) = (leg * 2, leg * 2 + 1);
+        let phi = (phase / std::f64::consts::TAU + order[leg]).rem_euclid(1.0); // 0..1 in this leg's cycle
+        let (hip_t, knee_t);
+        if phi < duty {
+            let s = phi / duty; // 0..1 across stance: hip sweeps back-to-front, driving the base +x
+            hip_t = a_sweep * (2.0 * s - 1.0);
+            knee_t = 0.0; // straight leg bears load
+        } else {
+            let s = (phi - duty) / (1.0 - duty); // 0..1 across swing: reposition + lift
+            hip_t = a_sweep * (1.0 - 2.0 * s);
+            knee_t = -a_lift * (std::f64::consts::PI * s).sin(); // lift then place
+        }
+        tau[hip] = kp * (hip_t - q[hip]) - kv * qd[hip];
+        tau[knee] = kp * (knee_t - q[knee]) - kv * qd[knee];
+    }
+    tau
+}
+
 /// A 4-legged robot (a torso with four 2-joint legs at its corners): `(joints, inertia, parent,
 /// foot contacts)`. Legs point straight down (`q = 0`); each foot is the shank tip.
 pub fn quadruped() -> (Vec<Joint>, Vec<LinkInertia>, Vec<isize>, Vec<FootContact>) {
@@ -284,6 +314,34 @@ mod tests {
         assert!(base.translation.z > 0.5 && base.translation.z < 0.63, "base not at stance height: {}", base.translation.z);
         assert!(min_pen > -0.03, "feet sank through the floor: {min_pen}");
         assert!(base_speed < 0.1, "quadruped did not settle: {base_speed}");
+    }
+
+    /// The scripted trot walks the quadruped forward while keeping the torso roughly upright — the
+    /// controller the browser bench uses.
+    #[test]
+    fn quadruped_walks_forward() {
+        let (joints, inertia, parent, contacts) = quadruped();
+        let n = joints.len();
+        let base_inertia = LinkInertia { mass: 8.0, com: Vector3::zeros(), inertia: nalgebra::Matrix3::from_diagonal(&Vector3::new(0.08, 0.08, 0.12)) };
+        let g = Vector3::new(0.0, 0.0, -9.81);
+        let (floor, kn, kd, dt, freq) = (0.0, 1.5e4, 120.0, 2e-4, 1.0);
+        let mut base = Isometry3::translation(0.0, 0.0, 0.62);
+        let mut v0 = Vector6::zeros();
+        let mut q = vec![0.0; n];
+        let mut qd = vec![0.0; n];
+        let x0 = base.translation.x;
+        for t in 0..15000 {
+            let phase = 6.2831853 * freq * t as f64 * dt;
+            let tau = quadruped_trot_tau(&q, &qd, phase);
+            let (b, v, qn, qdn) = tree_floating_contact_step(&joints, &inertia, &parent, &base_inertia, base, v0, &q, &qd, &tau, &contacts, floor, kn, kd, dt, g);
+            base = b; v0 = v; q = qn; qd = qdn;
+        }
+        let dx = base.translation.x - x0;
+        let up = base.rotation.to_rotation_matrix().matrix()[(2, 2)];
+        eprintln!("crawl walk: Δx {:.3} m over 3.0 s, base z {:.3}, up-alignment {:.3}", dx, base.translation.z, up);
+        assert!(base.translation.vector.iter().all(|v| v.is_finite()), "sim blew up");
+        assert!(up > 0.6, "quadruped toppled while trotting: up {up}");
+        assert!(dx.abs() > 0.03, "quadruped did not locomote: Δx {dx}");
     }
 
     /// base→body pose in a tree (compose along the parent chain).
