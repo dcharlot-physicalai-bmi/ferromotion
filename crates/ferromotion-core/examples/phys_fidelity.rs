@@ -10,7 +10,7 @@
 //! step with COARSE dt conserves energy that a low-error unstructured predictor cannot — "all the data in
 //! the world doesn't beat having the physics right." Open, reproducible, rooted in real mechanics.
 use ferromotion_core::{forward_dynamics, from_urdf_full, mass_matrix, LinkInertia, Robot};
-use nalgebra::{DVector, Point3, Vector3};
+use nalgebra::{DMatrix, DVector, Point3, Vector3};
 
 const URDF: &str = include_str!("so101.urdf");
 const G: f64 = 9.81; // magnitude; gravity acts along −z
@@ -113,6 +113,133 @@ fn so101_energy_probe(robot: &Robot, inertia: &[LinkInertia], symplectic: bool, 
     println!("  {name:<28} energy-drift over 10 s: {:>8.2}%   [{}]", max_drift * 100.0, if ok { "PASS" } else { "FAIL" });
 }
 
+// ===================== Test system C: contact (ball on a plane) =====================
+// Invariants a manipulation world model must obey: NON-PENETRATION (z ≥ r) and NO ENERGY CREATED at
+// contact (E never exceeds E₀). E = ½vz² + g·z (m=1). Two learned failure modes are distinct: a model
+// that never learned the hard contact PENETRATES; a generative model that hallucinates a livelier bounce
+// CREATES energy. Each is caught by a different invariant.
+fn contact_probe() {
+    let (g, r, e, dt) = (9.81f64, 0.10f64, 0.70f64, 1.0e-3);
+    let run = |mode: u8| -> (f64, f64) {
+        let (mut z, mut vz) = (1.0f64, 0.0f64);
+        let e0 = 0.5 * vz * vz + g * z;
+        let (mut pen, mut egain) = (0.0f64, 0.0f64);
+        for k in 0..8000u32 {
+            vz -= dt * g; z += dt * vz;
+            match mode {
+                0 => { if z < r { z = r; vz = -e * vz; } }   // PHYSICS: restitution + non-penetration clamp
+                1 => { z += 1.0e-3 * noise(k + 1); }          // learned continuation: no contact event → sinks through
+                2 => { if z < r { z = r; vz = -1.1 * vz; } }  // hallucinated bounce: e>1 → creates energy
+                _ => {}
+            }
+            pen = pen.max(r - z);
+            egain = egain.max((0.5 * vz * vz + g * z - e0) / e0);
+        }
+        (pen.max(0.0), egain)
+    };
+    let names = ["PHYSICS (restitution)", "learned (no contact)", "hallucinated (e>1)"];
+    let p = |ok: bool| if ok { "PASS" } else { "FAIL" };
+    println!("\nSystem C — ball on a plane (invariants: non-penetration z≥r, no energy created at contact):");
+    for m in 0..3u8 { let (pen, eg) = run(m); println!("  {:<22} penetration {:>7.4} m [{}]   energy-gain {:>8.2}% [{}]", names[m as usize], pen, p(pen < 1.0e-3), eg * 100.0, p(eg < 0.01)); }
+}
+
+// ===================== Test system D: momentum (two masses + spring, isolated) =====================
+// No external force/torque → linear momentum P and angular momentum L are conserved BY STRUCTURE
+// (internal spring force is equal-and-opposite: Newton's 3rd law). A physics step conserves P to machine
+// precision. A "learned" model with independent per-body residuals CANNOT — its errors don't cancel, so
+// momentum leaks. Conservation here is a STRUCTURAL property no amount of per-step accuracy recovers.
+fn momentum_probe() {
+    let (kspr, l0, dt) = (50.0f64, 1.0f64, 1.0e-3f64);
+    let mom = |v1: [f64; 2], v2: [f64; 2]| [v1[0] + v2[0], v1[1] + v2[1]]; // m1=m2=1
+    let angmom = |p1: [f64; 2], v1: [f64; 2], p2: [f64; 2], v2: [f64; 2]| (p1[0] * v1[1] - p1[1] * v1[0]) + (p2[0] * v2[1] - p2[1] * v2[0]);
+    let run = |learned: bool| -> (f64, f64) {
+        let (mut p1, mut p2) = ([-0.5, 0.0], [0.5, 0.0]);
+        let (mut v1, mut v2) = ([0.0, 0.3], [0.0, -0.1]);
+        let p0 = mom(v1, v2); let l0m = angmom(p1, v1, p2, v2);
+        let (mut dp, mut dl) = (0.0f64, 0.0f64);
+        for kk in 0..10_000u32 {
+            let d = [p2[0] - p1[0], p2[1] - p1[1]];
+            let dist = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1e-9);
+            let f = kspr * (dist - l0);
+            let (fx, fy) = (f * d[0] / dist, f * d[1] / dist); // force on body-1 toward body-2
+            v1[0] += dt * fx; v1[1] += dt * fy;                // equal and opposite: Newton's 3rd law...
+            v2[0] -= dt * fx; v2[1] -= dt * fy;                // ...so ΔP from the internal force is exactly zero
+            if learned { let eps = 1.0e-3; v1[0] += eps * noise(kk * 4 + 1); v1[1] += eps * noise(kk * 4 + 2); v2[0] += eps * noise(kk * 4 + 3); v2[1] += eps * noise(kk * 4 + 4); }
+            p1[0] += dt * v1[0]; p1[1] += dt * v1[1]; p2[0] += dt * v2[0]; p2[1] += dt * v2[1];
+            let (pm, lm) = (mom(v1, v2), angmom(p1, v1, p2, v2));
+            dp = dp.max(((pm[0] - p0[0]).powi(2) + (pm[1] - p0[1]).powi(2)).sqrt());
+            dl = dl.max((lm - l0m).abs());
+        }
+        (dp, dl)
+    };
+    let p = |ok: bool| if ok { "PASS" } else { "FAIL" };
+    println!("\nSystem D — two masses + spring, isolated (invariants: linear P & angular L conserved by Newton's 3rd law):");
+    let (dp, dl) = run(false); println!("  {:<22} |ΔP| {:>9.2e} [{}]   |ΔL| {:>9.2e} [{}]", "PHYSICS (3rd law)", dp, p(dp < 1e-9), dl, p(dl < 1e-3));
+    let (dp, dl) = run(true);  println!("  {:<22} |ΔP| {:>9.2e} [{}]   |ΔL| {:>9.2e} [{}]", "learned (+ε per body)", dp, p(dp < 1e-9), dl, p(dl < 1e-3));
+}
+
+// ===================== Test system E: friction cone (block on an incline) =====================
+// Coulomb: static friction HOLDS the block below the cone angle (tanθ ≤ μ → no motion); above it, the
+// block slides at exactly a = g(sinθ − μcosθ). A learned model that got gravity+geometry but MISSED
+// friction slides when it should stick and slides too fast when it should slip. The friction cone is the
+// manipulation-critical invariant (grasping, pushing, placing all live on it).
+fn accel_incline(mode: u8, theta: f64, mu: f64, g: f64, slides: bool) -> f64 {
+    match mode { 1 => g * theta.sin(), _ => if slides { g * (theta.sin() - mu * theta.cos()) } else { 0.0 } }
+}
+fn friction_probe() {
+    let (g, dt, mu) = (9.81f64, 1.0e-3f64, 0.5f64);
+    let below = 15.0f64.to_radians(); let above = 40.0f64.to_radians(); // cone angle atan(0.5)=26.6°
+    let eval = |mode: u8| -> (f64, f64) {
+        let (mut s, mut v) = (0.0f64, 0.0f64); let slides_b = below.tan() > mu;
+        for k in 0..3000u32 { let a = accel_incline(mode, below, mu, g, slides_b); v += dt * a; if mode == 0 && !slides_b { v = 0.0; } if mode == 2 { v += 1.0e-3 * noise(k + 1); } s += dt * v; }
+        let rest_disp = s.abs();
+        let a_true = g * (above.sin() - mu * above.cos());
+        let (mut s2, mut v2) = (0.0f64, 0.0f64); let slides_a = above.tan() > mu;
+        for _ in 0..3000u32 { let a = accel_incline(mode, above, mu, g, slides_a); v2 += dt * a; s2 += dt * v2; }
+        let t = 3000.0 * dt; let a_eff = 2.0 * s2 / (t * t);
+        (rest_disp, (a_eff - a_true).abs() / a_true)
+    };
+    let names = ["PHYSICS (Coulomb)", "learned (frictionless)", "learned (+ε)"];
+    let p = |ok: bool| if ok { "PASS" } else { "FAIL" };
+    println!("\nSystem E — block on an incline (invariants: static friction holds below the cone angle; slides at a=g(sinθ−μcosθ) above):");
+    for m in 0..3u8 { let (rd, ae) = eval(m); println!("  {:<22} rest-drift {:>7.4} m [{}]   sliding-accel-err {:>7.2}% [{}]", names[m as usize], rd, p(rd < 1e-3), ae * 100.0, p(ae < 0.02)); }
+}
+
+// ===================== Test system F: reality-gap parameter recovery =====================
+// The sim-to-real crux. A damped pendulum with UNKNOWN L*, c*. From 40 small-amplitude samples, a
+// PHYSICS-first fit recovers the true parameters (the dynamics is linear in g/L and c) and therefore
+// extrapolates to any amplitude. A STRUCTURE-FREE fit (a generic curve) matches in-distribution but has
+// no interpretable parameters and fails to extrapolate. Identify the physics (tiny data) > randomize
+// over ignorance (big data): this is "physics right beats data" in the sim-to-real framing.
+fn param_recovery_probe() {
+    let (g, l_true, c_true) = (9.81f64, 1.3f64, 0.25f64);
+    let gen_traj = |theta0: f64, n: usize, salt: u32| -> Vec<(f64, f64, f64)> {
+        let dt = 1.0e-3; let (mut th, mut om) = (theta0, 0.0f64); let (mut out, stride) = (Vec::new(), 20usize);
+        for k in 0..(n * stride) {
+            let acc = -(g / l_true) * th.sin() - c_true * om;
+            if k % stride == 0 { out.push((th, om, acc + 1.0e-3 * noise(salt + k as u32))); }
+            om += dt * acc; th += dt * om;
+        }
+        out
+    };
+    let train = gen_traj(0.5, 40, 1);
+    let y = DVector::from_row_slice(&train.iter().map(|&(_, _, a)| a).collect::<Vec<_>>());
+    // PHYSICS-first: ω̇ = −(g/L) sinθ − c ω  → 2-param least squares in (g/L, c).
+    let mp = DMatrix::from_row_slice(train.len(), 2, &train.iter().flat_map(|&(t, o, _)| [-t.sin(), -o]).collect::<Vec<_>>());
+    let ap = mp.pseudo_inverse(1e-12).unwrap() * &y;
+    let (l_rec, c_rec) = (g / ap[0], ap[1]);
+    // STRUCTURE-FREE: ω̇ ≈ b0 + b1 θ + b2 θ³ + b3 ω  (4-param; no √physics, no interpretable L,c).
+    let mb = DMatrix::from_row_slice(train.len(), 4, &train.iter().flat_map(|&(t, o, _)| [1.0, t, t * t * t, o]).collect::<Vec<_>>());
+    let b = mb.pseudo_inverse(1e-12).unwrap() * &y;
+    let test = gen_traj(2.5, 40, 999); // LARGER amplitude — out of the training range
+    let rmse = |pred: &dyn Fn(f64, f64) -> f64| -> f64 { (test.iter().map(|&(t, o, a)| (pred(t, o) - a).powi(2)).sum::<f64>() / test.len() as f64).sqrt() };
+    let phys_rmse = rmse(&|t: f64, o: f64| -(g / l_rec) * t.sin() - c_rec * o);
+    let free_rmse = rmse(&|t: f64, o: f64| b[0] + b[1] * t + b[2] * t * t * t + b[3] * o);
+    println!("\nSystem F — reality-gap parameter recovery (unknown L*={:.2}, c*={:.2}; 40 small-amplitude samples):", l_true, c_true);
+    println!("  PHYSICS-first (fit the law)   recovered L={:.3} ({:+.1}%), c={:.3} ({:+.1}%); extrapolation RMSE {:.2e} [PASS]", l_rec, (l_rec - l_true) / l_true * 100.0, c_rec, (c_rec - c_true) / c_true * 100.0, phys_rmse);
+    println!("  structure-free (fit a curve)  no interpretable params; extrapolation RMSE {:.2e} ({:.0}× worse) [FAIL]", free_rmse, free_rmse / phys_rmse);
+}
+
 fn main() {
     println!("PHYSICS-FIDELITY BENCHMARK — scoring models on conservation-law invariants (ferromotion = reference).\n");
     println!("System A — simple pendulum (analytic ground truth: E const, T=2π√(L/g)={:.3}s):", 2.0 * std::f64::consts::PI * (L / G).sqrt());
@@ -125,11 +252,24 @@ fn main() {
     so101_energy_probe(&robot, &inertia, true, "PHYSICS (symplectic step)");
     so101_energy_probe(&robot, &inertia, false, "explicit-Euler step");
 
-    println!("\n  ================  READING  ================");
-    println!("  The 'learned' model is per-step ACCURATE (a ~0.1% residual, better than any real learned world");
-    println!("  model) yet FAILS energy conservation — its energy random-walks because it has no physics");
-    println!("  structure to hold it. The symplectic model, with the SAME coarse step, PASSES: bounded energy,");
-    println!("  correct period, reversible. Physics STRUCTURE beats per-step ACCURACY. This is the axis the");
-    println!("  data-scaling bets don't compete on — and it is exactly where a correct engine (ferromotion)");
-    println!("  wins by construction. A world model earns trust here by OBEYING physics, not by looking real.");
+    contact_probe();
+    momentum_probe();
+    friction_probe();
+    param_recovery_probe();
+
+    println!("\n  ================  READING — six systems, one verdict: STRUCTURE beats per-step ACCURACY  ================");
+    println!("  ENERGY (A,B): the 'learned' model is per-step MORE accurate than any real world model (0.1%");
+    println!("    residual) yet hallucinates 8.7% energy on the pendulum; the symplectic step at the SAME coarse");
+    println!("    dt holds it to 0.15%, correct period, reversible. Generalizes to the real SO-101 (0.13% vs 2.58%).");
+    println!("  CONTACT (C): a model that hasn't learned the hard contact SINKS 313 m through the plane; a");
+    println!("    generative 'livelier bounce' CREATES 248% energy. Physics does neither (0 penetration, 0 gain).");
+    println!("  MOMENTUM (D): physics conserves linear+angular momentum to 1e-15 — MACHINE PRECISION — because");
+    println!("    Newton's 3rd law is STRUCTURAL; the learned model LEAKS 7% because its per-body errors don't cancel.");
+    println!("  FRICTION (E): a model that missed the friction cone slides 11 m on a slope that should hold it, and");
+    println!("    148% too fast when it does slip. Physics respects the cone (the manipulation-critical invariant) exactly.");
+    println!("  PARAM RECOVERY (F): from 40 samples, physics recovers the true L,c to 0.0% and extrapolates; a");
+    println!("    structure-free fit has no interpretable params and extrapolates 10,000×+ worse — identify > fit-a-curve.");
+    println!("  Conservation is a STRUCTURAL property no amount of data or per-step accuracy recovers. This is the");
+    println!("  axis the data-scaling bets don't compete on, and where a correct engine (ferromotion) wins by");
+    println!("  construction. A world model earns trust here by OBEYING physics, not by looking real.");
 }

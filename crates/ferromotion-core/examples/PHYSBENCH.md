@@ -1,0 +1,83 @@
+# The Physics-Fidelity Benchmark
+
+*Open, pure-Rust, reproducible. Reference implementation: `phys_fidelity.rs` and `wm_on_the_stand.rs` in this directory.*
+
+## Why this exists
+
+Learned world models and sim engines are judged on how **real** they look — and the whole field is scaling **data** to get there (video-hours, the largest-ever robot datasets, trillion-token world models). But a model can look perfect and still hallucinate energy, break momentum, penetrate contacts, or slide where friction says stick, because pixel/latent prediction carries no physics **structure**.
+
+This benchmark scores the axis nobody is competing on: **does the model obey real physics?** It is not about appearance or per-step accuracy — it is about conservation-law fidelity, with **analytic ground truth** and a verified rigid-body engine ([ferromotion](../../..)) as the calibrated reference. A world model earns trust here by *obeying* physics, not by looking real.
+
+## The model interface
+
+A candidate **model** is a next-state predictor: given a state, predict the next state at a fixed timestep `dt`. That is all a learned world model, a neural simulator, or a numerical integrator has in common — so that is the interface the benchmark scores. Every probe rolls the model forward and checks an invariant with a known answer.
+
+## Probes (v1) — `cargo run --release --example phys_fidelity`
+
+| # | System | Invariant (ground truth) | Pass | Reference (correct physics) |
+|---|--------|--------------------------|------|-----------------------------|
+| A | simple pendulum | total mechanical energy is constant; period = 2π√(L/g) | energy drift < 1%, period err < 1% | symplectic: 0.15% / 0.06% |
+| B | **the real SO-101** (ferromotion) | frictionless zero-torque energy is constant | drift < 2% | symplectic step: 0.13% |
+| C | ball on a plane | non-penetration (z ≥ r); no energy created at contact | pen 0, gain 0 | restitution model: 0 / 0 |
+| D | two masses + spring, isolated | linear & angular momentum conserved (Newton's 3rd law) | |ΔP|,|ΔL| ≈ 0 | physics: 1e-15 (machine precision) |
+| E | block on an incline | static friction holds below the cone angle; slides at a = g(sinθ − μcosθ) above | rest-drift 0, accel-err < 2% | Coulomb: 0 / 0.03% |
+| F | damped pendulum, unknown L, c | recover the true parameters from a few samples and extrapolate | — | physics-first: 0.0%, extrapolates 10,911× better than a structure-free fit |
+
+Each probe is scored against three model classes shipped as controls: **PHYSICS** (structure-correct — passes), **explicit-Euler** (numerically wrong), and **learned/no-structure** (per-step accurate but structure-free). The reference column is what a correct engine produces; a candidate model prints alongside.
+
+## Diagnosis → cure — `cargo run --release --example wm_on_the_stand`
+
+A genuinely trained neural world model (2→16→16→2 MLP, Adam, pure Rust, **gradient-checked** so the training is verifiably real), same data and capacity throughout:
+
+| Model | one-step accuracy | rollout energy drift | verdict |
+|-------|-------------------|----------------------|---------|
+| vanilla black-box next-state map | MSE 1.9e-4 | **86%** | FAIL — accurate yet non-conservative |
+| **structured** (learn the force → integrate symplectically) | MSE 2.1e-6 | **4.2%** | PASS — obeys physics by construction |
+
+Same data, same network capacity, same step size. The difference is not data or accuracy; it is **structure**. This is the constructive result behind the whole benchmark: you *can* have a learned model that obeys physics — by building the structure in (the Hamiltonian / Lagrangian / symplectic-net family).
+
+### On the real 5-DOF arm — `cargo run --release --example wm_so101_cure`
+
+The toy cure does not transfer as-is to a multi-body robot, and *why* is the deeper lesson. On the real SO-101, two learned models fit the same gravity data with the same true inertia M(q) and Coriolis and the same symplectic step; the only difference is how the configuration force is parameterized. A force field conserves energy only if it is a **gradient** — equivalently, its Jacobian ∂g/∂q is symmetric (‖J−Jᵀ‖ = 0). Both are gradient-checked.
+
+| Model | force-Jacobian ‖J−Jᵀ‖ | true-energy drift @ 1 s / 3 s / 5 s |
+|-------|----------------------|-------------------------------------|
+| generic learned gravity field | 0.041 | 26% → 2,497% → **12,637%** — runaway |
+| **potential gradient** g = ∇V | **0.000 (by construction)** | 49% → 100% → **100%** — bounded |
+| exact gravity (fit → perfect) | 0.000 | 0.8% → 1.8% → 1.8% |
+
+The finding is sharper than "it conserves." A *tiny* non-conservativeness (0.041) drives a **runaway**: the invented energy accelerates the arm into larger errors, which invent more energy — the drift compounds without bound. Parameterizing the force as ∇V makes it curl-free **by construction**, at any fit error, and the runaway disappears. What remains for the cure is a **bounded** offset from ordinary fit error (it reads as 100% only because this light arm holds just 0.82 J), and it shrinks toward the 1.8% reference as the fit improves. So conservativeness structure is *necessary* — it removes the catastrophic mode no integrator can fix — and fit accuracy is a separate, improvable axis. Remaining generalization: learn M(q) itself as a positive-definite net (a full Hamiltonian net); here M(q) is the known robot inertia — the same prior a free-form learned force was given, and still failed with, so the fix is the force parameterization.
+
+### Learn the metric too — `cargo run --release --example hamiltonian_net`
+
+The deepest form of the cure: let the model learn the arm's **inertia metric** itself and still conserve energy by construction. A mechanical system's Coriolis force is not free — it is the Christoffel term of the mass matrix M(q). So learn M̂(q) = L(q)L(q)ᵀ + εI (symmetric positive-definite by construction, so kinetic energy is never negative) and compute the Coriolis as the exact Christoffel of that **same** M̂. Then the Coriolis does no net work on the model's own energy, as an identity. Verified three ways (Christoffel routine vs analytic Coriolis 1.3e-8; metric-net training gradient-checked; analytic ∂M̂/∂q vs finite-difference 2.5e-8).
+
+| Coriolis on a learned metric M̂ | energy-injection rate \|dÊ/dt\| | rollout energy drift @ 5 s |
+|--------------------------------|-------------------------------|----------------------------|
+| **Christoffel of M̂ (built in)** | **9.8e-16** (machine zero) | **0.000%** (= true-system reference) |
+| free-form field, same data | 3.96 (~137% of the dynamics' own power scale) | 5.2% and climbing |
+
+The energy-injection rate is a **pointwise identity**, independent of fit quality, conditioning, or trajectory — the decisive result. A free-form Coriolis, however accurately fit, does real work and drifts. Conservation is a property you build into the model's structure, not a number you fit toward. (Debug notes worth stating: plain semi-implicit Euler is not symplectic for a q-dependent mass matrix, so we integrate the corroborating rollout with RK4 at small step; and a value-fit potential net has an uncontrolled gradient, so the potential is kept exact here to isolate the metric.)
+
+## Add your model — `cargo run --release --example physbench`
+
+`physbench` is the scoreboard harness. A submission is any type that implements one small trait:
+
+```rust
+trait Model { fn name(&self) -> &'static str; fn step(&self, th: f64, w: f64, dt: f64) -> (f64, f64); }
+```
+
+Add your model to `entries()` and re-run; the harness scores it on the conservation invariants and prints a ranked standings table next to the references. Current board (frictionless pendulum):
+
+| # | model | energy drift | one-step accuracy | verdict |
+|---|-------|--------------|-------------------|---------|
+| 1 | velocity-verlet (structure) | 0.07% | 4.6e-5 | PASS |
+| 2 | symplectic (structure) | 2.64% | 3.4e-3 | PASS |
+| 3 | lossy (wrong invariant) | 30.8% | 4.0e-3 | FAIL |
+| 4 | explicit-euler (no structure) | 59.8% | 3.4e-3 | FAIL |
+
+The tell: symplectic and explicit-euler have the **same one-step accuracy** (3.4e-3) and opposite verdicts — accuracy per step does not predict the invariant over a rollout. A learned world model plugs in identically; `wm_on_the_stand.rs` scores a trained black-box (86% drift, FAIL) against a structured net (4.2%, PASS) on this exact system. New probes (contact-impulse cone as a scored force ratio, angular momentum under external torque, restitution-coefficient fidelity) are welcome — each must carry analytic or engine-verified ground truth.
+
+## Scope & honesty
+
+v1 covers analytic systems plus the real SO-101, with ferromotion as the reference. Scoring a frontier **video** world model (a 4B-class model) requires a render → predict → perception pipeline to extract physical state from generated frames, which adds a perception confound (a violation could be the tracker's, not the model's); that is the flagship follow-on, and the trained-model result above already shows a real learned model fails these invariants without that confound. Everything here is pure Rust, free, and reproducible from source — no weights, no GPU, no data downloads required to run the reference.
