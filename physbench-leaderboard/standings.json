@@ -21,6 +21,16 @@
   },
   {
     "rank": 3,
+    "name": "structured-net",
+    "author": "reference (trained)",
+    "kind": "learned",
+    "energy_drift": 0.0287912939451381,
+    "reversibility": 0.03504392432953427,
+    "one_step_rmse": 0.0036843058137077537,
+    "pass": true
+  },
+  {
+    "rank": 4,
     "name": "lossy",
     "author": "reference",
     "kind": "wrong invariant",
@@ -30,13 +40,23 @@
     "pass": false
   },
   {
-    "rank": 4,
+    "rank": 5,
     "name": "explicit-euler",
     "author": "reference",
     "kind": "no structure",
     "energy_drift": 0.5981043403597338,
     "reversibility": 13.428799510145225,
     "one_step_rmse": 0.003442392108433823,
+    "pass": false
+  },
+  {
+    "rank": 6,
+    "name": "black-box-net",
+    "author": "reference (trained)",
+    "kind": "learned",
+    "energy_drift": 85.50717129008139,
+    "reversibility": 64.44985555868709,
+    "one_step_rmse": 0.026632915623953632,
     "pass": false
   }
 ]
