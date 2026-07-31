@@ -1,0 +1,45 @@
+name: leaderboard
+
+# Scores every submission on the physics-fidelity benchmark and keeps the persistent standings current.
+# On a PR: build all submissions, run the harness, and post the board to the job summary for reviewers.
+# On merge to main: regenerate and commit standings.json + STANDINGS.md so external models land automatically.
+on:
+  push:
+    branches: [main]
+    paths: ['physbench-leaderboard/**']
+  pull_request:
+    paths: ['physbench-leaderboard/**']
+
+permissions:
+  contents: write
+
+jobs:
+  score:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: physbench-leaderboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Score all submissions
+        run: cargo run --release --bin score
+      - name: Publish standings to the job summary
+        run: cat STANDINGS.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload standings.json artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: standings
+          path: physbench-leaderboard/standings.json
+      - name: Commit regenerated standings (main only)
+        if: github.event_name == 'push'
+        run: |
+          if [ -n "$(git status --porcelain standings.json STANDINGS.md)" ]; then
+            git config user.name "physbench-bot"
+            git config user.email "actions@users.noreply.github.com"
+            git add standings.json STANDINGS.md
+            git commit -m "chore(leaderboard): update standings [skip ci]"
+            git push
+          else
+            echo "standings unchanged"
+          fi

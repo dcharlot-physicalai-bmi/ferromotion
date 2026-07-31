@@ -1,0 +1,42 @@
+[
+  {
+    "rank": 1,
+    "name": "velocity-verlet",
+    "author": "reference",
+    "kind": "structured",
+    "energy_drift": 0.0007495783113537119,
+    "reversibility": 1.450129885202618e-14,
+    "one_step_rmse": 0.00004630869010179924,
+    "pass": true
+  },
+  {
+    "rank": 2,
+    "name": "symplectic",
+    "author": "reference",
+    "kind": "structured",
+    "energy_drift": 0.026380449769000988,
+    "reversibility": 0.0019476323078589728,
+    "one_step_rmse": 0.003442970844554814,
+    "pass": true
+  },
+  {
+    "rank": 3,
+    "name": "lossy",
+    "author": "reference",
+    "kind": "wrong invariant",
+    "energy_drift": 0.308261010837355,
+    "reversibility": 2.4054785392221323,
+    "one_step_rmse": 0.0040242899150547224,
+    "pass": false
+  },
+  {
+    "rank": 4,
+    "name": "explicit-euler",
+    "author": "reference",
+    "kind": "no structure",
+    "energy_drift": 0.598104340359734,
+    "reversibility": 13.428799510145224,
+    "one_step_rmse": 0.0034423921084338195,
+    "pass": false
+  }
+]

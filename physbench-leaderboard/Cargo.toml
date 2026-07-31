@@ -1,0 +1,17 @@
+[package]
+name = "physbench-leaderboard"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "CI-scored public leaderboard for the physics-fidelity benchmark."
+
+# Its own workspace root, so it stays isolated from the ferromotion crate workspace.
+[workspace]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[bin]]
+name = "score"
+path = "src/main.rs"
