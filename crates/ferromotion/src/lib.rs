@@ -18,6 +18,8 @@
 //! - [`cloth`] — differentiable FEM thin-shell cloth (StVK membrane + bending).
 //! - [`tactile`] — differentiable optical-tactile (GelSight/DIGIT) sensor simulation.
 //! - [`rod`] — differentiable Discrete Elastic Rods for cables, tendons, and continuum robots.
+//! - [`circuit`] — electrical-network dynamics (Modified Nodal Analysis): R/L/C, independent and
+//!   controlled sources, trapezoidally integrated and energy-conserving. The electrical domain.
 //!
 //! From the [Institute for Physical AI](https://physicalai-bmi.org). Sibling to `ferric` (the
 //! pure-Rust compute fabric).
@@ -34,4 +36,5 @@ pub use ferromotion_mpm as mpm;
 pub use ferromotion_policy as policy;
 pub use ferromotion_ruckig as ruckig;
 pub use ferromotion_rod as rod;
+pub use ferromotion_circuit as circuit;
 pub use ferromotion_tactile as tactile;

@@ -97,6 +97,7 @@ mod retarget;
 mod rigidbody;
 mod robot_contact;
 mod floating_contact;
+mod whole_body_contact;
 mod robot_plan;
 #[cfg(feature = "gpu")]
 pub mod gpu;
@@ -124,7 +125,7 @@ mod urdf;
 mod xcorr;
 mod xpbd;
 pub use aba::{floating_base_forward_dynamics, floating_base_forward_dynamics_ext, forward_dynamics_aba};
-pub use tree_dynamics::tree_floating_forward_dynamics;
+pub use tree_dynamics::{tree_floating_forward_dynamics, tree_floating_mass_matrix};
 pub use crba::crba;
 pub use apriltag::{decode_payload, tag_pose};
 pub use cfd_contact::{rollout_impulse, CfdContact};
@@ -225,6 +226,7 @@ pub use dex_retarget::{
 pub use planar_contact::PlanarBody;
 pub use robot_contact::RobotContactSim;
 pub use floating_contact::{floating_contact_step, quadruped, quadruped_trot_tau, tree_floating_contact_step, FootContact};
+pub use whole_body_contact::{whole_body_contact_jacobian, whole_body_contact_step, WholeBodyContactPoint};
 pub use pink::{
     solve_pink, FramePoseTask, PinkOptions, PinkResult, PinkSolver, PinkTask, PostureTask, TaskStack,
 };

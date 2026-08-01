@@ -1,0 +1,14 @@
+[package]
+name = "ferromotion-circuit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Electrical-network dynamics (Modified Nodal Analysis) as a conservation-law physics domain: R/L/C, sources, and controlled sources, trapezoidally integrated and energy-conserving. WASM-clean."
+
+[dependencies]
+nalgebra.workspace = true

@@ -46,6 +46,7 @@ pub mod sph;
 pub mod spectral;
 pub mod spectral_ns;
 pub mod swimmer;
+pub mod turbulence;
 pub mod ufvm;
 pub mod ufvm_stokes;
 pub mod vof;

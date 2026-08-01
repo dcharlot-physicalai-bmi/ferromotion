@@ -140,6 +140,175 @@ fn kb_grads(e0: Vector3<f64>, e1: Vector3<f64>) -> (Matrix3<f64>, Matrix3<f64>) 
     (dde0, dde1)
 }
 
+// ------------------------------------------------------------------------------------------------
+// Self-contact & rod-rod contact — the physics of knots, cable routing, and bundles. A rod is a
+// polyline of segments; two non-adjacent segments must not pass through each other. Contact is a
+// one-sided penalty on the segment-segment distance (energy ½k(2r−d)² when closer than two radii),
+// so it is differentiable (force = −∇E) and priced in the same energy currency as the elastic modes.
+// ------------------------------------------------------------------------------------------------
+
+/// Closest distance between segments `[p1,q1]` and `[p2,q2]` → `(dist, s, t, c1, c2)`, where the
+/// closest points are `c1 = p1 + s(q1−p1)` and `c2 = p2 + t(q2−p2)` (Ericson, *Real-Time Collision
+/// Detection*, clamped closest-point-of-two-segments).
+pub fn segment_segment_closest(p1: Vector3<f64>, q1: Vector3<f64>, p2: Vector3<f64>, q2: Vector3<f64>) -> (f64, f64, f64, Vector3<f64>, Vector3<f64>) {
+    let (d1, d2, r) = (q1 - p1, q2 - p2, p1 - p2);
+    let (a, e, f) = (d1.dot(&d1), d2.dot(&d2), d2.dot(&r));
+    const EPS: f64 = 1e-14;
+    let (mut s, t);
+    if a <= EPS && e <= EPS {
+        s = 0.0;
+        t = 0.0;
+    } else if a <= EPS {
+        s = 0.0;
+        t = (f / e).clamp(0.0, 1.0);
+    } else {
+        let c = d1.dot(&r);
+        if e <= EPS {
+            t = 0.0;
+            s = (-c / a).clamp(0.0, 1.0);
+        } else {
+            let b = d1.dot(&d2);
+            let denom = a * e - b * b;
+            s = if denom.abs() > EPS { ((b * f - c * e) / denom).clamp(0.0, 1.0) } else { 0.0 };
+            let mut tt = (b * s + f) / e;
+            if tt < 0.0 {
+                tt = 0.0;
+                s = (-c / a).clamp(0.0, 1.0);
+            } else if tt > 1.0 {
+                tt = 1.0;
+                s = ((b - c) / a).clamp(0.0, 1.0);
+            }
+            t = tt;
+        }
+    }
+    let c1 = p1 + s * d1;
+    let c2 = p2 + t * d2;
+    ((c1 - c2).norm(), s, t, c1, c2)
+}
+
+/// Segment index pairs `(i, j)` (`i < j`, never adjacent) whose radius-inflated AABBs overlap — the
+/// broadphase that keeps self-contact near-linear instead of O(n²). `cell` must be ≥ `2·radius`.
+pub fn contact_candidate_pairs(x: &[Vector3<f64>], radius: f64, cell: f64) -> Vec<(usize, usize)> {
+    use std::collections::{HashMap, HashSet};
+    let nseg = x.len().saturating_sub(1);
+    let key = |p: Vector3<f64>| (( (p.x / cell).floor() as i64), ((p.y / cell).floor() as i64), ((p.z / cell).floor() as i64));
+    // insert each segment into every grid cell its inflated AABB touches
+    let mut grid: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
+    for i in 0..nseg {
+        let (a, b) = (x[i], x[i + 1]);
+        let lo = a.inf(&b) - Vector3::repeat(radius);
+        let hi = a.sup(&b) + Vector3::repeat(radius);
+        let (kl, kh) = (key(lo), key(hi));
+        for cx in kl.0..=kh.0 {
+            for cy in kl.1..=kh.1 {
+                for cz in kl.2..=kh.2 {
+                    grid.entry((cx, cy, cz)).or_default().push(i);
+                }
+            }
+        }
+    }
+    let mut pairs: HashSet<(usize, usize)> = HashSet::new();
+    for seg in grid.values() {
+        for a in 0..seg.len() {
+            for b in (a + 1)..seg.len() {
+                let (i, j) = (seg[a].min(seg[b]), seg[a].max(seg[b]));
+                if j > i + 1 {
+                    pairs.insert((i, j)); // skip adjacent (share a vertex)
+                }
+            }
+        }
+    }
+    let mut out: Vec<_> = pairs.into_iter().collect();
+    out.sort_unstable();
+    out
+}
+
+/// One-sided penalty self-contact energy of a rod centerline: `½k(2r−d)²` summed over every
+/// non-adjacent segment pair closer than `2·radius`. Zero when the rod is clear of itself.
+pub fn self_contact_energy(x: &[Vector3<f64>], radius: f64, k: f64) -> f64 {
+    let nseg = x.len().saturating_sub(1);
+    let two_r = 2.0 * radius;
+    let mut e = 0.0;
+    for i in 0..nseg {
+        for j in (i + 2)..nseg {
+            let (d, ..) = segment_segment_closest(x[i], x[i + 1], x[j], x[j + 1]);
+            if d < two_r {
+                e += 0.5 * k * (two_r - d).powi(2);
+            }
+        }
+    }
+    e
+}
+
+/// Add the self-contact repulsion to `force` (a per-vertex accumulator). Force on each closest point
+/// is `k(2r−d)·n̂` along the separation direction, split to the two segment endpoints by the closest-
+/// point barycentric weights — the exact `−∇` of [`self_contact_energy`] (closest points stationary).
+pub fn accumulate_self_contact_forces(x: &[Vector3<f64>], radius: f64, k: f64, force: &mut [Vector3<f64>]) {
+    let nseg = x.len().saturating_sub(1);
+    let two_r = 2.0 * radius;
+    for i in 0..nseg {
+        for j in (i + 2)..nseg {
+            let (d, s, t, c1, c2) = segment_segment_closest(x[i], x[i + 1], x[j], x[j + 1]);
+            if d < two_r && d > 1e-12 {
+                let n = (c1 - c2) / d; // points from segment j toward segment i
+                let mag = k * (two_r - d);
+                let f1 = mag * n; // repels segment i's contact point
+                force[i] += (1.0 - s) * f1;
+                force[i + 1] += s * f1;
+                force[j] -= (1.0 - t) * f1;
+                force[j + 1] -= t * f1;
+            }
+        }
+    }
+}
+
+/// Self-contact repulsion as a fresh per-vertex force vector.
+pub fn self_contact_forces(x: &[Vector3<f64>], radius: f64, k: f64) -> Vec<Vector3<f64>> {
+    let mut f = vec![Vector3::zeros(); x.len()];
+    accumulate_self_contact_forces(x, radius, k, &mut f);
+    f
+}
+
+/// Penalty contact between two distinct rods → `(forces on a, forces on b)`. Every segment of `a`
+/// against every segment of `b` (all non-adjacent since they are different rods): the cable-bundle /
+/// rod-on-rod primitive, the same energy as self-contact.
+pub fn rod_rod_contact_forces(xa: &[Vector3<f64>], xb: &[Vector3<f64>], radius: f64, k: f64) -> (Vec<Vector3<f64>>, Vec<Vector3<f64>>) {
+    let (na, nb) = (xa.len().saturating_sub(1), xb.len().saturating_sub(1));
+    let two_r = 2.0 * radius;
+    let (mut fa, mut fb) = (vec![Vector3::zeros(); xa.len()], vec![Vector3::zeros(); xb.len()]);
+    for i in 0..na {
+        for j in 0..nb {
+            let (d, s, t, c1, c2) = segment_segment_closest(xa[i], xa[i + 1], xb[j], xb[j + 1]);
+            if d < two_r && d > 1e-12 {
+                let n = (c1 - c2) / d;
+                let f1 = k * (two_r - d) * n;
+                fa[i] += (1.0 - s) * f1;
+                fa[i + 1] += s * f1;
+                fb[j] -= (1.0 - t) * f1;
+                fb[j + 1] -= t * f1;
+            }
+        }
+    }
+    (fa, fb)
+}
+
+impl Rod {
+    /// One damped step with self-contact: elastic forces plus the self-contact repulsion (radius `r`,
+    /// stiffness `k_contact`). The step that lets a rod be tied into a knot without passing through itself.
+    pub fn step_self_contact(&mut self, dt: f64, damping: f64, radius: f64, k_contact: f64) {
+        let mut f = self.forces(&self.x);
+        accumulate_self_contact_forces(&self.x, radius, k_contact, &mut f);
+        for i in 0..self.x.len() {
+            if self.clamped[i] {
+                continue;
+            }
+            self.v[i] += dt * f[i] / self.mass;
+            self.v[i] *= damping;
+            self.x[i] += dt * self.v[i];
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,6 +355,128 @@ mod tests {
         let rel = (tip - expected).abs() / expected;
         eprintln!("cantilever: tip={tip:.5}, Euler-Bernoulli={expected:.5}, rel_err={rel:.3}");
         assert!(rel < 0.08, "cantilever deflection off Euler-Bernoulli by {rel:.3} (tip {tip}, EB {expected})");
+    }
+
+    #[test]
+    fn segment_distance_matches_analytic_cases() {
+        // two orthogonal segments crossing at height h: distance = h, closest points at the crossing
+        let (d, s, t, _, _) = segment_segment_closest(
+            Vector3::new(-1.0, 0.0, 0.5),
+            Vector3::new(1.0, 0.0, 0.5),
+            Vector3::new(0.0, -1.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+        );
+        assert!((d - 0.5).abs() < 1e-12 && (s - 0.5).abs() < 1e-12 && (t - 0.5).abs() < 1e-12, "crossing: d={d}, s={s}, t={t}");
+        // parallel segments offset by 1 in y: distance 1
+        let (d2, ..) = segment_segment_closest(Vector3::new(0.0, 0.0, 0.0), Vector3::new(2.0, 0.0, 0.0), Vector3::new(0.5, 1.0, 0.0), Vector3::new(1.5, 1.0, 0.0));
+        assert!((d2 - 1.0).abs() < 1e-12, "parallel: d={d2}");
+        // endpoint-to-endpoint (segments point away from each other): distance = gap between near ends
+        let (d3, ..) = segment_segment_closest(Vector3::new(0.0, 0.0, 0.0), Vector3::new(-1.0, 0.0, 0.0), Vector3::new(1.0, 0.0, 0.0), Vector3::new(2.0, 0.0, 0.0));
+        assert!((d3 - 1.0).abs() < 1e-12, "endpoints: d={d3}");
+    }
+
+    #[test]
+    fn self_contact_force_is_the_exact_energy_gradient() {
+        // a hairpin: the rod doubles back so two non-adjacent segments sit within 2r (interior closest
+        // points, no endpoint clamping) — the analytic repulsion must equal −∇(self-contact energy).
+        let (radius, k) = (0.08, 3000.0);
+        let x = vec![
+            Vector3::new(0.00, 0.0, 0.06),
+            Vector3::new(0.20, 0.0, 0.06),
+            Vector3::new(0.40, 0.0, 0.06),
+            Vector3::new(0.45, 0.0, 0.00), // fold
+            Vector3::new(0.30, 0.0, -0.05),
+            Vector3::new(0.10, 0.0, -0.05),
+        ];
+        let f = self_contact_forces(&x, radius, k);
+        let eps = 1e-7;
+        let mut worst = 0.0f64;
+        for i in 0..x.len() {
+            for d in 0..3 {
+                let (mut xp, mut xm) = (x.clone(), x.clone());
+                xp[i][d] += eps;
+                xm[i][d] -= eps;
+                let fd = -(self_contact_energy(&xp, radius, k) - self_contact_energy(&xm, radius, k)) / (2.0 * eps);
+                worst = worst.max((f[i][d] - fd).abs());
+            }
+        }
+        eprintln!("self-contact force vs finite-diff: worst |Δ| {worst:.3e}");
+        assert!(worst < 1e-3, "self-contact force is not the energy gradient: {worst}");
+    }
+
+    #[test]
+    fn broadphase_finds_every_true_contact() {
+        // a wiggly rod folded on itself; the spatial-hash broadphase must not miss any pair that the
+        // exhaustive all-pairs check finds within 2r (a missed contact = a tunnel).
+        let (radius, cell) = (0.05, 0.12);
+        let n = 30;
+        let x: Vec<Vector3<f64>> = (0..n)
+            .map(|i| {
+                let u = i as f64 / (n as f64 - 1.0);
+                Vector3::new((u * 6.28).sin() * 0.3, 0.02 * (i as f64 * 1.3).cos(), u * 0.2 - 0.1)
+            })
+            .collect();
+        let nseg = x.len() - 1;
+        // ground truth: all non-adjacent pairs within 2r
+        use std::collections::HashSet;
+        let mut truth: HashSet<(usize, usize)> = HashSet::new();
+        for i in 0..nseg {
+            for j in (i + 2)..nseg {
+                let (d, ..) = segment_segment_closest(x[i], x[i + 1], x[j], x[j + 1]);
+                if d < 2.0 * radius {
+                    truth.insert((i, j));
+                }
+            }
+        }
+        let cand: HashSet<(usize, usize)> = contact_candidate_pairs(&x, radius, cell).into_iter().collect();
+        let missed: Vec<_> = truth.difference(&cand).collect();
+        eprintln!("broadphase: {} candidates, {} true contacts, {} missed", cand.len(), truth.len(), missed.len());
+        assert!(missed.is_empty(), "broadphase missed true contacts: {missed:?}");
+        assert!(!truth.is_empty(), "test config had no self-contacts to find");
+    }
+
+    #[test]
+    fn self_contact_resolves_an_interpenetrating_rod() {
+        // A hairpin whose two arms START overlapping (gap 0.6·2r — the strands are through each other).
+        // Contact stiffness dominates the (weak) bending, so relaxation must PUSH the arms apart to at
+        // least ~2r: penetration is resolved, not tolerated. Without self-contact they would stay crossed.
+        let (radius, k) = (0.05, 3.0e4);
+        let two_r = 2.0 * radius;
+        let mut rod = Rod::straight(9, 1.0, 0.02, 1200.0, 0.005, Vector3::zeros());
+        let gap = 0.6 * two_r; // arms start closer than 2r → interpenetrating
+        rod.x = vec![
+            Vector3::new(0.00, 0.0, gap / 2.0),
+            Vector3::new(0.15, 0.0, gap / 2.0),
+            Vector3::new(0.30, 0.0, gap / 2.0),
+            Vector3::new(0.45, 0.0, gap / 2.0),
+            Vector3::new(0.55, 0.0, 0.0), // fold
+            Vector3::new(0.45, 0.0, -gap / 2.0),
+            Vector3::new(0.30, 0.0, -gap / 2.0),
+            Vector3::new(0.15, 0.0, -gap / 2.0),
+            Vector3::new(0.00, 0.0, -gap / 2.0),
+            Vector3::new(-0.05, 0.0, -gap / 2.0),
+        ];
+        rod.v = vec![Vector3::zeros(); rod.x.len()];
+        rod.clamped = vec![false; rod.x.len()];
+        let min_dist = |x: &[Vector3<f64>]| {
+            let nseg = x.len() - 1;
+            let mut m = f64::INFINITY;
+            for i in 0..nseg {
+                for j in (i + 2)..nseg {
+                    m = m.min(segment_segment_closest(x[i], x[i + 1], x[j], x[j + 1]).0);
+                }
+            }
+            m
+        };
+        let start_min = min_dist(&rod.x);
+        for _ in 0..6000 {
+            rod.step_self_contact(5e-4, 0.9, radius, k);
+        }
+        let end_min = min_dist(&rod.x);
+        eprintln!("self-contact resolve: start min-dist {:.4} (2r {:.4}), end min-dist {:.4}", start_min, two_r, end_min);
+        assert!(rod.x.iter().all(|p| p.iter().all(|c| c.is_finite())), "rod blew up");
+        assert!(start_min < two_r, "test must start interpenetrating: {start_min} vs 2r {two_r}");
+        assert!(end_min > 0.9 * two_r, "self-contact failed to separate the strands: end {end_min} vs 2r {two_r}");
     }
 
     #[test]
