@@ -59,6 +59,18 @@ The deepest form of the cure: let the model learn the arm's **inertia metric** i
 
 The energy-injection rate is a **pointwise identity**, independent of fit quality, conditioning, or trajectory — the decisive result. A free-form Coriolis, however accurately fit, does real work and drifts. Conservation is a property you build into the model's structure, not a number you fit toward. (Debug notes worth stating: plain semi-implicit Euler is not symplectic for a q-dependent mass matrix, so we integrate the corroborating rollout with RK4 at small step; and a value-fit potential net has an uncontrolled gradient, so the potential is kept exact here to isolate the metric.)
 
+## Scoring a generative video model (the two rules that decide whether a number means anything)
+
+A video world model outputs pixels, so scoring it means perceive-then-test: recover state from the frames, then check an invariant. Two disciplines are not optional — each caught a confident, wrong result in our own runs on a frontier 4B video model.
+
+**1. Look at the frames.** Trajectory math on video that lacks the thing you are measuring will manufacture a clean answer. Ours did, four times: three on incoherent output (a centroid drifting through smears reported a tidy "fall"), and once on coherent output that simply contained no collision (apex jitter reported restitution e≈0.24, "physical"). Always render a montage and confirm the event exists before believing any number. Gate the measurement on the event too — a bounce only counts as a bounce if the reversal happens *at* the floor, not at the apex.
+
+**2. Never trust n=1.** A single generated sample is an anecdote. Our first run showed a ball falling with textbook acceleration; re-running the identical scene across seeds, it fell in **3 of 9** (95% CI 12–65%) and hovered motionless in the rest. The single-sample verdict ("the model obeys gravity") was true of that sample and wrong as a claim about the model.
+
+Stated correctly, with both halves measured: *when this model generates motion, the motion obeys gravity — acceleration, landing, permanence, and continuity hold in every falling sample; but it generates that motion in about a third of samples, otherwise the object hovers in mid-air.* The failure mode is not wrong physics, it is **absent dynamics** — and an unsupported object that hangs in place is its own violation.
+
+Also measure your perception floor before scoring: run the tracker on frames whose physics you know, and treat only violations beyond that floor as the model's. Ours was 0.003 m position RMS; passing the frames through the model's own VAE added ~1 mm, and a wrong-gravity scene was still caught through the codec (9.6 vs 3.0 m/s²), which is what makes a verdict about generated video trustworthy at all.
+
 ## Add your model — `cargo run --release --example physbench`
 
 `physbench` is the scoreboard harness. A submission is any type that implements one small trait:
