@@ -17,13 +17,32 @@
 use crate::{solve_frictional_ipm, tree_floating_forward_dynamics, tree_floating_mass_matrix, Joint, JointKind, LinkInertia, StFrictionContact};
 use nalgebra::{DMatrix, DVector, Isometry3, Point3, Translation3, UnitQuaternion, Vector3, Vector6};
 
-/// A contact point in the whole-body model: it rides on tree body `body` at `offset` in that body's
-/// frame, with friction coefficient `mu`, and collides with the ground plane `z = floor_z`.
+/// A contact point in the whole-body model: it rides at `offset` in the frame of tree body `body`
+/// (`None` = the floating base itself, so a torso or belly can strike the ground), with friction
+/// coefficient `mu`, and collides with the ground plane `z = floor_z`.
 #[derive(Clone, Copy, Debug)]
 pub struct WholeBodyContactPoint {
-    pub body: usize,
+    pub body: Option<usize>,
     pub offset: Vector3<f64>,
     pub mu: f64,
+}
+
+impl WholeBodyContactPoint {
+    /// A contact point on tree body `body`.
+    pub fn on(body: usize, offset: Vector3<f64>, mu: f64) -> Self {
+        WholeBodyContactPoint { body: Some(body), offset, mu }
+    }
+    /// A contact point on the floating base (torso).
+    pub fn base(offset: Vector3<f64>, mu: f64) -> Self {
+        WholeBodyContactPoint { body: None, offset, mu }
+    }
+}
+
+/// World poses of every tree body, composed along the parent chain (topological order) from the base
+/// pose. The companion to [`whole_body_contact_jacobian`], which takes these poses, and the way to
+/// place barrier/clearance checks on any point of a floating-base robot.
+pub fn whole_body_forward_kinematics(joints: &[Joint], parent: &[isize], base: Isometry3<f64>, q: &[f64]) -> Vec<Isometry3<f64>> {
+    forward_kinematics(joints, parent, base, q)
 }
 
 /// Base→body world poses for every tree body, composed along the parent chain (topological order).
@@ -41,10 +60,14 @@ fn forward_kinematics(joints: &[Joint], parent: &[isize], base: Isometry3<f64>, 
 /// to the **world** linear velocity of a point at `offset` on body `body`. `world[i]` are the body world
 /// poses from [`forward_kinematics`], `base` the base world pose. Base columns come from the base twist
 /// (`ṗ = v_origin + ω × r`), joint columns from the geometric Jacobian of the ancestor joints.
-pub fn whole_body_contact_jacobian(joints: &[Joint], parent: &[isize], world: &[Isometry3<f64>], base: Isometry3<f64>, body: usize, offset: Vector3<f64>) -> DMatrix<f64> {
+pub fn whole_body_contact_jacobian(joints: &[Joint], parent: &[isize], world: &[Isometry3<f64>], base: Isometry3<f64>, body: Option<usize>, offset: Vector3<f64>) -> DMatrix<f64> {
     let n = joints.len();
     let mut j = DMatrix::zeros(3, 6 + n);
-    let p_w = (world[body] * Point3::from(offset)).coords; // contact point in world
+    // contact point in world: on a tree body, or on the floating base itself
+    let p_w = match body {
+        Some(b) => (world[b] * Point3::from(offset)).coords,
+        None => (base * Point3::from(offset)).coords,
+    };
     let r_wb = base.rotation.to_rotation_matrix();
     let o_b = base.translation.vector; // base origin in world
 
@@ -59,8 +82,12 @@ pub fn whole_body_contact_jacobian(joints: &[Joint], parent: &[isize], world: &[
         let col = r_wb * Vector3::ith(k, 1.0);
         j.fixed_view_mut::<3, 1>(0, 3 + k).copy_from(&col);
     }
-    // joint columns: only ancestors of `body` (walk the parent chain, `body` included) contribute
-    let mut jj = body as isize;
+    // joint columns: only ancestors of `body` (walk the parent chain, `body` included) contribute. A
+    // base-attached point has no ancestors, so joint motion never moves it.
+    let mut jj = match body {
+        Some(b) => b as isize,
+        None => -1,
+    };
     while jj >= 0 {
         let idx = jj as usize;
         let w_j = world[idx];
@@ -114,7 +141,10 @@ pub fn whole_body_contact_step(
     let world = forward_kinematics(joints, parent, base, q);
     let mut cset: Vec<StFrictionContact> = Vec::new();
     for c in contacts {
-        let p_w = (world[c.body] * Point3::from(c.offset)).coords;
+        let p_w = match c.body {
+            Some(b) => (world[b] * Point3::from(c.offset)).coords,
+            None => (base * Point3::from(c.offset)).coords,
+        };
         let phi = p_w.z - floor_z; // signed gap to the floor (normal +z)
         let jc = whole_body_contact_jacobian(joints, parent, &world, base, c.body, c.offset);
         let row = |r: usize| DVector::from_iterator(6 + n, jc.row(r).iter().copied());
@@ -169,7 +199,7 @@ mod tests {
         let q: Vec<f64> = (0..n).map(|i| 0.2 * ((i as f64) * 0.7).sin()).collect();
         let (body, off, _mu) = contacts[0];
         let world = forward_kinematics(&joints, &parent, base, &q);
-        let jc = whole_body_contact_jacobian(&joints, &parent, &world, base, body, off);
+        let jc = whole_body_contact_jacobian(&joints, &parent, &world, base, Some(body), off);
         let p0 = (world[body] * Point3::from(off)).coords;
         let eps = 1e-6;
         let mut worst = 0.0f64;
@@ -207,7 +237,7 @@ mod tests {
     fn quadruped_settles_under_hard_contact() {
         let (joints, inertia, parent, foot_list) = quadruped();
         let n = joints.len();
-        let contacts: Vec<WholeBodyContactPoint> = foot_list.iter().map(|&(body, offset, mu)| WholeBodyContactPoint { body, offset, mu }).collect();
+        let contacts: Vec<WholeBodyContactPoint> = foot_list.iter().map(|&(body, offset, mu)| WholeBodyContactPoint::on(body, offset, mu)).collect();
         let base_inertia = quad_base();
         let g = Vector3::new(0.0, 0.0, -9.81);
         let (floor, dt, kappa) = (0.0, 2e-4, 1e-6);
@@ -228,7 +258,7 @@ mod tests {
             qd = qdn;
             let world = forward_kinematics(&joints, &parent, base, &q);
             for c in &contacts {
-                let z = (world[c.body] * Point3::from(c.offset)).coords.z;
+                let z = match c.body { Some(b) => (world[b] * Point3::from(c.offset)).coords.z, None => (base * Point3::from(c.offset)).coords.z };
                 worst_pen = worst_pen.min(z - floor);
             }
         }

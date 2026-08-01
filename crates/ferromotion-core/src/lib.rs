@@ -226,7 +226,7 @@ pub use dex_retarget::{
 pub use planar_contact::PlanarBody;
 pub use robot_contact::RobotContactSim;
 pub use floating_contact::{floating_contact_step, quadruped, quadruped_trot_tau, tree_floating_contact_step, FootContact};
-pub use whole_body_contact::{whole_body_contact_jacobian, whole_body_contact_step, WholeBodyContactPoint};
+pub use whole_body_contact::{whole_body_contact_jacobian, whole_body_contact_step, whole_body_forward_kinematics, WholeBodyContactPoint};
 pub use pink::{
     solve_pink, FramePoseTask, PinkOptions, PinkResult, PinkSolver, PinkTask, PostureTask, TaskStack,
 };

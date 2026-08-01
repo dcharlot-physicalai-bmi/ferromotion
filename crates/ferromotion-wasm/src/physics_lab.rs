@@ -428,3 +428,84 @@ impl Default for CoupledLab {
         Self::new()
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Grown circuits — a base case plus a recursive rule grow an adder of any width, the graph is
+// lowered to transistors, and the analog voltages decide whether it computes. All on your own
+// device: the growth, the lowering and the nonlinear solve run here, in this page.
+// ---------------------------------------------------------------------------------------------
+#[wasm_bindgen]
+pub struct MorphoLab {
+    grown: ferromotion_circuit::morpho::Grown,
+    tech: ferromotion_circuit::morpho::Tech,
+    solved: Option<ferromotion_circuit::morpho::Solved>,
+    bits: usize,
+}
+
+#[wasm_bindgen]
+impl MorphoLab {
+    /// Grow an adder of `bits` width. The recursion is the entire description.
+    #[wasm_bindgen(constructor)]
+    pub fn new(bits: usize) -> MorphoLab {
+        let bits = bits.clamp(1, 8);
+        MorphoLab {
+            grown: ferromotion_circuit::morpho::grow_adder(bits),
+            tech: ferromotion_circuit::morpho::Tech::default(),
+            solved: None,
+            bits,
+        }
+    }
+
+    /// Drive `x + y` through the grown transistors and solve. Returns true when the analog voltages
+    /// read back as the right number.
+    pub fn solve(&mut self, x: u32, y: u32) -> bool {
+        let steps = ferromotion_circuit::morpho::recommended_steps(self.gate_count());
+        // warm-start from the previous operating point: changing an input is a small perturbation, so
+        // this converges in a few iterations instead of walking the supply up again
+        let warm = self.solved.as_ref().map(|s| s.state.clone());
+        let s = self.grown.evaluate_warm(x, y, self.tech, steps, warm.as_ref());
+        let ok = s.value == x + y;
+        self.solved = Some(s);
+        ok
+    }
+
+    pub fn bits(&self) -> usize {
+        self.bits
+    }
+    /// Gates the rule grew (two transistors each).
+    pub fn gate_count(&self) -> usize {
+        self.grown.netlist.gates().len()
+    }
+    /// Output voltage of every grown gate, in growth order: the circuit lit by its own solution.
+    pub fn gate_voltages(&self) -> Vec<f64> {
+        self.solved.as_ref().map(|s| s.gate_v.clone()).unwrap_or_default()
+    }
+    /// Voltage of each sum bit, then the carry out.
+    pub fn output_voltages(&self) -> Vec<f64> {
+        self.solved.as_ref().map(|s| s.out_v.clone()).unwrap_or_default()
+    }
+    /// The number read off the output nodes.
+    pub fn value(&self) -> u32 {
+        self.solved.as_ref().map(|s| s.value).unwrap_or(0)
+    }
+    pub fn worst_high(&self) -> f64 {
+        self.solved.as_ref().map(|s| s.worst_high).unwrap_or(f64::NAN)
+    }
+    pub fn worst_low(&self) -> f64 {
+        self.solved.as_ref().map(|s| s.worst_low).unwrap_or(f64::NAN)
+    }
+    /// How well the nonlinear solve converged. Reported next to the answer on purpose.
+    pub fn residual(&self) -> f64 {
+        self.solved.as_ref().map(|s| s.residual).unwrap_or(f64::NAN)
+    }
+    pub fn vdd(&self) -> f64 {
+        self.tech.vdd
+    }
+    pub fn vth(&self) -> f64 {
+        self.tech.vth
+    }
+    /// The analytic logic-low a conducting gate should produce: the resistor divider.
+    pub fn predicted_low(&self) -> f64 {
+        self.tech.predicted_low()
+    }
+}

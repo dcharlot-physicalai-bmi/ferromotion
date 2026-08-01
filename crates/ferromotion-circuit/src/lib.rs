@@ -13,10 +13,15 @@
 //! damps a lossless oscillator, so an `LC` tank conserves its energy to rounding. Pure `nalgebra`,
 //! WASM-clean, differentiable-ready.
 //!
-//! This is the physics under the "growing circuits" idea: a morphogenesis pass grows the netlist as a
-//! graph, and this domain simulates the electrical behaviour of what grew — signal propagation, `RC`
-//! delay, and the energy each computation costs. Nonlinear elements (diode, MOSFET-as-switch) needed
-//! for digital logic are the documented next step; this cut is the linear foundation, fully verified.
+//! Nonlinear devices (a Shockley diode and a MOSFET-as-switch) turn each timestep into a Newton solve
+//! and make digital logic expressible: see [`Mna::dc_nonlinear_stepped`] and [`Mna::transient_nonlinear`].
+//!
+//! This is the physics under the "growing circuits" idea: a morphogenesis pass grows a netlist as a
+//! graph, and this domain simulates the electrical behaviour of what grew. [`morpho`] carries that
+//! through end to end — one recursive rule grows an adder of any width, it is lowered to transistors,
+//! and the analog node voltages decide whether the grown design actually computes.
+
+pub mod morpho;
 
 use nalgebra::{DMatrix, DVector};
 
@@ -454,6 +459,38 @@ impl Mna {
     /// Nonlinear DC operating point: Newton on `G·x + i_nl(x) = b(0)` (capacitors open, inductors shorted).
     pub fn dc_nonlinear(&self) -> DVector<f64> {
         self.newton_solve(&self.g, &self.rhs(0.0), &DVector::zeros(self.n), 1e-9, 200)
+    }
+
+    /// Nonlinear DC operating point by **source stepping**: bring the sources up from zero in `steps`
+    /// increments, warm-starting Newton from the previous solution each time. Plain Newton from a cold
+    /// start diverges on large switching circuits (many gates can sit at their threshold, where the
+    /// device derivative is largest and the iteration has no reason to pick a side); walking the
+    /// supply up hands each solve an initial guess that is already close. This is the standard remedy
+    /// and is what makes a few hundred coupled logic gates solvable.
+    pub fn dc_nonlinear_stepped(&self, steps: usize) -> DVector<f64> {
+        let b = self.rhs(0.0);
+        let mut x = DVector::zeros(self.n);
+        for k in 1..=steps.max(1) {
+            let alpha = k as f64 / steps.max(1) as f64;
+            x = self.newton_solve(&self.g, &(&b * alpha), &x, 1e-9, 200);
+        }
+        x
+    }
+
+    /// Nonlinear DC solve started from an explicit guess. With a good guess (the operating point of a
+    /// nearby input combination) this converges in a handful of iterations, which is what makes
+    /// re-solving a large switching circuit interactive. Check [`dc_residual`](Self::dc_residual) on the
+    /// result and fall back to [`dc_nonlinear_stepped`](Self::dc_nonlinear_stepped) if the guess was bad.
+    pub fn dc_nonlinear_from(&self, x0: &DVector<f64>) -> DVector<f64> {
+        self.newton_solve(&self.g, &self.rhs(0.0), x0, 1e-9, 100)
+    }
+
+    /// Norm of the DC residual `‖G·x + i_nl(x) − b(0)‖` at a state — how well a solve actually converged.
+    pub fn dc_residual(&self, x: &DVector<f64>) -> f64 {
+        let mut f = &self.g * x - self.rhs(0.0);
+        let mut j = self.g.clone();
+        self.stamp_nonlin(x, &mut f, &mut j);
+        f.norm()
     }
 
     /// Backward-Euler transient for circuits with nonlinear devices: at each step Newton-solves
