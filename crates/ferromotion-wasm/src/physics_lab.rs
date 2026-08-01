@@ -440,6 +440,8 @@ pub struct MorphoLab {
     tech: ferromotion_circuit::morpho::Tech,
     solved: Option<ferromotion_circuit::morpho::Solved>,
     bits: usize,
+    last_x: u32,
+    last_y: u32,
 }
 
 #[wasm_bindgen]
@@ -453,6 +455,8 @@ impl MorphoLab {
             tech: ferromotion_circuit::morpho::Tech::default(),
             solved: None,
             bits,
+            last_x: 0,
+            last_y: 0,
         }
     }
 
@@ -466,6 +470,8 @@ impl MorphoLab {
         let s = self.grown.evaluate_warm(x, y, self.tech, steps, warm.as_ref());
         let ok = s.value == x + y;
         self.solved = Some(s);
+        self.last_x = x;
+        self.last_y = y;
         ok
     }
 
@@ -507,5 +513,48 @@ impl MorphoLab {
     /// The analytic logic-low a conducting gate should produce: the resistor divider.
     pub fn predicted_low(&self) -> f64 {
         self.tech.predicted_low()
+    }
+
+    // --- topology, so the page can draw the graph that grew ---
+
+    /// Every gate's wiring, flat `[in_a, in_b, out, …]` node ids in growth order. Reading these in
+    /// order is watching the recursion unfold: each gate appears only after the gates it listens to.
+    pub fn gate_wires(&self) -> Vec<u32> {
+        self.grown.netlist.gates().iter().flat_map(|&(a, b, out)| [a as u32, b as u32, out as u32]).collect()
+    }
+    /// Total node count, ground and rail included.
+    pub fn node_count(&self) -> usize {
+        self.grown.netlist.n_nodes()
+    }
+    /// The primary input nodes: the `a` bits then the `b` bits, least significant first.
+    pub fn input_nodes(&self) -> Vec<u32> {
+        self.grown.a.iter().chain(self.grown.b.iter()).map(|&n| n as u32).collect()
+    }
+    /// The output nodes: the sum bits least significant first, then the carry out.
+    pub fn output_nodes(&self) -> Vec<u32> {
+        self.grown.sum.iter().chain(std::iter::once(&self.grown.cout)).map(|&n| n as u32).collect()
+    }
+    /// Solved voltage of a single node, so the drawing can colour inputs and wires too.
+    pub fn node_voltage(&self, node: usize) -> f64 {
+        if node == 0 {
+            return 0.0;
+        }
+        if node == 1 {
+            return self.tech.vdd;
+        }
+        // primary inputs are driven, gates are solved; find whichever this is
+        if let Some(i) = self.grown.a.iter().position(|&n| n == node) {
+            return if (self.last_x >> i) & 1 == 1 { self.tech.vdd } else { 0.0 };
+        }
+        if let Some(i) = self.grown.b.iter().position(|&n| n == node) {
+            return if (self.last_y >> i) & 1 == 1 { self.tech.vdd } else { 0.0 };
+        }
+        self.grown
+            .netlist
+            .gates()
+            .iter()
+            .position(|&(_, _, out)| out == node)
+            .and_then(|g| self.solved.as_ref().map(|s| s.gate_v[g]))
+            .unwrap_or(0.0)
     }
 }
