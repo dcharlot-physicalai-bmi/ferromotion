@@ -70,6 +70,27 @@ The deepest form of the cure: let the model learn the arm's **inertia metric** i
 
 The energy-injection rate is a **pointwise identity**, independent of fit quality, conditioning, or trajectory — the decisive result. A free-form Coriolis, however accurately fit, does real work and drifts. Conservation is a property you build into the model's structure, not a number you fit toward. (Debug notes worth stating: plain semi-implicit Euler is not symplectic for a q-dependent mass matrix, so we integrate the corroborating rollout with RK4 at small step; and a value-fit potential net has an uncontrolled gradient, so the potential is kept exact here to isolate the metric.)
 
+### When does encoding a symmetry help? — a negative result worth keeping
+
+The periodicity fix above is tempting to generalize into "always encode known symmetries." We tested that on the
+learned-metric net, whose mass matrix is also periodic in the joint angles (M* here depends on cos q₁, so the encoding
+hands the net the physics' own basis function). It did **not** help: the metric fit got *worse* (‖M̂−M*‖² MSE 1.02e-2 →
+2.28e-2), because that rollout never leaves the trained range, so the doubled input width bought nothing and cost
+capacity. The chain rule through the encoding was verified correct (∂o/∂q vs finite difference, 6.5e-9), so this is a
+real result and not a broken implementation.
+
+The sharper principle: **encoding a symmetry pays off exactly when the model gets queried outside its training domain
+and the symmetry makes those queries valid.** The SO-101 needed it because its arm swung to 27 rad; the 2-link arm does
+not, because it stays inside ±π. Same physics, same encoding, opposite verdict — so the question to ask is not "is this
+symmetry real?" but "does my trajectory leave the region where the fit means anything?"
+
+One further limit surfaced while pushing that rollout harder. Conservation "by construction" is a statement about the
+*power identity*, not about numerical stability: spun up hard (initial q̇ = 3 rad/s), the learned-metric model diverges
+outright while the exact-metric reference stays at 0.000% drift. M̂ = LLᵀ + εI guarantees positive-definiteness, but
+nothing guarantees good *conditioning* — a near-singular learned metric makes M̂⁻¹ explode, and no amount of
+energy-conservation structure prevents that. Structure buys you the invariant; it does not buy you a well-conditioned
+inverse.
+
 ## Scoring a generative video model (the two rules that decide whether a number means anything)
 
 A video world model outputs pixels, so scoring it means perceive-then-test: recover state from the frames, then check an invariant. Two disciplines are not optional — each caught a confident, wrong result in our own runs on a frontier 4B video model.
