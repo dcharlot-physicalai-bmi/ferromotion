@@ -91,6 +91,21 @@ nothing guarantees good *conditioning* — a near-singular learned metric makes 
 energy-conservation structure prevents that. Structure buys you the invariant; it does not buy you a well-conditioned
 inverse.
 
+That diagnosis is testable, and it holds: the ε in M̂ = LLᵀ + εI sets a floor on the metric's smallest eigenvalue, so
+raising it should restore stability. It does, with a clean dose-response — and the useful surprise is that a moderate
+floor improves the *fit* as well, because a net that never has to produce near-singular outputs is also easier to train:
+
+| metric floor ε | worst condition number | ‖M̂−M*‖² MSE | energy drift @ 5 s |
+|---|---|---|---|
+| 1e-3 (default) | 1092 | 1.26e-2 | **diverges** |
+| **1e-1** | 29 | **6.57e-3** | 0.045% |
+| 5e-1 | 6.6 | 2.82e-2 | 0.000% |
+
+So ε is not merely a numerical guard to be set as small as possible — it is a real hyperparameter with a sweet spot, and
+the default was on the wrong side of it. Too large and you buy stability with fidelity (the 5e-1 row); too small and an
+energetic trajectory blows up despite conservation being built in. Report the learned metric's condition number
+alongside its fit: a model that conserves perfectly and inverts badly will still fail.
+
 ## Scoring a generative video model (the two rules that decide whether a number means anything)
 
 A video world model outputs pixels, so scoring it means perceive-then-test: recover state from the frames, then check an invariant. Two disciplines are not optional — each caught a confident, wrong result in our own runs on a frontier 4B video model.
