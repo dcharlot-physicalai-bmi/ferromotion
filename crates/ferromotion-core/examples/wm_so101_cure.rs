@@ -97,7 +97,7 @@ fn pot_grad(net: &Net, q: &DVector<f64>, err: &DVector<f64>) -> Net {
 fn main() {
     let (robot, inertia) = from_urdf_full(URDF, "base_link", "gripper_link").expect("load SO-101");
     println!("The cure on the REAL SO-101 — potential-gradient gravity + true-metric Coriolis vs a generic gravity field.\n");
-    let dt = 0.01; let steps = 40_000u32;
+    let dt = 0.01; let steps: u32 = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(40_000);
     let samp_q = |k: u32| -> Vec<f64> { (0..5).map(|i| 0.6 * (LIM[i][0] + (LIM[i][1] - LIM[i][0]) * u01(k * 11 + i as u32 + 1))).collect() };
 
     let mut gnet = Net::new(5, 5, 10); let mut gen_opt = Adam::new(5, 5);   // BASELINE: generic gravity field
@@ -122,11 +122,13 @@ fn main() {
         // baseline: predict gravity force directly
         let gg = gnet.fwd(&q).0;
         let ggrad = gnet.bwd_dy(&q, &(&gg - &gt));
-        gen_opt.step(&mut gnet, &ggrad, 1e-3);
+        let frac = k as f64 / steps as f64;
+        let lr = 1e-3 * 0.5 * (1.0 + (std::f64::consts::PI * frac).cos()).max(0.02); // cosine decay
+        gen_opt.step(&mut gnet, &ggrad, lr);
         // cure: g = ∇V, fit to g*
         let err = &pot_g(&pot, &q) - &gt;
         let pgrad = pot_grad(&pot, &q, &err);
-        pot_opt.step(&mut pot, &pgrad, 1e-3);
+        pot_opt.step(&mut pot, &pgrad, lr);
     }
 
     // ---- gravity-force fit quality (both) ----
