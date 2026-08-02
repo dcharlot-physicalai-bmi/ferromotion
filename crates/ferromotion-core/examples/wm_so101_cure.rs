@@ -77,20 +77,27 @@ impl Adam {
     }
 }
 
+// Gravity torque is 2π-PERIODIC in each joint angle, so feed the net [sin q, cos q] rather than raw q.
+// A net fed raw angles has no idea q=27 rad is the same configuration as q=1.87; this encodes that identity.
+fn enc(q: &DVector<f64>) -> DVector<f64> {
+    let mut e = DVector::zeros(10);
+    for i in 0..5 { e[i] = q[i].sin(); e[5 + i] = q[i].cos(); }
+    e
+}
 const EPS: f64 = 1e-4;
 // gravity force from the potential net: g_i = ∂V/∂q_i via central finite difference (symmetric-Jacobian, curl-free).
 fn pot_g(net: &Net, q: &DVector<f64>) -> DVector<f64> {
     let mut g = DVector::zeros(5);
     for i in 0..5 { let mut qp = q.clone(); let mut qm = q.clone(); qp[i] += EPS; qm[i] -= EPS;
-        g[i] = (net.fwd(&qp).0[0] - net.fwd(&qm).0[0]) / (2.0 * EPS); }
+        g[i] = (net.fwd(&enc(&qp)).0[0] - net.fwd(&enc(&qm)).0[0]) / (2.0 * EPS); }
     g
 }
 // assemble d(loss)/dw for the potential net: loss = ½‖∇V − g*‖², ∂g_i/∂w = (Vgrad(q+εeᵢ)−Vgrad(q−εeᵢ))/2ε.
 fn pot_grad(net: &Net, q: &DVector<f64>, err: &DVector<f64>) -> Net {
-    let mut gp = Net::zeros(5, 1); let one = DVector::from_vec(vec![1.0]);
+    let mut gp = Net::zeros(10, 1); let one = DVector::from_vec(vec![1.0]);
     for i in 0..5 { let mut qp = q.clone(); let mut qm = q.clone(); qp[i] += EPS; qm[i] -= EPS;
-        gp.axpy(err[i] / (2.0 * EPS), &net.bwd_dy(&qp, &one));
-        gp.axpy(-err[i] / (2.0 * EPS), &net.bwd_dy(&qm, &one)); }
+        gp.axpy(err[i] / (2.0 * EPS), &net.bwd_dy(&enc(&qp), &one));
+        gp.axpy(-err[i] / (2.0 * EPS), &net.bwd_dy(&enc(&qm), &one)); }
     gp
 }
 
@@ -98,10 +105,11 @@ fn main() {
     let (robot, inertia) = from_urdf_full(URDF, "base_link", "gripper_link").expect("load SO-101");
     println!("The cure on the REAL SO-101 — potential-gradient gravity + true-metric Coriolis vs a generic gravity field.\n");
     let dt = 0.01; let steps: u32 = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(40_000);
-    let samp_q = |k: u32| -> Vec<f64> { (0..5).map(|i| 0.6 * (LIM[i][0] + (LIM[i][1] - LIM[i][0]) * u01(k * 11 + i as u32 + 1))).collect() };
+    let width: f64 = std::env::args().nth(2).and_then(|a| a.parse().ok()).unwrap_or(0.6);
+    let samp_q = |k: u32| -> Vec<f64> { (0..5).map(|i| width * std::f64::consts::PI * (2.0 * u01(k * 11 + i as u32 + 1) - 1.0)).collect() };
 
     let mut gnet = Net::new(5, 5, 10); let mut gen_opt = Adam::new(5, 5);   // BASELINE: generic gravity field
-    let mut pot = Net::new(5, 1, 20); let mut pot_opt = Adam::new(5, 1);   // CURE: potential V(q)
+    let mut pot = Net::new(10, 1, 20); let mut pot_opt = Adam::new(10, 1);   // CURE: potential V(q)
 
     // gradient-check the potential-net training gradient (assembled analytic vs finite-diff of the loss)
     {
@@ -152,7 +160,8 @@ fn main() {
     let gen_curl = asym(&gen_f); let pot_curl = asym(&pot_f);
 
     // ---- rollout: true M+Coriolis, model gravity, symplectic; TRUE-energy drift at 1 s / 3 s / 5 s ----
-    let q0 = vec![0.5, -0.6, 0.7, 0.3, 0.0]; let v0 = vec![0.0; 5]; let e0 = energy(&robot, &inertia, &q0, &v0);
+    let qs: f64 = std::env::args().nth(3).and_then(|a| a.parse().ok()).unwrap_or(1.0); // scale the initial displacement
+    let q0 = vec![0.5*qs, -0.6*qs, 0.7*qs, 0.3*qs, 0.0]; let v0 = vec![0.0; 5]; let e0 = energy(&robot, &inertia, &q0, &v0);
     let cps = [100usize, 300, 500]; // 1 s, 3 s, 5 s at dt = 0.01
     let roll = |gfield: &dyn Fn(&DVector<f64>) -> DVector<f64>| -> ([f64; 3], bool) {
         let (mut q, mut qd) = (q0.clone(), v0.clone()); let mut drift = 0.0f64; let mut out = [0.0; 3];
@@ -172,6 +181,30 @@ fn main() {
     let (gd, gen_fin) = roll(&gen_f);
     let (pd, _) = roll(&pot_f);
     let (rd, _) = roll(&|q: &DVector<f64>| g_true(&robot, &inertia, q.as_slice())); // exact gravity reference
+    // Is the rollout INSIDE the training box? (training samples q = width * uniform(LIM))
+    {
+        let (mut q, mut qd) = (q0.clone(), v0.clone());
+        let mut lo = [f64::MAX; 5]; let mut hi = [f64::MIN; 5];
+        for _ in 0..500 {
+            let qv = DVector::from_row_slice(&q);
+            let cor = &bias(&robot, &inertia, &q, &qd) - &g_true(&robot, &inertia, &q);
+            let bm = cor + pot_g(&pot, &qv);
+            let m = mass_matrix(&robot, &inertia, &q); let mut ma = m.clone(); for i in 0..5 { ma[(i, i)] += ARM; }
+            let qdd = match ma.cholesky() { Some(c) => c.solve(&(-bm)), None => break };
+            for i in 0..5 { qd[i] += dt * qdd[i]; q[i] += dt * qd[i];
+                lo[i] = lo[i].min(q[i]); hi[i] = hi[i].max(q[i]); }
+            if !q.iter().all(|v| v.is_finite()) { break; }
+        }
+        let mut outn = 0;
+        println!("\n  ROLLOUT vs TRAINING BOX (width {:.2}):", width);
+        for i in 0..5 {
+            let (tl, th) = (width * LIM[i][0], width * LIM[i][1]);
+            let esc = lo[i] < tl || hi[i] > th; if esc { outn += 1; }
+            println!("    joint{}: visited [{:+.2},{:+.2}]  trained [{:+.2},{:+.2}]  {}",
+                i, lo[i], hi[i], tl, th, if esc { "<== OUTSIDE" } else { "inside" });
+        }
+        println!("    => {} of 5 joints leave the training region", outn);
+    }
     let fmt = |x: f64| if x.is_finite() { format!("{:>8.1}%", x * 100.0) } else { "DIVERGED".into() };
 
     println!("  (both: 5→32→32 MLP, {} Adam steps, SAME SO-101 gravity data, true M(q)+Coriolis, symplectic dt={})", steps, dt);
