@@ -20,7 +20,8 @@ use nalgebra::{DMatrix, DVector};
 
 // --- analytic planar 2-link (double pendulum), horizontal-x reference, gravity −z ---
 const M1: f64 = 1.0; const M2: f64 = 1.0; const L1: f64 = 1.0; const LC1: f64 = 0.5; const LC2: f64 = 0.5;
-const I1: f64 = 0.1; const I2: f64 = 0.1; const GRAV: f64 = 9.81; const EPSM: f64 = 1e-3;
+const I1: f64 = 0.1; const I2: f64 = 0.1; const GRAV: f64 = 9.81;
+fn epsm() -> f64 { std::env::args().nth(2).and_then(|a| a.parse().ok()).unwrap_or(1e-3) } // metric floor
 fn hash(mut h: u32) -> u32 { h ^= h >> 15; h = h.wrapping_mul(2246822519); h ^= h >> 13; h = h.wrapping_mul(3266489917); h ^= h >> 16; h }
 fn u01(i: u32) -> f64 { (hash(i) % 1_000_000) as f64 / 1_000_000.0 }
 fn randn(i: u32) -> f64 { (0..12).map(|k| u01(i * 13 + k)).sum::<f64>() - 6.0 }
@@ -80,6 +81,7 @@ impl Net {
         let gw1 = &dz1 * x.transpose(); let gb1 = dz1;
         Net { w1: gw1, b1: gb1, w2: gw2, b2: gb2, w3: gw3, b3: gb3 }
     }
+    #[allow(dead_code)] // kept alongside the other optimiser primitives
     fn axpy(&mut self, a: f64, g: &Net) { self.w1 += a * &g.w1; self.b1 += a * &g.b1; self.w2 += a * &g.w2; self.b2 += a * &g.b2; self.w3 += a * &g.w3; self.b3 += a * &g.b3; }
     // EXACT Jacobian of the outputs w.r.t. the inputs: ∂o/∂x = W3 diag(1−h2²) W2 diag(1−h1²) W1.
     fn input_jac(&self, x: &DVector<f64>) -> DMatrix<f64> {
@@ -106,13 +108,13 @@ impl Adam {
 fn m_hat(net: &Net, q: &[f64]) -> DMatrix<f64> {
     let o = net.fwd(&DVector::from_row_slice(q)).0;
     let l = DMatrix::from_row_slice(2, 2, &[o[0], 0.0, o[1], o[2]]);
-    &l * l.transpose() + DMatrix::identity(2, 2) * EPSM
+    &l * l.transpose() + DMatrix::identity(2, 2) * epsm()
 }
 // d(½‖M̂−M*‖²)/dw assembled: dL = 2 D L (D = M̂−M*), dy on the 3 L-outputs.
 fn mfit_grad(net: &Net, q: &[f64]) -> Net {
     let o = net.fwd(&DVector::from_row_slice(q)).0;
     let l = DMatrix::from_row_slice(2, 2, &[o[0], 0.0, o[1], o[2]]);
-    let d = (&l * l.transpose() + DMatrix::identity(2, 2) * EPSM) - m_star(q);
+    let d = (&l * l.transpose() + DMatrix::identity(2, 2) * epsm()) - m_star(q);
     let gl = 2.0 * &d * &l; // gradient w.r.t. L
     let dy = DVector::from_vec(vec![gl[(0, 0)], gl[(1, 0)], gl[(1, 1)]]);
     net.bwd_dy(&DVector::from_row_slice(q), &dy)
@@ -148,7 +150,7 @@ fn main() {
 
     let steps = 30_000u32;
     let samp = |k: u32| -> ([f64; 2], [f64; 2]) {
-        ([3.14 * (2.0 * u01(k * 11 + 1) - 1.0), 3.14 * (2.0 * u01(k * 11 + 2) - 1.0)],
+        ([std::f64::consts::PI * (2.0 * u01(k * 11 + 1) - 1.0), std::f64::consts::PI * (2.0 * u01(k * 11 + 2) - 1.0)],
          [3.5 * (2.0 * u01(k * 11 + 3) - 1.0), 3.5 * (2.0 * u01(k * 11 + 4) - 1.0)])
     };
 
@@ -227,6 +229,7 @@ fn main() {
     // M̂ stays well-conditioned and the trajectory does not wander out of the trained region). RK4, small dt, so
     // the integrator is not the confound. The potential force is the TRUE g_star for every model, so only the
     // Coriolis differs. Tracks drift of the model's own energy Ê = ½q̇ᵀMq̇ + V*(q).
+    let spin: f64 = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(0.0);
     let dt = 0.001; let q0 = [-1.27, 0.30]; let nstep = 5000usize; let cps = [1000usize, 3000, 5000]; // 1 s, 3 s, 5 s
     let roll = |mfn: &dyn Fn(&[f64]) -> DMatrix<f64>, vfn: &dyn Fn(&[f64]) -> f64,
                 gradvfn: &dyn Fn(&[f64]) -> DVector<f64>, cor: &dyn Fn(&[f64], &[f64]) -> DVector<f64>|
@@ -236,7 +239,7 @@ fn main() {
             mfn(q).cholesky().map(|c| c.solve(&-(cor(q, qd) + gradvfn(q)))) };
         let e_model = |q: &[f64], qd: &[f64]| energy(&mfn(q), vfn(q), qd);
         let e_true = |q: &[f64], qd: &[f64]| energy(&m_star(q), v_star(q), qd);
-        let (mut q, mut qd) = (q0, [0.0f64, 0.0]);
+        let (mut q, mut qd) = (q0, [spin, spin]);
         let em0s = e_model(&q, &qd); let et0s = e_true(&q, &qd);
         let em0 = em0s.abs().max(1e-9); let et0 = et0s.abs().max(1e-9);
         let (mut dm, mut dtr) = (0.0f64, 0.0f64); let (mut om, mut ot) = ([0.0; 3], [0.0; 3]);
@@ -274,6 +277,15 @@ fn main() {
     let fmt = |x: f64, fin: bool| if fin && x.is_finite() { format!("{:>8.3}%", x * 100.0) } else { "DIVERGED".into() };
     let escale = energy(&m_star(&q0), v_star(&q0), &[0.0, 0.0]).abs();
 
+    {   // conditioning of the LEARNED metric: eigenvalue ratio over sampled states
+        let mut worst: f64 = 1.0;
+        for k in 0..300u32 { let q = samp(500_000 + k).0;
+            let m = m_hat(&mnet, &q);
+            if let Some(e) = m.symmetric_eigenvalues().iter().cloned().fold(None, |a: Option<(f64,f64)>, v| Some(match a { None => (v,v), Some((lo,hi)) => (lo.min(v), hi.max(v)) })) {
+                if e.0 > 0.0 { worst = worst.max(e.1 / e.0); } }
+        }
+        println!("  learned-metric worst condition number over sampled states: {:.1} (eps = {:.0e})", worst, epsm());
+    }
     println!("  CORROBORATING ROLLOUT — gentle in-distribution swing, RK4 dt={}, true potential, only Coriolis differs:", dt);
     println!("  fit: ‖M̂−M*‖² MSE {:.2e} · free-form Coriolis MSE {:.2e} · system energy ~{:.1} J", mmse, cmse, escale);
     println!("    CURE  learned M̂ + Christoffel(M̂):  model-energy drift {} / {} / {} @ 1/3/5 s", fmt(cure_m[0], cure_fin), fmt(cure_m[1], cure_fin), fmt(cure_m[2], cure_fin));
