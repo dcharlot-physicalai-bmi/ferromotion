@@ -21,7 +21,9 @@ use nalgebra::{DMatrix, DVector};
 // --- analytic planar 2-link (double pendulum), horizontal-x reference, gravity −z ---
 const M1: f64 = 1.0; const M2: f64 = 1.0; const L1: f64 = 1.0; const LC1: f64 = 0.5; const LC2: f64 = 0.5;
 const I1: f64 = 0.1; const I2: f64 = 0.1; const GRAV: f64 = 9.81;
-fn epsm() -> f64 { std::env::args().nth(2).and_then(|a| a.parse().ok()).unwrap_or(1e-3) } // metric floor
+fn epsm() -> f64 { std::env::args().nth(2).and_then(|a| a.parse().ok()).unwrap_or(1e-1) } // metric floor: 1e-1, not the intuitive 1e-3 — measured to improve BOTH conditioning
+// (cond 1092 -> 29) and fit (MSE 1.26e-2 -> 6.57e-3); at 1e-3 an energetic rollout diverges despite
+// conservation being built in, because positive-definiteness does not imply a usable inverse.
 fn hash(mut h: u32) -> u32 { h ^= h >> 15; h = h.wrapping_mul(2246822519); h ^= h >> 13; h = h.wrapping_mul(3266489917); h ^= h >> 16; h }
 fn u01(i: u32) -> f64 { (hash(i) % 1_000_000) as f64 / 1_000_000.0 }
 fn randn(i: u32) -> f64 { (0..12).map(|k| u01(i * 13 + k)).sum::<f64>() - 6.0 }

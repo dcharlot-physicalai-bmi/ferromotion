@@ -65,8 +65,8 @@ The deepest form of the cure: let the model learn the arm's **inertia metric** i
 
 | Coriolis on a learned metric M̂ | energy-injection rate \|dÊ/dt\| | rollout energy drift @ 5 s |
 |--------------------------------|-------------------------------|----------------------------|
-| **Christoffel of M̂ (built in)** | **9.8e-16** (machine zero) | **0.000%** (= true-system reference) |
-| free-form field, same data | 3.96 (~137% of the dynamics' own power scale) | 5.2% and climbing |
+| **Christoffel of M̂ (built in)** | **7.9e-16** (machine zero) | **0.000%** (= true-system reference) |
+| free-form field, same data | 3.08 (~107% of the dynamics' own power scale) | 4.8% and climbing |
 
 The energy-injection rate is a **pointwise identity**, independent of fit quality, conditioning, or trajectory — the decisive result. A free-form Coriolis, however accurately fit, does real work and drifts. Conservation is a property you build into the model's structure, not a number you fit toward. (Debug notes worth stating: plain semi-implicit Euler is not symplectic for a q-dependent mass matrix, so we integrate the corroborating rollout with RK4 at small step; and a value-fit potential net has an uncontrolled gradient, so the potential is kept exact here to isolate the metric.)
 
@@ -102,7 +102,7 @@ floor improves the *fit* as well, because a net that never has to produce near-s
 | 5e-1 | 6.6 | 2.82e-2 | 0.000% |
 
 So ε is not merely a numerical guard to be set as small as possible — it is a real hyperparameter with a sweet spot, and
-the default was on the wrong side of it. Too large and you buy stability with fidelity (the 5e-1 row); too small and an
+the intuitive default was on the wrong side of it (the example now ships ε = 1e-1, which is where the numbers above come from). Too large and you buy stability with fidelity (the 5e-1 row); too small and an
 energetic trajectory blows up despite conservation being built in. Report the learned metric's condition number
 alongside its fit: a model that conserves perfectly and inverts badly will still fail.
 
