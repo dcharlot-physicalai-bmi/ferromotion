@@ -22,8 +22,23 @@ A candidate **model** is a next-state predictor: given a state, predict the next
 | D | two masses + spring, isolated | linear & angular momentum conserved (Newton's 3rd law) | |ΔP|,|ΔL| ≈ 0 | physics: 1e-15 (machine precision) |
 | E | block on an incline | static friction holds below the cone angle; slides at a = g(sinθ − μcosθ) above | rest-drift 0, accel-err < 2% | Coulomb: 0 / 0.03% |
 | F | damped pendulum, unknown L, c | recover the true parameters from a few samples and extrapolate | — | physics-first: 0.0%, extrapolates 10,911× better than a structure-free fit |
+| G | any position-dependent force field | the field is conservative iff its Jacobian is symmetric (‖J−Jᵀ‖ = 0) | ‖J−Jᵀ‖ ≈ 0 | gradient field: 0.000; rotational field: 0.700 |
 
 Each probe is scored against three model classes shipped as controls: **PHYSICS** (structure-correct — passes), **explicit-Euler** (numerically wrong), and **learned/no-structure** (per-step accurate but structure-free). The reference column is what a correct engine produces; a candidate model prints alongside.
+
+### Probe G is different: it predicts instead of diagnosing
+
+Every other probe rolls a model forward and inspects the wreckage. Probe G reads the force field itself. A force
+conserves energy only if it is the gradient of a potential, which holds iff its Jacobian is symmetric — so ‖J−Jᵀ‖
+answers "can this model conserve at all?" with **no trajectory, no simulation, and no dependence on fit quality**.
+It is the cheapest probe in the suite and the only predictive one. On the real SO-101 a mere **0.041** of antisymmetry
+foretold a **12,637%** runaway, while a gradient-parameterized field measured 0.000 and stayed bounded; on the 2-D
+controls a rotational field reads 0.700 and drifts 594%, against 0.000 and 1.3% for a true gradient.
+
+Its scope is measured rather than assumed, which is why the reference output includes a case it **misses**: a perfectly
+good gradient field plus velocity drag has a symmetric position-Jacobian, so the probe reports "conserves" while the
+rollout bleeds 98% of its energy. The probe sees the conservative half of a force. Velocity-dependent dissipation needs
+its own test, and a suite that hides that fact would be worse than one that prints it.
 
 ## Diagnosis → cure — `cargo run --release --example wm_on_the_stand`
 

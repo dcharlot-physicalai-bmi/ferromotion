@@ -240,6 +240,72 @@ fn param_recovery_probe() {
     println!("  structure-free (fit a curve)  no interpretable params; extrapolation RMSE {:.2e} ({:.0}× worse) [FAIL]", free_rmse, free_rmse / phys_rmse);
 }
 
+
+// ---- SYSTEM G: CONSERVATIVENESS — a STRUCTURAL probe that predicts energy failure WITHOUT a rollout ----
+// A force field conserves energy only if it is the gradient of a potential, which (away from degenerate cases)
+// holds iff its Jacobian ∂f/∂x is SYMMETRIC. Measuring ‖J−Jᵀ‖ therefore answers "will this model leak or pump
+// energy?" from the force alone — no simulation, no trajectory, no dependence on how well it was fit. This is
+// the cheapest probe in the suite and the only one that is predictive rather than diagnostic: on the SO-101 a
+// mere 0.041 of antisymmetry foretold a 12,637% runaway, while a gradient-parameterized field (0.000) stayed
+// bounded. Scored here on 2-D fields with known answers.
+fn conservative_probe() {
+    let eps = 1e-4;
+    // a true gradient field: f = −∇V for V = ½k(x²+y²) + a x²y²  (conservative)
+    let grad_field = |x: f64, y: f64| (-(4.0 * x + 2.0 * 1.5 * x * y * y), -(4.0 * y + 2.0 * 1.5 * x * x * y));
+    // a plausible-looking field that is NOT a gradient (a rotational component): the classic energy pump
+    let curl_field = |x: f64, y: f64| (-(4.0 * x) - 0.35 * y, -(4.0 * y) + 0.35 * x);
+    // NOTE the probe's SCOPE: it examines a force's dependence on POSITION. Velocity-dependent dissipation
+    // (drag) is invisible to it — included below on purpose, so the limit is measured rather than assumed.
+    let drag_c = 0.25;
+
+    let asym = |f: &dyn Fn(f64, f64) -> (f64, f64)| -> f64 {
+        let mut s = 0.0; let n = 400u32;
+        for k in 0..n {
+            let x = -2.0 + 4.0 * (k % 20) as f64 / 20.0;
+            let y = -2.0 + 4.0 * ((k / 20) % 20) as f64 / 20.0;
+            let dfx_dy = (f(x, y + eps).0 - f(x, y - eps).0) / (2.0 * eps);
+            let dfy_dx = (f(x + eps, y).1 - f(x - eps, y).1) / (2.0 * eps);
+            s += (dfx_dy - dfy_dx).abs();
+        }
+        s / n as f64
+    };
+    // corroborate with a symplectic rollout, energy measured against each field's OWN potential
+    let roll = |f: &dyn Fn(f64, f64) -> (f64, f64), pot: &dyn Fn(f64, f64) -> f64, drag: f64| -> f64 {
+        let (mut x, mut y, mut vx, mut vy) = (1.2f64, -0.8f64, 0.0f64, 0.0f64);
+        let e0 = pot(x, y); let dt = 0.01; let mut d: f64 = 0.0;
+        for _ in 0..1500 {
+            let (mut ax, mut ay) = f(x, y);
+            ax -= drag * vx; ay -= drag * vy;                       // velocity-dependent term (if any)
+            vx += dt * ax; vy += dt * ay; x += dt * vx; y += dt * vy;
+            if !x.is_finite() || !y.is_finite() { return f64::INFINITY; }
+            d = d.max(((0.5 * (vx * vx + vy * vy) + pot(x, y) - e0) / e0).abs());
+        }
+        d
+    };
+    let v_harm = |x: f64, y: f64| 0.5 * 4.0 * (x * x + y * y) + 1.5 * x * x * y * y;
+    let v_rot  = |x: f64, y: f64| 0.5 * 4.0 * (x * x + y * y);
+
+    println!("\nSystem G — conservativeness, a STRUCTURAL probe (‖J−Jᵀ‖ predicts energy behaviour with no rollout):");
+    let rows: [(&str, &dyn Fn(f64, f64) -> (f64, f64), &dyn Fn(f64, f64) -> f64, f64); 3] = [
+        ("PHYSICS (gradient field)",   &grad_field, &v_harm, 0.0),
+        ("rotational (not a gradient)", &curl_field, &v_rot,  0.0),
+        ("gradient + velocity drag",    &grad_field, &v_harm, drag_c),
+    ];
+    for (name, f, pot, drag) in rows {
+        let a = asym(f); let d = roll(f, pot, drag);
+        let pred = if a < 1e-6 { "conserves" } else { "will NOT conserve" };
+        let obs = if d.is_finite() { format!("{:.1}%", d * 100.0) } else { "diverged".into() };
+        let held = (a < 1e-6) == (d.is_finite() && d < 0.05);
+        println!("  {:<28} ‖J−Jᵀ‖ = {:>7.3}  → predicts {:<18}  rollout drift {:>9}  [{}]",
+                 name, a, pred, obs, if held { "PREDICTION HOLDS" } else { "MISSED — see scope" });
+    }
+    println!("    The structural number is computed from the FORCE alone — no trajectory, no fit quality, no");
+    println!("    simulation — and it says in advance whether a position-dependent force can conserve at all.");
+    println!("    SCOPE, measured not assumed: the third row is a perfectly good gradient field plus velocity");
+    println!("    drag. Its position-Jacobian is symmetric, so the probe reports \"conserves\" — and the rollout");
+    println!("    still bleeds energy. Test velocities separately; this probe sees the conservative half only.");
+}
+
 fn main() {
     println!("PHYSICS-FIDELITY BENCHMARK — scoring models on conservation-law invariants (ferromotion = reference).\n");
     println!("System A — simple pendulum (analytic ground truth: E const, T=2π√(L/g)={:.3}s):", 2.0 * std::f64::consts::PI * (L / G).sqrt());
@@ -256,6 +322,7 @@ fn main() {
     momentum_probe();
     friction_probe();
     param_recovery_probe();
+    conservative_probe();
 
     println!("\n  ================  READING — six systems, one verdict: STRUCTURE beats per-step ACCURACY  ================");
     println!("  ENERGY (A,B): the 'learned' model is per-step MORE accurate than any real world model (0.1%");
