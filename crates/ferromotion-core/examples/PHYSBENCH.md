@@ -23,6 +23,7 @@ A candidate **model** is a next-state predictor: given a state, predict the next
 | E | block on an incline | static friction holds below the cone angle; slides at a = g(sinθ − μcosθ) above | rest-drift 0, accel-err < 2% | Coulomb: 0 / 0.03% |
 | F | damped pendulum, unknown L, c | recover the true parameters from a few samples and extrapolate | — | physics-first: 0.0%, extrapolates 10,911× better than a structure-free fit |
 | G | any position-dependent force field | the field is conservative iff its Jacobian is symmetric (‖J−Jᵀ‖ = 0) | ‖J−Jᵀ‖ ≈ 0 | gradient field: 0.000; rotational field: 0.700 |
+| H | any velocity-dependent force field | a passive force may remove energy, never create it: λmax of sym(∂f/∂q̇) ≤ 0 | λmax ≤ 0 | gyroscopic: 0.000; drag: −0.300; negative damping: +0.300 |
 
 Each probe is scored against three model classes shipped as controls: **PHYSICS** (structure-correct — passes), **explicit-Euler** (numerically wrong), and **learned/no-structure** (per-step accurate but structure-free). The reference column is what a correct engine produces; a candidate model prints alongside.
 
@@ -39,6 +40,27 @@ Its scope is measured rather than assumed, which is why the reference output inc
 good gradient field plus velocity drag has a symmetric position-Jacobian, so the probe reports "conserves" while the
 rollout bleeds 98% of its energy. The probe sees the conservative half of a force. Velocity-dependent dissipation needs
 its own test, and a suite that hides that fact would be worse than one that prints it.
+
+### Probe H closes the gap probe G names
+
+Probe G reads the *position*-Jacobian's antisymmetric part and answers "can this force conserve?". It cannot see
+velocity-dependent energy loss, and ships with a case proving it. Probe H is the mirror image and covers that half.
+Power is P = q̇·f, so for a velocity-dependent force the rate of work depends only on the **symmetric** part of ∂f/∂q̇:
+zero means **gyroscopic** — it does no net work at any velocity, which is exactly what a metric-consistent Coriolis
+term is; negative-definite means physical **damping**; and a positive eigenvalue means the model **manufactures
+energy**, which no passive system does. So λmax of sym(∂f/∂q̇) is a worst-case energy-creation rate read off the force
+alone.
+
+| velocity-dependent field | λmax of sym(∂f/∂q̇) | verdict | rollout energy change |
+|---|---|---|---|
+| gyroscopic (a true Coriolis term) | 0.000 | does no work | ≈0 (integrator only) |
+| linear drag | −0.300 | dissipates | −100% |
+| negative damping | +0.300 | **pumps** | +799,364% |
+| rotation + a little hidden pumping | **+0.050** | **pumps** | +354% |
+
+The last row is the one worth having. It is rotation-dominated (0.30 against 0.05), so it reads as a harmless
+gyroscopic term and a short rollout shows little; the structural number exposes the hidden component immediately.
+Between them, G and H bound both halves of a force: G asks whether it can conserve, H asks whether it pumps.
 
 ## Diagnosis → cure — `cargo run --release --example wm_on_the_stand`
 

@@ -306,6 +306,70 @@ fn conservative_probe() {
     println!("    still bleeds energy. Test velocities separately; this probe sees the conservative half only.");
 }
 
+
+// ---- SYSTEM H: the VELOCITY half — does the force PUMP energy? (the gap probe G names) ----
+// Probe G reads the position-Jacobian's ANTIsymmetric part: zero ⇔ the force is a gradient ⇔ conservative.
+// A velocity-dependent force is governed by the mirror-image quantity. Power is P = q̇·f, so for f ≈ A q̇ the
+// rate of work is q̇ᵀA q̇ = q̇ᵀ·sym(A)·q̇, which depends ONLY on the SYMMETRIC part of ∂f/∂q̇:
+//     sym = 0            → GYROSCOPIC: does no net work at any velocity (this is what a true Coriolis term is)
+//     sym ≺ 0            → DISSIPATIVE: physical damping, energy falls monotonically
+//     sym has λ > 0      → PUMPS: the model manufactures energy, which no real passive system does
+// The largest eigenvalue of sym(∂f/∂q̇) is therefore a worst-case energy-creation rate, computed from the force
+// alone. Together with probe G it covers both halves: G says "can it conserve?", H says "does it pump?".
+fn dissipation_probe() {
+    let eps = 1e-4;
+    let c = 0.30;
+    // (a) gyroscopic: f = S q̇ with S antisymmetric — the structure a metric-consistent Coriolis term has
+    let gyro = |vx: f64, vy: f64| (-c * vy, c * vx);
+    // (b) linear drag: physical damping
+    let drag = |vx: f64, vy: f64| (-c * vx, -c * vy);
+    // (c) negative damping: the classic unphysical "livelier than real" failure
+    let pump = |vx: f64, vy: f64| (c * vx, c * vy);
+    // (d) a plausible-looking learned field mixing rotation with a little negative damping — the realistic
+    //     failure mode: it LOOKS gyroscopic but hides a pumping component
+    let sneaky = |vx: f64, vy: f64| (-c * vy + 0.05 * vx, c * vx + 0.05 * vy);
+
+    // largest eigenvalue of the symmetric part of the velocity-Jacobian (2×2, analytic)
+    let worst_pump = |f: &dyn Fn(f64, f64) -> (f64, f64)| -> f64 {
+        let mut worst = f64::MIN;
+        for k in 0..200u32 {
+            let vx = -2.0 + 4.0 * (k % 14) as f64 / 14.0;
+            let vy = -2.0 + 4.0 * ((k / 14) % 14) as f64 / 14.0;
+            let a00 = (f(vx + eps, vy).0 - f(vx - eps, vy).0) / (2.0 * eps);
+            let a01 = (f(vx, vy + eps).0 - f(vx, vy - eps).0) / (2.0 * eps);
+            let a10 = (f(vx + eps, vy).1 - f(vx - eps, vy).1) / (2.0 * eps);
+            let a11 = (f(vx, vy + eps).1 - f(vx, vy - eps).1) / (2.0 * eps);
+            let (s00, s11, s01) = (a00, a11, 0.5 * (a01 + a10));       // symmetric part
+            let tr = s00 + s11; let det = s00 * s11 - s01 * s01;
+            let lam = 0.5 * tr + (0.25 * tr * tr - det).max(0.0).sqrt(); // larger eigenvalue
+            worst = worst.max(lam);
+        }
+        worst
+    };
+    // corroborate: energy of a free particle driven ONLY by this velocity force (no potential)
+    let roll = |f: &dyn Fn(f64, f64) -> (f64, f64)| -> f64 {
+        let (mut vx, mut vy) = (1.0f64, 0.6f64); let e0 = 0.5 * (vx * vx + vy * vy); let dt = 0.01;
+        for _ in 0..1500 { let (ax, ay) = f(vx, vy); vx += dt * ax; vy += dt * ay;
+            if !vx.is_finite() || !vy.is_finite() { return f64::INFINITY; } }
+        (0.5 * (vx * vx + vy * vy) - e0) / e0
+    };
+    println!("\nSystem H — the velocity half: λmax of sym(∂f/∂q̇) is a worst-case energy-CREATION rate:");
+    for (name, f) in [("gyroscopic (true Coriolis)", &gyro as &dyn Fn(f64, f64) -> (f64, f64)),
+                      ("linear drag (physical)", &drag),
+                      ("negative damping (pumps)", &pump),
+                      ("rotation + hidden pumping", &sneaky)] {
+        let lam = worst_pump(f); let d = roll(f);
+        let verdict = if lam > 1e-6 { "PUMPS ✗" } else if lam < -1e-6 { "dissipates" } else { "gyroscopic — no work" };
+        let obs = if d.is_finite() { format!("{:+.1}%", d * 100.0) } else { "diverged".into() };
+        println!("  {:<28} λmax = {:>7.3}  → {:<22}  energy change {:>9}", name, lam, verdict, obs);
+    }
+    println!("    Only λmax ≤ 0 is physically admissible: a passive system may lose energy, never create it.");
+    println!("    (The gyroscopic row's small positive reading is the explicit-Euler corroboration step's own");
+    println!("     error, not the force's — the structural number λmax = 0.000 is the trustworthy one here.)");
+    println!("    Note the last row — it reads as rotation but carries a small positive eigenvalue, and that");
+    println!("    hidden component is what a rollout would eventually expose as a slow, unexplained gain.");
+}
+
 fn main() {
     println!("PHYSICS-FIDELITY BENCHMARK — scoring models on conservation-law invariants (ferromotion = reference).\n");
     println!("System A — simple pendulum (analytic ground truth: E const, T=2π√(L/g)={:.3}s):", 2.0 * std::f64::consts::PI * (L / G).sqrt());
@@ -323,6 +387,7 @@ fn main() {
     friction_probe();
     param_recovery_probe();
     conservative_probe();
+    dissipation_probe();
 
     println!("\n  ================  READING — six systems, one verdict: STRUCTURE beats per-step ACCURACY  ================");
     println!("  ENERGY (A,B): the 'learned' model is per-step MORE accurate than any real world model (0.1%");
