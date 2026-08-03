@@ -26,6 +26,12 @@ pub struct FrictionalStep {
     pub v_next: DVector<f64>,
     /// `∂v⁺/∂v_free` (dof×dof) — backprop through the frictional contact.
     pub dvnext_dvfree: DMatrix<f64>,
+    /// How well the central-path condition `z∘w = κ` was actually met: `max|zᵢwᵢ − κ|`. A solve that
+    /// quietly failed to converge returns an impulse that is not a solution to anything, and in a
+    /// simulation loop that shows up as a body gaining energy. Report this next to the answer.
+    pub residual: f64,
+    /// Worst violation of `z ≥ 0, w ≥ 0`; negative means the returned point is infeasible.
+    pub feasibility: f64,
 }
 
 /// Solve one frictional contact step and its gradient. Per contact the LCP variables are
@@ -69,7 +75,10 @@ pub fn solve_frictional_ipm(m: &DMatrix<f64>, v_free: &DVector<f64>, contacts: &
     let (z, dz_dq) = solve_lcp_diff(&m_lcp, q.as_slice(), kappa);
     let v_next = v_free + &minv * &b * &z;
     let dvnext_dvfree = DMatrix::identity(nv, nv) + &minv * &b * &dz_dq * &bt;
-    FrictionalStep { v_next, dvnext_dvfree }
+    let w = &m_lcp * &z + &q;
+    let residual = z.iter().zip(w.iter()).fold(0.0f64, |m, (zi, wi)| m.max((zi * wi - kappa).abs()));
+    let feasibility = z.iter().chain(w.iter()).fold(f64::INFINITY, |m, &v| m.min(v));
+    FrictionalStep { v_next, dvnext_dvfree, residual, feasibility }
 }
 
 #[cfg(test)]

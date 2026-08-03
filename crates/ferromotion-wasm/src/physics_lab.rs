@@ -300,8 +300,7 @@ impl QuadrupedLab {
     /// The island projects these to the screen (a slight y-shear gives the near/far legs depth).
     pub fn joints_world(&self) -> Vec<f64> {
         let mut out = Vec::with_capacity(36);
-        for leg in 0..4 {
-            let (cx, cy) = QCORNERS[leg];
+        for (leg, &(cx, cy)) in QCORNERS.iter().enumerate() {
             let (qh, qk) = (self.q[leg * 2], self.q[leg * 2 + 1]);
             let hip = Point3::new(cx, cy, 0.0);
             let rh = Rotation3::from_axis_angle(&Vector3::y_axis(), qh);

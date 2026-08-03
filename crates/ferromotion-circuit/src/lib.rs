@@ -296,6 +296,11 @@ impl Mna {
     pub fn dim(&self) -> usize {
         self.n
     }
+    /// How many leading entries of the solution are node voltages. Everything after them is a branch
+    /// current, one per inductor, voltage source and VCVS, in the order those elements were added.
+    pub fn n_node_voltages(&self) -> usize {
+        self.nv
+    }
     /// Matrix index of a node's voltage in `x` (ground → `None`).
     pub fn node_index(&self, node: usize) -> Option<usize> {
         if node == 0 {
@@ -376,7 +381,7 @@ impl Mna {
     fn stamp_nonlin(&self, x: &DVector<f64>, f: &mut DVector<f64>, j: &mut DMatrix<f64>) {
         let volt = |n: Option<usize>| n.map(|i| x[i]).unwrap_or(0.0);
         // add current `cur` (leaving `a`, entering `b`) and conductance `g` (∂cur/∂V) as a resistor-like stamp
-        let mut add = |f: &mut DVector<f64>, j: &mut DMatrix<f64>, a: Option<usize>, b: Option<usize>, cur: f64, g: f64| {
+        let add = |f: &mut DVector<f64>, j: &mut DMatrix<f64>, a: Option<usize>, b: Option<usize>, cur: f64, g: f64| {
             if let Some(a) = a {
                 f[a] += cur;
                 j[(a, a)] += g;

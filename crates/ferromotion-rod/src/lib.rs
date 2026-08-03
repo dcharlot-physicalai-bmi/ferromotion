@@ -98,11 +98,11 @@ impl Rod {
     /// One damped semi-implicit step (for dynamics / relaxation).
     pub fn step(&mut self, dt: f64, damping: f64) {
         let f = self.forces(&self.x);
-        for i in 0..self.x.len() {
+        for (i, &fi) in f.iter().enumerate() {
             if self.clamped[i] {
                 continue;
             }
-            self.v[i] += dt * f[i] / self.mass;
+            self.v[i] += dt * fi / self.mass;
             self.v[i] *= damping;
             self.x[i] += dt * self.v[i];
         }
@@ -298,11 +298,11 @@ impl Rod {
     pub fn step_self_contact(&mut self, dt: f64, damping: f64, radius: f64, k_contact: f64) {
         let mut f = self.forces(&self.x);
         accumulate_self_contact_forces(&self.x, radius, k_contact, &mut f);
-        for i in 0..self.x.len() {
+        for (i, &fi) in f.iter().enumerate() {
             if self.clamped[i] {
                 continue;
             }
-            self.v[i] += dt * f[i] / self.mass;
+            self.v[i] += dt * fi / self.mass;
             self.v[i] *= damping;
             self.x[i] += dt * self.v[i];
         }
@@ -413,7 +413,7 @@ mod tests {
         let x: Vec<Vector3<f64>> = (0..n)
             .map(|i| {
                 let u = i as f64 / (n as f64 - 1.0);
-                Vector3::new((u * 6.28).sin() * 0.3, 0.02 * (i as f64 * 1.3).cos(), u * 0.2 - 0.1)
+                Vector3::new((u * std::f64::consts::TAU).sin() * 0.3, 0.02 * (i as f64 * 1.3).cos(), u * 0.2 - 0.1)
             })
             .collect();
         let nseg = x.len() - 1;

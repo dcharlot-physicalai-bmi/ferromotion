@@ -177,9 +177,9 @@ pub fn quadruped_trot_tau(q: &[f64], qd: &[f64], phase: f64) -> Vec<f64> {
     // lift order over one cycle: FL, BR, FR, BL — each leg airborne for (1-duty) of the cycle
     let order = [0.0f64, 0.5, 0.75, 0.25];
     let mut tau = vec![0.0; 8];
-    for leg in 0..4 {
+    for (leg, &offset) in order.iter().enumerate() {
         let (hip, knee) = (leg * 2, leg * 2 + 1);
-        let phi = (phase / std::f64::consts::TAU + order[leg]).rem_euclid(1.0); // 0..1 in this leg's cycle
+        let phi = (phase / std::f64::consts::TAU + offset).rem_euclid(1.0); // 0..1 in this leg's cycle
         let (hip_t, knee_t);
         if phi < duty {
             let s = phi / duty; // 0..1 across stance: hip sweeps back-to-front, driving the base +x
@@ -331,7 +331,7 @@ mod tests {
         let mut qd = vec![0.0; n];
         let x0 = base.translation.x;
         for t in 0..15000 {
-            let phase = 6.2831853 * freq * t as f64 * dt;
+            let phase = std::f64::consts::TAU * freq * t as f64 * dt;
             let tau = quadruped_trot_tau(&q, &qd, phase);
             let (b, v, qn, qdn) = tree_floating_contact_step(&joints, &inertia, &parent, &base_inertia, base, v0, &q, &qd, &tau, &contacts, floor, kn, kd, dt, g);
             base = b; v0 = v; q = qn; qd = qdn;

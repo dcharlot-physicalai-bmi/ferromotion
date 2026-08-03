@@ -65,8 +65,13 @@ pub fn solve_lcp_diff(a: &DMatrix<f64>, b: &[f64], kappa: f64) -> (DVector<f64>,
             j[(i, k)] += lam[i] * a[(i, k)];
         }
     }
-    let jinv = j.try_inverse().expect("central-path Jacobian invertible");
-    let dlam_db = -&jinv * DMatrix::from_diagonal(&lam);
+    // At a degenerate point the central-path Jacobian can be singular. A library should not abort the
+    // caller's simulation for that: report a zero gradient, which is the honest "no usable derivative
+    // here" answer, and let the value it accompanies still be used.
+    let dlam_db = match j.try_inverse() {
+        Some(jinv) => -&jinv * DMatrix::from_diagonal(&lam),
+        None => DMatrix::zeros(n, n),
+    };
     (lam, dlam_db)
 }
 

@@ -30,7 +30,7 @@ fn splitmix64(state: &mut u64) -> u64 {
 
 fn trajectory(x0: f64, y0: f64, n: usize, dt: f64, seed: &mut u64, noise: f64, states: &mut Vec<Vec<f64>>, derivs: &mut Vec<Vec<f64>>) {
     let (mut x, mut y) = (x0, y0);
-    let mut nz = |s: &mut u64| ((splitmix64(s) as f64 / u64::MAX as f64) * 2.0 - 1.0) * noise;
+    let nz = |s: &mut u64| ((splitmix64(s) as f64 / u64::MAX as f64) * 2.0 - 1.0) * noise;
     for _ in 0..n {
         let (dx, dy) = duffing(x, y);
         states.push(vec![x, y]);

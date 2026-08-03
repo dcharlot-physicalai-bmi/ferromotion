@@ -45,8 +45,10 @@ fn self_clear(robot: &Robot, q: &[f64]) -> f64 {
 fn table_clear(robot: &Robot, q: &[f64]) -> f64 { arm_spheres(robot, q).iter().filter(|(_, l)| *l >= 2).map(|(c, _)| c.z - R_LINK).fold(f64::INFINITY, f64::min) }
 fn shelf_clear(robot: &Robot, q: &[f64]) -> f64 { arm_spheres(robot, q).iter().filter(|(c, _)| c.x > X_SHELF).map(|(c, _)| Z_SHELF - c.z - R_LINK).fold(f64::INFINITY, f64::min) }
 
+#[allow(dead_code)] // `lat` documents the envelope corner even where it is not read
 struct Env { fric: f64, lat: usize, dead: f64 }
 const WORST: Env = Env { fric: 0.35, lat: 4, dead: 0.024 };
+#[allow(dead_code)] // the tightened envelope, kept for comparison runs
 const TIGHT: Env = Env { fric: 0.60, lat: 1, dead: 0.006 };
 fn servo(cmd: &[f64], q: &[f64], qd: &[f64], dead: f64) -> Vec<f64> {
     (0..5).map(|i| { let mut e = cmd[i] - q[i]; if e.abs() < dead { e = 0.0; } (KP * e - KV * qd[i]).clamp(-TAUMAX, TAUMAX) }).collect()

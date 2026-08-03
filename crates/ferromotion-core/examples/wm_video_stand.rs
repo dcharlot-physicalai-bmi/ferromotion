@@ -26,7 +26,7 @@ fn u01(i: u32) -> f64 { (hash(i) % 1_000_000) as f64 / 1_000_000.0 }
 
 // ---- ground-truth "world" the frames depict: a ball under gravity g, bounce restitution e, optional floor ----
 fn simulate(g: f64, e: f64, floor: bool, n: usize) -> Vec<(f64, f64)> {
-    let (mut x, mut y, mut vx, mut vy) = (2.0f64, START_Y, 1.6f64, 0.0f64);
+    let (mut x, mut y, vx, mut vy) = (2.0f64, START_Y, 1.6f64, 0.0f64);
     let mut tr = Vec::with_capacity(n);
     for _ in 0..n {
         tr.push((x, y));
@@ -85,6 +85,7 @@ fn fit_parabola(ys: &[f64], i0: usize, i1: usize) -> (f64, f64, f64) {
     (sol[0], sol[1], sol[2])
 }
 
+#[allow(dead_code)] // mass_cv is reported in the write-up, not consumed here
 struct Score { g_meas: f64, energy_ratio: Option<f64>, min_y: f64, mass_cv: f64 }
 
 fn score(traj: &[(f64, f64)], mass: &[f64]) -> Score {

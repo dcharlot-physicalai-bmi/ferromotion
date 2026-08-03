@@ -217,3 +217,100 @@ mod tests {
         assert!(err < 0.5 * err0, "Raibert control did not steer toward the target speed: {vx} vs {vx_des} (started {err0} off)");
     }
 }
+
+#[cfg(test)]
+mod orbit_certificate {
+    use super::*;
+    use ferromotion_core::{find_limit_cycle, poincare_stability, return_map_jacobian, transverse_basis, transverse_restriction};
+    use nalgebra::DVector;
+
+    /// The whole certificate pipeline on a real legged model: find the running gait as a fixed point of
+    /// the apex-to-apex map, linearise it, and read orbital stability off the transverse monodromy.
+    ///
+    /// Passive SLIP is conservative, so the return map preserves energy and its Jacobian carries a
+    /// neutral direction along the energy level set. That is the same structure as the phase direction
+    /// on a general periodic orbit: the full spectral radius is pinned near one and says nothing, and
+    /// the transverse restriction is what decides the gait.
+
+    #[test]
+    fn slip_running_gait_is_a_certified_limit_cycle() {
+        let slip = Slip { m: 1.0, k: 1000.0, l0: 1.0, g: 9.81 };
+        let (alpha, dt) = (0.10_f64, 1e-4);
+        let apex = |x: &DVector<f64>| -> Option<DVector<f64>> {
+            slip.apex_map(x[0], x[1], alpha, dt).map(|(z, vx)| DVector::from_row_slice(&[z, vx]))
+        };
+
+        // a hop that returns at all is the starting guess; Newton then finds the periodic one
+        // seeded on the E/m = 11 manifold, where the angle sweep shows the map nearly returning
+        let guess = DVector::from_row_slice(&[1.00, 1.543]);
+        assert!(apex(&guess).is_some(), "the seed must at least complete one hop");
+        let fixed = find_limit_cycle(&apex, &guess, 1e-9, 80).expect("SLIP has a periodic running gait");
+        let back = apex(&fixed).expect("the fixed point returns");
+        let err = (&back - &fixed).norm();
+        eprintln!("SLIP limit cycle: apex height {:.6} m, forward speed {:.6} m/s, |P(x)-x| = {err:.2e}", fixed[0], fixed[1]);
+        assert!(err < 1e-8, "not actually a fixed point: {err}");
+
+        // the monodromy of the apex map at that gait
+        let mono = return_map_jacobian(&apex, &fixed, 1e-6).expect("monodromy exists");
+        let (rho_full, _) = poincare_stability(&mono);
+
+        // energy is conserved, so the neutral direction is the one the map leaves fixed; quotient it out
+        let eig = mono.clone().complex_eigenvalues();
+        let neutral = eig.iter().fold(0.0f64, |m, e| if (e.norm() - 1.0).abs() < (m - 1.0f64).abs() { e.norm() } else { m });
+        // the level-set tangent: energy E = m g z + m vx^2 / 2, so grad E ∝ (g, vx); the tangent is its perp
+        let tangent = DVector::from_row_slice(&[fixed[1], -slip.g]);
+        let z = transverse_basis(&tangent).expect("non-degenerate tangent");
+        let pi = transverse_restriction(&mono, &z);
+        let (rho_t, stable_t) = poincare_stability(&pi);
+
+        eprintln!("SLIP monodromy: full rho = {rho_full:.4} (neutral eigenvalue {neutral:.4}), transverse rho = {rho_t:.4}, orbitally stable = {stable_t}");
+        assert!(mono.iter().all(|v| v.is_finite()), "monodromy not finite");
+        assert!(rho_t < rho_full + 1e-9, "the transverse restriction cannot be the larger one");
+        // the physical claim: this gait is a genuine attractor in the directions that matter
+        assert!(stable_t, "the transverse dynamics should contract for a stable running gait: rho_t = {rho_t}");
+    }
+
+    /// Foot placement is what makes the gait stable, so sweeping the angle of attack should move the
+    /// transverse eigenvalue and eventually lose stability. A certificate that never changes with the
+    /// design parameter is not measuring anything.
+    #[test]
+    fn the_certificate_responds_to_foot_placement() {
+        let slip = Slip { m: 1.0, k: 1000.0, l0: 1.0, g: 9.81 };
+        let dt = 1e-4;
+        let mut rows = Vec::new();
+        for &alpha in &[0.05_f64, 0.07, 0.09, 0.11] {
+            let apex = |x: &DVector<f64>| -> Option<DVector<f64>> {
+                slip.apex_map(x[0], x[1], alpha, dt).map(|(z, vx)| DVector::from_row_slice(&[z, vx]))
+            };
+            // a steeper angle of attack puts the periodic gait lower and faster, so scan apex height
+            // along the same energy manifold until the map returns to itself
+            let mut found = None;
+            for k in 0..26 {
+                let z0 = 0.98 + 0.005 * k as f64;
+                let arg = 2.0 * (11.0 - slip.g * z0);
+                if arg <= 0.0 {
+                    continue;
+                }
+                let seed = DVector::from_row_slice(&[z0, arg.sqrt()]);
+                if let Some(fp) = find_limit_cycle(&apex, &seed, 1e-9, 60) {
+                    found = Some(fp);
+                    break;
+                }
+            }
+            let Some(fixed) = found else { eprintln!("  alpha={alpha:.2}: no periodic gait found"); continue };
+            let Some(mono) = return_map_jacobian(&apex, &fixed, 1e-6) else { continue };
+            let tangent = DVector::from_row_slice(&[fixed[1], -slip.g]);
+            let Some(z) = transverse_basis(&tangent) else { continue };
+            let (rho_t, stable) = poincare_stability(&transverse_restriction(&mono, &z));
+            eprintln!("  alpha={alpha:.2}: gait (z {:.4}, vx {:.4}), transverse rho = {rho_t:.4}, stable = {stable}", fixed[0], fixed[1]);
+            rows.push((alpha, rho_t));
+        }
+        // At a fixed energy the periodic gaits occupy a narrow band of angles, so a coarse sweep finds
+        // only a couple; two is enough to show the certificate tracks the design parameter.
+        assert!(rows.len() >= 2, "the sweep should find at least two periodic gaits, found {}", rows.len());
+        assert!(rows.iter().all(|r| r.1 < 1.0), "every gait found should be orbitally stable: {rows:?}");
+        let spread = rows.iter().map(|r| r.1).fold(0.0f64, f64::max) - rows.iter().map(|r| r.1).fold(f64::INFINITY, f64::min);
+        eprintln!("transverse eigenvalue varies by {spread:.4} across the sweep");
+        assert!(spread > 1e-3, "the certificate is insensitive to foot placement, so it measures nothing");
+    }
+}

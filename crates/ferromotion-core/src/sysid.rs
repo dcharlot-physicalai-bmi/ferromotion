@@ -199,7 +199,7 @@ mod tests {
         let (robot, inertia) = from_urdf_full(ARM3, "base", "tool").unwrap();
         let g = Vector3::new(0.0, 0.0, -9.81);
         let mut seed = 7u64;
-        let mut make_sample = |seed: &mut u64| {
+        let make_sample = |seed: &mut u64| {
             let q: Vec<f64> = (0..3).map(|_| lcg(seed)).collect();
             let qd: Vec<f64> = (0..3).map(|_| lcg(seed)).collect();
             let qdd: Vec<f64> = (0..3).map(|_| lcg(seed)).collect();

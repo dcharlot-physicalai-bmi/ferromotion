@@ -281,7 +281,7 @@ mod tests {
         let n = 4;
         let zero = vec![Vector6::zeros(); n];
 
-        let (a0, qdd) = tree_floating_forward_dynamics(&joints, &inertia, &parent, &base, Vector6::zeros(), &vec![0.3, -0.5, 0.3, -0.5], &vec![0.0; n], &vec![0.0; n], Vector6::zeros(), &zero, g);
+        let (a0, qdd) = tree_floating_forward_dynamics(&joints, &inertia, &parent, &base, Vector6::zeros(), &[0.3, -0.5, 0.3, -0.5], &vec![0.0; n], &vec![0.0; n], Vector6::zeros(), &zero, g);
         let lin = a0.fixed_rows::<3>(3).into_owned();
         let worst_qdd = qdd.iter().fold(0.0f64, |m, &v| m.max(v.abs()));
         eprintln!("branched free-fall: base lin accel {lin:?} (want {g:?}), worst qdd {worst_qdd:.3e}");

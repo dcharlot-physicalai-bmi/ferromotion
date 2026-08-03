@@ -138,7 +138,7 @@ mod tests {
             log_robot(&rec, "robot", &robot, &q).unwrap();
             log_trajectory(&rec, "traj", &robot, &wt, 60).unwrap();
             log_curve(&rec, "calib/rms", &[1.0, 0.3, 0.05, 0.01]).unwrap();
-            rec.flush_blocking();
+            let _ = rec.flush_blocking(); // best-effort flush; a closed viewer is not an error here
         }
         let meta = std::fs::metadata(&path).expect("rrd written");
         assert!(meta.len() > 1000, "rrd should be non-trivial: {} bytes", meta.len());

@@ -85,7 +85,6 @@ pub fn plan_arm_reach(
 mod tests {
     use super::*;
     use crate::{from_urdf_str, solve_diffik, DiffIkOptions, FrameTaskDef};
-    use nalgebra::Point3;
 
     const ARM: &str = r#"<robot name="a"><link name="world"/><link name="base"/>
       <link name="l1"/><link name="l2"/><link name="l3"/><link name="l4"/><link name="l5"/><link name="l6"/><link name="tool"/>
