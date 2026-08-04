@@ -343,10 +343,26 @@ mod tests {
 
 mod hj;
 mod hqp;
+mod capturability;
+mod compass_gait;
+mod envelope;
+mod learned_vc;
+mod hzd;
+mod terminal;
+mod iss;
+mod resclf;
 mod koopman;
 mod rmpflow;
 pub use hj::{solve_brt, HjGrid};
 pub use hqp::solve_hqp;
+pub use capturability::CaptureParams;
+pub use envelope::{best_eta, eiss_envelope, optimal_split, grid_max_bound, max_tolerable_discrepancy, Envelope, GridBound};
+pub use learned_vc::{invariance_defect, train_network, NeuralConstraint, score as score_constraint, train as train_constraint, worst_clearance, GaitGoal, GaitScore, LearnedConstraint};
+pub use compass_gait::{CompassGait, GaitState, OutputDynamics, RestrictedCoeffs, RestrictedMap, SwingConstraint, VirtualConstraint};
+pub use terminal::{check_terminal_ingredients, contact_gap_witness, probe_directions, Dynamics, InputSet, Policy, StageCost, StateFn, TerminalCheck};
+pub use resclf::ResClf;
+pub use iss::{chunked_imitation_multiplier, disturbance_tube, eiss_step, eiss_ultimate_bound, stochastic_contraction_bound, stochastic_steady_state};
+pub use hzd::{hybrid_invariance_residual, hzd_reduction, is_minimum_phase, zero_dynamics, HzdReduction, ZeroDynamicsReturnMap};
 pub use koopman::{edmd, edmdc, Koopman};
 pub use rmpflow::RmpArm;
 pub use rts::{RtsSmoother, SmoothResult};

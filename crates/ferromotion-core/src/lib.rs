@@ -126,7 +126,9 @@ mod tdoa;
 mod teaser;
 mod tensegrity;
 mod traj;
+mod sampler_bounds;
 mod transport;
+pub mod transport_geometry;
 mod mjcf;
 mod urdf;
 mod xcorr;
@@ -156,6 +158,8 @@ pub use epa::{epa, sphere_penetration, Penetration};
 pub use essential::{decompose_essential, eight_point, recover_pose};
 pub use gjk::{ccd_toi, gjk, intersects, Ball, ConvexPoints, Cuboid, GjkResult, Support, Translate};
 pub use contact_ipm::{solve_frictional_ipm, FrictionalStep, StFrictionContact};
+pub use sampler_bounds::{consistency_error, flow_matching_w2, minimax_rate, score_to_tv, SamplerError};
+pub use transport_geometry::{cramer_distance, distributional_bellman, distributional_bellman_contraction, free_energy, gromov_cost, gromov_wasserstein, gromov_wasserstein_from, jko_step, kantorovich_dual, maximal_wasserstein_1, schrodinger_bridge, total_variation, GromovPlan};
 pub use contact_pgs::{solve_contacts_pgs, solve_contacts_pgs_with, PgsContact, PgsResult, PgsStabilization};
 pub use contact::{
     solve_contacts, solve_contacts_diff, solve_contacts_friction, Contact, ContactSolve,
