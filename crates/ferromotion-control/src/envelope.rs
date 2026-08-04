@@ -199,6 +199,31 @@ pub fn optimal_split(delta_sq: f64, region: f64) -> Option<(f64, f64, f64)> {
     Some(((1.0 - delta_sq) / delta_sq, c3, region * c3))
 }
 
+/// **The funnel design rule**: the largest per-step disturbance a contact task can absorb without falling out
+/// of its certified basin.
+///
+/// This is P1's sub-problem (b) made concrete. A contact-rich loop has no global contraction metric — the
+/// continuous dynamics are non-smooth and the rate is negative on part of the state space — so the horizon-free
+/// regret bound cannot be hung on a global `λ`. What it *can* be hung on is a **funnel**: a region the loop
+/// provably returns to. On a section where the return map is affine with multiplier `δ²`, a per-step disturbance
+/// `w` moves the fixed point from `ζ*` to `ζ* + w/(1 − δ²)`, so the loop stays inside the basin exactly while
+///
+/// ```text
+/// w  <  (ζ* − ζ_stall)·(1 − δ²)
+/// ```
+///
+/// Below that, regret is bounded and horizon-free; above it the robot leaves the funnel and falls, and there is
+/// nothing horizon-free left to say. The threshold plays the role the `H∞` margin plays for a smooth loop, and
+/// like it, it is computable **before any policy is trained** — from the gait and the geometry alone.
+///
+/// `None` unless the map contracts and the gait sits strictly inside its own basin.
+pub fn max_disturbance_in_funnel(delta_sq: f64, zeta_star: f64, zeta_stall: f64) -> Option<f64> {
+    if !(0.0..1.0).contains(&delta_sq) || zeta_star <= zeta_stall || zeta_stall < 0.0 {
+        return None;
+    }
+    Some((zeta_star - zeta_stall) * (1.0 - delta_sq))
+}
+
 /// The Young split that tolerates the **largest** discrepancy, found by a sweep. Kept alongside
 /// [`optimal_split`] because a numerical sweep agreeing with a closed form is how the closed form was checked.
 ///
@@ -285,6 +310,27 @@ mod tests {
         // the tolerance scales with the region, which is the sanity check on the algebra
         let bigger = max_tolerable_discrepancy(delta_sq, eta, 2.0 * region).unwrap();
         assert!((bigger / d_max - 2.0).abs() < 1e-12, "linear in the region");
+    }
+
+    /// **The funnel rule is exact at its own boundary**, and it is the contact-task analogue of a stability
+    /// margin: a disturbance just under it keeps the gait inside the basin forever, and just over it walks the
+    /// fixed point out through the stall threshold.
+    #[test]
+    fn the_funnel_rule_is_exact_at_the_stall_boundary() {
+        let (delta_sq, zstar, stall) = (0.82f64, 2.5f64, 0.6f64);
+        let w_max = max_disturbance_in_funnel(delta_sq, zstar, stall).unwrap();
+        eprintln!("delta^2 {delta_sq}, zeta* {zstar}, stall {stall}: largest tolerable disturbance {w_max:.6}");
+        // the disturbed fixed point sits exactly at the stall threshold
+        let moved = zstar - w_max / (1.0 - delta_sq);
+        assert!((moved - stall).abs() < 1e-9, "at the boundary the fixed point lands on the stall threshold: {moved} vs {stall}");
+        // just inside, the gait survives; just outside, it does not
+        assert!(zstar - 0.99 * w_max / (1.0 - delta_sq) > stall);
+        assert!(zstar - 1.01 * w_max / (1.0 - delta_sq) < stall);
+        // a faster gait or a stronger contraction buys more room, both linearly
+        assert!(max_disturbance_in_funnel(delta_sq, 2.0 * zstar - stall, stall).unwrap() > 1.9 * w_max);
+        assert!(max_disturbance_in_funnel(0.5, zstar, stall).unwrap() > w_max);
+        // and a gait already at its stall threshold has no room at all
+        assert!(max_disturbance_in_funnel(delta_sq, stall, stall).is_none());
     }
 
     /// **The closed form against the sweep**, and then the claim that matters: at the optimal split the

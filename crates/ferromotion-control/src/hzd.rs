@@ -183,6 +183,49 @@ pub fn zero_dynamics(a: &DMatrix<f64>, b: &DMatrix<f64>, c: &DMatrix<f64>) -> Op
     Some(z.transpose() * p * a * &z)
 }
 
+/// **The zero dynamics of a relative-degree-two output** — the case every mechanical system is in.
+///
+/// [`zero_dynamics`] requires `CB` invertible, which means the input reaches the output in one derivative. A
+/// position output on a mechanical system does not: force reaches position through two integrations, so `CB = 0`
+/// and that function returns `None`. Using a *velocity* output instead to dodge the requirement is a trap worth
+/// naming — it constrains one velocity combination and leaves both positions free, so an unactuated tipping mode
+/// survives at every choice of output weights and the sweep finds no safe one. A velocity constraint cannot pin a
+/// position.
+///
+/// Here the output is held at zero along with its first derivative, so `y = Cx` and `ẏ = CAx` both vanish: two
+/// constraints, leaving `n − 2` internal states. The input follows from `ÿ = 0`, giving
+/// `u = −(CAB)⁻¹CA²x`, and the internal dynamics is the restriction of `A − B(CAB)⁻¹CA²` to `ker[C; CA]`.
+///
+/// `None` unless `CAB` is invertible — relative degree exactly two.
+pub fn zero_dynamics_order2(a: &DMatrix<f64>, b: &DMatrix<f64>, c: &DMatrix<f64>) -> Option<DMatrix<f64>> {
+    let n = a.nrows();
+    let m = b.ncols();
+    if a.ncols() != n || b.nrows() != n || c.ncols() != n || c.nrows() != m || 2 * m >= n {
+        return None;
+    }
+    let ca = c * a;
+    let cab = &ca * b;
+    let cab_inv = cab.clone().try_inverse()?; // relative degree exactly two
+    let ca2 = &ca * a;
+    let closed = a - b * cab_inv * &ca2;
+
+    // the internal space is the joint kernel of C and CA
+    let mut both = DMatrix::zeros(2 * m, n);
+    both.view_mut((0, 0), (m, n)).copy_from(c);
+    both.view_mut((m, 0), (m, n)).copy_from(&ca);
+    let z = kernel_basis(&both)?;
+    // The closed-loop map preserves that kernel by construction, so the restriction is exact.
+    Some(z.transpose() * closed * &z)
+}
+
+/// Whether a relative-degree-two output is **minimum phase**: every zero-dynamics eigenvalue strictly in the left
+/// half plane. The design question for a learned output-tracker on an underactuated robot — and answerable from
+/// the plant, before any policy exists.
+pub fn is_minimum_phase_order2(a: &DMatrix<f64>, b: &DMatrix<f64>, c: &DMatrix<f64>) -> Option<bool> {
+    let zd = zero_dynamics_order2(a, b, c)?;
+    Some(zd.complex_eigenvalues().iter().all(|l| l.re < 0.0))
+}
+
 /// Whether the system is **minimum phase**: every zero-dynamics eigenvalue strictly in the left half plane.
 ///
 /// Input-output-linearising feedback stabilises the state if and only if this holds. When it fails, exact
@@ -236,6 +279,77 @@ fn kernel_basis(c: &DMatrix<f64>) -> Option<DMatrix<f64>> {
     }
     let row_space = orthonormalize(&c.transpose())?;
     orthonormal_complement(&row_space)
+}
+
+#[cfg(test)]
+mod rd2_tests {
+    use super::*;
+    use nalgebra::DVector;
+
+    /// **Relative degree two, against a hand-computable case.** A double integrator pair with the output taking a
+    /// weighted difference: `ẍ₁ = u`, `ẍ₂ = k·x₂`, `y = x₁ + c·x₂`. Holding `y` and `ẏ` at zero forces
+    /// `x₁ = −c·x₂`, leaving `x₂` with `ẍ₂ = k·x₂` — so the zero dynamics is `±√k` regardless of `c`, and the
+    /// output choice cannot rescue an unactuated unstable mode it does not couple to.
+    #[test]
+    fn relative_degree_two_zero_dynamics_matches_a_hand_computable_case() {
+        let k = 4.0f64;
+        // state [x1, x2, v1, v2]
+        let mut a = DMatrix::zeros(4, 4);
+        a[(0, 2)] = 1.0;
+        a[(1, 3)] = 1.0;
+        a[(3, 1)] = k; // the unactuated unstable mode
+        let mut b = DMatrix::zeros(4, 1);
+        b[(2, 0)] = 1.0;
+
+        for c in [0.0f64, 1.0, -2.5] {
+            let cm = DMatrix::from_row_slice(1, 4, &[1.0, c, 0.0, 0.0]);
+            let zd = zero_dynamics_order2(&a, &b, &cm).expect("relative degree two");
+            assert_eq!(zd.shape(), (2, 2), "n - 2m = 2 internal states");
+            let worst = zd.complex_eigenvalues().iter().fold(f64::NEG_INFINITY, |m, l| m.max(l.re));
+            eprintln!("c = {c:>5}: zero-dynamics worst real part {worst:+.6} (analytic sqrt(k) = {:+.6})", k.sqrt());
+            assert!((worst - k.sqrt()).abs() < 1e-9, "the zero dynamics must be +/-sqrt(k): got {worst}");
+            assert!(!is_minimum_phase_order2(&a, &b, &cm).unwrap());
+        }
+
+        // A velocity output on the same plant has relative degree ONE and leaves three internal states - which is
+        // the trap the doc comment warns about: it constrains a velocity and both positions stay free.
+        let vel = DMatrix::from_row_slice(1, 4, &[0.0, 0.0, 1.0, 0.0]);
+        let zd1 = zero_dynamics(&a, &b, &vel).expect("relative degree one");
+        assert_eq!(zd1.shape(), (3, 3), "one constraint leaves three internal states");
+        assert!(!is_minimum_phase(&a, &b, &vel).unwrap(), "and the unstable mode is still in there");
+    }
+
+    /// Holding the output at zero really does leave the internal dynamics the function predicts — checked by
+    /// simulating the relative-degree-two feedback and comparing the growth rate to the eigenvalue.
+    #[test]
+    fn the_order_two_prediction_matches_a_simulation() {
+        let k = 4.0f64;
+        let mut a = DMatrix::zeros(4, 4);
+        a[(0, 2)] = 1.0;
+        a[(1, 3)] = 1.0;
+        a[(3, 1)] = k;
+        let mut b = DMatrix::zeros(4, 1);
+        b[(2, 0)] = 1.0;
+        let cm = DMatrix::from_row_slice(1, 4, &[1.0, 1.0, 0.0, 0.0]);
+        let ca = &cm * &a;
+        let cab = (&ca * &b)[0];
+        let ca2 = &ca * &a;
+
+        // start on the zero-dynamics manifold: y = 0 and ydot = 0
+        let mut x = DVector::from_row_slice(&[-0.01, 0.01, -0.02, 0.02]);
+        assert!((&cm * &x)[0].abs() < 1e-15 && (&ca * &x)[0].abs() < 1e-15);
+        let dt = 1e-5;
+        let mut worst_y = 0.0f64;
+        for _ in 0..100_000 {
+            let u = -(&ca2 * &x)[0] / cab;
+            worst_y = worst_y.max((&cm * &x)[0].abs());
+            x += (&a * &x + &b * DVector::from_row_slice(&[u])) * dt;
+        }
+        let growth = x.norm() / 0.0316_f64;
+        eprintln!("held y to {worst_y:.2e} over 1 s; internal state grew by {growth:.3}x (analytic e^sqrt(k) = {:.3})", k.sqrt().exp());
+        assert!(worst_y < 1e-9, "the output must stay at zero, drifted to {worst_y:.2e}");
+        assert!((growth / k.sqrt().exp() - 1.0).abs() < 0.1, "the growth must match the zero-dynamics eigenvalue: {growth} vs {}", k.sqrt().exp());
+    }
 }
 
 #[cfg(test)]
