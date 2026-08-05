@@ -71,7 +71,10 @@ impl WholeBody {
         let g_lin: Vec<f64> = g.iter().cloned().collect();
         let lo = vec![-self.accel_limit; n];
         let hi = vec![self.accel_limit; n];
-        let qdd = solve_box_qp(&h, &g_lin, &lo, &hi);
+        // Fault reaction: zero acceleration, so the torque below is gravity compensation alone. That is the safe
+        // whole-body command when the task QP could not be solved - the robot holds its pose instead of being driven
+        // by an unsolved iterate.
+        let qdd = solve_box_qp(&h, &g_lin, &lo, &hi).unwrap_or_else(|_| vec![0.0; n]);
 
         // Torque from inverse dynamics.
         inverse_dynamics(robot, inertia, q, qd, &qdd, gravity)

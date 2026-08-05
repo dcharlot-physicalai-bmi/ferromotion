@@ -72,9 +72,27 @@ impl CbfLab {
         self.obs.iter().map(|&o| self.constraint_for(o)).collect()
     }
 
-    /// The filtered, safe command actually applied to the robot.
-    fn filtered(&self) -> Vec<f64> {
+    /// The filtered command actually applied to the robot, and whether the filter could certify it.
+    ///
+    /// The lab shows the certification state rather than only the number: a learner who sees the filter go from
+    /// certified to relaxed as the obstacles close in has learned what a safety filter can and cannot promise.
+    fn filtered_outcome(&self) -> ferromotion_control::FilterOutcome {
         CbfFilter::new().filter(&self.nominal(), &self.constraints())
+    }
+
+    fn filtered(&self) -> Vec<f64> {
+        self.filtered_outcome().u
+    }
+
+    /// Whether the applied command is a certified safe control. `false` means the constraints could not all be met and
+    /// the readout should say so.
+    pub fn certified(&self) -> bool {
+        self.filtered_outcome().certified()
+    }
+
+    /// How far the applied command still violates the barrier rows; `0` when certified.
+    pub fn slack(&self) -> f64 {
+        self.filtered_outcome().slack()
     }
 
     // --- exposed to JS for drawing/readout ---

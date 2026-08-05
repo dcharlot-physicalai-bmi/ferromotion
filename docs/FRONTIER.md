@@ -141,21 +141,30 @@ These surfaced as highest-leverage across *multiple* sweeps, or unblock large fa
 
 ## 4. Manipulation, grasping, dexterity, tactile
 
-- 🔲 **Screw-theory / Lie-group kinematics toolkit** (PoE, twists, wrenches, adjoint) —
-  the algebra everything else is written in. *(quick win, exact tests)*
-- 🔲 **Manipulability ellipsoids & measures** (Yoshikawa 1985) — singularity/posture signal.
-- 🔲 **Antipodal / analytic grasp sampling** (GPD, Dex-Net) — *generate* grasp candidates
-  (we can only score with Q1).
-- 🔲 **Soft-finger contact / friction limit surface** (Xydas–Kao 1999) — torsion-coupled
-  contact realism.
-- 🔲 **Task-oriented + probabilistic grasp quality** (TWS, robust-ε) — beyond origin-ball Q1.
-- 🔲 **Dexterous grasp synthesis via differentiable force closure** (DexGraspNet) — invent
-  whole-hand grasps.
+> Status audited 2026-08-05 against the source tree. Several items marked open here had in fact shipped, so the
+> checkboxes below name the module that closed them. An unaudited roadmap overstates what is left and understates
+> what is done, and both directions cost work.
+
+- ✅ **Screw-theory / Lie-group kinematics toolkit** (PoE, twists, wrenches, adjoint) — twists and adjoints in
+  `control/visual_servo.rs`, `control/placo.rs`; wrench algebra in `core/grasp_spatial.rs`.
+- ✅ **Manipulability ellipsoids & measures** (Yoshikawa 1985) — `core/manipulability.rs`.
+- ✅ **Antipodal / analytic grasp sampling** (GPD, Dex-Net) — `core/grasp.rs`, exercised by `wasm/grasp_lab.rs`.
+- ✅ **Grasp matrix + internal-force decomposition** — `core/grasp_spatial.rs` (`grasp_matrix`, `grasp_split`,
+  `wrench_rank`), cross-validated against the hand-object contact loop to `1.5e11x` separation.
+- ✅ **Task-oriented + probabilistic grasp quality** — `force_closure_soft_spatial` alongside the hard
+  `force_closure_q1_spatial`; the smoothed metric falls when a contact is lifted, which was measured rather than
+  assumed (the opposite was asserted first and was wrong).
+- ✅ **Tactile slip detection + slip-aware force regulation** (Dong et al., 2019) — `tactile/shear.rs`
+  (Cattaneo–Mindlin partial slip; `SlipSignal::incipient` warns at 35% of capacity) plus `control/slip.rs`.
+- ✅ **Hierarchical (task-priority) whole-body QP** — `control/hierarchy.rs`, with the two-rate interface and delay
+  margin now driven by a real clock in `policy/clock.rs`.
+- 🔲 **Soft-finger contact / friction limit surface** (Xydas–Kao 1999) — torsion-coupled contact realism. Not built:
+  `shear.rs` covers tangential partial slip but not the torsional-coupling limit surface.
+- 🔲 **Dexterous grasp synthesis via differentiable force closure** (DexGraspNet) — invent whole-hand grasps. We can
+  score and split a grasp; we cannot yet synthesise one by descent.
 - 🔲 **Caging / energy-bounded caging** — topological grasp guarantee without force closure.
-- 🔲 **In-hand manipulation / finger-gaiting / regrasp** — manifold-switching dexterity.
-- 🔲 **Grasp matrix + internal-force decomposition** — bimanual/multi-contact wrench split.
-- 🔲 **Hierarchical (task-priority) whole-body QP** — prioritized redundant multi-task control.
-- 🔲 **Tactile slip detection + slip-aware force regulation** (Dong et al., 2019).
+- 🔲 **In-hand manipulation / finger-gaiting / regrasp** — manifold-switching dexterity. `core/hand_object.rs` gives
+  the contact loop a gait would sit on; the gait itself is absent.
 - 🔲 **Tactile localization / SLAM** (GPIS + factor graph) — pose/shape from touch.
 - 🔲 **Stable-pushing / non-prehensile planner** (Lynch–Mason) — on our pusher-slider model.
 - 🔲 **TAMP** (PDDLStream / LGP) — symbolic↔geometric multi-step planning. *(harder to verify)*
@@ -190,6 +199,49 @@ These surfaced as highest-leverage across *multiple* sweeps, or unblock large fa
 - 🔲 **Point-cloud / LiDAR odometry** — point-to-plane ICP / GICP / NDT (SE(3) registration).
 - 🔲 **Moving-Horizon Estimation** — constrained receding-horizon estimator (reuses QP).
 - 🔲 **Particle / Rao-Blackwellized filter** — non-Gaussian/global localization.
+
+## 6b. Fresh sweep, 2026-08-05
+
+What the current literature says that changes what we should build. Recorded with the claim we tested, because a
+citation is not a result.
+
+- **DiffMJX / Contacts-from-Distance** (arXiv 2506.14186, ICLR 2026). Tolerance-driven adaptive integration cuts
+  penalty-contact gradient error by orders of magnitude. **Tested and reproduced** in `core/adaptive_contact.rs`:
+  1.59e5x over four decades of tolerance, and the tolerance route reaches the closed-form saltation Jacobian to three
+  digits in ~199 steps. This overturned our own attribution, not theirs. Their CFD straight-through trick for
+  *pre-contact* gradients is still unbuilt and is the obvious next piece.
+- ✅ **Certified contact-rich manipulation via smoothing-error reachable tubes** (arXiv 2602.09368, Li & Chou, RSS
+  2026). Plan on smoothed dynamics, bound the smoothing error, certify under the *original* nonsmooth dynamics. Built
+  as `control/smoothing_tube.rs` on top of `control/zonotope.rs`, measured in
+  `examples/smoothing_tube_certificate.rs`. What it found:
+  - **Stiffness decides whether the certificate exists.** The measured smoothing gap falls from `3.2e-1` at `k = 1e4`
+    to `9.5e-3` at `k = 1e6`, which turns a **refuted** ceiling constraint (violated at step 208) into one that would
+    certify with margin `2.6e-2`.
+  - **That is the same regime where a fixed-step gradient is unusable.** At `k = 1e6` fixed-step autodiff reports
+    `dv/dh = -209.76` against a true `+3.65`: wrong sign, 57x magnitude. So the only stiffness at which the tube is
+    tight enough to certify is a stiffness at which you must have the exact or tolerance-driven Jacobian. That is the
+    bridge, measured rather than argued.
+  - **Certifying with the wrong Jacobian inflates the tube 2.38x** at `k = 1e6` (pessimistic here, not dangerous — a
+    certificate you could have had and did not get).
+  - **The blocking piece is a sound gap bound, not the tube algebra.** Every sampled verdict is
+    `Undecided { GapOnlySampled }` by design: sampling gives a *lower* bound on the gap, so it can refute and must
+    never certify. Deriving a defensible Lipschitz constant for a stiff penalty contact is the open item.
+  - Two traps encoded as tests: a sampled bound can never return `Certified` however wide the margin, and
+    `nominal_activity` exposes a **vacuous** certificate. The first version of the example certified a ceiling over a
+    60 ms horizon when the mass needed 285 ms to reach its apex; the verdict was `Certified` and the constraint was
+    unreachable.
+- **Newton 1.0** (GTC 2026, Linux Foundation; NVIDIA + Google DeepMind + Disney Research). MuJoCo-Warp and Kamino
+  solvers, a Vertex Block Descent deformable solver, SDF collision, hydroelastic contact, OpenUSD throughout. Our
+  ingest lines up: `cloth/vbd.rs`, `core/hydroelastic.rs`, `core/esdf.rs`, `core/usda.rs`. Treat as the reference
+  solver list, not a target.
+- **MuJoCoUni** (arXiv 2605.24922, Tsinghua). Persistent batched runtime primitives: per-environment model copies,
+  sparse reset, reset-lifecycle domain randomisation, batched sensor evaluation without advancing dynamics. This is
+  the shape of the batched-engine gap we recorded and deferred (single-copy model buffers mean all N worlds are the
+  same world).
+- **GPU-parallel linearization error bounds** (arXiv 2607.01203) and **certified deformable MPC** (arXiv 2606.14188)
+  — both are error-bound-carrying control, the same discipline as our certificates.
+- **Action-chunking latency**: RTC, REMAC/masked action chunking, and VLA-Perf. `policy/clock.rs` covers the
+  execution side; corrective adjustment under asynchronous mismatch is unbuilt.
 
 ## 7. Differentiable simulation & physics
 

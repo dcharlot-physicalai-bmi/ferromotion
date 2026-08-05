@@ -124,8 +124,12 @@ impl SrbdMpc {
 
         let f_slice: Vec<f64> = f.iter().cloned().collect();
         let b_slice: Vec<f64> = b_c.iter().cloned().collect();
-        let sol = solve_qp(&h, &f_slice, &a_c, &b_slice);
-        sol[0..u].to_vec()
+        // Fault reaction: zero wrench. A single-rigid-body MPC whose QP failed has no certified contact forces to
+        // apply, and applying an unsolved iterate would push the robot on a number nothing checked.
+        match solve_qp(&h, &f_slice, &a_c, &b_slice) {
+            Ok(sol) => sol[0..u].to_vec(),
+            Err(_) => vec![0.0; u],
+        }
     }
 }
 

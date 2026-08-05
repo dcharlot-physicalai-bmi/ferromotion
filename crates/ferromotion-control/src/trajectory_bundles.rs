@@ -187,7 +187,9 @@ impl TrajectoryBundle {
             let g_vec: Vec<f64> = g.iter().copied().collect();
             let lo = vec![-trust; dim];
             let hi = vec![trust; dim];
-            let step = crate::qp::solve_box_qp(&h, &g_vec, &lo, &hi);
+            // Fault reaction: no step. The accept-on-improvement test below then rejects it and the trust radius
+            // shrinks, which is exactly what should happen when the local model could not be solved.
+            let step = crate::qp::solve_box_qp(&h, &g_vec, &lo, &hi).unwrap_or_else(|_| vec![0.0; dim]);
 
             // Evaluate the candidate; accept only on improvement, then adapt the trust radius.
             let candidate: Vec<f64> = (0..dim).map(|j| best[j] + step[j]).collect();

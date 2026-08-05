@@ -139,7 +139,7 @@ mod tests {
         a2.view_mut((m, 0), (m, n)).copy_from(&(-a));
         let mut b = u.to_vec();
         b.extend(l.iter().map(|v| -v));
-        solve_qp(p, q, &a2, &b)
+        solve_qp(p, q, &a2, &b).expect("the reference QP in this test must solve")
     }
 
     #[test]

@@ -147,7 +147,9 @@ impl PlacoSolver {
         }
 
         let g_lin: Vec<f64> = g.iter().cloned().collect();
-        let mut qd = solve_box_qp(&h, &g_lin, &lo, &hi);
+        // Fault reaction: hold still. A failed IK/WBC solve means no joint velocity is justified, and zero is
+        // always inside the velocity box.
+        let mut qd = solve_box_qp(&h, &g_lin, &lo, &hi).unwrap_or_else(|_| vec![0.0; n]);
         // Defensive clamp: the interior-point solve satisfies the box only to its tolerance; project
         // back so the hard-limit guarantee holds exactly under floating point.
         for i in 0..n {

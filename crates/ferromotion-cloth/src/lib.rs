@@ -11,6 +11,8 @@
 //! gradient w.r.t. the material stiffness `μ` is exact and available in closed form (verified against
 //! finite differences to machine precision). Pure `nalgebra` → WASM-clean.
 
+pub mod vbd;
+
 use nalgebra::{Matrix2, Vector3};
 
 /// Closest point on triangle `abc` to point `p`, with its barycentric weights `(wa, wb, wc)` (Ericson,

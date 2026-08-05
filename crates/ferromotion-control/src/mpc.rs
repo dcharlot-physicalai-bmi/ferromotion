@@ -59,8 +59,12 @@ impl LinearMpc {
 
         let dim = nn * m;
         let q_lin: Vec<f64> = f.iter().cloned().collect();
-        let u = solve_box_qp(&h, &q_lin, &vec![self.u_min; dim], &vec![self.u_max; dim]);
-        u[0..m].to_vec()
+        // Fault reaction: zero input. A linear MPC that cannot solve its own QP has no basis for a command, and
+        // zero is inside the input box whenever the box contains the origin.
+        match solve_box_qp(&h, &q_lin, &vec![self.u_min; dim], &vec![self.u_max; dim]) {
+            Ok(u) => u[0..m].to_vec(),
+            Err(_) => vec![0.0; m],
+        }
     }
 }
 

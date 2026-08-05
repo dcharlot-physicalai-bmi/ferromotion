@@ -150,7 +150,12 @@ impl CentroidalMpc {
         // Support polygon becomes the literal box on the ZMP decision variable.
         let lo = vec![zmp_lo; n];
         let hi = vec![zmp_hi; n];
-        let p_opt = DVector::from_vec(solve_box_qp(&self.h, &g_slice, &lo, &hi));
+        // Fault reaction: hold the current ZMP. Commanding a jerk computed from an unsolved QP is worse than
+        // commanding none, and holding is inside the support polygon by construction.
+        let p_opt = match solve_box_qp(&self.h, &g_slice, &lo, &hi) {
+            Ok(v) => DVector::from_vec(v),
+            Err(_) => p0.clone(),
+        };
 
         // Recover the jerk sequence and apply the first input. Because M is lower-triangular with
         // M[0,0] = 1/(C·B), the first jerk exactly places next-step ZMP at p_opt[0] ∈ [lo, hi].

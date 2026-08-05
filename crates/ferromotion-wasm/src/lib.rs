@@ -69,7 +69,19 @@ pub use scvx_lab::ScvxLab;
 mod foci_lab;
 pub use foci_lab::FociLab;
 
+mod actuator_sysid_lab;
+mod certificate_lab;
+mod contact_gradient_lab;
+mod grasp_reality_lab;
+mod robot_file_lab;
+mod running_cost_lab;
 mod autodiff_lab;
+pub use actuator_sysid_lab::ActuatorSysIdLab;
+pub use certificate_lab::CertificateLab;
+pub use contact_gradient_lab::ContactGradientLab;
+pub use grasp_reality_lab::GraspRealityLab;
+pub use robot_file_lab::RobotFileLab;
+pub use running_cost_lab::RunningCostLab;
 pub use autodiff_lab::AutodiffLab;
 
 mod nn_lab;

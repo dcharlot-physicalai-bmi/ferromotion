@@ -114,7 +114,9 @@ impl BoxDdpProblem {
                 // box-QP for the feed-forward: bounds are the box shifted by the current control
                 let lo: Vec<f64> = (0..m).map(|i| self.u_min[i] - us[k][i]).collect();
                 let hi: Vec<f64> = (0..m).map(|i| self.u_max[i] - us[k][i]).collect();
-                let kff = DVector::from_vec(solve_box_qp(&q_uu, q_u.as_slice(), &lo, &hi));
+                // Fault reaction: no feed-forward update, so the line search keeps the previous iterate rather
+                // than stepping on an unsolved subproblem.
+                let kff = DVector::from_vec(solve_box_qp(&q_uu, q_u.as_slice(), &lo, &hi).unwrap_or_else(|_| vec![0.0; m]));
 
                 // feedback only on the FREE (unclamped) controls; clamped rows are zero
                 let free: Vec<usize> = (0..m).filter(|&i| kff[i] > lo[i] + 1e-6 && kff[i] < hi[i] - 1e-6).collect();

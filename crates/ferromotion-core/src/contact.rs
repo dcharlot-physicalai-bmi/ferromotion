@@ -5,7 +5,7 @@
 //! through. Pure Rust → WASM-clean.
 
 use clarabel::algebra::CscMatrix;
-use clarabel::solver::{DefaultSettingsBuilder, DefaultSolver, IPSolver, SupportedConeT};
+use clarabel::solver::{DefaultSettingsBuilder, DefaultSolver, IPSolver, SolverStatus, SupportedConeT};
 use nalgebra::{DMatrix, DVector};
 
 /// One unilateral normal contact: `jn` maps generalized velocity → separation velocity along the
@@ -24,6 +24,13 @@ pub struct ContactSolve {
     pub impulses: Vec<f64>,
     /// Post-contact generalized velocity `v⁺ = v_free + M⁻¹ Jᵀ λ`.
     pub v_next: DVector<f64>,
+    /// **Whether the cone solver actually converged.** `false` means the impulses are the solver's last interior-point
+    /// iterate rather than a solution, and neither they nor `v_next` satisfy the contact conditions.
+    ///
+    /// This field exists because the solve previously returned `solution.x` regardless of status, so a failed contact
+    /// solve was indistinguishable from a successful one — and every certificate built on top of the contact model
+    /// inherited that. A caller integrating a simulation should treat `false` as a step to reject, not as a step to take.
+    pub converged: bool,
 }
 
 /// Symmetric matrix → upper-triangular CSC (clarabel wants `P` upper-triangular).
@@ -53,7 +60,9 @@ fn csc_neg_identity(n: usize) -> CscMatrix<f64> {
 
 /// `min ½ xᵀA x + bᵀx  s.t.  x ≥ 0` (A symmetric PSD). The KKT system of this QP is exactly the
 /// contact LCP `0 ≤ x ⟂ (Ax + b) ≥ 0`.
-fn solve_nonneg_qp(a: &DMatrix<f64>, b: &[f64]) -> Vec<f64> {
+/// Returns `None` unless the solver reports a solved status — handing back the last iterate is what made a failed
+/// contact solve look like a successful one.
+fn solve_nonneg_qp(a: &DMatrix<f64>, b: &[f64]) -> Option<Vec<f64>> {
     let n = a.ncols();
     let p = csc_upper(a);
     let a_c = csc_neg_identity(n);
@@ -62,7 +71,9 @@ fn solve_nonneg_qp(a: &DMatrix<f64>, b: &[f64]) -> Vec<f64> {
     let settings = DefaultSettingsBuilder::default().verbose(false).build().unwrap();
     let mut solver = DefaultSolver::new(&p, b, &a_c, &b_c, &cones, settings).unwrap();
     solver.solve();
-    solver.solution.x.clone()
+    matches!(solver.solution.status, SolverStatus::Solved | SolverStatus::AlmostSolved)
+        .then(|| solver.solution.x.clone())
+        .filter(|x| x.iter().all(|v| v.is_finite()))
 }
 
 /// Resolve unilateral contacts for one step. `m` is the mass matrix (SPD), `v_free` the generalized
@@ -72,7 +83,7 @@ fn solve_nonneg_qp(a: &DMatrix<f64>, b: &[f64]) -> Vec<f64> {
 pub fn solve_contacts(m: &DMatrix<f64>, v_free: &DVector<f64>, contacts: &[Contact], dt: f64) -> ContactSolve {
     let k = contacts.len();
     if k == 0 {
-        return ContactSolve { impulses: vec![], v_next: v_free.clone() };
+        return ContactSolve { impulses: vec![], v_next: v_free.clone(), converged: true };
     }
     let n = v_free.len();
     let minv = m.clone().try_inverse().expect("mass matrix invertible");
@@ -86,10 +97,14 @@ pub fn solve_contacts(m: &DMatrix<f64>, v_free: &DVector<f64>, contacts: &[Conta
     for (i, c) in contacts.iter().enumerate() {
         b[i] += c.phi / dt;
     }
-    let impulses = solve_nonneg_qp(&a, b.as_slice());
+    // Fault reaction: no impulses and the free velocity, with `converged = false`. An unresolved contact reported as
+    // "no force computed" is honest; the solver's last iterate reported as an impulse is not.
+    let Some(impulses) = solve_nonneg_qp(&a, b.as_slice()) else {
+        return ContactSolve { impulses: vec![0.0; k], v_next: v_free.clone(), converged: false };
+    };
     let lam = DVector::from_row_slice(&impulses);
     let v_next = v_free + &minv * j.transpose() * lam;
-    ContactSolve { impulses, v_next }
+    ContactSolve { impulses, v_next, converged: true }
 }
 
 /// A frictional unilateral contact: normal row `jn`, one or two tangent rows `jt`, signed gap
@@ -115,7 +130,7 @@ pub fn solve_contacts_friction(
     dt: f64,
 ) -> ContactSolve {
     if contacts.is_empty() {
-        return ContactSolve { impulses: vec![], v_next: v_free.clone() };
+        return ContactSolve { impulses: vec![], v_next: v_free.clone(), converged: true };
     }
     let n = v_free.len();
     let minv = m.clone().try_inverse().expect("mass matrix invertible");
@@ -165,9 +180,17 @@ pub fn solve_contacts_friction(
     let settings = DefaultSettingsBuilder::default().verbose(false).build().unwrap();
     let mut solver = DefaultSolver::new(&p, &b, &a_c, &b_c, &cones, settings).unwrap();
     solver.solve();
+    let converged = matches!(solver.solution.status, SolverStatus::Solved | SolverStatus::AlmostSolved)
+        && solver.solution.x.iter().all(|v| v.is_finite());
+    // On a failed solve, report zero impulses and the free velocity rather than the solver's last iterate: a
+    // contact that was not resolved is better represented as "no contact force computed" than as a wrong one, and
+    // `converged` tells the caller which happened.
+    if !converged {
+        return ContactSolve { impulses: vec![0.0; solver.solution.x.len()], v_next: v_free.clone(), converged };
+    }
     let lam = DVector::from_row_slice(&solver.solution.x);
     let v_next = v_free + &minv * j.transpose() * &lam;
-    ContactSolve { impulses: solver.solution.x.clone(), v_next }
+    ContactSolve { impulses: solver.solution.x.clone(), v_next, converged }
 }
 
 /// A contact solve plus the gradient of the post-contact velocity w.r.t. the free velocity —
@@ -355,5 +378,27 @@ mod tests {
         assert!((sol.impulses[0] - m1 * g * dt).abs() < 1e-6, "λ1 = {}", sol.impulses[0]);
         assert!((sol.impulses[1] - m2 * g * dt).abs() < 1e-6, "λ2 = {}", sol.impulses[1]);
         assert!(sol.v_next.norm() < 1e-6, "masses should be at rest, v = {:?}", sol.v_next);
+    }
+
+    /// The new `converged` flag must be set on a well-posed solve, and an empty contact set counts as converged.
+    ///
+    /// Before this field existed, a failed cone solve returned its last interior-point iterate as an impulse and every
+    /// certificate built on the contact model inherited the error with no way to detect it.
+    #[test]
+    fn a_contact_solve_reports_whether_it_converged() {
+        let m = DMatrix::from_diagonal(&DVector::from_row_slice(&[1.0, 2.0]));
+        let v_free = DVector::from_row_slice(&[-1.0, -0.5]);
+        let contacts = [Contact { jn: DVector::from_row_slice(&[1.0, 0.0]), phi: -1e-4 }];
+        let r = solve_contacts(&m, &v_free, &contacts, 1e-3);
+        eprintln!("one closing contact: converged = {}, impulse = {:.4}, v_next = {:?}", r.converged, r.impulses[0], r.v_next.as_slice());
+        assert!(r.converged, "a well-posed contact solve must report convergence");
+        assert!(r.impulses[0] >= -1e-9, "the impulse is non-negative");
+        // the contact stops the closing velocity, which is what the complementarity condition asks for
+        assert!(r.v_next[0] >= -1e-6, "the normal velocity is non-negative after the impulse: {}", r.v_next[0]);
+
+        // no contacts is a converged solve with the free velocity
+        let empty = solve_contacts(&m, &v_free, &[], 1e-3);
+        assert!(empty.converged && empty.impulses.is_empty());
+        assert!((empty.v_next - &v_free).amax() < 1e-15);
     }
 }

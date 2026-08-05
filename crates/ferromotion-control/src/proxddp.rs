@@ -288,7 +288,7 @@ mod tests {
         let (n, m) = (lqr.horizon, lqr.b.ncols());
         let lo: Vec<f64> = (0..n * m).map(|i| lqr.u_lo[i % m]).collect();
         let hi: Vec<f64> = (0..n * m).map(|i| lqr.u_hi[i % m]).collect();
-        let uqp = solve_box_qp(&h, g.as_slice(), &lo, &hi);
+        let uqp = solve_box_qp(&h, g.as_slice(), &lo, &hi).expect("the reference box QP in this test must solve");
         let mut max_err = 0.0f64;
         for t in 0..n {
             max_err = max_err.max((res.us[t][0] - uqp[t]).abs());

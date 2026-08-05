@@ -1,0 +1,14 @@
+[package]
+name = "ferromotion-bench"
+version = "0.54.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Dependency-free measurement harness for ferromotion, with the statistics the claims need."
+
+[dependencies]
+
+[dev-dependencies]
+ferromotion-core = { path = "../ferromotion-core" }
+ferromotion-cloth = { path = "../ferromotion-cloth" }
+ferromotion-control = { path = "../ferromotion-control" }
+nalgebra.workspace = true

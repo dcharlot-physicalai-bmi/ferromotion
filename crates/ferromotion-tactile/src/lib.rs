@@ -13,6 +13,8 @@
 //! against finite differences — enabling gradient-based tactile inference (estimate contact
 //! depth/pose from an image). Pure `nalgebra` → WASM-clean.
 
+pub mod shear;
+
 use nalgebra::Vector3;
 
 /// A spherical indenter pressing into the gel.
