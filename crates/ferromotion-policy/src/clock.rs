@@ -260,6 +260,11 @@ mod tests {
         assert_eq!(c.latency_samples(0.5), 50, "but the LATENCY is still reported uncapped, so the margin check sees it");
     }
 
+    /// **Scope of this test, stated because an adversarial audit found it weaker than it looks.** The loop below
+    /// delivers and ticks within the same iteration, which models a scheduler that hands over a chunk instantly. On
+    /// that timeline it reports 0 gaps even at 0.19 s inference. A time-honest loop — one that advances control ticks
+    /// *during* inference — starves at 0.10 s (130 gaps in 400 ticks). What this pins is the queue/freeze bookkeeping,
+    /// not the scheduler; the headline 20 ms configuration survives either timeline.
     /// **The action stream must never gap.** The fast loop runs continuously while the slow loop delivers late.
     #[test]
     fn the_fast_loop_never_starves_while_inference_keeps_up() {

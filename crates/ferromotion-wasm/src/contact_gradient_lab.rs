@@ -152,8 +152,10 @@ impl ContactGradientLab {
         AdaptivePenalty::new(GRAVITY, k, 2.0 * ZETA * k.sqrt())
     }
 
-    /// Tolerance driving the adaptive route. Fixed rather than exposed: the point of the third route is that it does
-    /// not need tuning, and a slider would suggest it does.
+    /// Tolerance driving the adaptive route. Fixed rather than exposed so the lesson stays about the integrator rather
+    /// than about tuning — but not because the choice is free: at `rtol = 1e-6` this route returns `-38.11` and at
+    /// `1e-4` it returns `-279.76`, both the wrong sign. A tolerance that is too loose fails the same way a fixed step
+    /// does. `1e-11` is a tight setting, chosen and then verified, not a default that happens to work.
     fn adaptive_options() -> AdaptiveOptions {
         AdaptiveOptions::with_tolerance(1e-11)
     }

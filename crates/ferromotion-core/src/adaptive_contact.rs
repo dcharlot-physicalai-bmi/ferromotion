@@ -37,13 +37,23 @@
 //!
 //! - **The discretisation term dominates**, by four orders of magnitude at `k = 1e6`: `1.5e2` against `1.7e-2`.
 //!   At every stiffness from `1e4` up it accounts for the entire error to two decimal places.
-//! - **The model term shrinks as roughly `1/k`** (fitted exponent `-0.93` over the four stiffnesses where it clears
-//!   the reference's own noise floor). The converged penalty gradient approaches the rigid saltation Jacobian
-//!   rather than departing from it.
+//! - **The model term shrinks monotonically**, which is the direction that matters: it approaches the rigid saltation
+//!   Jacobian rather than departing from it. The *rate* needs care. The four-point fit reports `-0.93`, but an
+//!   adversarial audit showed that figure is set almost entirely by the `k = 1e3` point, which is out of the
+//!   asymptotic regime twice over: its model error (`14.96`) is 280% of the largest rigid-Jacobian entry, and its
+//!   decomposition is degenerate (the two error terms nearly cancel, `disc/total = 40.18`). The three well-resolved
+//!   decades fit `k^-0.50` with `R^2 = 1.0000` — **`1/sqrt(k)`, not `1/k`**. Anchored at `k = 1e4`, `1/k` predicts
+//!   `1.7e-3` at `k = 1e6` against a measured `1.696e-2`; `1/sqrt(k)` predicts it to 1%.
 //! - **A tolerance-driven rollout recovers the exact answer.** At `k = 1e6` it reproduces the closed-form rigid
-//!   saltation Jacobian to three digits in ~519 steps, verified in
-//!   [`tests::adaptive_reproduces_the_integration_free_jacobian`] against a quantity that shares no machinery with
-//!   it: no timestep, no tolerance, no finite difference.
+//!   saltation Jacobian in ~519 steps, verified in
+//!   [`tests::adaptive_reproduces_the_integration_free_jacobian`]. Scoped honestly: the agreement is three digits on
+//!   the scaled max-abs statistic the test uses; entrywise, `dv/dv0` agrees to `0.04%` and `dh/dh0` only to about
+//!   1.5 digits (`-0.31926` vs `-0.30229`), and the test's pass margin is set by that worst entry.
+//!
+//!   The check is **integration-free only in `dv/dv0`**, where the rigid value is `1` exactly by algebra and does not
+//!   depend on the restitution. The other entries are calibrated by a restitution that
+//!   [`AdaptivePenalty::effective_restitution`] measures with the same adaptive rollout under test, so they are a
+//!   consistency check rather than an independent one. Saying otherwise was an overstatement.
 //!
 //! So a bad penalty-contact gradient is the integrator's doing, not the contact model's. This corrects the
 //! attribution in [`crate::contact_gradient`], whose measurement stands but whose explanation did not: what diverges
@@ -528,8 +538,9 @@ mod tests {
     }
 
     /// **The load-bearing result.** A tolerance-driven adaptive rollout of the penalty model reproduces the exact
-    /// saltation Jacobian of the rigid system, which is closed form and shares no machinery with it: no timestep, no
-    /// tolerance, no finite difference.
+    /// saltation Jacobian of the rigid system, which is closed form. The independence is partial and worth stating:
+    /// `dv/dv0` is `1` by algebra whatever the restitution, so that entry is a genuinely integration-free check, while
+    /// the others are calibrated by a restitution this same adaptive rollout measured.
     ///
     /// This is what makes the decomposition trustworthy rather than circular. Every other method here is scored
     /// against an adaptively-computed reference, so agreement among them proves nothing on its own.

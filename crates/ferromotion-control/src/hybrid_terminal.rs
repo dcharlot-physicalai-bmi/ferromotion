@@ -6,7 +6,7 @@
 //!
 //! [`terminal`](crate::terminal) measured the obstruction rather than asserting it: attach a plastic impact to a
 //! smooth terminal set and **some point of the set is ejected at every level**, with shrinking the set a hundredfold
-//! failing to help. The number behind it was `mu^2 = 1.1469` — the impact's expansion in the terminal cost's own
+//! failing to help. The number behind it is `mu^2 = 1.1478` at runtime (an earlier doc said `1.1469`, which was stale) — the impact's expansion in the terminal cost's own
 //! metric. Expansion is scale-invariant, which is exactly why shrinking does nothing.
 //!
 //! **The way out is that the terminal cost is not given to us.** The condition that actually has to hold is

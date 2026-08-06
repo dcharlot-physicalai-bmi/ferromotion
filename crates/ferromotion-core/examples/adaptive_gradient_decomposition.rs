@@ -231,7 +231,8 @@ fn part_two_c_event_alignment() {
 }
 
 /// Every method above is scored against an adaptively-computed reference, so "the adaptive answer is right" is
-/// partly circular. The rigid saltation Jacobian is a fourth answer that involves no integration at all: closed
+/// partly circular. The rigid saltation Jacobian is a fourth answer that is closed form, and integration-free in its
+/// dv/dv0 entry specifically (which is 1 by algebra); the other entries are calibrated by a measured restitution:
 /// form, no timestep, no tolerance, no finite difference. Printing all of them together says which is the outlier.
 ///
 /// It also checks the one thing a finite-difference reference can hide: whether the answer depends on the
@@ -282,7 +283,7 @@ fn part_two_d_which_one_is_right() {
             a.map(|v| format!("{v:.5}")).unwrap_or_else(|| "-".into())
         );
     }
-    println!("  (dv/dv0 shown; the rigid value is the integration-free target)\n");
+    println!("  (the column above is dv/dh0 = j[1][0]; dv/dv0 is the entry that is integration-free by algebra)\n");
 }
 
 fn mat2_mul(a: [[f64; 2]; 2], b: [[f64; 2]; 2]) -> [[f64; 2]; 2] {
@@ -303,7 +304,8 @@ fn part_three_decompose_over_stiffness() {
     println!("explicit stability bound allows. Two values of c show what refining the step does to each term.\n");
 
     println!("The `floor` column is the reference's own uncertainty, from recomputing it at a tighter tolerance");
-    println!("and a different step. A model error at or below its floor is not a measurement, so those rows are");
+    println!("and a different step. The gate below is model > 10x floor, so a row is marked when it comes WITHIN a");
+    println!("factor of ten of the floor, which is stricter than 'at or below it' - only 1e8 is actually under.");
     println!("marked and excluded from the exponent fit rather than quoted.\n");
 
     for &c in &[1.0, 0.2] {

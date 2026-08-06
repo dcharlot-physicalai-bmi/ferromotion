@@ -21,10 +21,19 @@
 //!
 //! - **Sampling can refute.** One sampled state whose tube violates a constraint is a real counterexample, and
 //!   [`TubeVerdict::Refuted`] is sound on sampled evidence.
-//! - **Sampling cannot certify.** With sampled evidence the best available verdict is
-//!   [`TubeVerdict::Undecided`], no matter how wide the margin looks.
+//! - **A bound still tagged [`GapEvidence::Sampled`] can never certify.** The best available verdict is
+//!   [`TubeVerdict::Undecided`], at any margin, and [`certify`] enforces it.
 //!
-//! This workspace has already shipped an unsound interval certificate once. The type is the fix.
+//! **What this does NOT do, stated plainly because an adversarial audit of this module caught the overstatement.**
+//! Soundness is *relocated*, not eliminated. [`GapBound::from_lipschitz`] verifies nothing: it stamps
+//! [`GapEvidence::Proved`] on whatever half-widths it is handed, so passing sampled numbers through it certifies. The
+//! accompanying example and the shipped `certificate_lab` do exactly that on purpose, to show what a proof *would*
+//! buy, and both label it as assumed. The type moves the unsupported step to one named, auditable call site; it does
+//! not discharge it. Deriving a real Lipschitz constant for a stiff penalty contact remains open.
+//!
+//! Two defects the same audit found here, both now fixed and pinned by tests: [`certify`] read a trusted `sound`
+//! boolean and never consulted the evidence, so a hand-built report certified regardless of its gaps; and
+//! `propagate_tube(x0, &[])` certified every constraint because the loop that checks evidence never ran.
 //!
 //! # What is certified
 //!
@@ -170,6 +179,8 @@ pub enum UndecidedReason {
     TubeDiverged,
     /// A map or bound was not finite.
     NonFinite,
+    /// The tube propagated no steps, so it establishes nothing however wide the constraint margin looks.
+    EmptyTube,
     /// Dimensions did not agree across the inputs.
     DimensionMismatch,
 }
@@ -181,13 +192,31 @@ pub struct TubeReport {
     pub sets: Vec<Zonotope>,
     /// Per-step largest half-width of the tube, the honest one-number summary of how much the certificate gave away.
     pub widths: Vec<f64>,
-    /// Whether every step's gap bound was sound.
-    pub sound: bool,
-    /// The weakest evidence encountered, which is what the whole tube rests on.
-    pub weakest_evidence: GapEvidence,
+    /// The evidence behind **every** step's gap bound, in order.
+    ///
+    /// Recorded per step rather than collapsed into a `sound: bool`, because a single trusted flag is one assignment
+    /// away from certifying anything: an adversarial audit of this module found that [`certify`] read such a flag and
+    /// never consulted the evidence, so a hand-built report with `sound: true` certified regardless of its gaps. The
+    /// flag is gone and [`Self::is_sound`] derives the answer instead.
+    pub evidence: Vec<GapEvidence>,
 }
 
 impl TubeReport {
+    /// **Whether a certificate may rest on this tube.** Derived, never stored.
+    ///
+    /// A tube over **zero** steps is not sound. That is not pedantry: the same audit found that
+    /// `propagate_tube(x0, &[])` produced a report that certified every constraint, because the loop that would have
+    /// noticed weak evidence never ran. A tube that propagated nothing establishes nothing.
+    pub fn is_sound(&self) -> bool {
+        !self.evidence.is_empty() && self.evidence.iter().all(GapEvidence::is_sound)
+    }
+
+    /// The weakest evidence any step rested on, or `None` for a tube over no steps. Sampled evidence is weaker than
+    /// proved, so a single sampled step is what this returns.
+    pub fn weakest_evidence(&self) -> Option<GapEvidence> {
+        self.evidence.iter().find(|e| !e.is_sound()).copied().or_else(|| self.evidence.first().copied())
+    }
+
     /// The final tube width: how much uncertainty the policy is carrying at the end of the horizon.
     pub fn final_width(&self) -> f64 {
         self.widths.last().copied().unwrap_or(f64::NAN)
@@ -210,8 +239,7 @@ pub fn propagate_tube(x0: &Zonotope, steps: &[TubeStep]) -> Option<TubeReport> {
     let n = x0.center.len();
     let mut sets = vec![x0.clone()];
     let mut widths = vec![half_width(x0)];
-    let mut sound = true;
-    let mut weakest = GapEvidence::Proved { lipschitz: 0.0, radius: 0.0 };
+    let mut evidence: Vec<GapEvidence> = Vec::with_capacity(steps.len());
 
     for s in steps {
         let (r, c) = s.closed_loop.shape();
@@ -221,16 +249,13 @@ pub fn propagate_tube(x0: &Zonotope, steps: &[TubeStep]) -> Option<TubeReport> {
         if s.closed_loop.iter().any(|v| !v.is_finite()) || s.gap.half_width.iter().any(|v| !v.is_finite()) {
             return None;
         }
-        if !s.gap.evidence.is_sound() {
-            sound = false;
-            weakest = s.gap.evidence;
-        }
+        evidence.push(s.gap.evidence);
         let next = sets.last()?.linear_map(&s.closed_loop).minkowski_sum(&s.gap.as_set());
         widths.push(half_width(&next));
         sets.push(next);
     }
 
-    Some(TubeReport { sets, widths, sound, weakest_evidence: weakest })
+    Some(TubeReport { sets, widths, evidence })
 }
 
 /// Largest per-dimension half-width of a zonotope.
@@ -271,7 +296,10 @@ pub fn certify(nominal: &[DVector<f64>], tube: &TubeReport, constraints: &[HalfS
     }
 
     // Nothing refutable. Now the evidence decides, and a wide margin does not upgrade a sampled bound.
-    if !tube.sound {
+    if tube.evidence.is_empty() {
+        return TubeVerdict::Undecided { reason: UndecidedReason::EmptyTube };
+    }
+    if !tube.is_sound() {
         return TubeVerdict::Undecided { reason: UndecidedReason::GapOnlySampled };
     }
     if !margin.is_finite() {
@@ -446,6 +474,39 @@ mod tests {
         // certificate is worth having.
         let near: Vec<DVector<f64>> = (0..11).map(|_| DVector::from_vec(vec![99.95, 0.0])).collect();
         assert!(nominal_activity(&near, &c) < tube.final_width());
+    }
+
+    /// **Defect found by adversarial audit.** A tube that propagated no steps used to certify every constraint,
+    /// because the loop that would have noticed weak evidence never ran and the trusted `sound` flag stayed `true`.
+    /// A tube over nothing establishes nothing.
+    #[test]
+    fn a_tube_over_no_steps_certifies_nothing() {
+        let tube = propagate_tube(&Zonotope::point(DVector::zeros(2)), &[]).unwrap();
+        assert!(!tube.is_sound(), "an empty tube must not be sound");
+        assert_eq!(tube.weakest_evidence(), None);
+        let nominal = vec![DVector::zeros(2)];
+        let c = vec![HalfSpace::new(DVector::from_vec(vec![1.0, 0.0]), 1e6)];
+        match certify(&nominal, &tube, &c) {
+            TubeVerdict::Undecided { reason } => assert_eq!(reason, UndecidedReason::EmptyTube),
+            other => panic!("an empty tube returned {other:?}"),
+        }
+    }
+
+    /// **Defect found by adversarial audit.** Soundness used to be a single `pub bool` that `certify` trusted, so a
+    /// hand-built report could flip it and certify anything. It is now derived from the per-step evidence, so a forgery
+    /// has to rewrite the whole record rather than one field.
+    #[test]
+    fn soundness_is_derived_from_the_evidence_not_a_trusted_flag() {
+        let sampled = GapBound::from_samples(&[DVector::from_vec(vec![1e-9, 1e-9])]).unwrap();
+        let steps = vec![TubeStep { closed_loop: m2(0.5, 0.0, 0.0, 0.5), gap: sampled }];
+        let mut tube = propagate_tube(&Zonotope::point(DVector::zeros(2)), &steps).unwrap();
+        assert!(!tube.is_sound());
+        assert!(matches!(tube.weakest_evidence(), Some(GapEvidence::Sampled { .. })));
+
+        // The only way to make this tube read as sound is to replace the recorded evidence, which is exactly the
+        // explicit act the old boolean let a caller perform by accident.
+        tube.evidence = vec![GapEvidence::Proved { lipschitz: 0.0, radius: 0.0 }];
+        assert!(tube.is_sound(), "an honest record is what soundness now means");
     }
 
     /// Dimension disagreement is refused, not silently broadcast.
