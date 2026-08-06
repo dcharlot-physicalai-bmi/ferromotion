@@ -12,6 +12,7 @@ use nalgebra::{DMatrix, DVector, Isometry3, Translation3, Unit, UnitQuaternion, 
 
 mod aba;
 mod adaptive_contact;
+mod affine_contact;
 mod contacts_from_distance;
 mod tree_dynamics;
 mod crba;
@@ -169,6 +170,7 @@ pub use epa::{epa, sphere_penetration, Penetration};
 pub use essential::{decompose_essential, eight_point, recover_pose};
 pub use gjk::{ccd_toi, gjk, intersects, Ball, ConvexPoints, Cuboid, GjkResult, Support, Translate};
 pub use contact_gradient::{jacobian_error, jacobian_relative_error, BouncingMass, PenaltyMass, GRAVITY};
+pub use affine_contact::{AffineContact, ExactContact, SpringExit};
 pub use contacts_from_distance::{descend, CfdProfile, DescentResult, PushTask};
 pub use adaptive_contact::{converged_reference, decompose_gradient_error, AdaptiveError, AdaptiveOptions, AdaptivePenalty, AdaptiveStats, ErrorDecomposition};
 pub use contact_ipm::{solve_frictional_ipm, FrictionalStep, StFrictionContact};
