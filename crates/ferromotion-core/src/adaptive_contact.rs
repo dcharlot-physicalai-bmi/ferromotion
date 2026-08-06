@@ -609,36 +609,55 @@ mod tests {
         );
     }
 
-    /// **The obstacle to a smoothing-gap certificate, pinned.**
+    /// **The fixed-step vs continuous restitution shift, in the units the comparison actually needs.**
     ///
-    /// A provable bound on the penalty-vs-rigid gap is achievable, because the penalty force here is piecewise affine
-    /// (three modes: above the plane, in contact with the one-sided clamp open, and in contact with it shut), so the
-    /// flow is closed-form and needs no Gronwall constant or validated Taylor integration. Every tractable route bounds
-    /// the **continuous** ODE.
+    /// The two models do not realise the same restitution, and that is real: at `k = 1e6` it is `1.8e-2` in
+    /// restitution, `7.97e-2 m/s` in rebound velocity.
     ///
-    /// A practitioner runs a **fixed-step** rollout. These two do not realise the same restitution, and the difference
-    /// is not bookkeeping: at `k = 1e6` it is `1.8e-2` in restitution, `8.0e-2` in rebound velocity, **three times the
-    /// `2.6e-2` constraint margin** the smoothing-tube certificate has to fit inside. So a bound proved for the
-    /// continuous ODE does not cover a fixed-step trajectory however tight the bound is, and bounding the extra term
-    /// rigorously costs more than the whole margin.
+    /// # A dimensional error this test used to make
     ///
-    /// The route out is not a better bound. It is to run the design rollout under a tolerance — which is the same
-    /// conclusion the gradient work reached from the opposite direction. Measured across stiffnesses in
-    /// `examples/discretisation_restitution_shift.rs`.
+    /// It compared that velocity difference directly against the smoothing-tube's `2.6e-2` constraint margin and
+    /// reported "1.78x to 3.31x, exceeds the margin at every stiffness". The margin is **metres of height** (the slack
+    /// `certify` returns against the half-space `[1,0] . x <= 0.46`); the shift is **metres per second**. Dividing them
+    /// is meaningless, and the claim was repeated in the module header, the roadmap and a release message before an
+    /// audit caught it.
+    ///
+    /// Converted honestly — a rebound at speed `w` reaches an apex of `w^2 / 2g`, so the height consequence is
+    /// `(w1^2 - w2^2) / 2g` — the shift is **below** the margin at every stiffness measured:
+    ///
+    /// ```text
+    /// k      dv [m/s]    d(apex) [m]   vs margin
+    /// 1e4    4.629e-2    1.307e-2      0.50x
+    /// 1e5    8.614e-2    2.482e-2      0.95x
+    /// 1e6    7.971e-2    2.303e-2      0.89x
+    /// 1e7    7.759e-2    2.244e-2      0.86x
+    /// ```
+    ///
+    /// So the shift is a large fraction of the margin — half to nearly all of it, which is a serious obstacle worth
+    /// designing around — and it does **not** on its own exceed it. The stronger claim is withdrawn.
     #[test]
-    fn the_fixed_step_and_continuous_models_realise_different_restitutions() {
+    fn the_fixed_step_and_continuous_restitution_shift_is_a_large_fraction_of_the_margin() {
         let v = (2.0f64 * 9.81 * 1.0).sqrt();
-        let margin = 2.6e-2;
+        let margin_m = 2.6e-2; // METRES of height, not m/s
         for &k in &[1e4f64, 1e5, 1e6, 1e7] {
             let d = 2.0 * 0.1606 * k.sqrt();
             let dt: f64 = (1e-3f64).min(0.2 / k.sqrt());
-            let fixed = PenaltyMass::new(9.81, k, d, dt).unwrap();
-            let cont = AdaptivePenalty::new(9.81, k, d).unwrap();
-            let a = fixed.effective_restitution(v).unwrap();
-            let b = cont.effective_restitution(v, AdaptiveOptions::with_tolerance(1e-11)).unwrap();
-            let dv = (a - b).abs() * v;
-            eprintln!("k {k:.0e}: e fixed {a:.6}, continuous {b:.6}, dv {dv:.3e} m/s = {:.2}x margin", dv / margin);
-            assert!(dv > margin, "at k = {k:.0e} the shift {dv:.3e} must exceed the margin, or this obstacle is not real");
+            let a = PenaltyMass::new(9.81, k, d, dt).unwrap().effective_restitution(v).unwrap();
+            let b = AdaptivePenalty::new(9.81, k, d)
+                .unwrap()
+                .effective_restitution(v, AdaptiveOptions::with_tolerance(1e-11))
+                .unwrap();
+            // The height the difference is worth: apex = w^2/2g, so d(apex) = (w1^2 - w2^2)/2g.
+            let (w1, w2) = (a * v, b * v);
+            let d_apex = (w1 * w1 - w2 * w2).abs() / (2.0 * 9.81);
+            let ratio = d_apex / margin_m;
+            eprintln!(
+                "k {k:.0e}: e fixed {a:.6}, continuous {b:.6}, dv {:.3e} m/s -> d(apex) {d_apex:.3e} m = {ratio:.2}x margin",
+                (w1 - w2).abs()
+            );
+            assert!(a != b, "the two models must realise different restitutions at k = {k:.0e}");
+            assert!(ratio > 0.4, "the shift should be a large fraction of the margin, got {ratio:.2}x");
+            assert!(ratio < 1.0, "and it should NOT exceed it — that was the dimensional error, got {ratio:.2}x");
         }
     }
 

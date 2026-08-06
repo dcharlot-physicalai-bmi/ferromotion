@@ -35,7 +35,13 @@ use wasm_bindgen::prelude::*;
 /// whole sweep stays interactive.
 const FACETS: usize = 8;
 /// Probe directions for the wrench-ball radius.
-const DIRS: usize = 64;
+///
+/// **This is an upper bound that falls as the count rises**, because sampling directions can only miss the binding one.
+/// At 64 the same grasp scored `0.163661`; at 1024, `0.089087`; at 20000, `0.052770`. The lab shipped 64 and therefore
+/// published a grasp quality **3.1x optimistic**, and a scope-error hunt caught it. 4096 is the working compromise
+/// between honesty and a browser frame; [`GraspRealityLab::q1_spatial_at_dirs`] exposes the sweep so the value is never
+/// quoted without its convergence.
+const DIRS: usize = 4096;
 /// Object radius, metres. A graspable sphere.
 const RADIUS: f64 = 0.05;
 
@@ -144,6 +150,22 @@ impl GraspRealityLab {
     pub fn planar_ratio(&self) -> f64 {
         let (p, s) = (self.q1_planar(), self.q1_spatial());
         if s > 0.0 { p / s } else { f64::INFINITY }
+    }
+
+    /// **Q1 at an arbitrary direction count**, so the reader can see the value is a bound and not a number.
+    ///
+    /// Exists because the lab's headline claim — that the spatial wrench ball does not move as coplanar contacts are
+    /// added — was a *sampling artifact*: bit-exact at 64 directions, and moving by 3.28% at 4096. A quantity whose
+    /// invariance depends on how coarsely you probe it is not invariant.
+    pub fn q1_spatial_at_dirs(&self, dirs: usize) -> f64 {
+        force_closure_q1_spatial(&self.contact_set(), FACETS, dirs.clamp(8, 65536))
+    }
+
+    /// How far Q1 still moves between this direction count and a 5x finer one, relative to the value. Above a few
+    /// percent, the number is a sampling artifact rather than a measurement.
+    pub fn q1_convergence(&self) -> f64 {
+        let (a, b) = (self.q1_spatial_at_dirs(DIRS), self.q1_spatial_at_dirs(DIRS * 5));
+        if a > 0.0 { (a - b).abs() / a } else { f64::NAN }
     }
 
     /// A smoothed quality, for when the hard metric's zero is uninformative about which way to move.
@@ -291,27 +313,49 @@ mod tests {
         assert!(spread > flat, "spreading should help: {flat:.5} -> {spread:.5}");
     }
 
-    /// **Adding coplanar contacts buys nothing in 6-D.** The binding direction for a coplanar set is out of the plane,
-    /// and it is set by the friction-cone half-angle rather than by how many fingers are on the circle. A designer
-    /// reading only the planar metric would see the number move and conclude otherwise.
+    /// **The retracted claim: "adding coplanar contacts buys nothing in 6-D" was a sampling artifact.**
+    ///
+    /// The lab used to assert that the spatial wrench ball is invariant to coplanar contact count, to nine digits, and
+    /// taught it as a headline. It is bit-exact at 64 probe directions and moves at finer sampling — 3.28% of Q1 at
+    /// 4096, 1.42% at 20000. A quantity whose invariance depends on how coarsely you probe it is not invariant, and
+    /// this test now pins the retraction so the claim cannot come back.
     #[test]
-    fn more_coplanar_contacts_do_not_improve_the_spatial_grasp() {
+    fn the_coplanar_invariance_claim_was_a_sampling_artifact() {
         let mut lab = GraspRealityLab::new();
         lab.set_spread(0.0);
-        let mut spatial = Vec::new();
-        let mut planar = Vec::new();
-        for n in [3.0, 4.0, 5.0, 6.0, 7.0] {
-            lab.set_contacts(n);
-            spatial.push(lab.q1_spatial());
-            planar.push(lab.q1_planar());
+        for dirs in [64usize, 4096, 20000] {
+            let vals: Vec<f64> = (3..=7)
+                .map(|n| {
+                    lab.set_contacts(n as f64);
+                    lab.q1_spatial_at_dirs(dirs)
+                })
+                .collect();
+            let (lo, hi) = vals.iter().fold((f64::MAX, f64::MIN), |(a, b), v| (a.min(*v), b.max(*v)));
+            let rel = (hi - lo) / hi;
+            eprintln!("n_dirs {dirs:>6}: Q1 over 3..7 coplanar contacts spans {:.3e} ({:.2}% of Q1)", hi - lo, 100.0 * rel);
+            if dirs == 64 {
+                assert!(hi - lo < 1e-9, "at 64 directions it is a bit-exact tie, which is what fooled us");
+            } else {
+                assert!(rel > 1e-3, "at {dirs} directions it MOVES, so the invariance was an artifact: {rel:.2e}");
+            }
         }
-        eprintln!("coplanar 3..7 contacts, Q1 spatial: {spatial:.5?}");
-        eprintln!("coplanar 3..7 contacts, Q1 planar:  {planar:.5?}");
-        let (lo, hi) = spatial.iter().fold((f64::MAX, f64::MIN), |(a, b), v| (a.min(*v), b.max(*v)));
-        assert!(hi - lo < 1e-9, "the spatial ball should not move with contact count: {lo:.6} to {hi:.6}");
-        // ... while the planar number does move, which is exactly the trap.
-        let (plo, phi) = planar.iter().fold((f64::MAX, f64::MIN), |(a, b), v| (a.min(*v), b.max(*v)));
-        assert!(phi - plo > 1e-3, "the planar number should visibly move: {plo:.6} to {phi:.6}");
+    }
+
+    /// **Q1 by direction sampling is an upper bound, and 64 directions overstated it 3.1x.** The lab published
+    /// `0.163661` as "the honest 6-D quality of the grasp"; at 20000 directions the same grasp scores `0.052770`.
+    #[test]
+    fn q1_is_an_upper_bound_that_falls_with_the_direction_count() {
+        let lab = GraspRealityLab::new();
+        let mut prev = f64::INFINITY;
+        for dirs in [64usize, 256, 1024, 4096, 20000] {
+            let q = lab.q1_spatial_at_dirs(dirs);
+            eprintln!("n_dirs {dirs:>6}: Q1 = {q:.6}");
+            assert!(q <= prev + 1e-12, "more directions can only tighten the bound: {q} after {prev}");
+            prev = q;
+        }
+        assert!(lab.q1_spatial_at_dirs(64) > 2.5 * lab.q1_spatial_at_dirs(20000), "64 directions overstates ~3x");
+        // And the shipped default must be honest enough to report its own residual movement.
+        eprintln!("at the shipped default, Q1 still moves {:.2}% under 5x finer sampling", 100.0 * lab.q1_convergence());
     }
 
     /// **The early-warning result.** A stick-fraction monitor warns at a fraction of capacity where a Coulomb monitor
