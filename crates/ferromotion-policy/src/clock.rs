@@ -153,7 +153,29 @@ impl ChunkClock {
             // start. `frozen` is how many of those actions the fast loop consumed while this inference was in flight.
             self.frozen_for(inference_time)
         };
-        let target = if self.last_chunk.len() == n { self.last_chunk.clone() } else { vec![0.0; n] };
+        // **Realign the freeze target to the playback position.** The actions the fast loop actually executed while
+        // this inference was in flight are the previous chunk's indices [consumed_in_chunk - frozen,
+        // consumed_in_chunk) — NOT [0, frozen). `rtc_mask` freezes and soft-guides the new chunk's leading entries
+        // against `target`'s leading entries, so `target` has to start where playback currently is.
+        //
+        // Without this shift the blend target is where the previous chunk STARTED, which the arm left several ticks
+        // ago, and the commanded stream jumps at every chunk boundary — measured at 16.6x a normal intra-chunk step,
+        // which is exactly the discontinuity RTC exists to remove.
+        let target = if self.last_chunk.len() == n {
+            let offset = self.consumed_in_chunk.saturating_sub(frozen).min(self.chunk_len);
+            let mut shifted = vec![0.0; n];
+            for j in 0..self.chunk_len {
+                let src = offset + j;
+                // Past the end of the previous chunk there is nothing committed to blend against, so hold its last
+                // action rather than invent a zero.
+                let take = src.min(self.chunk_len - 1);
+                shifted[j * self.action_dim..(j + 1) * self.action_dim]
+                    .copy_from_slice(&self.last_chunk[take * self.action_dim..(take + 1) * self.action_dim]);
+            }
+            shifted
+        } else {
+            vec![0.0; n]
+        };
         let chunk = sample_rtc(field, a0, &target, self.chunk_len, self.action_dim, frozen, self.soft, steps, method);
 
         // The frozen prefix is already committed, so only the un-frozen remainder is new work for the queue. Enqueueing
@@ -258,6 +280,54 @@ mod tests {
         assert_eq!(c.frozen_for(0.025), 3, "25 ms at 100 Hz is 3 ticks");
         assert_eq!(c.frozen_for(0.5), 20, "an inference longer than a chunk caps at the chunk length");
         assert_eq!(c.latency_samples(0.5), 50, "but the LATENCY is still reported uncapped, so the margin check sees it");
+    }
+
+    /// **The freeze target must be aligned to the playback position, not to the previous chunk's start.**
+    ///
+    /// This is the property RTC exists for: the commanded action stream is continuous across a chunk boundary. It was
+    /// broken. `rtc_mask` blends the new chunk's leading entries against `target`'s leading entries, and `target` was
+    /// the previous chunk unshifted — where playback STARTED, not where it had reached. Measured on a field with real
+    /// intra-chunk variation, the boundary jump was **16.6x a normal interior step**; realigned it is **0.4x**.
+    #[test]
+    fn the_commanded_stream_is_continuous_across_a_chunk_boundary() {
+        let (chunk, adim, period, soft) = (20usize, 1usize, 0.01f64, 4usize);
+        let field = |a: &[f64], _t: f64| a.iter().map(|x| 0.5 + 0.3 * x).collect::<Vec<f64>>();
+        // A ramped start, so consecutive actions within a chunk genuinely differ and "is the boundary worse than a
+        // normal step?" is a question with an answer.
+        let a0: Vec<f64> = (0..chunk * adim).map(|i| 0.05 * i as f64).collect();
+        let inference = 0.03;
+
+        let mut clock = ChunkClock::new(chunk, adim, period, soft, 6).unwrap();
+        clock.deliver(&field, &a0, inference, 4, Integrator::Heun);
+        let mut sent: Vec<f64> = Vec::new();
+        let mut boundaries: Vec<usize> = Vec::new();
+        for _ in 0..60 {
+            if clock.queued() <= soft {
+                boundaries.push(sent.len());
+                clock.deliver(&field, &a0, inference, 4, Integrator::Heun);
+            }
+            if let Some(a) = clock.tick() {
+                sent.push(a[0]);
+            }
+        }
+        let steps: Vec<f64> = sent.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
+        let bset: std::collections::BTreeSet<usize> = boundaries.iter().copied().collect();
+        let mut interior: Vec<f64> = steps
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !bset.contains(&(i + 1)) && !bset.contains(&(i + 2)))
+            .map(|(_, s)| *s)
+            .collect();
+        interior.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+        let median = interior[interior.len() / 2];
+        let worst = boundaries
+            .iter()
+            .filter(|b| **b > 0 && **b < steps.len())
+            .map(|b| steps[*b - 1])
+            .fold(0.0f64, f64::max);
+        eprintln!("median interior step {median:.6}; worst boundary jump {worst:.6} = {:.1}x", worst / median);
+        assert!(median > 1e-6, "the fixture must have real intra-chunk variation, got {median:e}");
+        assert!(worst < 3.0 * median, "boundary jump {worst:.4} is {:.1}x the interior step", worst / median);
     }
 
     /// **Scope of this test, stated because an adversarial audit found it weaker than it looks.** The loop below
