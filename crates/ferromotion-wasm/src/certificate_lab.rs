@@ -125,7 +125,7 @@ impl CertificateLab {
         if self.proved {
             // The same magnitude, presented as proved. Deriving a real Lipschitz constant for a stiff penalty contact
             // is an open problem, so this is a conditional: it shows what a proof would buy, not that one exists.
-            GapBound::from_lipschitz(&sampled.half_width, 0.0, 0.0)
+            GapBound::assume_bound(&sampled.half_width, 0.0, 0.0)
         } else {
             Some(sampled)
         }
@@ -146,7 +146,7 @@ impl CertificateLab {
         )?;
         let impact = DMatrix::from_row_slice(2, 2, &[exact[0][0], exact[0][1], exact[1][0], exact[1][1]]);
         let flight = DMatrix::from_row_slice(2, 2, &[1.0, DT, 0.0, 1.0]);
-        let zero = GapBound::from_lipschitz(&DVector::zeros(2), 0.0, 0.0)?;
+        let zero = GapBound::assume_bound(&DVector::zeros(2), 0.0, 0.0)?;
 
         let mut steps = vec![TubeStep { closed_loop: impact, gap }];
         for _ in 0..self.horizon {

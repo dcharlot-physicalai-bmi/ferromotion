@@ -223,9 +223,26 @@ citation is not a result.
     bridge, measured rather than argued.
   - **Certifying with the wrong Jacobian inflates the tube 2.38x** at `k = 1e6` (pessimistic here, not dangerous — a
     certificate you could have had and did not get).
-  - **The blocking piece is a sound gap bound, not the tube algebra.** Every sampled verdict is
-    `Undecided { GapOnlySampled }` by design: sampling gives a *lower* bound on the gap, so it can refute and must
-    never certify. Deriving a defensible Lipschitz constant for a stiff penalty contact is the open item.
+  - 🔲 **THE TOP OPEN ITEM: a sound gap bound. Soundness is currently *relocated*, not eliminated.** Every sampled
+    verdict is `Undecided { GapOnlySampled }` by design — sampling gives a *lower* bound on the gap, so it can refute
+    and must never certify. But `GapBound::from_lipschitz` is the only producer of `Proved` evidence and it **verifies
+    nothing**: it stamps `Proved` on whatever half-widths it is handed, so passing sampled numbers through it certifies.
+    The accompanying example and the shipped `certificate_lab` do exactly that on purpose, labelled as assumed, to show
+    what a proof *would* buy. The type moves the unsupported step to one named, auditable call site; it does not
+    discharge it. An adversarial audit named this precisely and it is the correct framing.
+
+    What is needed is a computable, provable upper bound on
+    `sup_{x in X} ||Phi_penalty(x,T) - Phi_rigid(x,T)||`, over a set of entry states, for a stiff one-sided
+    spring-damper against a rigid impact at the *measured* restitution. Until that exists, **every certificate in this
+    workspace that rests on a smoothing gap is conditional**, and the conditional is worth stating in any paper.
+    Target: the bound must exceed the sampled `9.5e-3` at `k = 1e6` (a proved bound below a sampled measurement is a
+    proof of a bug, not a tighter result) while staying under the `2.6e-2` constraint margin, or the certificate is
+    sound and vacuous.
+
+  - Two defects the same audit found in the tube itself, both fixed: `certify()` read a trusted `pub bool` and never
+    consulted the recorded evidence, so a hand-built report certified regardless of its gaps; and
+    `propagate_tube(x0, &[])` certified every constraint because the evidence loop never ran. Soundness is now derived
+    from a per-step evidence record, and an empty tube is unsound by construction.
   - Two traps encoded as tests: a sampled bound can never return `Certified` however wide the margin, and
     `nominal_activity` exposes a **vacuous** certificate. The first version of the example certified a ceiling over a
     60 ms horizon when the mass needed 285 ms to reach its apex; the verdict was `Certified` and the constraint was

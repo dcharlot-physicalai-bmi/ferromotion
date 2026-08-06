@@ -25,7 +25,7 @@
 //!   [`TubeVerdict::Undecided`], at any margin, and [`certify`] enforces it.
 //!
 //! **What this does NOT do, stated plainly because an adversarial audit of this module caught the overstatement.**
-//! Soundness is *relocated*, not eliminated. [`GapBound::from_lipschitz`] verifies nothing: it stamps
+//! Soundness is *relocated*, not eliminated. [`GapBound::assume_bound`] verifies nothing: it stamps
 //! [`GapEvidence::Proved`] on whatever half-widths it is handed, so passing sampled numbers through it certifies. The
 //! accompanying example and the shipped `certificate_lab` do exactly that on purpose, to show what a proof *would*
 //! buy, and both label it as assumed. The type moves the unsupported step to one named, auditable call site; it does
@@ -94,16 +94,26 @@ impl GapBound {
         Some(GapBound { half_width: half, evidence: GapEvidence::Sampled { samples: residuals.len() } })
     }
 
-    /// From a Lipschitz argument: the gap is at most `nominal + lipschitz * radius` in every dimension, over a ball
-    /// of the given radius around the nominal trajectory.
+    /// **Assume** a bound: the gap is at most `nominal + lipschitz * radius` in every dimension, over a ball of the
+    /// given radius around the nominal trajectory.
     ///
-    /// This is the only constructor whose bound can support a certificate. Supplying a Lipschitz constant that is not
-    /// actually a Lipschitz constant is outside what any type can catch, so it is the caller's claim and is reported
-    /// verbatim in [`TubeReport`].
+    /// # This function verifies nothing
+    ///
+    /// It stamps [`GapEvidence::Proved`] on whatever half-widths it is handed. Pass it sampled numbers and they will
+    /// certify. It was called `from_lipschitz` until an adversarial audit pointed out that the name reads as *derived
+    /// from a Lipschitz argument* when the operation is *assert a bound*, and that the module's own example and shipped
+    /// lab both route sampled gaps through it. The rename makes every call site self-indicting; it does not make the
+    /// assertion any more discharged.
+    ///
+    /// It exists for two legitimate uses:
+    /// - a gap that is **structurally** zero, e.g. a free-flight step both models integrate identically;
+    /// - a **conditional** result, to show what a proof would buy before anyone spends the effort proving it.
+    ///
+    /// Any other use is a certificate resting on an unverified claim, and the claim is the caller's.
     // Negated comparisons are deliberate: `!(lipschitz >= 0.0)` rejects a NaN constant, where `lipschitz < 0.0`
     // would accept it and build a gap bound out of it.
     #[allow(clippy::neg_cmp_op_on_partial_ord)]
-    pub fn from_lipschitz(nominal: &DVector<f64>, lipschitz: f64, radius: f64) -> Option<GapBound> {
+    pub fn assume_bound(nominal: &DVector<f64>, lipschitz: f64, radius: f64) -> Option<GapBound> {
         if !(lipschitz >= 0.0) || !(radius >= 0.0) || nominal.iter().any(|v| !v.is_finite()) {
             return None;
         }
@@ -395,7 +405,7 @@ mod tests {
     /// A proved gap on a contracting loop certifies, and the margin is the real slack rather than a placeholder.
     #[test]
     fn a_proved_gap_on_a_contracting_loop_certifies() {
-        let gap = GapBound::from_lipschitz(&DVector::from_vec(vec![0.01, 0.01]), 0.0, 0.0).unwrap();
+        let gap = GapBound::assume_bound(&DVector::from_vec(vec![0.01, 0.01]), 0.0, 0.0).unwrap();
         assert!(gap.evidence.is_sound());
         let steps: Vec<TubeStep> =
             (0..20).map(|_| TubeStep { closed_loop: m2(0.5, 0.0, 0.0, 0.5), gap: gap.clone() }).collect();
@@ -415,7 +425,7 @@ mod tests {
     /// that grows cannot be rescued by a tighter gap, so this is the first thing to look at.
     #[test]
     fn tube_growth_tracks_the_closed_loop() {
-        let gap = GapBound::from_lipschitz(&DVector::from_vec(vec![0.01, 0.01]), 0.0, 0.0).unwrap();
+        let gap = GapBound::assume_bound(&DVector::from_vec(vec![0.01, 0.01]), 0.0, 0.0).unwrap();
         let stable: Vec<TubeStep> =
             (0..30).map(|_| TubeStep { closed_loop: m2(0.5, 0.0, 0.0, 0.5), gap: gap.clone() }).collect();
         let unstable: Vec<TubeStep> =
@@ -457,7 +467,7 @@ mod tests {
     /// has to expose that, because the verdict never will.
     #[test]
     fn a_vacuous_certificate_is_visible_in_the_activity_check() {
-        let gap = GapBound::from_lipschitz(&DVector::from_vec(vec![0.01, 0.0]), 0.0, 0.0).unwrap();
+        let gap = GapBound::assume_bound(&DVector::from_vec(vec![0.01, 0.0]), 0.0, 0.0).unwrap();
         let steps: Vec<TubeStep> =
             (0..10).map(|_| TubeStep { closed_loop: m2(1.0, 0.0, 0.0, 1.0), gap: gap.clone() }).collect();
         let tube = propagate_tube(&Zonotope::point(DVector::zeros(2)), &steps).unwrap();
@@ -512,7 +522,7 @@ mod tests {
     /// Dimension disagreement is refused, not silently broadcast.
     #[test]
     fn mismatched_dimensions_are_refused() {
-        let gap = GapBound::from_lipschitz(&DVector::from_vec(vec![0.01, 0.01]), 0.0, 0.0).unwrap();
+        let gap = GapBound::assume_bound(&DVector::from_vec(vec![0.01, 0.01]), 0.0, 0.0).unwrap();
         let steps = vec![TubeStep { closed_loop: DMatrix::identity(3, 3), gap }];
         assert!(propagate_tube(&Zonotope::point(DVector::zeros(2)), &steps).is_none());
     }

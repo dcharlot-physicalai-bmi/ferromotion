@@ -106,7 +106,7 @@ fn run_stiffness(k: f64) {
 
     // Free flight over one control step is exact for both models, so those steps carry no gap.
     let flight = DMatrix::from_row_slice(2, 2, &[1.0, DT, 0.0, 1.0]);
-    let zero_gap = GapBound::from_lipschitz(&DVector::zeros(2), 0.0, 0.0).expect("zero gap");
+    let zero_gap = GapBound::assume_bound(&DVector::zeros(2), 0.0, 0.0).expect("zero gap");
     // A small spread of entry states, so the tube starts with a real width and its growth is meaningful.
     let x0 = Zonotope::from_interval(
         &DVector::from_vec(vec![-1e-4, -1e-3]),
@@ -149,7 +149,7 @@ fn run_stiffness(k: f64) {
     // built on a lower bound is not a certificate. The useful follow-up question is whether PROVING the gap would be
     // worth the effort, and that is answerable without proving it - assume a sound bound of the measured magnitude and
     // see what verdict it would buy. A conditional result, labelled as one.
-    let conditional = GapBound::from_lipschitz(&gap.half_width, 0.0, 0.0).expect("conditional gap");
+    let conditional = GapBound::assume_bound(&gap.half_width, 0.0, 0.0).expect("conditional gap");
     let mut steps = vec![TubeStep { closed_loop: exact.clone(), gap: conditional }];
     for _ in 0..HORIZON {
         steps.push(TubeStep { closed_loop: flight.clone(), gap: zero_gap.clone() });
@@ -216,7 +216,7 @@ fn to_matrix(j: [[f64; 2]; 2]) -> DMatrix<f64> {
 fn soundness_demonstration() {
     let tiny = DVector::from_vec(vec![1e-9, 1e-9]);
     let sampled = GapBound::from_samples(std::slice::from_ref(&tiny)).expect("sampled");
-    let proved = GapBound::from_lipschitz(&tiny, 0.0, 0.0).expect("proved");
+    let proved = GapBound::assume_bound(&tiny, 0.0, 0.0).expect("proved");
     let contract = DMatrix::from_row_slice(2, 2, &[0.5, 0.0, 0.0, 0.5]);
     let nominal: Vec<DVector<f64>> = (0..11).map(|_| DVector::zeros(2)).collect();
     let wide = vec![HalfSpace::new(DVector::from_vec(vec![1.0, 0.0]), 1e6)];
