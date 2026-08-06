@@ -609,6 +609,39 @@ mod tests {
         );
     }
 
+    /// **The obstacle to a smoothing-gap certificate, pinned.**
+    ///
+    /// A provable bound on the penalty-vs-rigid gap is achievable, because the penalty force here is piecewise affine
+    /// (three modes: above the plane, in contact with the one-sided clamp open, and in contact with it shut), so the
+    /// flow is closed-form and needs no Gronwall constant or validated Taylor integration. Every tractable route bounds
+    /// the **continuous** ODE.
+    ///
+    /// A practitioner runs a **fixed-step** rollout. These two do not realise the same restitution, and the difference
+    /// is not bookkeeping: at `k = 1e6` it is `1.8e-2` in restitution, `8.0e-2` in rebound velocity, **three times the
+    /// `2.6e-2` constraint margin** the smoothing-tube certificate has to fit inside. So a bound proved for the
+    /// continuous ODE does not cover a fixed-step trajectory however tight the bound is, and bounding the extra term
+    /// rigorously costs more than the whole margin.
+    ///
+    /// The route out is not a better bound. It is to run the design rollout under a tolerance — which is the same
+    /// conclusion the gradient work reached from the opposite direction. Measured across stiffnesses in
+    /// `examples/discretisation_restitution_shift.rs`.
+    #[test]
+    fn the_fixed_step_and_continuous_models_realise_different_restitutions() {
+        let v = (2.0f64 * 9.81 * 1.0).sqrt();
+        let margin = 2.6e-2;
+        for &k in &[1e4f64, 1e5, 1e6, 1e7] {
+            let d = 2.0 * 0.1606 * k.sqrt();
+            let dt: f64 = (1e-3f64).min(0.2 / k.sqrt());
+            let fixed = PenaltyMass::new(9.81, k, d, dt).unwrap();
+            let cont = AdaptivePenalty::new(9.81, k, d).unwrap();
+            let a = fixed.effective_restitution(v).unwrap();
+            let b = cont.effective_restitution(v, AdaptiveOptions::with_tolerance(1e-11)).unwrap();
+            let dv = (a - b).abs() * v;
+            eprintln!("k {k:.0e}: e fixed {a:.6}, continuous {b:.6}, dv {dv:.3e} m/s = {:.2}x margin", dv / margin);
+            assert!(dv > margin, "at k = {k:.0e} the shift {dv:.3e} must exceed the margin, or this obstacle is not real");
+        }
+    }
+
     /// The reachable fraction is a fraction.
     #[test]
     fn reachable_fraction_is_bounded() {
