@@ -577,13 +577,25 @@ pub fn robot_from_usda(stage: &UsdaStage, base: &str, tip: &str) -> Result<(Robo
             return Err(format!("joint '{}' has unsupported type '{}'", j.name, j.spec));
         };
         let axis = j.attr("physics:axis").and_then(|v| v.as_str()).map(axis_from_token).unwrap_or_else(Vector3::z);
-        let pos = j.attr("physics:localPos0").and_then(Value::as_vector3).unwrap_or_else(Vector3::zeros) * scale;
-        let rot = j
-            .attr("physics:localRot0")
-            .and_then(Value::as_tuple)
-            .filter(|q| q.len() >= 4)
-            .map(|q| UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(q[0], q[1], q[2], q[3])))
-            .unwrap_or_else(UnitQuaternion::identity);
+        // **UsdPhysics defines the joint frame TWICE** — once in each body — and the parent-to-child transform is
+        // `T(localPos0, localRot0) * T(localPos1, localRot1)^-1`. Reading only the body0 side silently assumes the
+        // body1 frame is the identity, which loses |localPos1| of link length per joint with no error. Isaac Sim
+        // exports set both, so that is the common asset shape, and the loss was measured at 0.15 m on a 0.40 m link
+        // before this composed the second frame in.
+        let quat = |name: &str| {
+            j.attr(name)
+                .and_then(Value::as_tuple)
+                .filter(|q| q.len() >= 4)
+                .map(|q| UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(q[0], q[1], q[2], q[3])))
+                .unwrap_or_else(UnitQuaternion::identity)
+        };
+        let p0 = j.attr("physics:localPos0").and_then(Value::as_vector3).unwrap_or_else(Vector3::zeros) * scale;
+        let p1 = j.attr("physics:localPos1").and_then(Value::as_vector3).unwrap_or_else(Vector3::zeros) * scale;
+        let frame0 = Iso::from_parts(Translation3::from(p0), quat("physics:localRot0"));
+        let frame1 = Iso::from_parts(Translation3::from(p1), quat("physics:localRot1"));
+        let origin = frame0 * frame1.inverse();
+        let pos = origin.translation.vector;
+        let rot = origin.rotation;
 
         // limits: DEGREES for revolute, distance units for prismatic
         let lower = j.attr("physics:lowerLimit").and_then(Value::as_number);
@@ -685,6 +697,57 @@ pub fn usda_from_robot(robot: &Robot, inertia: &[LinkInertia], name: &str) -> St
 
 #[cfg(test)]
 mod tests {
+    /// **The joint frame is defined twice, and we used to read one half.** `UsdPhysics` gives the joint frame in both
+    /// bodies, so parent-to-child is `T(localPos0, localRot0) * T(localPos1, localRot1)^-1`. Reading only the body0
+    /// side assumes the body1 frame is the identity and loses `|localPos1|` of link length per joint, silently — on
+    /// exactly the asset shape Isaac Sim produces. Measured 0.4000 where 0.5500 was correct before the fix.
+    #[test]
+    fn the_body1_joint_frame_is_composed_not_discarded() {
+        let base = r#"#usda 1.0
+(
+    defaultPrim = "robot"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+def Xform "robot" ( prepend apiSchemas = ["PhysicsArticulationRootAPI"] )
+{
+    def Xform "link0" ( prepend apiSchemas = ["PhysicsRigidBodyAPI"] ) { }
+    def Xform "link1" ( prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"] )
+    {
+        float physics:mass = 2.0
+        float3 physics:diagonalInertia = (0.03, 0.03, 0.008)
+    }
+    def PhysicsRevoluteJoint "joint1"
+    {
+        rel physics:body0 = </robot/link0>
+        rel physics:body1 = </robot/link1>
+        uniform token physics:axis = "Z"
+        point3f physics:localPos0 = (0, 0, 0.40)
+LP1
+        float physics:lowerLimit = -90
+        float physics:upperLimit = 90
+    }
+}
+"#;
+        let z = |lp1: &str| {
+            let s = base.replace("LP1", lp1);
+            let st = parse_usda(&s).expect("parse");
+            robot_from_usda(&st, "link0", "link1").expect("robot").0.joints[0].origin.translation.vector.z
+        };
+        let absent = z("");
+        let with = z("        point3f physics:localPos1 = (0, 0, -0.15)");
+        eprintln!("localPos1 absent -> {absent:.4} m; localPos1 = -0.15 -> {with:.4} m (USD says 0.55)");
+        assert!((absent - 0.40).abs() < 1e-12, "with no body1 frame the origin is localPos0");
+        assert!((with - 0.55).abs() < 1e-12, "the body1 frame must be composed as an inverse, got {with}");
+        // And it carries metersPerUnit exactly once, like every other length.
+        let cm = base
+            .replace("metersPerUnit = 1", "metersPerUnit = 0.01")
+            .replace("LP1", "        point3f physics:localPos1 = (0, 0, -0.15)");
+        let st = parse_usda(&cm).unwrap();
+        let zz = robot_from_usda(&st, "link0", "link1").unwrap().0.joints[0].origin.translation.vector.z;
+        assert!((zz - 0.0055).abs() < 1e-12, "both frames scale once, got {zz}");
+    }
+
     /// **The mass-scale trap, which was live.** `kilogramsPerUnit` was never read, so a gram-authored stage loaded with
     /// masses and inertias 1000x wrong and no error — in the module that exists to catch this exact class of trap for
     /// `metersPerUnit`. Inertia carries one power of the mass scale and two of the length scale, and both are checked

@@ -2,7 +2,8 @@
 //!
 //! A loop that heap-allocates has a latency tail set by the allocator rather than by its algorithm, and median timing
 //! cannot see it. Counting can. Measured with [`ferromotion-bench`'s allocation counter], one MPPI control tick at 1024
-//! samples over a 25-step horizon performs **923,730** allocations — and the interesting part is *where*:
+//! samples over a 25-step horizon performs **923,730** allocations **at 2 degrees of freedom** — and the interesting
+//! part is *where*:
 //!
 //! ```text
 //!   one forward_dynamics call                35 allocations, 1632 bytes
@@ -11,7 +12,12 @@
 //!   MPPI's own per-step vec![0.0; n]           1
 //! ```
 //!
-//! So the controller's own plumbing is **2.8%** of it. The rest is `ferromotion-core`'s dynamics: nine `Vec`s per RNEA
+//! **Every count on this page is at 2 dof**, and the dynamics share is roughly LINEAR in dof: RNEA allocates nine
+//! `Vec`s per sweep and `mass_matrix` runs one sweep per column. A 6-dof arm therefore allocates around 2x the quoted
+//! tick figure, and the controller's share falls to about 1.3%. This was quoted without the dof attached until an audit
+//! asked. It does not weaken the conclusion — it strengthens it, since the share this module fixes only grows with dof.
+//!
+//! So the controller's own plumbing is **2.8%** of it, at 2 dof. The rest is `ferromotion-core`'s dynamics: nine `Vec`s per RNEA
 //! sweep, and `mass_matrix` calling RNEA once per column. Pre-allocating the controller's buffers would have been the
 //! visible fix and very nearly the wrong one.
 //!
@@ -71,7 +77,20 @@ impl RneaScratch {
 
 /// Every buffer the dynamics need, allocated once.
 ///
-/// Sized for a degree count at construction and grown only if a larger robot arrives, so the steady state is
+/// Sized for a degree count at construction, so the steady state is
+///
+/// # Scope of the allocation-free claim
+///
+/// **It holds at a FIXED dof, which is the shipped use** (MPPI holds one robot). Measured with a counting allocator:
+/// `1.00` allocations per `forward_dynamics_in` call at fixed dof, and `3.00` when one workspace is reused across
+/// robots of alternating dof — `ensure` guards on `!=`, so `mass` and `rhs` are reallocated when the count *shrinks* as
+/// well as grows.
+///
+/// Deliberately not fixed. A grow-only buffer would leave `mass` larger than `dof x dof`, and `mass_matrix_in` returns
+/// `&DMatrix`, so it would either hand back an over-sized matrix or need a different return type. Two extra allocations
+/// on a code path nothing ships is a smaller hazard than either. The number is measured and stated instead of implied.
+///
+/// Grown only if a larger robot arrives, so the steady state is
 /// allocation-free. Reusing one workspace across ticks is the point; constructing one per tick would defeat it.
 #[derive(Clone, Debug, Default)]
 pub struct DynamicsWorkspace {
@@ -249,6 +268,48 @@ pub fn forward_dynamics_in<'w>(ws: &'w mut DynamicsWorkspace, robot: &Robot, ine
 
 #[cfg(test)]
 mod tests {
+    /// **The allocation-free claim is scoped to a fixed dof, and the cross-dof cost is measured rather than implied.**
+    /// `ensure` guards on `!=`, so a workspace reused across robots of differing dof reallocates `mass` and `rhs` every
+    /// time the count changes. This pins the shapes so the scope cannot silently widen: identical results either way,
+    /// and the buffers genuinely resize.
+    #[test]
+    fn the_workspace_handles_a_dof_change_correctly_even_though_it_reallocates() {
+        let g = Vector3::new(0.0, 0.0, -9.81);
+        let mut ws = DynamicsWorkspace::new(6);
+        for dof in [6usize, 2, 6, 2] {
+            let (robot, inertia) = test_arm(dof);
+            let q: Vec<f64> = (0..dof).map(|i| 0.1 * (i as f64 + 1.0)).collect();
+            let zero = vec![0.0; dof];
+            // Shared buffers must be resized to the active dof, not left at the previous robot's size.
+            let a = forward_dynamics_in(&mut ws, &robot, &inertia, &q, &zero, &zero, g).to_vec();
+            assert_eq!(a.len(), dof, "the result must match the active dof, not the workspace's history");
+            let b = crate::forward_dynamics(&robot, &inertia, &q, &zero, &zero, g);
+            for (x, y) in a.iter().zip(&b) {
+                assert_eq!(x.to_bits(), y.to_bits(), "a dof change must not change the answer");
+            }
+            assert!(ws.capacity() >= dof);
+        }
+    }
+
+    fn test_arm(dof: usize) -> (crate::Robot, Vec<LinkInertia>) {
+        let joints = (0..dof)
+            .map(|i| crate::Joint {
+                origin: nalgebra::Isometry3::translation(0.0, 0.0, 0.12),
+                axis: nalgebra::Unit::new_normalize(if i % 2 == 0 { Vector3::z() } else { Vector3::y() }),
+                kind: crate::JointKind::Revolute,
+                limits: Some((-2.5, 2.5)),
+            })
+            .collect();
+        let inertia = (0..dof)
+            .map(|_| LinkInertia {
+                mass: 1.4,
+                com: Vector3::new(0.0, 0.0, 0.06),
+                inertia: nalgebra::Matrix3::from_diagonal(&Vector3::new(0.01, 0.01, 0.004)),
+            })
+            .collect();
+        (crate::Robot { joints, ee_offset: nalgebra::Isometry3::identity() }, inertia)
+    }
+
     use super::*;
     use crate::{forward_dynamics, from_urdf_full, inverse_dynamics, mass_matrix};
 
