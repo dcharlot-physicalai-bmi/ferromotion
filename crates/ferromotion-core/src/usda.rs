@@ -135,6 +135,13 @@ impl Prim {
 pub struct UsdaStage {
     /// Scene scale. Content in centimetres carries `0.01`; every length must be multiplied by this to reach metres.
     pub meters_per_unit: f64,
+    /// **Mass scale**, USD's `kilogramsPerUnit`. Content in grams carries `0.001`; every mass must be multiplied by
+    /// this to reach kilograms, and every inertia by it as well (inertia is `mass * length^2`).
+    ///
+    /// This field was missing, and the parser silently assumed `1`. A gram-authored stage therefore loaded with masses,
+    /// inertias and every gravity or inertial torque **1000x wrong**, with no error — in the module whose entire
+    /// purpose is to catch exactly this class of trap for `metersPerUnit`. Found by a scope-error hunt.
+    pub kilograms_per_unit: f64,
     /// `"Y"` or `"Z"`. Graphics content defaults to `Y`; robotics content is authored `Z`.
     pub up_axis: String,
     pub default_prim: Option<String>,
@@ -144,7 +151,8 @@ pub struct UsdaStage {
 impl Default for UsdaStage {
     fn default() -> Self {
         // USD's own defaults, not robotics' - a reader that silently substitutes Z-up and unit scale is the bug.
-        UsdaStage { meters_per_unit: 1.0, up_axis: "Y".into(), default_prim: None, root: Vec::new() }
+        UsdaStage { meters_per_unit: 1.0,
+            kilograms_per_unit: 1.0, up_axis: "Y".into(), default_prim: None, root: Vec::new() }
     }
 }
 
@@ -486,6 +494,9 @@ pub fn parse_usda(src: &str) -> Result<UsdaStage, ParseError> {
     if let Some(v) = meta.get("metersPerUnit").and_then(Value::as_number) {
         stage.meters_per_unit = v;
     }
+    if let Some(v) = meta.get("kilogramsPerUnit").and_then(Value::as_number) {
+        stage.kilograms_per_unit = v;
+    }
     if let Some(v) = meta.get("upAxis").and_then(|v| v.as_str()) {
         stage.up_axis = v.to_owned();
     }
@@ -525,6 +536,7 @@ fn axis_from_token(t: &str) -> Vector3<f64> {
 /// are lengths and are scaled, not converted.
 pub fn robot_from_usda(stage: &UsdaStage, base: &str, tip: &str) -> Result<(Robot, Vec<LinkInertia>), String> {
     let scale = stage.meters_per_unit;
+    let mass_scale = stage.kilograms_per_unit;
     // index joints by the body they drive
     let joints: Vec<&Prim> = stage.walk().into_iter().filter(|p| p.spec.starts_with("Physics") && p.spec.ends_with("Joint")).collect();
     let leaf = |path: &str| path.rsplit('/').next().unwrap_or(path).to_owned();
@@ -591,11 +603,13 @@ pub fn robot_from_usda(stage: &UsdaStage, base: &str, tip: &str) -> Result<(Robo
         let prim = stage.walk().into_iter().find(|p| p.name == body);
         inertias.push(match prim {
             Some(p) if p.has_api("PhysicsMassAPI") || p.attr("physics:mass").is_some() => {
-                let mass = p.attr("physics:mass").and_then(Value::as_number).unwrap_or(0.0);
+                // Mass carries the stage's mass scale, exactly as lengths carry metersPerUnit.
+                let mass = p.attr("physics:mass").and_then(Value::as_number).unwrap_or(0.0) * mass_scale;
                 let com = p.attr("physics:centerOfMass").and_then(Value::as_vector3).unwrap_or_else(Vector3::zeros) * scale;
                 let d = p.attr("physics:diagonalInertia").and_then(Value::as_vector3).unwrap_or_else(Vector3::zeros);
-                // inertia has units of mass * length^2
-                let s2 = scale * scale;
+                // inertia has units of mass * length^2, so it carries BOTH scales — one power of the mass scale and
+                // two of the length scale.
+                let s2 = scale * scale * mass_scale;
                 LinkInertia { mass, com, inertia: Matrix3::from_diagonal(&Vector3::new(d.x * s2, d.y * s2, d.z * s2)) }
             }
             _ => LinkInertia::zero(),
@@ -611,7 +625,7 @@ pub fn robot_from_usda(stage: &UsdaStage, base: &str, tip: &str) -> Result<(Robo
 /// another tool reads it.
 pub fn usda_from_robot(robot: &Robot, inertia: &[LinkInertia], name: &str) -> String {
     let mut s = String::from("#usda 1.0\n(\n");
-    s += &format!("    defaultPrim = \"{name}\"\n    metersPerUnit = 1\n    upAxis = \"Z\"\n)\n\n");
+    s += &format!("    defaultPrim = \"{name}\"\n    metersPerUnit = 1\n    kilogramsPerUnit = 1\n    upAxis = \"Z\"\n)\n\n");
     s += &format!("def Xform \"{name}\" (\n    prepend apiSchemas = [\"PhysicsArticulationRootAPI\"]\n)\n{{\n");
     s += "    def Xform \"link0\" (\n        prepend apiSchemas = [\"PhysicsRigidBodyAPI\"]\n    )\n    {\n    }\n\n";
 
@@ -671,6 +685,52 @@ pub fn usda_from_robot(robot: &Robot, inertia: &[LinkInertia], name: &str) -> St
 
 #[cfg(test)]
 mod tests {
+    /// **The mass-scale trap, which was live.** `kilogramsPerUnit` was never read, so a gram-authored stage loaded with
+    /// masses and inertias 1000x wrong and no error — in the module that exists to catch this exact class of trap for
+    /// `metersPerUnit`. Inertia carries one power of the mass scale and two of the length scale, and both are checked
+    /// here because getting the exponent right is the whole point.
+    #[test]
+    fn kilograms_per_unit_scales_mass_and_inertia() {
+        let grams = STAGE.replace("metersPerUnit = 1", "metersPerUnit = 1\n    kilogramsPerUnit = 0.001");
+        let base = parse_usda(STAGE).expect("kg stage");
+        let g = parse_usda(&grams).expect("gram stage");
+        assert_eq!(base.kilograms_per_unit, 1.0, "the default must be USD's 1, not 0");
+        assert_eq!(g.kilograms_per_unit, 0.001);
+
+        let (_, kg_in) = robot_from_usda(&base, "link0", "link2").expect("kg robot");
+        let (_, g_in) = robot_from_usda(&g, "link0", "link2").expect("gram robot");
+        for (a, b) in kg_in.iter().zip(&g_in) {
+            eprintln!("mass {:.6} kg -> {:.9}; inertia xx {:.6} -> {:.9}", a.mass, b.mass, a.inertia[(0, 0)], b.inertia[(0, 0)]);
+            assert!((b.mass - a.mass * 0.001).abs() < 1e-12, "mass carries one power of the mass scale");
+            assert!(
+                (b.inertia[(0, 0)] - a.inertia[(0, 0)] * 0.001).abs() < 1e-15,
+                "inertia carries ONE power of the mass scale (and two of length, unchanged here)"
+            );
+        }
+        // A gram-authored stage read as kilograms would be 1000x heavy — the silent failure this closes.
+        assert!(kg_in[1].mass > 0.0 && (kg_in[1].mass / g_in[1].mass - 1000.0).abs() < 1e-6);
+    }
+
+    /// Both scales compose on inertia: `mass * length^2`. Checked together, because the exponent is the thing a reader
+    /// would get wrong and the module header once stated it as 10^5 when the code does 10^4.
+    #[test]
+    fn the_two_stage_scales_compose_on_inertia() {
+        let both = STAGE
+            .replace("metersPerUnit = 1", "metersPerUnit = 0.01\n    kilogramsPerUnit = 0.001");
+        let base = parse_usda(STAGE).unwrap();
+        let s = parse_usda(&both).unwrap();
+        let (_, a) = robot_from_usda(&base, "link0", "link2").unwrap();
+        let (_, b) = robot_from_usda(&s, "link0", "link2").unwrap();
+        // 0.001 * 0.01^2 = 1e-7
+        let expect = 1e-3 * 1e-2 * 1e-2;
+        // Pick the link that actually carries inertia in the fixture.
+        let i = a.iter().position(|l| l.inertia[(0, 0)] > 0.0).expect("a link with inertia");
+        let (ia, ib) = (a[i].inertia[(0, 0)], b[i].inertia[(0, 0)]);
+        let ratio = ib / ia;
+        eprintln!("inertia xx {ia:.6} -> {ib:.12}, ratio {ratio:.3e} (expect {expect:.0e})");
+        assert!((ratio - expect).abs() / expect < 1e-9, "both scales must compose: got {ratio:e}");
+    }
+
     use super::*;
 
     const STAGE: &str = r#"#usda 1.0

@@ -110,6 +110,64 @@ impl RunningCostLab {
         gaps as f64
     }
 
+    /// **Gaps on an HONEST timeline**, where control ticks keep firing while the inference is in flight.
+    ///
+    /// [`Self::gaps_over`] delivers and ticks in the same loop iteration, so the chunk lands with zero control time
+    /// elapsed — an infinitely fast scheduler. That is what the lab used to report to learners, and it is why it said a
+    /// 190 ms policy keeps a 100 Hz loop fed. Here the request is issued when the queue runs low and the chunk lands
+    /// `latency_samples` ticks later, during which the fast loop still has to send something.
+    pub fn gaps_over_honest(&self, ticks: usize) -> f64 {
+        let Some(mut clock) = self.clock() else { return f64::NAN };
+        let field = |_a: &[f64], _t: f64| vec![0.1; CHUNK * ADIM];
+        let a0 = vec![0.0; CHUNK * ADIM];
+        let latency = clock.latency_samples(self.inference).max(1);
+        let mut gaps = 0usize;
+        let mut lands_at: Option<usize> = None;
+        for k in 0..ticks.min(4000) {
+            if lands_at.is_some_and(|land| k >= land) {
+                clock.deliver(&field, &a0, self.inference, 4, Integrator::Heun);
+                lands_at = None;
+            }
+            if lands_at.is_none() && clock.queued() <= SOFT {
+                lands_at = Some(k + latency);
+            }
+            if clock.tick().is_none() {
+                gaps += 1;
+            }
+        }
+        gaps as f64
+    }
+
+    /// Gaps on the honest timeline **after a warmup**, so a startup transient is not confused with ongoing starvation.
+    /// The queue is empty at t = 0 and the first chunk cannot arrive for `latency_samples` ticks; that is real but it is
+    /// a different fault from a loop that cannot keep up.
+    pub fn steady_state_gaps(&self, ticks: usize, warmup: usize) -> f64 {
+        let Some(mut clock) = self.clock() else { return f64::NAN };
+        let field = |_a: &[f64], _t: f64| vec![0.1; CHUNK * ADIM];
+        let a0 = vec![0.0; CHUNK * ADIM];
+        let latency = clock.latency_samples(self.inference).max(1);
+        let mut gaps = 0usize;
+        let mut lands_at: Option<usize> = None;
+        for k in 0..ticks.min(4000) {
+            if lands_at.is_some_and(|land| k >= land) {
+                clock.deliver(&field, &a0, self.inference, 4, Integrator::Heun);
+                lands_at = None;
+            }
+            if lands_at.is_none() && clock.queued() <= SOFT {
+                lands_at = Some(k + latency);
+            }
+            if clock.tick().is_none() && k >= warmup {
+                gaps += 1;
+            }
+        }
+        gaps as f64
+    }
+
+    /// How much the optimistic timeline flatters the honest one, in gaps. A learner should see this number.
+    pub fn gaps_hidden_by_the_optimistic_timeline(&self, ticks: usize) -> f64 {
+        self.gaps_over_honest(ticks) - self.gaps_over(ticks)
+    }
+
     /// **Health**: `0 = Nominal, 1 = BeyondMargin, 2 = Starved, -1 = unavailable`. Beyond-margin and starved are
     /// independent failures: the first withdraws the stability claim while the stream continues, the second means the
     /// stream stopped.
@@ -284,6 +342,35 @@ mod tests {
             eprintln!("inference {ms:>5.1} ms at {} ms/tick -> {got} actions frozen", lab.control_period_ms());
             assert_eq!(got, want, "at {ms} ms");
         }
+    }
+
+    /// **The optimistic timeline flatters the loop, and by how much.** The lab told learners a 190 ms policy keeps a
+    /// 100 Hz loop fed because its scheduler delivered and ticked in one iteration. On a timeline where control ticks
+    /// keep firing during inference, it starves.
+    #[test]
+    fn the_optimistic_timeline_hides_real_starvation() {
+        let mut lab = RunningCostLab::new();
+        eprintln!("{:>8}  {:>10}  {:>10}  {:>8}", "inference", "optimistic", "honest", "hidden");
+        let mut worst_hidden = 0.0f64;
+        for ms in [20.0, 50.0, 100.0, 190.0] {
+            lab.set_inference_ms(ms);
+            let (o, h) = (lab.gaps_over(400), lab.gaps_over_honest(400));
+            eprintln!("{ms:>7.0}ms  {o:>10.0}  {h:>10.0}  {:>8.0}", h - o);
+            worst_hidden = worst_hidden.max(h - o);
+            assert!(h >= o, "an honest timeline cannot have FEWER gaps than an infinitely fast scheduler");
+        }
+        assert!(worst_hidden > 100.0, "the optimistic timeline should hide substantial starvation, hid {worst_hidden}");
+        // The lesson headlines "20 ms -> 0 gaps". Honestly it is 2, and they are a STARTUP transient: the queue is
+        // empty at t=0 and the first chunk cannot arrive for latency_samples ticks. Steady state is clean, and saying
+        // "2 startup gaps then none" is a different and truer claim than "0 gaps".
+        lab.set_inference_ms(20.0);
+        let (all, steady) = (lab.gaps_over_honest(400), lab.steady_state_gaps(400, 10));
+        eprintln!("20 ms honest: {all} gaps total, {steady} after a 10-tick warmup");
+        assert_eq!(all, 2.0, "a 20 ms policy has a small startup transient");
+        assert_eq!(steady, 0.0, "and no steady-state starvation");
+        // A slow policy starves in steady state, which is the fault that matters.
+        lab.set_inference_ms(190.0);
+        assert!(lab.steady_state_gaps(400, 10) > 300.0, "190 ms starves continuously, not just at startup");
     }
 
     /// A fast policy must never starve the loop, and a slow one must be reported rather than silently papered over.
