@@ -181,12 +181,54 @@ impl ContactGradientLab {
         }
     }
 
-    /// What the adaptive route costs, in accepted steps. The honest comparison is cost against accuracy, and a
-    /// learner should be able to see it is not buying the answer with a huge budget.
+    /// Accepted steps in **one** adaptive rollout. Kept because it is the number the stepper reports, and immediately
+    /// followed by [`Self::adaptive_jacobian_evals`], which is the number that belongs in a comparison.
     pub fn adaptive_steps(&self) -> f64 {
         self.adaptive().map_or(f64::NAN, |p| {
             p.rollout([H0, 0.0], HORIZON, Self::adaptive_options()).map_or(f64::NAN, |(_, s)| s.accepted as f64)
         })
+    }
+
+    /// **What the adaptive Jacobian actually costs**, in right-hand-side evaluations.
+    ///
+    /// An adversarial audit caught this lab presenting one rollout's step count against the fixed route's total, which
+    /// reads as a large saving and is a loss. Richardson extrapolation needs two finite-difference Jacobians, each of
+    /// which is two perturbed rollouts per coordinate: **eight rollouts** for a 2-state system. Dormand-Prince spends
+    /// seven RHS evaluations per attempted step, so this is the honest figure to compare against the fixed route's one
+    /// pass.
+    pub fn adaptive_jacobian_evals(&self) -> f64 {
+        let Some(p) = self.adaptive() else { return f64::NAN };
+        let opts = Self::adaptive_options();
+        let x0 = [H0, 0.0];
+        // The eight rollouts jacobian_richardson performs: two probe sizes x two coordinates x plus/minus.
+        let mut attempted = 0.0;
+        for scale in [1.0, 0.5] {
+            let h = 1e-6 * scale;
+            for j in 0..2 {
+                for sign in [1.0, -1.0] {
+                    let mut x = x0;
+                    x[j] += sign * h;
+                    match p.rollout(x, HORIZON, opts) {
+                        Ok((_, s)) => attempted += (s.accepted + s.rejected) as f64,
+                        Err(_) => return f64::NAN,
+                    }
+                }
+            }
+        }
+        attempted * 7.0
+    }
+
+    /// Right-hand-side evaluations the fixed-step route spends, for the same comparison. Semi-implicit Euler evaluates
+    /// the force once per step and the Jacobian rides along on the same pass, so this is just the step count.
+    pub fn fixed_evals(&self) -> f64 {
+        self.fixed_steps()
+    }
+
+    /// How much MORE the tolerance route costs. Above one means the correct answer is the expensive one, which is the
+    /// honest framing and the opposite of what this lab used to imply.
+    pub fn adaptive_cost_ratio(&self) -> f64 {
+        let (a, f) = (self.adaptive_jacobian_evals(), self.fixed_evals());
+        if f > 0.0 { a / f } else { f64::NAN }
     }
 
     /// How many fixed steps the timestep buttons are spending, for the same comparison.
@@ -355,6 +397,28 @@ mod tests {
             models.push(m);
         }
         assert!(models[2] < models[0], "the model share should shrink with stiffness: {:.3e} -> {:.3e}", models[0], models[2]);
+    }
+
+    /// **The cost comparison, pinned honestly.** This lab used to present one rollout's step count against the fixed
+    /// route's total, which reads as a ~40x saving. An adversarial audit showed the real Jacobian cost is HIGHER: the
+    /// Richardson extrapolation needs eight rollouts. The tolerance route buys the right answer, not a cheaper one, and
+    /// this test fails if the lab ever implies otherwise again.
+    #[test]
+    fn the_tolerance_route_costs_more_not_less() {
+        let mut lab = ContactGradientLab::new();
+        lab.set_log_stiffness(6.0);
+        lab.set_dt(1e-4);
+        eprintln!(
+            "at 1e6: one rollout {} accepted steps, but the JACOBIAN costs {:.0} RHS evals vs {:.0} fixed ({:.2}x)",
+            lab.adaptive_steps(),
+            lab.adaptive_jacobian_evals(),
+            lab.fixed_evals(),
+            lab.adaptive_cost_ratio()
+        );
+        assert!(lab.adaptive_jacobian_evals() > lab.fixed_evals(), "the honest cost must exceed the fixed route's");
+        assert!(lab.adaptive_cost_ratio() > 1.0, "ratio {} should be above one", lab.adaptive_cost_ratio());
+        // And the accuracy it buys is still worth it, which is the actual argument.
+        assert!(lab.adaptive_error() < lab.gradient_error() / 100.0);
     }
 
     /// Finer timesteps do not rescue the gradient, so a learner who tries that must see it fail.
