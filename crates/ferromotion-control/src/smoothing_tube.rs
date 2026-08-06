@@ -35,6 +35,34 @@
 //! boolean and never consulted the evidence, so a hand-built report certified regardless of its gaps; and
 //! `propagate_tube(x0, &[])` certified every constraint because the loop that checks evidence never ran.
 //!
+//! # ⚠ THE EXAMPLE'S VERDICTS ARE WITHDRAWN
+//!
+//! Both of them: the `Certified { margin: 2.64e-2 }` at `k = 1e6` and the `Refuted` at `k = 1e4`. A scope-error hunt
+//! established that the accompanying example feeds this module a disturbance set that cannot bound what it claims to,
+//! and the decisive evidence is [`escaping_sample`]: **the tube does not contain the very penalty trajectory its own
+//! gap was measured from**, escaping by `6.09 mm` and `4.87 m/s` one millisecond after impact — outside by `2.48x` the
+//! tube's own half-width. A tube that misses the real trajectory certifies nothing.
+//!
+//! The reason is structural, not a tuning error, and it took three attempts to see. The measured "gap" is the
+//! difference of the two models sampled at **one instant**, and what it actually measures is a **time offset of one
+//! contact duration**: the rigid model reverses velocity instantaneously while the penalty model leaves the plane `tau`
+//! later at the same speed, so at a fixed absolute time the two states are at different phases of the *same* parabola.
+//! The witness is that `gap_dv = 3.157e-1 m/s` against `g * tau = 3.139e-1 m/s`, agreeing to `0.57%`.
+//!
+//! A time reparametrisation is not an additive state disturbance, and **no per-step `W` can represent it**: matching
+//! the endpoint requires a small box, bounding the path requires a large one, and Minkowski sums cannot cancel. The
+//! true one-step velocity mismatch is `4.8751 m/s` where `2.2873e-3` was injected — understated `2131x`. Scoped
+//! honestly the tube is `19.5 m` wide and the verdict is `Undecided`.
+//!
+//! What survives, and is tested: the tube algebra, the exact half-space test, the evidence asymmetry, the derived
+//! soundness, the empty-tube refusal, and the region preconditions. What does not survive is the fixture that fed it.
+//! Representing the mismatch correctly needs a saltation-style timing term rather than an additive box, and that is
+//! not built.
+//!
+//! **The rule this bought:** a tube is not a certificate until [`escaping_sample`] has been run against a trajectory
+//! the true system actually takes. Neither the evidence types, nor the preconditions, nor 1244 passing tests caught
+//! this, because every number was individually right and only the scope was wrong.
+//!
 //! # What is certified
 //!
 //! Given a nominal trajectory, a per-step closed-loop map, and a per-step gap set: that **every** state reachable
@@ -414,6 +442,48 @@ pub fn certify(nominal: &[DVector<f64>], tube: &TubeReport, constraints: &[HalfS
     TubeVerdict::Certified { margin }
 }
 
+/// **Does the tube actually contain a trajectory?** The falsification test any reachable tube must pass.
+///
+/// `samples[t]` is a state the true system genuinely reaches at index `t`. The tube claims to over-approximate the
+/// reachable set, so every such state must lie inside `nominal[t] (+) sets[t]`. Returns the index and the worst
+/// per-dimension overshoot in units of the tube's own half-width, or `None` if nothing escaped.
+///
+/// # Why this exists
+///
+/// This module produced a `Certified` margin and a `Refuted` verdict, and both were wrong, because the disturbance
+/// set fed to it was measured over the wrong scope. Neither the evidence types, nor the precondition checks, nor 1244
+/// passing tests caught it — every number was individually right. What catches it is asking the only question that
+/// matters about an over-approximation: **is the real thing inside it?**
+///
+/// A tube is not a certificate until it has passed this. Call it before quoting any verdict.
+pub fn escaping_sample(
+    nominal: &[DVector<f64>],
+    tube: &TubeReport,
+    samples: &[DVector<f64>],
+) -> Option<(usize, f64)> {
+    let mut worst: Option<(usize, f64)> = None;
+    for (t, s) in samples.iter().enumerate() {
+        let (Some(x), Some(set)) = (nominal.get(t), tube.sets.get(t)) else { break };
+        if s.len() != x.len() {
+            return Some((t, f64::INFINITY));
+        }
+        let (lo, hi) = set.interval_hull();
+        for i in 0..s.len() {
+            let half = 0.5 * (hi[i] - lo[i]);
+            let centre = x[i] + 0.5 * (lo[i] + hi[i]);
+            let over = (s[i] - centre).abs() - half;
+            if over > 0.0 {
+                // Report the overshoot relative to the half-width, so "outside by 2.5x" is directly readable.
+                let ratio = if half > 0.0 { (s[i] - centre).abs() / half } else { f64::INFINITY };
+                if worst.is_none_or(|(_, w)| ratio > w) {
+                    worst = Some((t, ratio));
+                }
+            }
+        }
+    }
+    worst
+}
+
 /// The smallest slack the **nominal** trajectory leaves against any constraint, ignoring the tube entirely.
 ///
 /// A certificate is worthless if the constraint could not have been violated over the horizon in the first place. That
@@ -613,6 +683,37 @@ mod tests {
         // explicit act the old boolean let a caller perform by accident.
         tube.evidence = vec![GapEvidence::Proved { lipschitz: 0.0, radius: 0.0 }];
         assert!(tube.is_sound(), "an honest record is what soundness now means");
+    }
+
+    /// **The falsification test, on a tube that is honestly wide enough.** A trajectory inside must not be reported as
+    /// escaping, or the test is useless as an oracle.
+    #[test]
+    fn containment_passes_when_the_tube_is_wide_enough() {
+        let gap = GapBound::assume_bound(&DVector::from_vec(vec![1.0, 1.0]), 0.0, 0.0).unwrap();
+        let steps: Vec<TubeStep> =
+            (0..5).map(|_| TubeStep::linear(m2(1.0, 0.0, 0.0, 1.0), gap.clone()).unwrap()).collect();
+        let tube = propagate_tube(&Zonotope::point(DVector::zeros(2)), &steps).unwrap();
+        let nominal: Vec<DVector<f64>> = (0..6).map(|_| DVector::zeros(2)).collect();
+        // Samples well inside the accumulating +-1, +-2, ... box.
+        let inside: Vec<DVector<f64>> = (0..6).map(|i| DVector::from_vec(vec![0.5 * i as f64, 0.0])).collect();
+        assert_eq!(escaping_sample(&nominal, &tube, &inside), None, "an inside trajectory must not escape");
+    }
+
+    /// **And it must catch a trajectory that leaves.** This is the test that would have caught a `Certified` margin and
+    /// a `Refuted` verdict that were both wrong: neither the evidence types nor the preconditions nor a thousand
+    /// passing tests noticed, because every number was individually right and only the disturbance's SCOPE was wrong.
+    #[test]
+    fn containment_catches_a_trajectory_that_leaves() {
+        let gap = GapBound::assume_bound(&DVector::from_vec(vec![0.01, 0.0]), 0.0, 0.0).unwrap();
+        let steps: Vec<TubeStep> =
+            (0..5).map(|_| TubeStep::linear(m2(1.0, 0.0, 0.0, 1.0), gap.clone()).unwrap()).collect();
+        let tube = propagate_tube(&Zonotope::point(DVector::zeros(2)), &steps).unwrap();
+        let nominal: Vec<DVector<f64>> = (0..6).map(|_| DVector::zeros(2)).collect();
+        // A trajectory that drifts far faster than the tube grows.
+        let escapes: Vec<DVector<f64>> = (0..6).map(|i| DVector::from_vec(vec![0.5 * i as f64, 0.0])).collect();
+        let (step, ratio) = escaping_sample(&nominal, &tube, &escapes).expect("must be caught");
+        eprintln!("escaped at index {step}, outside by {ratio:.1}x the tube half-width");
+        assert!(step > 0 && ratio > 10.0, "index {step}, ratio {ratio}");
     }
 
     /// Dimension disagreement is refused, not silently broadcast.

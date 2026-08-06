@@ -158,7 +158,7 @@ pub use wahba::{davenport_q_method, triad};
 pub use wbc::{CartesianTask, WholeBody};
 pub use zmp::{capture_point, CartState, PreviewState, ZmpPreview};
 pub use smoothing_tube::{
-    certify, nominal_activity, propagate_tube, reaches_goal, GapBound, GapEvidence, HalfSpace, TubeReport, TubeStep,
+    certify, escaping_sample, nominal_activity, propagate_tube, reaches_goal, GapBound, GapEvidence, HalfSpace, TubeReport, TubeStep,
     TubeVerdict, UndecidedReason,
 };
 pub use zonotope::{reach_linear, Zonotope};
