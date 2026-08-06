@@ -208,15 +208,28 @@ citation is not a result.
 - **DiffMJX / Contacts-from-Distance** (arXiv 2506.14186, ICLR 2026). Tolerance-driven adaptive integration cuts
   penalty-contact gradient error by orders of magnitude. **Tested and reproduced** in `core/adaptive_contact.rs`:
   1.59e5x over four decades of tolerance, and the tolerance route reaches the closed-form saltation Jacobian to three
-  digits in ~199 steps. This overturned our own attribution, not theirs. Their CFD straight-through trick for
+  digits. This overturned our own attribution, not theirs. ⛔ Do NOT quote "~199 steps against 8000 fixed" as a saving:
+  199 is ONE rollout's accepted steps and the Jacobian needs eight, so the honest cost is ~14,805 force evaluations
+  against the fixed route's 8,000 — **1.85x MORE work**, buying the right answer rather than a cheaper one. Their CFD straight-through trick for
   *pre-contact* gradients is still unbuilt and is the obvious next piece.
 - ✅ **Certified contact-rich manipulation via smoothing-error reachable tubes** (arXiv 2602.09368, Li & Chou, RSS
   2026). Plan on smoothed dynamics, bound the smoothing error, certify under the *original* nonsmooth dynamics. Built
   as `control/smoothing_tube.rs` on top of `control/zonotope.rs`, measured in
   `examples/smoothing_tube_certificate.rs`. What it found:
-  - **Stiffness decides whether the certificate exists.** The measured smoothing gap falls from `3.2e-1` at `k = 1e4`
-    to `9.5e-3` at `k = 1e6`, which turns a **refuted** ceiling constraint (violated at step 208) into one that would
-    certify with margin `2.6e-2`.
+  - ⛔ **BOTH VERDICTS WITHDRAWN (2026-08-06).** This section recorded that a gap of `3.2e-1` at `k = 1e4` refutes a
+    ceiling constraint while `9.5e-3` at `k = 1e6` would certify it at margin `2.6e-2`. Neither holds. The decisive
+    evidence is `escaping_sample`: **the tube does not contain the penalty trajectory its own gap was measured from**,
+    outside by `6.09 mm` and `4.87 m/s` one millisecond after impact — `2.48x` its own half-width. A tube that misses
+    the real trajectory cannot certify, and cannot refute either (the k=1e4 "violation" is fabricated: a 460 mm ceiling
+    reported breached by 1 mm when the true apex is 398 mm with 62 mm of slack).
+    The cause is structural. The measured "gap" is the two models differenced at ONE instant, and what it measures is a
+    **time offset of one contact duration** — `gap_dv = 3.157e-1 m/s` against `g*tau = 3.139e-1 m/s`, agreeing to
+    `0.57%`. A time reparametrisation is not an additive state disturbance and **no per-step `W` can be one**: matching
+    the endpoint needs a small box, bounding the path needs a large one, and Minkowski sums cannot cancel. Representing
+    it needs a saltation-style timing term, which is not built.
+    What survives and is tested: the tube algebra, the exact support test, the evidence asymmetry, derived soundness,
+    the empty-tube refusal, the region preconditions, and `escaping_sample` itself. **A tube is not a certificate until
+    it has passed containment against a trajectory the true system actually takes.**
   - **That is the same regime where a fixed-step gradient is unusable.** At `k = 1e6` fixed-step autodiff reports
     `dv/dh = -209.76` against a true `+3.65`: wrong sign, 57x magnitude. So the only stiffness at which the tube is
     tight enough to certify is a stiffness at which you must have the exact or tolerance-driven Jacobian. That is the
@@ -236,7 +249,8 @@ citation is not a result.
     spring-damper against a rigid impact at the *measured* restitution. Until that exists, **every certificate in this
     workspace that rests on a smoothing gap is conditional**, and the conditional is worth stating in any paper.
     Target: the bound must exceed the sampled `9.5e-3` at `k = 1e6` (a proved bound below a sampled measurement is a
-    proof of a bug, not a tighter result) while staying under the `2.6e-2` constraint margin, or the certificate is
+    proof of a bug, not a tighter result) while staying under the `2.6e-2` constraint margin — and it must additionally
+    pass `escaping_sample`, which the current fixture does not — or the certificate is
     sound and vacuous.
 
   - Two defects the same audit found in the tube itself, both fixed: `certify()` read a trusted `pub bool` and never
