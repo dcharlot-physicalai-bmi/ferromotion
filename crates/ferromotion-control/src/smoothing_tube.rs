@@ -143,7 +143,49 @@ impl GapBound {
 #[derive(Clone, Debug)]
 pub struct TubeStep {
     pub closed_loop: DMatrix<f64>,
+    /// How far the smoothed dynamics depart from the nonsmooth ones over this step.
     pub gap: GapBound,
+    /// **The linearisation residual**: how far the true map departs from `closed_loop * x` over this step's reachable
+    /// set.
+    ///
+    /// This field exists because an adversarial review pointed out that the tube propagated `M*x + w` with *nothing*
+    /// bounding the true map's departure from `M*x` — so proving the gap would have moved the leak one field over
+    /// rather than closing it. Zero here is a **claim**, and like every other claim in this module it needs evidence:
+    /// legitimate when the step is exactly linear (free flight is), and an assertion otherwise.
+    pub residual: GapBound,
+    /// A precondition the reachable set must satisfy for this step's bounds to hold at all, as `normal . x <= bound`.
+    ///
+    /// The motivating case: a free-flight step is given a structurally-zero gap because both models integrate the same
+    /// quadratic — but only **above the plane**. The same review found that the first three flight steps of this
+    /// module's own example have reachable sets containing `h < 0`, where free flight is the flow of neither model, so
+    /// the zero was false. Attaching `-h <= 0` here makes the claim checkable, and [`certify`] refuses when it fails.
+    pub precondition: Option<HalfSpace>,
+}
+
+impl TubeStep {
+    /// A step whose gap and residual both need stating. Verbose on purpose: every argument is a claim.
+    pub fn new(closed_loop: DMatrix<f64>, gap: GapBound, residual: GapBound) -> TubeStep {
+        TubeStep { closed_loop, gap, residual, precondition: None }
+    }
+
+    /// Attach a precondition the reachable set must satisfy for this step's bounds to mean anything.
+    pub fn requiring(mut self, precondition: HalfSpace) -> TubeStep {
+        self.precondition = Some(precondition);
+        self
+    }
+
+    /// An **exactly linear** step: free flight, where the map is linear by construction so the residual is
+    /// structurally zero rather than assumed. Still takes a gap, and still wants a precondition if the linearity is
+    /// only valid in a region.
+    pub fn linear(closed_loop: DMatrix<f64>, gap: GapBound) -> Option<TubeStep> {
+        let n = closed_loop.nrows();
+        Some(TubeStep {
+            closed_loop,
+            gap,
+            residual: GapBound::assume_bound(&DVector::zeros(n), 0.0, 0.0)?,
+            precondition: None,
+        })
+    }
 }
 
 /// A half-space constraint `normal . x <= bound`.
@@ -191,6 +233,9 @@ pub enum UndecidedReason {
     NonFinite,
     /// The tube propagated no steps, so it establishes nothing however wide the constraint margin looks.
     EmptyTube,
+    /// A step's bounds were only valid in a region and the reachable set left it. The classic case is a free-flight
+    /// step given a structurally-zero gap whose reachable set dips below the plane.
+    PreconditionViolated { step: usize },
     /// Dimensions did not agree across the inputs.
     DimensionMismatch,
 }
@@ -209,6 +254,9 @@ pub struct TubeReport {
     /// never consulted the evidence, so a hand-built report with `sound: true` certified regardless of its gaps. The
     /// flag is gone and [`Self::is_sound`] derives the answer instead.
     pub evidence: Vec<GapEvidence>,
+    /// Per-step preconditions, in order, so [`certify`] can check that the reachable set stayed where each step's
+    /// bounds were valid.
+    pub preconditions: Vec<Option<HalfSpace>>,
 }
 
 impl TubeReport {
@@ -249,23 +297,38 @@ pub fn propagate_tube(x0: &Zonotope, steps: &[TubeStep]) -> Option<TubeReport> {
     let n = x0.center.len();
     let mut sets = vec![x0.clone()];
     let mut widths = vec![half_width(x0)];
-    let mut evidence: Vec<GapEvidence> = Vec::with_capacity(steps.len());
+    let mut evidence: Vec<GapEvidence> = Vec::with_capacity(2 * steps.len());
+    let mut preconditions: Vec<Option<HalfSpace>> = Vec::with_capacity(steps.len());
 
     for s in steps {
         let (r, c) = s.closed_loop.shape();
         if r != n || c != n || s.gap.half_width.len() != n {
             return None;
         }
-        if s.closed_loop.iter().any(|v| !v.is_finite()) || s.gap.half_width.iter().any(|v| !v.is_finite()) {
+        if s.residual.half_width.len() != n {
             return None;
         }
+        if s.closed_loop.iter().any(|v| !v.is_finite())
+            || s.gap.half_width.iter().any(|v| !v.is_finite())
+            || s.residual.half_width.iter().any(|v| !v.is_finite())
+        {
+            return None;
+        }
+        // BOTH bounds are evidence the certificate rests on, so both are recorded. Omitting the residual is how the
+        // linearisation leak stayed invisible.
         evidence.push(s.gap.evidence);
-        let next = sets.last()?.linear_map(&s.closed_loop).minkowski_sum(&s.gap.as_set());
+        evidence.push(s.residual.evidence);
+        let next = sets
+            .last()?
+            .linear_map(&s.closed_loop)
+            .minkowski_sum(&s.gap.as_set())
+            .minkowski_sum(&s.residual.as_set());
+        preconditions.push(s.precondition.clone());
         widths.push(half_width(&next));
         sets.push(next);
     }
 
-    Some(TubeReport { sets, widths, evidence })
+    Some(TubeReport { sets, widths, evidence, preconditions })
 }
 
 /// Largest per-dimension half-width of a zonotope.
@@ -287,6 +350,21 @@ pub fn certify(nominal: &[DVector<f64>], tube: &TubeReport, constraints: &[HalfS
     }
     if nominal.iter().any(|x| x.iter().any(|v| !v.is_finite())) || tube.widths.iter().any(|w| !w.is_finite()) {
         return TubeVerdict::Undecided { reason: UndecidedReason::NonFinite };
+    }
+
+    // Preconditions first: a step whose bounds are only valid in a region must have stayed in it, or every number
+    // downstream is about a system the caller was not simulating.
+    for (t, pre) in tube.preconditions.iter().enumerate() {
+        if let Some(c) = pre {
+            let (Some(x), Some(set)) = (nominal.get(t + 1), tube.sets.get(t + 1)) else { continue };
+            if c.normal.len() != x.len() {
+                return TubeVerdict::Undecided { reason: UndecidedReason::DimensionMismatch };
+            }
+            let shifted = Zonotope::new(&set.center + x, set.generators.clone());
+            if c.worst_case(&shifted) > 0.0 {
+                return TubeVerdict::Undecided { reason: UndecidedReason::PreconditionViolated { step: t + 1 } };
+            }
+        }
     }
 
     let mut margin = f64::INFINITY;
@@ -373,7 +451,7 @@ mod tests {
     fn a_sampled_gap_can_never_certify() {
         let gap = GapBound::from_samples(&[DVector::from_vec(vec![1e-9, 1e-9])]).unwrap();
         assert!(!gap.evidence.is_sound());
-        let steps = vec![TubeStep { closed_loop: m2(0.5, 0.0, 0.0, 0.5), gap }];
+        let steps = vec![TubeStep::linear(m2(0.5, 0.0, 0.0, 0.5), gap).unwrap()];
         let tube = propagate_tube(&Zonotope::point(DVector::zeros(2)), &steps).unwrap();
         let nominal = vec![DVector::zeros(2), DVector::zeros(2)];
         // A constraint with an enormous margin.
@@ -389,7 +467,7 @@ mod tests {
     #[test]
     fn a_sampled_gap_can_refute() {
         let gap = GapBound::from_samples(&[DVector::from_vec(vec![2.0, 0.0])]).unwrap();
-        let steps = vec![TubeStep { closed_loop: m2(1.0, 0.0, 0.0, 1.0), gap }];
+        let steps = vec![TubeStep::linear(m2(1.0, 0.0, 0.0, 1.0), gap).unwrap()];
         let tube = propagate_tube(&Zonotope::point(DVector::zeros(2)), &steps).unwrap();
         let nominal = vec![DVector::zeros(2), DVector::zeros(2)];
         let c = vec![HalfSpace::new(DVector::from_vec(vec![1.0, 0.0]), 1.0)];
@@ -408,7 +486,7 @@ mod tests {
         let gap = GapBound::assume_bound(&DVector::from_vec(vec![0.01, 0.01]), 0.0, 0.0).unwrap();
         assert!(gap.evidence.is_sound());
         let steps: Vec<TubeStep> =
-            (0..20).map(|_| TubeStep { closed_loop: m2(0.5, 0.0, 0.0, 0.5), gap: gap.clone() }).collect();
+            (0..20).map(|_| TubeStep::linear(m2(0.5, 0.0, 0.0, 0.5), gap.clone()).unwrap()).collect();
         let tube = propagate_tube(&Zonotope::point(DVector::zeros(2)), &steps).unwrap();
         let nominal: Vec<DVector<f64>> = (0..21).map(|_| DVector::zeros(2)).collect();
         let c = vec![HalfSpace::new(DVector::from_vec(vec![1.0, 0.0]), 0.1)];
@@ -427,9 +505,9 @@ mod tests {
     fn tube_growth_tracks_the_closed_loop() {
         let gap = GapBound::assume_bound(&DVector::from_vec(vec![0.01, 0.01]), 0.0, 0.0).unwrap();
         let stable: Vec<TubeStep> =
-            (0..30).map(|_| TubeStep { closed_loop: m2(0.5, 0.0, 0.0, 0.5), gap: gap.clone() }).collect();
+            (0..30).map(|_| TubeStep::linear(m2(0.5, 0.0, 0.0, 0.5), gap.clone()).unwrap()).collect();
         let unstable: Vec<TubeStep> =
-            (0..30).map(|_| TubeStep { closed_loop: m2(1.2, 0.0, 0.0, 1.2), gap: gap.clone() }).collect();
+            (0..30).map(|_| TubeStep::linear(m2(1.2, 0.0, 0.0, 1.2), gap.clone()).unwrap()).collect();
 
         let x0 = Zonotope::from_interval(&DVector::from_vec(vec![-0.05, -0.05]), &DVector::from_vec(vec![0.05, 0.05]));
         let a = propagate_tube(&x0, &stable).unwrap();
@@ -469,7 +547,7 @@ mod tests {
     fn a_vacuous_certificate_is_visible_in_the_activity_check() {
         let gap = GapBound::assume_bound(&DVector::from_vec(vec![0.01, 0.0]), 0.0, 0.0).unwrap();
         let steps: Vec<TubeStep> =
-            (0..10).map(|_| TubeStep { closed_loop: m2(1.0, 0.0, 0.0, 1.0), gap: gap.clone() }).collect();
+            (0..10).map(|_| TubeStep::linear(m2(1.0, 0.0, 0.0, 1.0), gap.clone()).unwrap()).collect();
         let tube = propagate_tube(&Zonotope::point(DVector::zeros(2)), &steps).unwrap();
 
         // A nominal trajectory that never goes anywhere near the constraint.
@@ -508,7 +586,7 @@ mod tests {
     #[test]
     fn soundness_is_derived_from_the_evidence_not_a_trusted_flag() {
         let sampled = GapBound::from_samples(&[DVector::from_vec(vec![1e-9, 1e-9])]).unwrap();
-        let steps = vec![TubeStep { closed_loop: m2(0.5, 0.0, 0.0, 0.5), gap: sampled }];
+        let steps = vec![TubeStep::linear(m2(0.5, 0.0, 0.0, 0.5), sampled).unwrap()];
         let mut tube = propagate_tube(&Zonotope::point(DVector::zeros(2)), &steps).unwrap();
         assert!(!tube.is_sound());
         assert!(matches!(tube.weakest_evidence(), Some(GapEvidence::Sampled { .. })));
@@ -523,7 +601,7 @@ mod tests {
     #[test]
     fn mismatched_dimensions_are_refused() {
         let gap = GapBound::assume_bound(&DVector::from_vec(vec![0.01, 0.01]), 0.0, 0.0).unwrap();
-        let steps = vec![TubeStep { closed_loop: DMatrix::identity(3, 3), gap }];
+        let steps = vec![TubeStep::linear(DMatrix::identity(3, 3), gap).unwrap()];
         assert!(propagate_tube(&Zonotope::point(DVector::zeros(2)), &steps).is_none());
     }
 }

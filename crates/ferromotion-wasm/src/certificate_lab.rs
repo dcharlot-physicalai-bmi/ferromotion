@@ -42,13 +42,20 @@ pub struct CertificateLab {
     /// Whether the gap bound is presented as proved. Sampled is the honest default, because that is what a
     /// measurement actually gives you.
     proved: bool,
+    /// Whether the flight steps' preconditions are checked.
+    ///
+    /// A fourth control, and the one that found a real modelling error in this very lab. The flight steps claim a zero
+    /// gap because both models integrate the same quadratic — true only ABOVE the plane. With checking on, the tube's
+    /// reachable set is found to dip below it and the verdict is honestly `PreconditionViolated`. With it off you get
+    /// the verdict the lab used to report, which is what an unchecked assumption buys you.
+    check_preconditions: bool,
 }
 
 #[wasm_bindgen]
 impl CertificateLab {
     #[wasm_bindgen(constructor)]
     pub fn new() -> CertificateLab {
-        CertificateLab { log_stiffness: 6.0, ceiling: 0.46, horizon: 340, proved: false }
+        CertificateLab { log_stiffness: 6.0, ceiling: 0.46, horizon: 340, proved: false, check_preconditions: true }
     }
 
     pub fn set_log_stiffness(&mut self, v: f64) {
@@ -81,6 +88,15 @@ impl CertificateLab {
 
     pub fn is_proved(&self) -> bool {
         self.proved
+    }
+
+    /// Turn the flight steps' precondition checking on or off. On is the honest default.
+    pub fn set_check_preconditions(&mut self, on: bool) {
+        self.check_preconditions = on;
+    }
+
+    pub fn checks_preconditions(&self) -> bool {
+        self.check_preconditions
     }
 
     fn impact_speed() -> f64 {
@@ -148,9 +164,23 @@ impl CertificateLab {
         let flight = DMatrix::from_row_slice(2, 2, &[1.0, DT, 0.0, 1.0]);
         let zero = GapBound::assume_bound(&DVector::zeros(2), 0.0, 0.0)?;
 
-        let mut steps = vec![TubeStep { closed_loop: impact, gap }];
+        // The impact map is a linearisation, so its residual is asserted; the flight steps are exactly linear but
+        // their zero gap only holds above the plane, which the precondition makes checkable.
+        let asserted = GapBound::assume_bound(&DVector::zeros(2), 0.0, 0.0)?;
+        let above_plane = HalfSpace::new(DVector::from_vec(vec![-1.0, 0.0]), 0.0);
+        let mut steps = vec![TubeStep::new(impact, gap, asserted)];
+        // Free flight is exactly linear, so the residual is structural. Its ZERO GAP, however, is justified only by
+        // "both models integrate the same quadratic", which holds only above the plane — so every flight step carries
+        // that precondition and certify() refuses when the reachable set dips below it.
+        //
+        // On this fixture it DOES dip, and the refusal is correct. The gap is injected as a fixed height half-width at
+        // the impact step, but the contact exits at h = 0 BY CONSTRUCTION: the real difference is downstream, growing
+        // from the velocity and timing mismatch. Modelling it as an offset at the exit puts penetrating states in the
+        // reachable set that the system never visits, and the honest consequence is UNDECIDED rather than a certificate.
+        // Fixing it needs the exact gap identity, which is not built. Until then this lab shows the refusal.
         for _ in 0..self.horizon {
-            steps.push(TubeStep { closed_loop: flight.clone(), gap: zero.clone() });
+            let step = TubeStep::linear(flight.clone(), zero.clone())?;
+            steps.push(if self.check_preconditions { step.requiring(above_plane.clone()) } else { step });
         }
         let x0 = Zonotope::from_interval(
             &DVector::from_vec(vec![-1e-4, -1e-3]),
@@ -267,6 +297,7 @@ mod tests {
     #[test]
     fn the_verdict_tracks_the_evidence_not_the_geometry() {
         let mut lab = CertificateLab::new();
+        lab.set_check_preconditions(false); // the evidence lesson, with the modelling assumption left unchecked
         lab.set_log_stiffness(6.0);
         let (w, s) = (lab.tube_width(), lab.nominal_slack());
         assert_eq!(lab.verdict_code(), 2, "sampled evidence must be Undecided: {}", lab.verdict_text());
@@ -281,6 +312,7 @@ mod tests {
     #[test]
     fn stiffening_the_contact_shrinks_the_gap_and_changes_the_verdict() {
         let mut lab = CertificateLab::new();
+        lab.set_check_preconditions(false);
         lab.set_proved(true);
 
         lab.set_log_stiffness(4.0);
@@ -305,6 +337,7 @@ mod tests {
     #[test]
     fn a_short_horizon_produces_a_vacuous_certificate() {
         let mut lab = CertificateLab::new();
+        lab.set_check_preconditions(false);
         lab.set_proved(true);
         lab.set_log_stiffness(6.0);
 
@@ -317,11 +350,36 @@ mod tests {
         assert!(lab.constraint_is_active(), "a full horizon makes it active: ratio {}", lab.vacuity_ratio());
     }
 
+    /// **The modelling error the precondition check found in this lab.**
+    ///
+    /// With checking on, the verdict is `PreconditionViolated` at step 2 no matter how good the evidence or how high
+    /// the ceiling: the flight steps' zero gap is justified only above the plane, and the tube's reachable set dips
+    /// below it. The cause is that the gap is injected as a fixed HEIGHT half-width at the impact step, while the
+    /// contact exits at `h = 0` by construction — the real difference is downstream, growing from the velocity and
+    /// timing mismatch. So the certificate this lab used to report was resting on a false premise.
+    #[test]
+    fn checking_the_precondition_exposes_the_fixtures_own_modelling_error() {
+        let mut lab = CertificateLab::new();
+        lab.set_log_stiffness(6.0);
+        lab.set_proved(true);
+        lab.set_ceiling(1.2); // out of reach, so nothing else could possibly refute
+
+        assert!(lab.checks_preconditions());
+        eprintln!("checked:   {}", lab.verdict_text());
+        assert_eq!(lab.verdict_code(), 2, "the honest verdict is undecided: {}", lab.verdict_text());
+        assert!(lab.verdict_text().contains("PreconditionViolated"), "and it must name the reason");
+
+        lab.set_check_preconditions(false);
+        eprintln!("unchecked: {}", lab.verdict_text());
+        assert_eq!(lab.verdict_code(), 0, "unchecked, the old certificate reappears: {}", lab.verdict_text());
+    }
+
     /// Raising the ceiling out of reach must certify; dropping it below the nominal path must refute. Both on proved
     /// evidence, so the verdict is about the geometry and not the bound.
     #[test]
     fn the_ceiling_moves_the_verdict_in_the_obvious_direction() {
         let mut lab = CertificateLab::new();
+        lab.set_check_preconditions(false);
         lab.set_proved(true);
         lab.set_log_stiffness(6.0);
 

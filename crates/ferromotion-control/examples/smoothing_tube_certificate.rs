@@ -107,6 +107,14 @@ fn run_stiffness(k: f64) {
     // Free flight over one control step is exact for both models, so those steps carry no gap.
     let flight = DMatrix::from_row_slice(2, 2, &[1.0, DT, 0.0, 1.0]);
     let zero_gap = GapBound::assume_bound(&DVector::zeros(2), 0.0, 0.0).expect("zero gap");
+    // The impact map's linearisation residual. Zero is an ASSERTION here, and an unproved one: nothing in this
+    // workspace yet bounds how far the true hybrid transition departs from its saltation-composed linearisation.
+    let asserted_residual = GapBound::assume_bound(&DVector::zeros(2), 0.0, 0.0).expect("residual");
+    // The flight steps' zero gap is justified by "both models integrate the same quadratic" — which holds only above
+    // the plane. Measured on this very fixture, the first three flight steps have reachable sets containing h < 0, so
+    // the justification fails there and the zero is false. Attaching the precondition makes certify() say so.
+    let above_plane = HalfSpace::new(DVector::from_vec(vec![-1.0, 0.0]), 0.0);
+
     // A small spread of entry states, so the tube starts with a real width and its growth is meaningful.
     let x0 = Zonotope::from_interval(
         &DVector::from_vec(vec![-1e-4, -1e-3]),
@@ -120,9 +128,14 @@ fn run_stiffness(k: f64) {
     println!("\n  {:>20}  {:>11}  {:>11}  {:>9}  verdict", "tube propagated via", "final width", "vs truth", "growth");
     let mut truth_width = f64::NAN;
     for (name, m) in [("exact saltation", &exact), ("fixed-step autodiff", &fixed), ("tolerance-driven", &tol)] {
-        let mut steps = vec![TubeStep { closed_loop: m.clone(), gap: gap.clone() }];
+        // The impact map is a LINEARISATION of a hybrid transition, so its residual is asserted, not structural.
+        let mut steps = vec![TubeStep::new(m.clone(), gap.clone(), asserted_residual.clone())];
         for _ in 0..HORIZON {
-            steps.push(TubeStep { closed_loop: flight.clone(), gap: zero_gap.clone() });
+            steps.push(
+                TubeStep::linear(flight.clone(), zero_gap.clone())
+                    .expect("flight step")
+                    .requiring(above_plane.clone()),
+            );
         }
         let Some(tube) = propagate_tube(&x0, &steps) else {
             println!("  {name:>20}  propagation refused");
@@ -150,9 +163,13 @@ fn run_stiffness(k: f64) {
     // worth the effort, and that is answerable without proving it - assume a sound bound of the measured magnitude and
     // see what verdict it would buy. A conditional result, labelled as one.
     let conditional = GapBound::assume_bound(&gap.half_width, 0.0, 0.0).expect("conditional gap");
-    let mut steps = vec![TubeStep { closed_loop: exact.clone(), gap: conditional }];
+    let mut steps = vec![TubeStep::new(exact.clone(), conditional, asserted_residual.clone())];
     for _ in 0..HORIZON {
-        steps.push(TubeStep { closed_loop: flight.clone(), gap: zero_gap.clone() });
+        steps.push(
+            TubeStep::linear(flight.clone(), zero_gap.clone())
+                .expect("flight step")
+                .requiring(above_plane.clone()),
+        );
     }
     if let Some(tube) = propagate_tube(&x0, &steps) {
         let nominal = nominal_after_impact(&rigid, v, tube.sets.len());
@@ -223,7 +240,7 @@ fn soundness_demonstration() {
 
     for (name, gap) in [("sampled at 1 state", sampled), ("proved by Lipschitz", proved)] {
         let steps: Vec<TubeStep> =
-            (0..10).map(|_| TubeStep { closed_loop: contract.clone(), gap: gap.clone() }).collect();
+            (0..10).map(|_| TubeStep::linear(contract.clone(), gap.clone()).unwrap()).collect();
         let tube = propagate_tube(&Zonotope::point(DVector::zeros(2)), &steps).expect("tube");
         println!(
             "  gap {name:>22}: tube width {:.2e}, constraint slack ~1e6  ->  {:?}",
