@@ -24,7 +24,7 @@
 use ferromotion_control::{
     certify, nominal_activity, propagate_tube, GapBound, HalfSpace, TubeStep, TubeVerdict, Zonotope,
 };
-use ferromotion_core::{BouncingMass, PenaltyMass, GRAVITY};
+use ferromotion_core::{AffineContact, BouncingMass, PenaltyMass, GRAVITY};
 use nalgebra::{DMatrix, DVector};
 use wasm_bindgen::prelude::*;
 
@@ -163,12 +163,35 @@ impl CertificateLab {
         let impact = DMatrix::from_row_slice(2, 2, &[exact[0][0], exact[0][1], exact[1][0], exact[1][1]]);
         let flight = DMatrix::from_row_slice(2, 2, &[1.0, DT, 0.0, 1.0]);
         let zero = GapBound::assume_bound(&DVector::zeros(2), 0.0, 0.0)?;
+        let _ = &flight;
 
         // The impact map is a linearisation, so its residual is asserted; the flight steps are exactly linear but
         // their zero gap only holds above the plane, which the precondition makes checkable.
         let asserted = GapBound::assume_bound(&DVector::zeros(2), 0.0, 0.0)?;
         let above_plane = HalfSpace::new(DVector::from_vec(vec![-1.0, 0.0]), 0.0);
-        let mut steps = vec![TubeStep::new(impact, gap, asserted)];
+
+        // **The disturbance set is PER STEP.** The standard tube recursion is R_{k+1} = A R_k (+) W with W the
+        // one-step mismatch (Mayne et al. 2005). The measured gap is the mismatch accumulated over the WHOLE contact,
+        // so injecting it at a single control step over-states the one-step disturbance by the number of steps the
+        // contact spans — and that over-statement is what used to put spurious below-plane states in the tube.
+        //
+        // The contact duration is known exactly, from the closed-form solve, so the step count is computed rather
+        // than guessed.
+        let k = self.stiffness();
+        let contact = AffineContact::new(GRAVITY, k, 2.0 * ZETA * k.sqrt())?;
+        let duration = contact.solve(Self::impact_speed())?.duration;
+        let n_contact = ((duration / DT).ceil().max(1.0) as usize).min(self.horizon);
+        // divided_by, NOT assume_bound: dividing through the assertion constructor would stamp Proved on a sampled
+        // gap and launder it into a certificate.
+        let per_step = gap.divided_by(n_contact as f64)?;
+
+        // During the contact the two models genuinely differ, and the mismatch accrues; the total injected over those
+        // steps is the measured gap. Once the contact is over both models are in free flight and there is no new
+        // mismatch, which is when the zero gap and its above-plane precondition become true.
+        let mut steps = vec![TubeStep::new(impact, per_step.clone(), asserted.clone())];
+        for _ in 1..n_contact {
+            steps.push(TubeStep::new(flight.clone(), per_step.clone(), asserted.clone()));
+        }
         // Free flight is exactly linear, so the residual is structural. Its ZERO GAP, however, is justified only by
         // "both models integrate the same quadratic", which holds only above the plane — so every flight step carries
         // that precondition and certify() refuses when the reachable set dips below it.
@@ -178,7 +201,7 @@ impl CertificateLab {
         // from the velocity and timing mismatch. Modelling it as an offset at the exit puts penetrating states in the
         // reachable set that the system never visits, and the honest consequence is UNDECIDED rather than a certificate.
         // Fixing it needs the exact gap identity, which is not built. Until then this lab shows the refusal.
-        for _ in 0..self.horizon {
+        for _ in n_contact..self.horizon {
             let step = TubeStep::linear(flight.clone(), zero.clone())?;
             steps.push(if self.check_preconditions { step.requiring(above_plane.clone()) } else { step });
         }
@@ -297,7 +320,6 @@ mod tests {
     #[test]
     fn the_verdict_tracks_the_evidence_not_the_geometry() {
         let mut lab = CertificateLab::new();
-        lab.set_check_preconditions(false); // the evidence lesson, with the modelling assumption left unchecked
         lab.set_log_stiffness(6.0);
         let (w, s) = (lab.tube_width(), lab.nominal_slack());
         assert_eq!(lab.verdict_code(), 2, "sampled evidence must be Undecided: {}", lab.verdict_text());
@@ -312,7 +334,6 @@ mod tests {
     #[test]
     fn stiffening_the_contact_shrinks_the_gap_and_changes_the_verdict() {
         let mut lab = CertificateLab::new();
-        lab.set_check_preconditions(false);
         lab.set_proved(true);
 
         lab.set_log_stiffness(4.0);
@@ -337,7 +358,6 @@ mod tests {
     #[test]
     fn a_short_horizon_produces_a_vacuous_certificate() {
         let mut lab = CertificateLab::new();
-        lab.set_check_preconditions(false);
         lab.set_proved(true);
         lab.set_log_stiffness(6.0);
 
@@ -350,28 +370,40 @@ mod tests {
         assert!(lab.constraint_is_active(), "a full horizon makes it active: ratio {}", lab.vacuity_ratio());
     }
 
-    /// **The modelling error the precondition check found in this lab.**
+    /// **The certificate closes, with the precondition CHECKED.**
     ///
-    /// With checking on, the verdict is `PreconditionViolated` at step 2 no matter how good the evidence or how high
-    /// the ceiling: the flight steps' zero gap is justified only above the plane, and the tube's reachable set dips
-    /// below it. The cause is that the gap is injected as a fixed HEIGHT half-width at the impact step, while the
-    /// contact exits at `h = 0` by construction — the real difference is downstream, growing from the velocity and
-    /// timing mismatch. So the certificate this lab used to report was resting on a false premise.
+    /// This test exists because the certificate was briefly withdrawn on the strength of a bug in this fixture rather
+    /// than in the certificate. The disturbance set in `R_{k+1} = A R_k (+) W` is PER STEP; the measured gap is the
+    /// mismatch accumulated over the whole contact. Injecting it at one control step over-stated the one-step
+    /// disturbance by the number of steps the contact spans, which put below-plane states in the tube and made the
+    /// flight steps' above-plane precondition fail. Scoping it correctly makes the precondition hold and the
+    /// certificate close.
     #[test]
-    fn checking_the_precondition_exposes_the_fixtures_own_modelling_error() {
+    fn the_certificate_closes_with_preconditions_checked() {
         let mut lab = CertificateLab::new();
         lab.set_log_stiffness(6.0);
         lab.set_proved(true);
-        lab.set_ceiling(1.2); // out of reach, so nothing else could possibly refute
+        assert!(lab.checks_preconditions(), "checking must be the default");
+        eprintln!("k=1e6, proved, checked: {}", lab.verdict_text());
+        assert_eq!(lab.verdict_code(), 0, "expected a certificate: {}", lab.verdict_text());
+        assert!(lab.constraint_is_active(), "and a non-vacuous one: ratio {}", lab.vacuity_ratio());
+    }
 
-        assert!(lab.checks_preconditions());
-        eprintln!("checked:   {}", lab.verdict_text());
-        assert_eq!(lab.verdict_code(), 2, "the honest verdict is undecided: {}", lab.verdict_text());
-        assert!(lab.verdict_text().contains("PreconditionViolated"), "and it must name the reason");
-
-        lab.set_check_preconditions(false);
-        eprintln!("unchecked: {}", lab.verdict_text());
-        assert_eq!(lab.verdict_code(), 0, "unchecked, the old certificate reappears: {}", lab.verdict_text());
+    /// **The scope bug, locked out.** Injecting the whole-contact mismatch at a single step is exactly the error that
+    /// cost a correct result. The tube's own half-width is the witness: correctly scoped it must be far smaller than
+    /// the whole gap right after the impact, because the mismatch has only had one step to accrue.
+    #[test]
+    fn the_gap_is_injected_per_step_not_all_at_once() {
+        let mut lab = CertificateLab::new();
+        lab.set_log_stiffness(6.0);
+        let gap = lab.gap_magnitude();
+        let first = lab.tube_width_at(1.0);
+        eprintln!("gap {gap:.4e} over the contact; tube half-width after ONE step {first:.4e}");
+        assert!(first < gap, "a per-step injection cannot reach the whole gap in one step: {first:.3e} vs {gap:.3e}");
+        // And by the end of the contact the accrued width is on the order of the whole gap, which is the total the
+        // measurement actually supports.
+        let after = lab.tube_width_at(6.0);
+        assert!(after > 0.5 * gap, "by the contact's end the accrued width should approach the gap: {after:.3e}");
     }
 
     /// Raising the ceiling out of reach must certify; dropping it below the nominal path must refute. Both on proved
@@ -379,7 +411,6 @@ mod tests {
     #[test]
     fn the_ceiling_moves_the_verdict_in_the_obvious_direction() {
         let mut lab = CertificateLab::new();
-        lab.set_check_preconditions(false);
         lab.set_proved(true);
         lab.set_log_stiffness(6.0);
 

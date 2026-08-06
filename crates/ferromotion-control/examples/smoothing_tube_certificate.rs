@@ -20,7 +20,7 @@
 use ferromotion_control::{
     certify, nominal_activity, propagate_tube, GapBound, GapEvidence, HalfSpace, TubeStep, TubeVerdict, Zonotope,
 };
-use ferromotion_core::{AdaptiveOptions, AdaptivePenalty, BouncingMass, PenaltyMass, GRAVITY};
+use ferromotion_core::{AdaptiveOptions, AdaptivePenalty, AffineContact, BouncingMass, PenaltyMass, GRAVITY};
 use nalgebra::{DMatrix, DVector};
 
 /// Drop height, so the impact speed is closed form.
@@ -95,6 +95,10 @@ fn run_stiffness(k: f64) {
     // The gap the tube has to absorb: how far the smoothed one-step map lands from the rigid one, sampled around the
     // nominal impact state. Sampled, so this can refute but never certify - which is the point of the last section.
     let gap = sampled_gap(&penalty, &rigid, x_pre, window);
+    let contact_duration = AffineContact::new(GRAVITY, k, d)
+        .and_then(|c| c.solve(v))
+        .map(|c| c.duration)
+        .expect("closed-form contact duration");
     println!(
         "\n  sampled smoothing gap (max half-width {:.3e} over {} states)",
         gap.magnitude(),
@@ -128,9 +132,18 @@ fn run_stiffness(k: f64) {
     println!("\n  {:>20}  {:>11}  {:>11}  {:>9}  verdict", "tube propagated via", "final width", "vs truth", "growth");
     let mut truth_width = f64::NAN;
     for (name, m) in [("exact saltation", &exact), ("fixed-step autodiff", &fixed), ("tolerance-driven", &tol)] {
-        // The impact map is a LINEARISATION of a hybrid transition, so its residual is asserted, not structural.
-        let mut steps = vec![TubeStep::new(m.clone(), gap.clone(), asserted_residual.clone())];
-        for _ in 0..HORIZON {
+        // The disturbance set is PER STEP: R_{k+1} = A R_k (+) W. The measured gap accumulated over the whole
+        // contact, so it is divided across the steps the contact spans (duration known exactly from the closed form).
+        // Injecting it at one step over-states the one-step disturbance and puts spurious below-plane states in the
+        // tube - the error that briefly cost this result. `divided_by` preserves the evidence; `assume_bound` would
+        // launder a sampled gap into a certificate.
+        let n_contact = ((contact_duration / DT).ceil().max(1.0) as usize).min(HORIZON);
+        let per_step = gap.divided_by(n_contact as f64).expect("per-step gap");
+        let mut steps = vec![TubeStep::new(m.clone(), per_step.clone(), asserted_residual.clone())];
+        for _ in 1..n_contact {
+            steps.push(TubeStep::new(flight.clone(), per_step.clone(), asserted_residual.clone()));
+        }
+        for _ in n_contact..HORIZON {
             steps.push(
                 TubeStep::linear(flight.clone(), zero_gap.clone())
                     .expect("flight step")
@@ -163,8 +176,13 @@ fn run_stiffness(k: f64) {
     // worth the effort, and that is answerable without proving it - assume a sound bound of the measured magnitude and
     // see what verdict it would buy. A conditional result, labelled as one.
     let conditional = GapBound::assume_bound(&gap.half_width, 0.0, 0.0).expect("conditional gap");
-    let mut steps = vec![TubeStep::new(exact.clone(), conditional, asserted_residual.clone())];
-    for _ in 0..HORIZON {
+    let n_contact = ((contact_duration / DT).ceil().max(1.0) as usize).min(HORIZON);
+    let per_step = conditional.divided_by(n_contact as f64).expect("per-step gap");
+    let mut steps = vec![TubeStep::new(exact.clone(), per_step.clone(), asserted_residual.clone())];
+    for _ in 1..n_contact {
+        steps.push(TubeStep::new(flight.clone(), per_step.clone(), asserted_residual.clone()));
+    }
+    for _ in n_contact..HORIZON {
         steps.push(
             TubeStep::linear(flight.clone(), zero_gap.clone())
                 .expect("flight step")

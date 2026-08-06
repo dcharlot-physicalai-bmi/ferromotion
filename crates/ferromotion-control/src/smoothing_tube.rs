@@ -121,6 +121,24 @@ impl GapBound {
         Some(GapBound { half_width: half, evidence: GapEvidence::Proved { lipschitz, radius } })
     }
 
+    /// **Rescale a bound while PRESERVING its evidence.**
+    ///
+    /// Needed because the tube's disturbance set is per step (`R_{k+1} = A R_k (+) W`), so a mismatch measured over a
+    /// whole contact has to be divided across the steps the contact spans. Doing that through
+    /// [`Self::assume_bound`] would stamp `Proved` on the slices and launder sampled numbers into a certificate — a
+    /// bug that was written and caught by the evidence tests within minutes, which is the entire argument for having
+    /// the evidence be a type rather than a comment.
+    ///
+    /// Returns `None` for a non-positive or non-finite divisor.
+    // `!(n > 0.0)` rather than `n <= 0.0` so a NaN divisor is refused rather than used to build a bound.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
+    pub fn divided_by(&self, n: f64) -> Option<GapBound> {
+        if !(n > 0.0) || !n.is_finite() {
+            return None;
+        }
+        Some(GapBound { half_width: &self.half_width / n, evidence: self.evidence })
+    }
+
     /// The gap set as a zonotope centred at the origin.
     pub fn as_set(&self) -> Zonotope {
         let n = self.half_width.len();
