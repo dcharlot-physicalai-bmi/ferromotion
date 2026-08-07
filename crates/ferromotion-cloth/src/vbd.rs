@@ -1,4 +1,12 @@
-//! **Vertex Block Descent** — the deformable solver that is unconditionally stable at one iteration per step.
+//! **Vertex Block Descent** — the deformable solver that stays stable at one iteration per step.
+//!
+//! **On the word "unconditionally".** The unconditional-stability claim belongs to the paper below, not to this file.
+//! What this file measures is one operating point: `dt = 1/30 s`, `k = 1e6`, a 12-link chain of `0.1 m` links at
+//! `0.05 kg`, 600 steps, where a single sweep stays bounded (max extent `1.9124 m`) and explicit Euler on the identical
+//! system goes `NaN`. No test here sweeps `dt`, stiffness, mass or mesh, so cite the paper for the general property and
+//! this measurement for what the code demonstrates. And carry the qualification with it: **stable is not accurate.**
+//! At that same operating point one sweep overstretches a `1.200 m` rest length to `1.9194 m`, `+60.0%`; four sweeps is
+//! `+14.6%`, sixteen `+3.3%`, sixty-four `+0.5%`. One sweep buys boundedness; accuracy is bought in sweeps.
 //!
 //! VBD (Chen, Liu, Yang and Yuksel, SIGGRAPH 2024) solves the *variational* form of implicit Euler
 //!
@@ -51,6 +59,18 @@ pub struct Spring {
     pub j: usize,
     pub rest: f64,
     pub stiffness: f64,
+}
+
+/// **A maximum that reports divergence instead of hiding it.**
+///
+/// `f64::max` returns the non-NaN argument, by IEEE-754 `maxNum`. So `.fold(0.0, f64::max)` over an all-NaN sequence
+/// yields `0.0`, and `0.0.is_finite()` is `true` — measured, not reasoned about. Every reduction in this module that
+/// summarises a quantity capable of diverging must go through here, because the alternative reads a blown-up solve as
+/// a perfect one: a `0.0` maximum extent looks like a chain at rest, and a `0.0` residual looks like convergence.
+///
+/// Returns `0.0` for an empty sequence, matching the identity of a maximum over norms.
+pub fn nan_propagating_max(values: impl IntoIterator<Item = f64>) -> f64 {
+    values.into_iter().fold(0.0f64, |a, b| if a.is_nan() || b.is_nan() { f64::NAN } else { a.max(b) })
 }
 
 /// Elastic energy of one spring at the given endpoint positions.
@@ -121,7 +141,18 @@ impl VbdSolver {
         inertia + elastic
     }
 
-    /// `max_i ||grad_i E||` over the free vertices — zero exactly at the implicit-Euler solution.
+    /// `max_i ||grad_i E||` over the free vertices — zero exactly at the implicit-Euler solution, and `NaN` if the
+    /// state is not finite.
+    ///
+    /// **That `NaN` is a correction (2026-08-06).** This used to fold with `.fold(0.0, f64::max)`, and `f64::max`
+    /// returns the *non-NaN* argument, so `[NaN, NaN].fold(0.0, f64::max)` is `0.0` with `is_finite() == true`
+    /// (measured, not reasoned). A fully diverged solve therefore reported a residual of exactly zero — which this
+    /// doc comment reads as "exactly at the implicit-Euler solution" — and the convergence test's `r < last` and
+    /// `last < 1e-5` would both have passed on garbage. `residual` is the number a convergence plot puts on its
+    /// y-axis, so the failure mode was: break the solver, watch the residual drop to zero, conclude it converged.
+    ///
+    /// The trap was already documented in this file, on the `max_extent` test helper below, and fixed there only.
+    /// Use [`nan_propagating_max`] for any new reduction over a quantity that can diverge.
     pub fn residual(&self, x: &[Vector3<f64>], y: &[Vector3<f64>], verts: &[Vertex], springs: &[Spring]) -> f64 {
         let mut grad = vec![Vector3::zeros(); verts.len()];
         for (i, v) in verts.iter().enumerate() {
@@ -134,7 +165,7 @@ impl VbdSolver {
             grad[s.i] += g;
             grad[s.j] -= g;
         }
-        verts.iter().enumerate().filter(|(_, v)| !v.pinned).map(|(i, _)| grad[i].norm()).fold(0.0, f64::max)
+        nan_propagating_max(verts.iter().enumerate().filter(|(_, v)| !v.pinned).map(|(i, _)| grad[i].norm()))
     }
 
     /// **One VBD step.** Sweeps vertices `iterations` times, taking a projected Newton step in each vertex's own block
@@ -299,9 +330,10 @@ mod tests {
     use super::*;
 
     /// `f64::max` returns the non-NaN argument, so folding with it silently swallows a diverged trajectory.
-    /// Propagate NaN deliberately instead.
+    /// [`nan_propagating_max`] is the shared fix; this helper existed before it and now delegates, so the module and
+    /// its tests cannot drift apart on the one reduction that decides whether divergence is visible.
     fn max_extent(verts: &[Vertex]) -> f64 {
-        verts.iter().map(|v| v.position.norm()).fold(0.0f64, |a, b| if a.is_nan() || b.is_nan() { f64::NAN } else { a.max(b) })
+        nan_propagating_max(verts.iter().map(|v| v.position.norm()))
     }
 
     /// **The defining claim: stable at one iteration with a large timestep and stiff springs.** Explicit Euler is run
@@ -410,13 +442,16 @@ mod tests {
         }
         let solver = VbdSolver::new(1.0 / 60.0, 4).unwrap();
 
+        // NOT .fold(0.0, f64::max): a diverged run would fold to 0.0 and read as PERFECT constraint enforcement,
+        // and the only assertion below is that both numbers are finite.
         let stiff_error = |verts: &[Vertex]| -> f64 {
-            springs
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| i % 2 == 0)
-                .map(|(_, s)| ((verts[s.i].position - verts[s.j].position).norm() - s.rest).abs())
-                .fold(0.0, f64::max)
+            nan_propagating_max(
+                springs
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| i % 2 == 0)
+                    .map(|(_, s)| ((verts[s.i].position - verts[s.j].position).norm() - s.rest).abs()),
+            )
         };
 
         let mut vbd_verts = verts0.clone();
@@ -435,5 +470,59 @@ mod tests {
         eprintln!("        AVBD : worst stiff-link violation {e_avbd:.4e} m");
         assert!(e_vbd.is_finite() && e_avbd.is_finite(), "both stay stable");
         eprintln!("    ratio {:.2}x", e_vbd / e_avbd.max(1e-300));
+
+        // The module header claims AVBD "is what makes the method usable when stiffnesses differ by orders of
+        // magnitude". Until now that was PRINTED and never asserted, so the advantage could invert or vanish with
+        // nothing failing. Measured 1.1125e-4 m vs 4.4060e-5 m, a 2.52x margin; assert a conservative 1.5x so the
+        // claim is pinned without being brittle.
+        assert!(
+            e_avbd * 1.5 < e_vbd,
+            "AVBD must enforce the stiff links better than plain VBD, which is the module's stated reason for it: \
+             VBD {e_vbd:.4e} m vs AVBD {e_avbd:.4e} m (ratio {:.2}x, needs > 1.5x)",
+            e_vbd / e_avbd.max(1e-300)
+        );
+    }
+
+    /// **A diverged solve must not report a residual of zero.**
+    ///
+    /// `residual` folded with `.fold(0.0, f64::max)`, and `f64::max` returns the non-NaN argument, so a state full of
+    /// `NaN` reduced to `0.0` — indistinguishable from the exact implicit-Euler solution, which is what the doc comment
+    /// says zero means. The convergence test's `r < last` and `last < 1e-5` would both pass on that. This pins the
+    /// direction of the failure: not-finite in must give not-finite out.
+    #[test]
+    fn a_diverged_state_gives_a_nan_residual_not_a_zero_one() {
+        // the fold itself, first: this is the behaviour the whole fix rests on
+        assert_eq!(
+            [f64::NAN, f64::NAN].iter().copied().fold(0.0, f64::max),
+            0.0,
+            "f64::max returns the non-NaN argument, which is why the naive fold hides divergence"
+        );
+        assert!(nan_propagating_max([f64::NAN, f64::NAN]).is_nan(), "the shared reduction must propagate it");
+        assert!(nan_propagating_max([1.0, f64::NAN, 2.0]).is_nan(), "one NaN anywhere poisons the maximum");
+        assert_eq!(nan_propagating_max([1.0, 3.0, 2.0]), 3.0, "and it is still a maximum on finite input");
+        assert_eq!(nan_propagating_max(std::iter::empty()), 0.0, "empty reduces to the identity");
+
+        let solver = VbdSolver::new(1.0 / 60.0, 4).unwrap();
+        let (mut verts, springs) = hanging_chain(6, 0.1, 0.05, 1e4);
+
+        // a finite state gives a finite, positive residual — prove the fixture is live before trusting the NaN case
+        let y = solver.inertial_positions(&verts);
+        let x: Vec<Vector3<f64>> = verts.iter().map(|v| v.position).collect();
+        let clean = solver.residual(&x, &y, &verts, &springs);
+        assert!(clean.is_finite() && clean > 0.0, "the fixture must have a real residual to compare against: {clean}");
+
+        // now poison one free vertex, as a diverged step would
+        verts[3].position = Vector3::new(f64::NAN, f64::NAN, f64::NAN);
+        let y = solver.inertial_positions(&verts);
+        let x: Vec<Vector3<f64>> = verts.iter().map(|v| v.position).collect();
+        let poisoned = solver.residual(&x, &y, &verts, &springs);
+        assert!(
+            poisoned.is_nan(),
+            "a non-finite state must give a non-finite residual, got {poisoned} (0.0 would read as converged)"
+        );
+
+        // and the whole point: it must not look better than the healthy state
+        assert!(!(poisoned < clean), "a diverged residual must never compare as smaller than a healthy one");
+        eprintln!("residual: healthy {clean:.4e} N, one NaN vertex -> {poisoned} (was 0.0 before the fix)");
     }
 }

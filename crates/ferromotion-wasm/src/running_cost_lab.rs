@@ -252,7 +252,13 @@ impl RunningCostLab {
         let a = forward_dynamics(&robot, &inertia, &q, &qd, &tau, g);
         let mut ws = DynamicsWorkspace::new(n);
         let b = forward_dynamics_in(&mut ws, &robot, &inertia, &q, &qd, &tau, g).to_vec();
-        a.iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max)
+        // NOT .fold(0.0, f64::max): f64::max returns the non-NaN argument, so a NaN in either result would
+        // fold to 0.0 and this function would report the two paths as BIT-IDENTICAL. That is the claim the
+        // lesson makes on the strength of this number, so the reduction has to propagate.
+        a.iter()
+            .zip(&b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f64, |m, d| if m.is_nan() || d.is_nan() { f64::NAN } else { m.max(d) })
     }
 
     /// Allocations per `forward_dynamics` call before and after the workspace, measured natively with a counting

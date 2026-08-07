@@ -159,7 +159,17 @@ These surfaced as highest-leverage across *multiple* sweeps, or unblock large fa
 - ✅ **Hierarchical (task-priority) whole-body QP** — `control/hierarchy.rs`, with the two-rate interface and delay
   margin now driven by a real clock in `policy/clock.rs`.
 - 🔲 **Soft-finger contact / friction limit surface** (Xydas–Kao 1999) — torsion-coupled contact realism. Not built:
-  `shear.rs` covers tangential partial slip but not the torsional-coupling limit surface.
+  `shear.rs` covers tangential partial slip but not the torsional-coupling limit surface. What exists is the
+  **decoupled polyhedral** form in `grasp_spatial.rs`: independent bounds `|f_t| ≤ μ·f_n` and `|m_n| ≤ μ_t·f_n` as
+  separate generators, which is what makes the wrench set a polytope and is exactly the coupling Xydas–Kao supplies.
+  A correction landed here on 2026-08-06: the torsional generator was scaled as though the normal force were `1`,
+  while the cone edges are normalised to unit **total** force and so deliver `f_n = 1/√(1+μ²)` (matched to `2.2e-16`
+  over `μ ∈ [0,2]`). The mixed convention overstated torsion by `√(1+μ²)` — `1.80×` at `μ=1.5`. Cost, measured:
+  `Q1` is exactly flat in `μ_t` until torsion **binds** (from `μ_t ≈ 0.28` at `μ=0.3`, `≈ 0.70` at `μ=1.0`, never up
+  to `4.0` at `μ=1.5`), so the largest premise error sits where it costs nothing; above the threshold the old form
+  overstated `Q1` by **+10.2%** at `μ=0.5, μ_t=1.0`. Hard contacts are bit-identical, so no published hard-grasp
+  number moves. The first probe sampled only `μ_t ∈ {0.1, 0.3}` — all inside the flat region — and reported "no
+  change" in twelve cases; the finding required sweeping past the binding threshold.
 - 🔲 **Dexterous grasp synthesis via differentiable force closure** (DexGraspNet) — invent whole-hand grasps. We can
   score and split a grasp; we cannot yet synthesise one by descent.
 - 🔲 **Caging / energy-bounded caging** — topological grasp guarantee without force closure.

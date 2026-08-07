@@ -68,9 +68,45 @@ impl GraspContact3 {
 
 /// **The primitive wrenches** of the grasp: one per friction-cone edge, plus torsional generators for a soft finger.
 ///
-/// Each wrench is `[f; p x f]` for a unit cone-edge force `f`. A soft finger adds `[0; +/- mu_torsion * n]`, the
-/// polyhedral form of the torsional limit surface — a pure moment about the contact normal, bounded by the normal force
-/// which is unit by construction here.
+/// Each wrench is `[f; p x f]` for a **unit-magnitude** cone-edge force `f`. That normalisation is the convention this
+/// module works in, and it fixes what the torsional generator may be scaled by.
+///
+/// **A correction (2026-08-06).** This previously emitted `[0; +/- mu_torsion * n]` and documented the normal force as
+/// "unit by construction here". It is not. The cone-edge force is `(n + mu*t).normalize()`, so its NORMAL component is
+///
+/// ```text
+///   f.n = 1 / sqrt(1 + mu^2)
+/// ```
+///
+/// measured over `mu` in `[0, 2]` and matching that expression to `2.2e-16`, not `1`. Taking the tangential and the
+/// torsional bounds from two different normalisations overstated the torsional generator by `sqrt(1 + mu^2)`: `1.03x`
+/// at `mu = 0.25`, `1.12x` at `0.5`, `1.41x` at `1.0`, `1.80x` at `1.5`, `2.24x` at `2.0`. So the generator is now
+/// scaled by the normal force this normalisation actually delivers.
+///
+/// **What that was worth, measured.** `Q1` is exactly FLAT in `mu_torsion` until torsion becomes the binding
+/// constraint, and the threshold rises steeply with `mu`: on the four-contact non-coplanar fixture in
+/// `examples/soft_finger_sensitivity.rs` it binds from `mu_torsion ~ 0.28` at `mu = 0.3`, `~ 0.38` at `0.5`, `~ 0.70`
+/// at `1.0`, and **never** up to `4.0` at `mu = 1.5`. Below the threshold the old and new generators give bit-identical
+/// `Q1`; above it the old one overstated the grasp:
+///
+/// ```text
+///   mu = 0.5, mu_torsion = 1.0    Q1  0.542841048750 -> 0.492818002608    +10.2% overstated
+///   mu = 1.0, mu_torsion = 1.0        0.598498599390 -> 0.566294829236     +5.7%
+///   mu = 1.5, mu_torsion = 1.0        0.634002191339    unchanged          torsion never binds
+/// ```
+///
+/// The largest premise error therefore sits where it costs nothing, and the cost appears at moderate `mu` where the
+/// premise error is small. A first probe that sampled only `mu_torsion` in `{0.1, 0.3}` reported "no change, ratio
+/// 1.0000" in all twelve cases — every sample was inside the flat region. A null result is a claim about the sweep, not
+/// about the code.
+///
+/// Every hard contact (`mu_torsion = 0`) is bit-identical across this change, so no published hard-grasp number moves.
+///
+/// **What the polyhedral form gives up.** The true soft-finger limit surface couples the bounds to the instantaneous
+/// normal force (`|f_t| <= mu*f_n` and `|m_n| <= mu_torsion*f_n` at the same `f_n`). Decoupling them into independent
+/// generators is what makes the set a polytope, and it means the torsional bound can only be scaled by a
+/// representative normal force rather than the one a particular combination happens to use. This uses the largest
+/// normal force the normalised edge set can reach, which is the hull's centroid direction, `1/sqrt(1 + mu^2)`.
 pub fn primitive_wrenches_spatial(contacts: &[GraspContact3], facets: usize) -> Vec<Vector6<f64>> {
     let facets = facets.max(3);
     let mut out = Vec::with_capacity(contacts.len() * (facets + 2));
@@ -84,8 +120,10 @@ pub fn primitive_wrenches_spatial(contacts: &[GraspContact3], facets: usize) -> 
             out.push(Vector6::new(f.x, f.y, f.z, m.x, m.y, m.z));
         }
         if c.mu_torsion > 0.0 {
+            // the normal force a unit-magnitude cone-edge force delivers — NOT 1, see the correction above
+            let f_normal = 1.0 / (1.0 + c.mu * c.mu).sqrt();
             for s in [-1.0, 1.0] {
-                let m = s * c.mu_torsion * n;
+                let m = s * c.mu_torsion * f_normal * n;
                 out.push(Vector6::new(0.0, 0.0, 0.0, m.x, m.y, m.z));
             }
         }
@@ -403,6 +441,111 @@ mod tests {
             assert_eq!(q, 0.0, "still rank-deficient, so still exactly zero");
         }
         eprintln!("   Rank 2 -> 4, but 4 is not 6: torsion alone cannot close a flat frictionless grasp.");
+    }
+
+    /// **The torsional generator is scaled by the normal force the normalisation actually delivers, not by 1.**
+    ///
+    /// The doc comment used to claim the normal force was "unit by construction". It is `1/sqrt(1 + mu^2)`. This pins
+    /// both halves: the normal component of every cone edge, and the resulting torsional generator magnitude.
+    #[test]
+    fn the_cone_edge_normal_force_is_not_unit_and_the_torsion_is_scaled_by_it() {
+        for mu in [0.0f64, 0.25, 0.5, 1.0, 1.5, 2.0] {
+            let c = GraspContact3 { pos: Vector3::new(1.0, 0.0, 0.0), normal: -Vector3::x(), mu, mu_torsion: 0.7 };
+            let n = c.normal.normalize();
+            let ws = primitive_wrenches_spatial(std::slice::from_ref(&c), 24);
+            let expected = 1.0 / (1.0 + mu * mu).sqrt();
+
+            for w in &ws {
+                let f = Vector3::new(w[0], w[1], w[2]);
+                if f.norm() < 1e-12 {
+                    // a torsional generator: pure moment about the normal, magnitude mu_torsion * f.n
+                    let m = Vector3::new(w[3], w[4], w[5]);
+                    assert!(
+                        (m.norm() - 0.7 * expected).abs() < 1e-12,
+                        "mu={mu}: torsional generator is {} but the normal force available is {expected}, so it must be {}",
+                        m.norm(),
+                        0.7 * expected
+                    );
+                    assert!(m.cross(&n).norm() < 1e-12, "the torsional moment must lie along the normal");
+                } else {
+                    assert!((f.norm() - 1.0).abs() < 1e-12, "cone-edge forces are unit magnitude by convention");
+                    assert!(
+                        (f.dot(&n) - expected).abs() < 1e-12,
+                        "mu={mu}: cone-edge normal force is {} not the claimed 1.0 (expected {expected})",
+                        f.dot(&n)
+                    );
+                }
+            }
+        }
+    }
+
+    /// **The sweep that catches it — past the point where torsion BINDS.**
+    ///
+    /// `Q1` is exactly flat in `mu_torsion` until torsion becomes the binding constraint, so a sweep that stays below
+    /// the threshold reports "no change" no matter how wrong the generator is. That is how the mixed convention
+    /// survived: a probe over `mu_torsion` in `{0.1, 0.3}` found ratio 1.0000 in twelve cases. This test asserts the
+    /// fixture is past the threshold FIRST, then asserts the value.
+    #[test]
+    fn q1_responds_to_the_torsional_scaling_once_torsion_actually_binds() {
+        // non-coplanar so Q1 is not identically zero, matching examples/soft_finger_sensitivity.rs
+        let grasp = |mu: f64, mt: f64| -> Vec<GraspContact3> {
+            [
+                Vector3::new(1.0, 0.0, -0.35),
+                Vector3::new(-0.5, 0.866, -0.35),
+                Vector3::new(-0.5, -0.866, -0.35),
+                Vector3::new(0.0, 0.0, 1.0),
+            ]
+            .iter()
+            .map(|d| {
+                let p = d.normalize();
+                GraspContact3 { pos: p, normal: -p, mu, mu_torsion: mt }
+            })
+            .collect()
+        };
+
+        let (mu, mt, dirs) = (0.5f64, 1.0f64, 20_000);
+        let base = force_closure_q1_spatial(&grasp(mu, 0.0), 24, dirs);
+        let soft = force_closure_q1_spatial(&grasp(mu, mt), 24, dirs);
+
+        // 1. the fixture must be PAST the binding threshold, or the rest of this test proves nothing
+        assert!(
+            soft > base * 1.01,
+            "mu_torsion={mt} does not bind at mu={mu} (Q1 {base:.9} -> {soft:.9}); the sweep is inside the flat \
+             region and would pass against any torsional scaling"
+        );
+
+        // 2. and the VALUE must be the scaled one. Comparing Q1 at two mu_torsion values does NOT test this — Q1 rises
+        //    with generator magnitude either way, so that comparison passes against the unscaled generator too (it
+        //    did). The only discriminating assertion is the absolute value, which the two conventions separate by 10%.
+        //    This is a deterministic Kronecker sweep with no RNG, so 0.5% is a safe band and still rules the other out.
+        let f_normal = 1.0 / (1.0 + mu * mu).sqrt();
+        let scaled_expected = 0.492_818_002_608; // torsion scaled by f.n = 0.894427
+        let unscaled_would_be = 0.542_841_048_750; // torsion scaled as though f.n = 1
+        assert!(
+            (soft / scaled_expected - 1.0).abs() < 5e-3,
+            "Q1 is {soft:.12}; expected {scaled_expected:.12} with torsion scaled by f.n={f_normal:.6}. \
+             {unscaled_would_be:.12} would mean the generator is still scaled as though the normal force were 1."
+        );
+        assert!(
+            (soft / unscaled_would_be - 1.0).abs() > 5e-2,
+            "Q1 {soft:.12} is indistinguishable from the unscaled convention's {unscaled_would_be:.12}"
+        );
+        eprintln!(
+            "mu={mu} mu_torsion={mt}: Q1 {base:.9} (hard) -> {soft:.9} (torsion scaled by f.n={f_normal:.6}); \
+             the unscaled convention gives {unscaled_would_be:.9}, +{:.1}% overstated",
+            (unscaled_would_be / soft - 1.0) * 100.0
+        );
+
+        // 3. and a hard contact is untouched by the whole change
+        for m in [0.0f64, 0.3, 0.5, 1.0, 1.5] {
+            let hard: Vec<GraspContact3> =
+                grasp(m, 0.0).iter().map(|c| GraspContact3 { mu_torsion: 0.0, ..*c }).collect();
+            let ws = primitive_wrenches_spatial(&hard, 24);
+            assert!(
+                ws.iter().all(|w| Vector3::new(w[0], w[1], w[2]).norm() > 1e-12),
+                "a hard contact must emit no torsional generators at all"
+            );
+        }
     }
 
     /// **The planar reduction.** Restricting the spatial computation to `(fx, fy, mz)` recovers the planar metric

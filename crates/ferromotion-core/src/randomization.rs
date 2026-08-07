@@ -8,23 +8,29 @@
 //! **Half of that was wrong, and the measurement says so plainly.** The premise was that the regressor's null space is
 //! "model error the data could not rule out", and therefore the prize to randomise over. It is not. For inertial
 //! identification the null space is **structural**, not a consequence of which trajectories were sampled. Perturbing the
-//! estimate by a norm of `38.665` along it changes joint torques by:
+//! estimate by a norm of `38.665` along it changes joint torques by **nothing measurable**: the test asserts the worst
+//! change over every trajectory is `< 1e-6 N m`, and it lands ten orders of magnitude under that. One run's transcript,
+//! for scale:
 //!
 //! ```text
-//!   training samples          1.976e-13 N m
-//!   held out, same speeds     2.078e-13
-//!   held out, 10x faster      3.361e-12
-//!   held out, 100x faster     5.045e-10
+//!   training samples          ~1e-13 N m       (2.903e-13 on this machine, 1.976e-13 on another)
+//!   held out, same speeds     ~1e-13           (2.816e-13 / 2.078e-13)
+//!   held out, 10x faster      ~1e-12           (6.228e-12 / 3.361e-12)
+//!   held out, 100x faster     ~1e-10           (4.945e-10 / 5.045e-10)
 //! ```
 //!
-//! Nothing. Those 15 of 30 parameter directions have no observable effect on the joint torques of *any* trajectory, so
-//! randomising them buys no robustness — it perturbs coordinates the dynamics cannot see. What it would buy is wasted
-//! compute and a misleading sense of coverage.
+//! **Do not quote those mantissas as measurements.** They are numerically zero, and the digits move run to run because
+//! the 15-dimensional null space is degenerate: which basis SVD returns inside it is not unique, so the perturbation
+//! direction — and the rounding noise it drags along — differs between builds. The reproducible facts are the
+//! perturbation norm `38.665`, the enforced bound `< 1e-6 N m`, and the conclusion. Those 15 of 30 parameter directions
+//! have no observable effect on the joint torques of *any* trajectory, so randomising them buys no robustness — it
+//! perturbs coordinates the dynamics cannot see. What it would buy is wasted compute and a misleading sense of coverage.
 //!
 //! The same measurement explains something about [`identification`](crate::identify_consistent) worth stating directly:
-//! `|truth - estimate| = 1.8889` while the largest component along any *identifiable* direction is `3.109e-16`. Link 0's
-//! mass is identified as `0.0000` against a true `1.5000` and the estimate is **dynamically equivalent** for joint
-//! torques. Recovering the true inertial parameters is therefore not the goal of identification, and the reason
+//! `|truth - estimate| = 1.8889` (reproducible) while the largest component along any *identifiable* direction is at the
+//! `1e-16` level — again noise, not a figure to quote, and the test enforces `< 1e-9`. Link 0's mass is identified as
+//! `0.0000` against a true `1.5000` and the estimate is **dynamically equivalent** for joint torques. Recovering the
+//! true inertial parameters is therefore not the goal of identification, and the reason
 //! [`identify_consistent`](crate::identify_consistent) matters is not that the fit was wrong — it is that a simulator
 //! needing mass for contact, collision or energy gets nonsense from the unconstrained estimate.
 //!

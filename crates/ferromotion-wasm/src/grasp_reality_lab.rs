@@ -8,17 +8,32 @@
 //! not. A friction cone at a contact whose normal lies in the plane still contains out-of-plane directions, because
 //! the tangent `n x t1` leaves the plane. So a coplanar grasp is full rank 6 with a positive wrench ball.
 //!
-//! Which way the planar number errs turns out to depend on the arrangement rather than being a law: measured here it
-//! reads `0.92x` the spatial value at three contacts and `1.10x` at four. The lesson is that the two metrics disagree
-//! and neither is a safe proxy for the other, not that one of them is reliably optimistic. What *is* consistent is
-//! more useful: the spatial wrench ball does not improve at all as coplanar contacts are added, while the planar
-//! number wanders. Adding fingers in the same plane buys nothing in six dimensions.
+//! Which way the planar number errs depends on the arrangement rather than being a law. **Two corrections here
+//! (2026-08-06), both from the tests below rather than from this comment.**
+//!
+//! *The ratios were 64-direction values.* This used to say the planar number reads `0.92x` the spatial value at three
+//! contacts and `1.10x` at four, and concluded that it "crosses one". At the shipped `DIRS = 4096` the measured ratios
+//! are `0.639x` / `0.644x` / `0.671x` at three, four and five contacts, and they **never cross one** on this geometry.
+//! The surviving teachable point is the one that was always the point: the two metrics disagree and neither is a safe
+//! proxy for the other. The direction of the disagreement is not pinned — the test asserts only `|ratio - 1| > 0.02`.
+//!
+//! *The invariance was a sampling artifact.* This used to say "the spatial wrench ball does not improve at all as
+//! coplanar contacts are added [...] adding fingers in the same plane buys nothing in six dimensions." That is
+//! retracted, by [`tests::the_coplanar_invariance_claim_was_a_sampling_artifact`]. `Q1` is a direction-sampled UPPER
+//! bound, and the flatness was a bit-exact tie at 64 directions only: the span over 3..7 coplanar contacts is
+//! `0.00%` of `Q1` at 64 directions, `3.28%` at 4096, `1.42%` at 20000. Both numbers move — spatial `0.06388` ->
+//! `0.06512` -> `0.06580` and planar `0.04079` -> `0.04191` -> `0.04415` across three, four and five contacts.
+//! Adding coplanar fingers buys little, and "nothing" was an artifact of not sampling finely enough to see it.
 //!
 //! **Two: a grasp that is holding can already be slipping.** Coulomb friction says stuck or sliding, and a real
 //! elastic contact says neither: a stick region shrinks from the edge inward as tangential load rises
 //! ([Cattaneo-Mindlin](crate::grasp_reality_lab)), so partial slip begins long before the grasp lets go. The stick
-//! radius goes as `(1 - Q/muP)^(1/3)`, which means it has already lost a third of its area at about a third of
-//! capacity. A controller watching only for gross slip gets no warning; one watching the stick fraction gets a lot.
+//! radius goes as `(1 - Q/muP)^(1/3)`, so the **area** goes as the square of that. A third correction: this used to
+//! say the area "has already lost a third at about a third of capacity". Measured in the table below, a third of
+//! capacity costs `1 - 0.7884 = 21.2%` of the area; a third of the area is not gone until about `0.46` of capacity.
+//! The pinned number is the milder and more striking one — a **tenth** of capacity already costs `6.8%` of the patch
+//! (area `0.9322`). A controller watching only for gross slip gets no warning; one watching the stick fraction gets a
+//! lot.
 //!
 //! Everything is computed live from `ferromotion-core`'s spatial grasp module and `ferromotion-tactile`'s shear
 //! model, against the same contact set the readout describes.
@@ -145,8 +160,10 @@ impl GraspRealityLab {
     }
 
     /// **Planar quality divided by spatial quality.** Deliberately not called an overstatement: which way a planar
-    /// analysis errs depends on the arrangement, and on a coplanar sphere grasp it reads *low* (about 0.92), not high.
-    /// The finding is that the two metrics disagree and that neither is a safe proxy, not that one is optimistic.
+    /// analysis errs depends on the arrangement, and on a coplanar sphere grasp it reads *low* — `0.639` at three
+    /// contacts at the shipped `DIRS = 4096`, rising to `0.671` at five and never reaching one. (An earlier version of
+    /// this comment said "about 0.92", which was the value at 64 directions.) The finding is that the two metrics
+    /// disagree and that neither is a safe proxy, not that one is optimistic.
     pub fn planar_ratio(&self) -> f64 {
         let (p, s) = (self.q1_planar(), self.q1_spatial());
         if s > 0.0 { p / s } else { f64::INFINITY }
@@ -281,8 +298,10 @@ mod tests {
     /// tangent `n x t1` leaves the plane.
     ///
     /// This test asserts the structural facts and *reports* the planar-to-spatial ratio rather than bounding it. An
-    /// earlier version asserted the ratio exceeded one, importing a `1.5x` figure measured on a different contact set;
-    /// on this geometry it is `0.92`. The direction is a property of the arrangement, not a law.
+    /// earlier version asserted the ratio exceeded one, importing a `1.5x` figure measured on a different contact set.
+    /// On this geometry, at the shipped `DIRS = 4096`, it is `0.639` / `0.644` / `0.671` at three, four and five
+    /// contacts — the `0.92` this comment used to quote was a 64-direction value. The direction is a property of the
+    /// arrangement and of the sampling density, not a law, which is why only `|ratio - 1| > 0.02` is asserted.
     #[test]
     fn coplanar_contacts_are_full_rank_with_a_positive_wrench_ball() {
         let mut lab = GraspRealityLab::new();
