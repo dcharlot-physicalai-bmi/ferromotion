@@ -5,8 +5,8 @@
     "author": "reference",
     "kind": "structured",
     "energy_drift": 0.0007495783113537119,
-    "reversibility": 1.450129885202618e-14,
-    "one_step_rmse": 0.00004630869010179924,
+    "reversibility": 2.896602509665974e-14,
+    "one_step_rmse": 0.00004630869010179975,
     "pass": true
   },
   {
@@ -16,7 +16,7 @@
     "kind": "structured",
     "energy_drift": 0.026380449769000988,
     "reversibility": 0.0019476323078589728,
-    "one_step_rmse": 0.003442970844554814,
+    "one_step_rmse": 0.003442970844554817,
     "pass": true
   },
   {
@@ -25,7 +25,7 @@
     "author": "reference (trained)",
     "kind": "learned",
     "energy_drift": 0.0287912939451381,
-    "reversibility": 0.03504392432953427,
+    "reversibility": 0.03504392432952004,
     "one_step_rmse": 0.0036843058137077537,
     "pass": true
   },
@@ -36,7 +36,7 @@
     "kind": "wrong invariant",
     "energy_drift": 0.308261010837355,
     "reversibility": 2.4054785392221323,
-    "one_step_rmse": 0.0040242899150547224,
+    "one_step_rmse": 0.004024289915054727,
     "pass": false
   },
   {
@@ -44,9 +44,9 @@
     "name": "explicit-euler",
     "author": "reference",
     "kind": "no structure",
-    "energy_drift": 0.598104340359734,
-    "reversibility": 13.428799510145224,
-    "one_step_rmse": 0.0034423921084338195,
+    "energy_drift": 0.5981043403597338,
+    "reversibility": 13.428799510145225,
+    "one_step_rmse": 0.003442392108433823,
     "pass": false
   },
   {
@@ -56,7 +56,7 @@
     "kind": "learned",
     "energy_drift": 85.50717129008139,
     "reversibility": 64.44985555868709,
-    "one_step_rmse": 0.026632915623953632,
+    "one_step_rmse": 0.026632915623953625,
     "pass": false
   }
 ]
