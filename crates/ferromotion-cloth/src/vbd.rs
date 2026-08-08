@@ -225,6 +225,29 @@ impl VbdSolver {
 /// than by making the block enormous. The effective force on a constraint with extension `C` becomes
 /// `lambda + penalty * C`, and `lambda` is updated after each step.
 #[derive(Clone, Debug)]
+///
+/// **The penalty is not a free knob (measured 2026-08-06).** `step` builds each vertex block with `penalty` in place of
+/// the spring's true stiffness, so the penalty IS the stiffness the Newton step sees. Choose it too small and the block
+/// is far softer than the constraint it must enforce, and the solve blows up — while staying finite, which is how this
+/// went unnoticed. On a uniform-stiffness 10-link chain of `0.1 m` links (rest total `1.0 m`), 4 sweeps, 200 steps:
+///
+/// ```text
+///   stiffness   penalty   penalty/stiffness   max extent      verdict
+///        1e7       1e2               1e-5     23192.7883 m    finite, and 23 km of it
+///        1e7       1e4               1e-3       373.2868 m    diverged
+///        1e7       1e6               1e-1         6.0075 m    diverged
+///        1e7       1e8                1e1         1.9845 m    usable
+///        1e4       1e2               1e-2        29.4211 m    diverged
+///        1e4       1e4                1e0         1.3283 m    usable
+/// ```
+///
+/// Bisected, the usable threshold is a RATIO, rising slowly with stiffness: `penalty/stiffness` of about `0.02` at
+/// `k = 1e2`, `0.06` at `1e4`, `0.13` at `1e7`. So: **pick the penalty on the order of the largest stiffness present**,
+/// and check the resulting EXTENT rather than only that the numbers are finite.
+///
+/// The mixed fixture this module tests (`1e7` / `1e2` alternating, penalty `1e4`) is fine despite a `1e-3` ratio against
+/// its stiff links, because the soft links leave the chain compliant enough to satisfy them. The threshold is therefore
+/// a property of the configuration, not of the ratio alone. See `examples/avbd_penalty_threshold.rs`.
 pub struct AugmentedVbd {
     pub solver: VbdSolver,
     /// One multiplier per spring.
@@ -483,6 +506,132 @@ mod tests {
         );
     }
 
+    /// **The projection actually produces a positive semi-definite block, in every regime.**
+    ///
+    /// This is the module's central claim and nothing checked it. "Projected to PSD" is asserted in the header; here
+    /// the eigenvalues are computed. Three regimes matter: extension (`||d|| > rest`, transverse term positive),
+    /// compression (`||d|| < rest`, the term the clamp exists for), and exact rest length.
+    #[test]
+    fn the_projected_hessian_is_psd_in_compression_extension_and_at_rest() {
+        let (k, rest) = (1.0e4f64, 1.0f64);
+        let mut saw_clamped = false;
+        let mut saw_unclamped = false;
+        for len in [0.05f64, 0.25, 0.5, 0.9, 0.999, 1.0, 1.001, 1.5, 3.0] {
+            let (xi, xj) = (Vector3::new(len, 0.0, 0.0), Vector3::zeros());
+            let h = spring_hessian_psd(xi, xj, rest, k);
+            assert!((h - h.transpose()).norm() < 1e-9, "len={len}: the block must be symmetric");
+            let eig = h.symmetric_eigenvalues();
+            let min = eig.iter().fold(f64::INFINITY, |a, b| a.min(*b));
+            assert!(min >= -1e-9, "len={len}: eigenvalue {min:.6e} is negative, so the block is NOT PSD");
+
+            // the longitudinal eigenvalue is the stiffness itself, in every regime
+            let max = eig.iter().fold(f64::NEG_INFINITY, |a, b| a.max(*b));
+            assert!((max - k).abs() < 1e-6 * k, "len={len}: longitudinal eigenvalue {max:.6e} should be the stiffness");
+
+            // and the clamp must actually be doing something in compression: two zero eigenvalues there
+            let zeros = eig.iter().filter(|e| e.abs() < 1e-6 * k).count();
+            if len < rest {
+                assert_eq!(zeros, 2, "len={len} is compression, so the clamp must zero both transverse directions");
+                saw_clamped = true;
+            } else if len > rest {
+                assert_eq!(zeros, 0, "len={len} is extension, so no direction should be clamped");
+                saw_unclamped = true;
+            }
+        }
+        assert!(saw_clamped && saw_unclamped, "the sweep must exercise both sides of the rest length");
+
+        // The degenerate branch is a FALLBACK, not a limit. As ||d|| -> 0 the transverse coefficient tends to
+        // -infinity (clamped to 0) and d_hat is undefined, so k*I is a choice. Pin it as such, and pin that the
+        // gradient goes to zero there rather than to something enormous.
+        let h0 = spring_hessian_psd(Vector3::new(1e-14, 0.0, 0.0), Vector3::zeros(), rest, k);
+        assert_eq!(h0, Matrix3::identity() * k, "the coincident-vertex fallback is k*I by choice, not by derivation");
+        assert_eq!(
+            spring_gradient(Vector3::new(1e-14, 0.0, 0.0), Vector3::zeros(), rest, k),
+            Vector3::zeros(),
+            "and the gradient is zeroed on the same branch"
+        );
+    }
+
+    /// **`objective` is the quantity `residual` is the gradient of, so it must fall as sweeps rise.**
+    ///
+    /// `VbdSolver::objective` is public and, before this, had no caller and no test anywhere in the workspace. It is
+    /// also the natural thing to reach for when showing that a solver converges ("plot the energy going down"), and
+    /// nothing would have caught a sign or a mass-weighting error in it.
+    #[test]
+    fn the_variational_objective_falls_as_sweeps_rise() {
+        let (mut verts0, springs) = hanging_chain(8, 0.1, 0.05, 1e4);
+        let base = VbdSolver::new(1.0 / 60.0, 1).unwrap();
+        let y = base.inertial_positions(&verts0);
+
+        // the objective at the starting point, for scale
+        let x0: Vec<Vector3<f64>> = verts0.iter().map(|v| v.position).collect();
+        let e_start = base.objective(&x0, &y, &verts0, &springs);
+        assert!(e_start.is_finite() && e_start > 0.0, "the fixture must start away from the minimum: {e_start}");
+
+        let mut last_e = f64::INFINITY;
+        let mut last_r = f64::INFINITY;
+        for iters in [1usize, 2, 4, 8, 16, 64, 256] {
+            let solver = VbdSolver::new(1.0 / 60.0, iters).unwrap();
+            let mut verts = verts0.clone();
+            solver.step(&mut verts, &springs);
+            let x: Vec<Vector3<f64>> = verts.iter().map(|v| v.position).collect();
+            let e = solver.objective(&x, &y, &verts, &springs);
+            let r = solver.residual(&x, &y, &verts, &springs);
+            eprintln!("  {iters:>4} sweeps: objective {e:.9e}   residual {r:.4e}");
+            assert!(e.is_finite(), "{iters} sweeps: objective went non-finite");
+            assert!(e <= last_e * (1.0 + 1e-9), "{iters} sweeps: objective ROSE, {last_e:.9e} -> {e:.9e}");
+            assert!(r <= last_r * (1.0 + 1e-9), "{iters} sweeps: residual rose, {last_r:.4e} -> {r:.4e}");
+            last_e = e;
+            last_r = r;
+        }
+        assert!(last_e < e_start, "more sweeps must beat the starting point: {last_e:.6e} vs {e_start:.6e}");
+        // and NaN in must give NaN out, same contract as residual
+        verts0[3].position = Vector3::new(f64::NAN, 0.0, 0.0);
+        let xn: Vec<Vector3<f64>> = verts0.iter().map(|v| v.position).collect();
+        assert!(base.objective(&xn, &y, &verts0, &springs).is_nan(), "a non-finite state must not report a finite energy");
+    }
+
+    /// **Does the AVBD multiplier clamp bind, and what is it worth?**
+    ///
+    /// The clamp is `+/- stiffness * rest` and no test exercised it, so a snippet choosing a large penalty could trip
+    /// it with nothing to say so. This reports whether it binds on the stiff fixture and pins that the multipliers
+    /// stay inside their bound and finite.
+    #[test]
+    fn the_avbd_multipliers_stay_inside_their_clamp() {
+        let (verts0, springs) = hanging_chain(10, 0.1, 0.05, 1e7);
+        let solver = VbdSolver::new(1.0 / 60.0, 4).unwrap();
+        for penalty in [1e2f64, 1e4, 1e8] {
+            let mut avbd = AugmentedVbd::new(solver, springs.len(), penalty).unwrap();
+            let mut verts = verts0.clone();
+            for _ in 0..200 {
+                avbd.step(&mut verts, &springs);
+            }
+            let mut at_bound = 0usize;
+            for (si, s) in springs.iter().enumerate() {
+                let bound = s.stiffness * s.rest;
+                let m = avbd.multipliers[si];
+                assert!(m.is_finite(), "penalty {penalty:.0e}: multiplier {si} is not finite");
+                assert!(m.abs() <= bound * (1.0 + 1e-12), "penalty {penalty:.0e}: multiplier {m} escaped +/-{bound}");
+                if m.abs() >= bound * (1.0 - 1e-9) {
+                    at_bound += 1;
+                }
+            }
+            let ext = max_extent(&verts);
+            eprintln!("  penalty {penalty:>7.0e}: {at_bound} of {} multipliers at the clamp, max extent {ext:.4} m", springs.len());
+            assert!(ext.is_finite(), "penalty {penalty:.0e}: the solve went non-finite");
+
+            // Finiteness is NOT the bar. The first version of this test asserted only is_finite() and passed on
+            // 23192.7883 m of finite, on a chain whose rest total is 1.0 m. Assert the physical bound, and assert
+            // that an under-sized penalty really does fail it, so the rule is measured rather than assumed.
+            let rest_total = 10.0 * 0.1;
+            if penalty / 1e7 >= 1.0 {
+                assert!(ext <= 3.0 * rest_total, "penalty {penalty:.0e} is adequate, so the chain must stay physical: {ext:.4} m");
+            } else {
+                assert!(ext > 3.0 * rest_total, "penalty {penalty:.0e} is 1e7/{:.0e} of the stiffness and should DIVERGE; if this now passes, the threshold moved and the doc table is stale", 1e7 / penalty);
+            }
+        }
+    }
+
     /// **A diverged solve must not report a residual of zero.**
     ///
     /// `residual` folded with `.fold(0.0, f64::max)`, and `f64::max` returns the non-NaN argument, so a state full of
@@ -521,8 +670,15 @@ mod tests {
             "a non-finite state must give a non-finite residual, got {poisoned} (0.0 would read as converged)"
         );
 
-        // and the whole point: it must not look better than the healthy state
-        assert!(!(poisoned < clean), "a diverged residual must never compare as smaller than a healthy one");
+        // And the whole point: it must not look BETTER than the healthy state. Stating it as a partial-order
+        // comparison, so the NaN case is explicit rather than riding on `!(NaN < x)` being true by accident:
+        // an unordered result is the correct answer here, and a `Less` would be the bug.
+        assert_ne!(
+            poisoned.partial_cmp(&clean),
+            Some(std::cmp::Ordering::Less),
+            "a diverged residual ({poisoned}) must never order below a healthy one ({clean:.4e}); before the fix it \
+             was 0.0, which ordered below every real residual and read as perfect convergence"
+        );
         eprintln!("residual: healthy {clean:.4e} N, one NaN vertex -> {poisoned} (was 0.0 before the fix)");
     }
 }
