@@ -108,6 +108,12 @@ impl SmootherLab {
 
 const TAU: f64 = std::f64::consts::TAU;
 
+impl Default for SmootherLab {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

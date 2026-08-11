@@ -12,3 +12,6 @@ description = "Electrical-network dynamics (Modified Nodal Analysis) as a conser
 
 [dependencies]
 nalgebra.workspace = true
+
+[lints]
+workspace = true

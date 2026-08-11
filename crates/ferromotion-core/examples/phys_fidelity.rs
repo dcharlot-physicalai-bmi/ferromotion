@@ -96,7 +96,7 @@ fn so101_energy(robot: &Robot, inertia: &[LinkInertia], q: &[f64], qd: &[f64]) -
     ke + pe
 }
 fn so101_step(robot: &Robot, inertia: &[LinkInertia], q: &mut Vec<f64>, qd: &mut Vec<f64>, dt: f64, symplectic: bool) {
-    let qdd_link = forward_dynamics(robot, inertia, q, qd, &vec![0.0; 5], Vector3::new(0.0, 0.0, -G));
+    let qdd_link = forward_dynamics(robot, inertia, q, qd, &[0.0; 5], Vector3::new(0.0, 0.0, -G));
     let m = mass_matrix(robot, inertia, q);
     let mut ma = m.clone(); for i in 0..5 { ma[(i, i)] += ARM; }
     let qdd = ma.cholesky().unwrap().solve(&(&m * DVector::from_row_slice(&qdd_link)));
@@ -127,9 +127,9 @@ fn contact_probe() {
         for k in 0..8000u32 {
             vz -= dt * g; z += dt * vz;
             match mode {
-                0 => { if z < r { z = r; vz = -e * vz; } }   // PHYSICS: restitution + non-penetration clamp
+                0 => { if z < r { z = r; vz *= -e; } }   // PHYSICS: restitution + non-penetration clamp
                 1 => { z += 1.0e-3 * noise(k + 1); }          // learned continuation: no contact event → sinks through
-                2 => { if z < r { z = r; vz = -1.1 * vz; } }  // hallucinated bounce: e>1 → creates energy
+                2 if z < r => { z = r; vz *= -1.1; }  // hallucinated bounce: e>1 → creates energy
                 _ => {}
             }
             pen = pen.max(r - z);
@@ -191,7 +191,8 @@ fn friction_probe() {
     let below = 15.0f64.to_radians(); let above = 40.0f64.to_radians(); // cone angle atan(0.5)=26.6°
     let eval = |mode: u8| -> (f64, f64) {
         let (mut s, mut v) = (0.0f64, 0.0f64); let slides_b = below.tan() > mu;
-        for k in 0..3000u32 { let a = accel_incline(mode, below, mu, g, slides_b); v += dt * a; if mode == 0 && !slides_b { v = 0.0; } if mode == 2 { v += 1.0e-3 * noise(k + 1); } s += dt * v; }
+        for k in 0..3000u32 { let a = accel_incline(mode, below, mu, g, slides_b); v += dt * a; if mode == 0 && !slides_b { v = 0.0; }
+        if mode == 2 { v += 1.0e-3 * noise(k + 1); } s += dt * v; }
         let rest_disp = s.abs();
         let a_true = g * (above.sin() - mu * above.cos());
         let (mut s2, mut v2) = (0.0f64, 0.0f64); let slides_a = above.tan() > mu;

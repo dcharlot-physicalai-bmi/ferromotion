@@ -247,7 +247,7 @@ mod verification {
 
     /// Ground-truth projection of a world point into normalized image coordinates (CV frame, +z fwd).
     fn project(cam: &DepthCamera, p: &Vector3<f64>) -> (f64, f64, f64) {
-        let pc = cam.pose.inverse_transform_point(&p.clone().into());
+        let pc = cam.pose.inverse_transform_point(&(*p).into());
         (pc.x / pc.z, pc.y / pc.z, pc.z)
     }
 

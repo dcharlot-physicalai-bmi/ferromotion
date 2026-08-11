@@ -99,6 +99,12 @@ impl CableLab {
     }
 }
 
+impl Default for CableLab {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

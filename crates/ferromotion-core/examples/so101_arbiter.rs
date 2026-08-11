@@ -174,9 +174,11 @@ fn main() {
         let (mut crash, mut death, mut rec, mut n) = (0, 0, 0, 0);
         for (ei, env) in envs.iter().enumerate() {
             for ep in 0..14 {
-                let seed = (ei as u32 * 131 + ep * 7 + 1) as u32;
+                let seed = ei as u32 * 131 + ep * 7 + 1;
                 let (c, d, r) = episode(&robot, &inertia, &task, arb, env, seed);
-                n += 1; if c { crash += 1; } if d { death += 1; } if r { rec += 1; }
+                n += 1; if c { crash += 1; }
+                if d { death += 1; }
+                if r { rec += 1; }
             }
         }
         println!("  {label}");

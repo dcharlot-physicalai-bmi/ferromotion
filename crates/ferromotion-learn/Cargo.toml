@@ -13,3 +13,6 @@ description = "Differentiable physics-informed learning for ferromotion — reve
 [dependencies]
 ferromotion-core = { path = "../ferromotion-core", version = "0.55.0" }
 nalgebra.workspace = true
+
+[lints]
+workspace = true

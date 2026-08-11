@@ -516,7 +516,7 @@ mod tests {
         // perturbation that stays collision-free — require the cost not to drop below equilibrium.
         let base = game.player_cost(0, &res.controls[0]);
         let fixed_b = &res.states[1];
-        let mut rng = Lcg(0xC0FFEE_1234_5678);
+        let mut rng = Lcg(0x00C0_FFEE_1234_5678);
         let mut feasible_tested = 0;
         for _ in 0..80 {
             let mut pert = res.controls[0].clone();

@@ -131,7 +131,8 @@ fn main() {
     for (idx, (label, aware)) in [("NAIVE retreat (straight to safe home)", false), ("CONFLICT-AWARE retreat (ascend composite clearance, then home)", true)].iter().enumerate() {
         for (q, qd) in &region {
             let (w, h) = retreat(&robot, &inertia, q, qd, &q0, *aware);
-            worst[idx] = worst[idx].min(w); if w < 0.0 { hole[idx] += 1; } if h { homed_c[idx] += 1; }
+            worst[idx] = worst[idx].min(w); if w < 0.0 { hole[idx] += 1; }
+            if h { homed_c[idx] += 1; }
         }
         println!("  {label}");
         println!("     worst min-barrier over R: {:.4} m   barrier violations (trap holes): {}/{}   reached home: {}/{}\n", worst[idx], hole[idx], region.len(), homed_c[idx], region.len());

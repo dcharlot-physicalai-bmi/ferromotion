@@ -223,7 +223,7 @@ mod verification {
             l.set_velocity(|x, y| (u0 * (k * x).sin() * (k * y).cos(), -u0 * (k * x).cos() * (k * y).sin()));
             let nu = l.nu();
             // decay to ~60% amplitude
-            let t_end = (0.5f64.ln() * -1.0) / (2.0 * nu * k * k);
+            let t_end = -0.5f64.ln() / (2.0 * nu * k * k);
             let steps = t_end.round() as usize;
             for _ in 0..steps {
                 l.step();

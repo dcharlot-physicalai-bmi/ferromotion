@@ -147,6 +147,12 @@ impl RmpLab {
     }
 }
 
+impl Default for RmpLab {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

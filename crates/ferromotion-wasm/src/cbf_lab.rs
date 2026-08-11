@@ -125,6 +125,12 @@ impl CbfLab {
     }
 }
 
+impl Default for CbfLab {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -85,7 +85,7 @@ fn nagumo(robot: &Robot, inertia: &[LinkInertia], b: &dyn Fn(&Robot, &[f64]) -> 
         lb_max = lb_max.max((g.iter().map(|x| x * x).sum::<f64>()).sqrt());
         // from REST (Ḃ(0)=0), one real step under the recover command → Ḃ = a↑·DT, so a↑ = Ḃ(1)/DT.
         let cmd = recover_target(q);
-        let (q2, qd2) = step_from(robot, inertia, q, &vec![0.0; 5], &cmd, env);
+        let (q2, qd2) = step_from(robot, inertia, q, &[0.0; 5], &cmd, env);
         let g2 = grad(robot, b, &q2);
         let a_up = g2.iter().zip(&qd2).map(|(a, b)| a * b).sum::<f64>() / DT;
         a_min = a_min.min(a_up);

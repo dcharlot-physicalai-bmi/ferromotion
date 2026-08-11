@@ -107,7 +107,11 @@ impl Hinf {
             || c.ncols() != n
             || d.nrows() != c.nrows()
             || d.ncols() != b2.ncols()
-            || !(gamma > 0.0)
+            // NOT `gamma <= 0.0`: that lets NaN through, because every comparison with NaN is false. The
+            // negated form rejects NaN as well as non-positive, which is the intent — clippy's
+            // neg_cmp_op_on_partial_ord suggestion would open a hole here, so state it explicitly instead.
+            || !gamma.is_finite()
+            || gamma <= 0.0
         {
             return None;
         }

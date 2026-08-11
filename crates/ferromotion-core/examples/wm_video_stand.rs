@@ -31,7 +31,7 @@ fn simulate(g: f64, e: f64, floor: bool, n: usize) -> Vec<(f64, f64)> {
     for _ in 0..n {
         tr.push((x, y));
         vy -= g * DT; x += vx * DT; y += vy * DT;
-        if floor && y < FLOOR { y = FLOOR; vy = -e * vy; } // reflect at the ledge
+        if floor && y < FLOOR { y = FLOOR; vy *= -e; } // reflect at the ledge
     }
     tr
 }
@@ -98,7 +98,7 @@ fn score(traj: &[(f64, f64)], mass: &[f64]) -> Score {
     let mut bounces: Vec<usize> = Vec::new();
     for i in 2..n - 2 {
         if ys[i] <= ys[i - 1] && ys[i] < ys[i + 1] && ys[i] < FLOOR + 0.6
-            && bounces.last().map_or(true, |&l| i - l > 5) { bounces.push(i); }
+            && bounces.last().is_none_or(|&l| i - l > 5) { bounces.push(i); }
     }
     // gravity: fit the initial free-flight drop [1, first bounce] → accel = 2c, g = -2c
     let end = bounces.first().copied().unwrap_or(n - 2).max(5).min(n - 2);

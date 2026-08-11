@@ -104,6 +104,14 @@ pub fn from_urdf_full(xml: &str, base: &str, tip: &str) -> Result<(Robot, Vec<Li
     Ok((Robot { joints, ee_offset: pre }, inertias))
 }
 
+// --- shared with `kinematic_tree`, so the tree loader reads inertia with the SAME code the serial loader uses.
+// `transform_inertia` and `combine_inertia` are already `pub(crate)` in `dynamics`, so the fixed-joint welding is
+// literally shared; the agreement test in that module compares the two loaders and would be meaningless otherwise.
+
+pub(crate) fn link_inertia_for(robot: &urdf_rs::Robot, link: &str) -> LinkInertia {
+    link_inertia(robot, link)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,14 +188,6 @@ mod tests {
         assert!(res.converged, "did not converge: err={} iters={}", res.error, res.iters);
         assert!(pose_error(&r.fk(&res.q), &target).norm() < 1e-4);
     }
-}
-
-// --- shared with `kinematic_tree`, so the tree loader reads inertia with the SAME code the serial loader uses.
-// `transform_inertia` and `combine_inertia` are already `pub(crate)` in `dynamics`, so the fixed-joint welding is
-// literally shared; the agreement test in that module compares the two loaders and would be meaningless otherwise.
-
-pub(crate) fn link_inertia_for(robot: &urdf_rs::Robot, link: &str) -> LinkInertia {
-    link_inertia(robot, link)
 }
 
 

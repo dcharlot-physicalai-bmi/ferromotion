@@ -114,6 +114,12 @@ impl GraspLab {
     }
 }
 
+impl Default for GraspLab {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

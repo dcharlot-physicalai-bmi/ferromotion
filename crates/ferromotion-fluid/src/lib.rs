@@ -722,7 +722,6 @@ fn phi_prime(r: f64) -> f64 {
     dphi_da * s
 }
 
-/// Linear interpolation of a monotone-in-`x` `(x, y)` table.
 // ---------------------------------------------------------------------------------------------
 // Verification suite — the benchmarks that turn a demo into a citable solver (Honest Fluids
 // stage 1): Taylor–Green decay vs the analytic solution with MEASURED convergence order, the
@@ -858,6 +857,7 @@ mod verification {
     }
 }
 
+/// Linear interpolation of a monotone-in-`x` `(x, y)` table.
 #[cfg(test)]
 fn interp(table: &[(f64, f64)], x: f64) -> f64 {
     if x <= table[0].0 {

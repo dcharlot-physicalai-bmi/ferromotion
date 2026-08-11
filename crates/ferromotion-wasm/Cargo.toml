@@ -27,3 +27,6 @@ ferromotion-policy = { path = "../ferromotion-policy", version = "0.55.0" }
 ferromotion-bench = { path = "../ferromotion-bench", version = "0.55.0" }
 wasm-bindgen = "0.2"
 nalgebra.workspace = true
+
+[lints]
+workspace = true

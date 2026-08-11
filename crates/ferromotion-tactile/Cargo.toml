@@ -12,3 +12,6 @@ description = "Differentiable optical-tactile (GelSight/DIGIT) sensor simulation
 
 [dependencies]
 nalgebra.workspace = true
+
+[lints]
+workspace = true

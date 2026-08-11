@@ -12,3 +12,6 @@ description = "Discrete-element-method granular media (spring-dashpot + Coulomb 
 
 [dependencies]
 nalgebra.workspace = true
+
+[lints]
+workspace = true

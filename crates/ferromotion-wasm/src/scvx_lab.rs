@@ -117,6 +117,12 @@ impl ScvxLab {
     }
 }
 
+impl Default for ScvxLab {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

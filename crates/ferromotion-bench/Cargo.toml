@@ -12,3 +12,6 @@ ferromotion-core = { path = "../ferromotion-core" }
 ferromotion-cloth = { path = "../ferromotion-cloth" }
 ferromotion-control = { path = "../ferromotion-control" }
 nalgebra.workspace = true
+
+[lints]
+workspace = true

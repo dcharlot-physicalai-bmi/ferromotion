@@ -283,8 +283,8 @@ fn main() {
         let mut worst: f64 = 1.0;
         for k in 0..300u32 { let q = samp(500_000 + k).0;
             let m = m_hat(&mnet, &q);
-            if let Some(e) = m.symmetric_eigenvalues().iter().cloned().fold(None, |a: Option<(f64,f64)>, v| Some(match a { None => (v,v), Some((lo,hi)) => (lo.min(v), hi.max(v)) })) {
-                if e.0 > 0.0 { worst = worst.max(e.1 / e.0); } }
+            if let Some(e) = m.symmetric_eigenvalues().iter().cloned().fold(None, |a: Option<(f64,f64)>, v| Some(match a { None => (v,v), Some((lo,hi)) => (lo.min(v), hi.max(v)) }))
+                && e.0 > 0.0 { worst = worst.max(e.1 / e.0); }
         }
         println!("  learned-metric worst condition number over sampled states: {:.1} (eps = {:.0e})", worst, epsm());
     }

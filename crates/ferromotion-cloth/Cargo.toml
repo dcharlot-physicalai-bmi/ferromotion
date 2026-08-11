@@ -12,3 +12,6 @@ description = "Differentiable FEM thin-shell cloth (StVK membrane + bending) for
 
 [dependencies]
 nalgebra.workspace = true
+
+[lints]
+workspace = true

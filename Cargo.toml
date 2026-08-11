@@ -2,6 +2,26 @@
 resolver = "3"
 members = ["crates/ferromotion", "crates/ferromotion-core", "crates/ferromotion-ruckig", "crates/ferromotion-wasm", "crates/ferromotion-control", "crates/ferromotion-policy", "crates/ferromotion-fluid", "crates/ferromotion-mpm", "crates/ferromotion-cloth", "crates/ferromotion-fem", "crates/ferromotion-dem", "crates/ferromotion-coupled", "crates/ferromotion-tactile", "crates/ferromotion-rod", "crates/ferromotion-circuit", "crates/ferromotion-learn", "crates/ferromotion-viz", "crates/ferromotion-bench"]
 
+# Lints allowed workspace-wide, each with the reason it does not apply here. Everything NOT listed stays a warning.
+#
+# The count these four suppress was measured before adding them: 50 + 12 + 11 + 3 of 96. What remains after this is
+# `clippy::ptr_arg` (20 sites, `&mut Vec` where `&mut [_]` would do). That one is a real improvement and is left
+# VISIBLE deliberately: it changes public signatures, so it is a single semver decision rather than a cleanup.
+[workspace.lints.clippy]
+# Dynamics, RNEA and matrix code indexes several arrays by the same loop variable. `for i in 0..n { m[(i, j)] = a[i] }`
+# is the form the equations are written in; the iterator rewrite needs zips and enumerates that obscure which index is
+# which, and this is exactly the code where an index slip is hardest to notice.
+needless_range_loop = "allow"
+# A physics call genuinely takes the robot, the inertia set, q, qd, qdd and gravity. Bundling them into a struct to
+# satisfy a count of seven hides which quantities a function reads.
+too_many_arguments = "allow"
+# The complex types are things like `(Robot, Vec<LinkInertia>)` and closure-returning env builders. A type alias would
+# name them once and then hide the shape at every call site, where the shape is the useful part.
+type_complexity = "allow"
+# `V3::add`/`sub` and `M3::add` are inherent methods on small fixed-size helpers in `gendyn`. Implementing `std::ops`
+# for a generic `T` there needs bounds that complicate the type for no gain at the call sites.
+should_implement_trait = "allow"
+
 [workspace.package]
 version = "0.55.0"
 edition = "2024"

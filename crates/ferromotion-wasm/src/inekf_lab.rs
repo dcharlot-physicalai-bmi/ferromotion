@@ -122,6 +122,12 @@ impl InekfLab {
     }
 }
 
+impl Default for InekfLab {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

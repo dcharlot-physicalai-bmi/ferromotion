@@ -109,9 +109,9 @@ mod tests {
         let robot = Robot {
             joints: vec![
                 crate::Joint::revolute(Isometry3::identity(), Vector3::z()),
-                crate::Joint::revolute(Isometry3::from_parts(Translation3::new(1.0, 0.0, 0.0).into(), nalgebra::UnitQuaternion::identity()), Vector3::z()),
+                crate::Joint::revolute(Isometry3::from_parts(Translation3::new(1.0, 0.0, 0.0), nalgebra::UnitQuaternion::identity()), Vector3::z()),
             ],
-            ee_offset: Isometry3::from_parts(Translation3::new(0.7, 0.0, 0.0).into(), nalgebra::UnitQuaternion::identity()),
+            ee_offset: Isometry3::from_parts(Translation3::new(0.7, 0.0, 0.0), nalgebra::UnitQuaternion::identity()),
         };
         let q = [0.3, 0.15]; // elbow nearly straight ⇒ low manipulability
         let g = manipulability_gradient(&robot, &q);

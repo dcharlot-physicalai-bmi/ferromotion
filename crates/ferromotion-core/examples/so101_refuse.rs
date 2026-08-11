@@ -156,7 +156,8 @@ fn main() {
             for ep in 0..12u32 {
                 let seed = n as u32 * 17 + ep + 1;
                 let (s, r, d) = episode(&robot, &inertia, &task, &q_bad, &q0, &q_lim, fence, refuse, env, seed);
-                if s { strk += 1; } if r { rec += 1; } deepest = deepest.max(d); n += 1;
+                if s { strk += 1; }
+                if r { rec += 1; } deepest = deepest.max(d); n += 1;
             }
         }
         println!("  {label}");

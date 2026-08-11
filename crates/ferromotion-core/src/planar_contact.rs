@@ -129,7 +129,7 @@ mod tests {
         let (target_x, n_seg, horizon, dt, g) = (0.4, 4usize, 40usize, 0.01, 9.81);
 
         // Deterministic LCG + Box-Muller (no `rand`).
-        let mut rng: u64 = 0xC0FFEE_1234_5678;
+        let mut rng: u64 = 0x00C0_FFEE_1234_5678;
         let mut gauss = || {
             rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             let a = (((rng >> 11) as f64) / ((1u64 << 53) as f64)).max(1e-12);

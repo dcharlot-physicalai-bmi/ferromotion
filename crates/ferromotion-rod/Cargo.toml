@@ -12,3 +12,6 @@ description = "Differentiable Discrete Elastic Rods for cables, tendons, and con
 
 [dependencies]
 nalgebra.workspace = true
+
+[lints]
+workspace = true

@@ -244,7 +244,7 @@ pub fn from_mjcf_constrained(xml: &str) -> Result<(Robot, Vec<LinkInertia>, crat
                 "slide" => JointKind::Prismatic,
                 other => return Err(format!("unsupported joint type '{other}' (hinge/slide only)")),
             };
-            let axis = j.attr("axis").map(vec3).transpose()?.unwrap_or_else(|| Vector3::z()); // MJCF default axis
+            let axis = j.attr("axis").map(vec3).transpose()?.unwrap_or_else(Vector3::z); // MJCF default axis
             let jpos = j.attr("pos").map(vec3).transpose()?.unwrap_or_else(Vector3::zeros);
             // joint frame = body frame translated to the joint's anchor point
             let origin = carry * bpose * Iso::from_parts(Translation3::from(jpos), UnitQuaternion::identity());
@@ -282,7 +282,7 @@ pub fn from_mjcf_constrained(xml: &str) -> Result<(Robot, Vec<LinkInertia>, crat
                     return Err("inertial mass on a jointless base body is outside the subset".into());
                 }
             }
-            carry = carry * bpose;
+            carry *= bpose;
         }
         body = b.child("body");
     }

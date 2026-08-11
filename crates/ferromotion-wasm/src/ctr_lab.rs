@@ -80,6 +80,12 @@ impl CtrLab {
     }
 }
 
+impl Default for CtrLab {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

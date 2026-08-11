@@ -162,7 +162,8 @@ fn main() {
     for (idx, (label, mode)) in modes.iter().enumerate() {
         for (q, qd) in &region {
             let (w, h) = retreat(&robot, &inertia, q, qd, &q0, &q_mid, *mode);
-            worst[idx] = worst[idx].min(w); if w < 0.0 { hole[idx] += 1; } if h { homed[idx] += 1; }
+            worst[idx] = worst[idx].min(w); if w < 0.0 { hole[idx] += 1; }
+            if h { homed[idx] += 1; }
         }
         println!("  {label}");
         println!("     worst min-barrier: {:+.4} m   strikes: {}/{}   reached home: {}/{}\n", worst[idx], hole[idx], region.len(), homed[idx], region.len());

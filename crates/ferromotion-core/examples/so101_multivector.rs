@@ -145,9 +145,10 @@ fn main() {
         let (mut ht, mut tb, mut sf, mut th) = (0, 0, 0, 0);
         for (ei, env) in envs.iter().enumerate() {
             for ep in 0..14 {
-                let seed = (ei as u32 * 131 + ep * 7 + 1) as u32;
+                let seed = ei as u32 * 131 + ep * 7 + 1;
                 let (s, w, r) = episode(&robot, &inertia, &task, arb, env, seed);
-                n += 1; if s { strk += 1; match w { 2 => ht += 1, 1 => tb += 1, 3 => sf += 1, 4 => th += 1, _ => {} } } if r { rec += 1; }
+                n += 1; if s { strk += 1; match w { 2 => ht += 1, 1 => tb += 1, 3 => sf += 1, 4 => th += 1, _ => {} } }
+                if r { rec += 1; }
             }
         }
         println!("  {label}");

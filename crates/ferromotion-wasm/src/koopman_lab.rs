@@ -137,6 +137,12 @@ impl KoopmanLab {
     }
 }
 
+impl Default for KoopmanLab {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

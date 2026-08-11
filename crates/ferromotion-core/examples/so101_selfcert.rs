@@ -138,7 +138,8 @@ fn main() {
             w = w.min(self_clear(&robot, &qq));
             if (0..5).all(|i| (qq[i] - q0[i]).abs() < 0.14) { home = true; break; }
         }
-        worst = worst.min(w); if w < 0.0 { strk += 1; } if home { homed += 1; } n += 1;
+        worst = worst.min(w); if w < 0.0 { strk += 1; }
+        if home { homed += 1; } n += 1;
     } }
     println!("\n  ================  SELF-COLLISION RECOVER  ================");
     println!("  over {n} adversarial fold-onto-self entries, worst envelope: self-contact strikes {strk}/{n},");

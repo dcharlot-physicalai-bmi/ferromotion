@@ -215,7 +215,8 @@ fn main() {
             }
             None => (false, false, 0),
         };
-        if pw_ex { pw_ok += 1; } if pt_ex { pt_ok += 1; }
+        if pw_ex { pw_ok += 1; }
+        if pt_ex { pt_ok += 1; }
         println!("  pose {:>2} ({:>2.0} cm under): reactive {:<7} | plan+exec WORST {:<7} | plan+exec TIGHT {:<7} ({} nodes)",
             i, (tipx(&robot, q) - X_SHELF) * 100.0,
             if react { "escape" } else { "strike" }, if pw_ex { "escape" } else { "strike" }, if pt_ex { "escape" } else { "strike" }, plen);

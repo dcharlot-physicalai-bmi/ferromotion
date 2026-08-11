@@ -9,3 +9,6 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 description = "Jerk-limited, time-optimal trajectory generation in Rust — a port of Ruckig's MIT Community S-curve. WASM-clean, no deps."
+
+[lints]
+workspace = true

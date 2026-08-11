@@ -191,11 +191,11 @@ mod verification {
             }
         }
         let mut sim = DemSim::new(grains, 3.0e4, 60.0, 0.4, 3e-4);
-        let ke_hist_start;
+        
         for _ in 0..200 {
             sim.step();
         }
-        ke_hist_start = sim.kinetic_energy();
+        let ke_hist_start = sim.kinetic_energy();
         for _ in 0..15000 {
             sim.step();
         }

@@ -173,6 +173,12 @@ impl ToppLab {
     }
 }
 
+impl Default for ToppLab {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -12,3 +12,6 @@ description = "Differentiable 2D Material Point Method (MLS-MPM) for soft/elasti
 
 [dependencies]
 nalgebra.workspace = true
+
+[lints]
+workspace = true
