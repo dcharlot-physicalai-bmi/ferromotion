@@ -95,13 +95,13 @@ fn so101_energy(robot: &Robot, inertia: &[LinkInertia], q: &[f64], qd: &[f64]) -
     }
     ke + pe
 }
-fn so101_step(robot: &Robot, inertia: &[LinkInertia], q: &mut Vec<f64>, qd: &mut Vec<f64>, dt: f64, symplectic: bool) {
+fn so101_step(robot: &Robot, inertia: &[LinkInertia], q: &mut [f64], qd: &mut [f64], dt: f64, symplectic: bool) {
     let qdd_link = forward_dynamics(robot, inertia, q, qd, &[0.0; 5], Vector3::new(0.0, 0.0, -G));
     let m = mass_matrix(robot, inertia, q);
     let mut ma = m.clone(); for i in 0..5 { ma[(i, i)] += ARM; }
     let qdd = ma.cholesky().unwrap().solve(&(&m * DVector::from_row_slice(&qdd_link)));
     if symplectic { for i in 0..5 { qd[i] += dt * qdd[i]; q[i] += dt * qd[i]; } }      // velocity, then position
-    else { let old = qd.clone(); for i in 0..5 { q[i] += dt * old[i]; qd[i] += dt * qdd[i]; } } // explicit Euler
+    else { let old = qd.to_vec(); for i in 0..5 { q[i] += dt * old[i]; qd[i] += dt * qdd[i]; } } // explicit Euler
 }
 fn so101_energy_probe(robot: &Robot, inertia: &[LinkInertia], symplectic: bool, name: &str) {
     let dt = 5.0e-4;

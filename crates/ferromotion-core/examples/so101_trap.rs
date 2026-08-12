@@ -63,7 +63,7 @@ const WORST: Env = Env { fric: 0.35, lat: 4, dead: 0.024 };
 fn servo(cmd: &[f64], q: &[f64], qd: &[f64], dead: f64) -> Vec<f64> {
     (0..5).map(|i| { let mut e = cmd[i] - q[i]; if e.abs() < dead { e = 0.0; } (KP * e - KV * qd[i]).clamp(-TAUMAX, TAUMAX) }).collect()
 }
-fn step(robot: &Robot, inertia: &[LinkInertia], q: &mut Vec<f64>, qd: &mut Vec<f64>, applied: &[f64], env: &Env) {
+fn step(robot: &Robot, inertia: &[LinkInertia], q: &mut [f64], qd: &mut [f64], applied: &[f64], env: &Env) {
     let tau_s = servo(applied, q, qd, env.dead);
     let tau: Vec<f64> = (0..5).map(|i| tau_s[i] - env.fric * qd[i] - if qd[i].abs() > 1e-3 { 0.052 * qd[i].signum() } else { 0.0 }).collect();
     let qdd_link = forward_dynamics(robot, inertia, q, qd, &tau, Vector3::new(0.0, 0.0, G));
