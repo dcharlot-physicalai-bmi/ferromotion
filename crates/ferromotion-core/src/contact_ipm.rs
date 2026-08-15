@@ -76,14 +76,60 @@ pub fn solve_frictional_ipm(m: &DMatrix<f64>, v_free: &DVector<f64>, contacts: &
     let v_next = v_free + &minv * &b * &z;
     let dvnext_dvfree = DMatrix::identity(nv, nv) + &minv * &b * &dz_dq * &bt;
     let w = &m_lcp * &z + &q;
-    let residual = z.iter().zip(w.iter()).fold(0.0f64, |m, (zi, wi)| m.max((zi * wi - kappa).abs()));
-    let feasibility = z.iter().chain(w.iter()).fold(f64::INFINITY, |m, &v| m.min(v));
+    // **Both reductions propagate `NaN` on purpose (2026-08-14).** `f64::max` and `f64::min` return the
+    // *non-`NaN`* operand by IEEE-754 `maxNum`/`minNum`, so a solve that has gone entirely non-finite used to
+    // report `residual = 0.0` — the central-path condition met exactly, per this struct's own doc — and
+    // `feasibility = +INFINITY`, i.e. maximally feasible, while `v_next` was all-`NaN`. The two numbers whose
+    // stated job is to tell a caller the solve failed were the two that could not. Reachable from
+    // `dt = 0.0` (φ/dt is non-finite) or a non-finite φ, neither of which is guarded upstream.
+    let residual = z
+        .iter()
+        .zip(w.iter())
+        .fold(0.0f64, |m, (zi, wi)| {
+            let r = (zi * wi - kappa).abs();
+            if m.is_nan() || r.is_nan() { f64::NAN } else { m.max(r) }
+        });
+    let feasibility = z
+        .iter()
+        .chain(w.iter())
+        .fold(f64::INFINITY, |m, &v| if m.is_nan() || v.is_nan() { f64::NAN } else { m.min(v) });
     FrictionalStep { v_next, dvnext_dvfree, residual, feasibility }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_health_readouts_report_a_failed_solve_instead_of_a_perfect_one() {
+        // `residual` and `feasibility` exist to tell a caller the solve did not work. With `f64::max` /
+        // `f64::min` they were the two quantities that could not: IEEE maxNum/minNum return the non-NaN
+        // operand, so an all-NaN solve read as residual 0.0 (central-path condition met exactly) and
+        // feasibility +INFINITY (maximally feasible) beside an all-NaN `v_next`.
+        let m = DMatrix::from_diagonal(&DVector::from_row_slice(&[2.0, 2.0]));
+        // A non-finite gap. Nothing upstream guards φ, and φ/dt is how it enters the LCP right-hand side.
+        let c = StFrictionContact {
+            jn: DVector::from_row_slice(&[0.0, 1.0]),
+            jt: vec![DVector::from_row_slice(&[1.0, 0.0]), DVector::from_row_slice(&[-1.0, 0.0])],
+            phi: f64::NAN,
+            mu: 0.5,
+        };
+        let v_free = DVector::from_row_slice(&[2.0, -0.0981]);
+        let s = solve_frictional_ipm(&m, &v_free, std::slice::from_ref(&c), 0.01, 1e-6);
+        assert!(s.v_next.iter().any(|v| v.is_nan()), "this fixture is supposed to produce a broken solve");
+        assert!(
+            !s.residual.is_finite(),
+            "a non-finite solve reported residual {} — the old fold returned exactly 0.0, which reads as \
+             `converged` against the doc's own contract",
+            s.residual
+        );
+        assert!(
+            !s.feasibility.is_finite() || s.feasibility <= 0.0,
+            "a non-finite solve reported feasibility {} — the old fold returned +INFINITY, i.e. maximally \
+             feasible",
+            s.feasibility
+        );
+    }
 
     #[test]
     fn ipm_friction_decelerates_a_planar_sliding_block() {

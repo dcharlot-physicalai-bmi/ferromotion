@@ -34,6 +34,41 @@ pub fn exp_so3(w: &Vector3<f64>) -> Matrix3<f64> {
 }
 
 /// `log` on SO(3): the rotation vector of a rotation matrix.
+///
+/// **Two branches, and the second one is not optional (2026-08-14).** The textbook form recovers the axis
+/// from the *antisymmetric* part, `vee(R − Rᵀ) = 2 sin θ · n̂`. That divides by `sin θ`, which vanishes at
+/// `θ = π` — and the numerator vanishes there too, because a half-turn matrix is exactly symmetric. This
+/// function used to have only that branch, so:
+///
+/// * `log_so3(diag(1, −1, −1))` returned `(0, 0, 0)`. **A half-turn read as the identity**: the largest
+///   rotation error representable was reported as no error at all, and `exp∘log` was off by `2.0`
+///   elementwise, against this module's own claim that the group laws hold. `diag(−1, −1, 1)` is exactly
+///   what the unit quaternion `(w=0, z=1)` produces, so this was reachable from any quaternion input.
+/// * just short of π it was catastrophically wrong rather than merely singular: at `θ = π − 1e-8` it
+///   returned a rotation vector of norm **2.57e8** for a rotation of `π`.
+///
+/// So above `θ = π/2` the axis comes from the *symmetric* part instead. With `K = [n̂]×`,
+/// `R = cos θ·I + sin θ·K + (1 − cos θ)·n̂ n̂ᵀ`, hence
+/// `M = ((R + Rᵀ)/2 − cos θ·I) / (1 − cos θ) = n̂ n̂ᵀ`, whose largest-diagonal column recovers `n̂`. The
+/// denominator `1 − cos θ ≥ 1` on this branch, and `tr(M) = 1` puts the largest diagonal at `≥ 1/3`, so
+/// neither division can be ill-conditioned here.
+///
+/// **The sign is the subtle part, and a lexicographic convention is wrong.** For `θ < π` the log is
+/// single-valued, so `n̂` must not be flipped: the symmetric part gives `±n̂` only, and reading the sign off
+/// `vee(R − Rᵀ)` (informative for every `θ ≠ π`) is what fixes it. Choosing "first non-zero component
+/// positive" instead is wrong on 17 of 20 sampled half-turn-ish rotations with `O(1)` error — and a sweep
+/// whose test axes all happen to have a positive leading component cannot see that.
+///
+/// At `θ = π` exactly the log genuinely *is* two-valued (`±π n̂` both exponentiate to `R`), which is a
+/// property of the chart and not something to fix; there the sign is resolved by convention so the result
+/// is at least deterministic. A trajectory passing through `θ = π` will therefore see the axis flip sign,
+/// as it must for any minimal-angle rotation-vector parameterisation.
+///
+/// **Threshold chosen by measurement, not convention.** Round-trip error `|exp(log R) − R|` was compared
+/// branch against branch over `θ ∈ [0.001, π]` and four axes: the antisymmetric form is better below
+/// ~1.2 rad, the symmetric form above it, and both sit at one to two ulp through the whole middle of the
+/// range. `cos θ < 0` (i.e. `θ > π/2`) is inside that flat region, so the switch costs nothing and lands
+/// far from both singularities. At `θ = π` the symmetric branch round-trips to `2.2e-16`.
 pub fn log_so3(r: &Matrix3<f64>) -> Vector3<f64> {
     let tr = r.trace();
     let cos = ((tr - 1.0) / 2.0).clamp(-1.0, 1.0);
@@ -41,8 +76,29 @@ pub fn log_so3(r: &Matrix3<f64>) -> Vector3<f64> {
     if theta < EPS {
         return vee3(&((r - r.transpose()) * 0.5));
     }
-    let axis = vee3(&((r - r.transpose()) * (0.5 / theta.sin())));
-    axis * theta
+    let anti = vee3(&(r - r.transpose())); // = 2 sin θ · n̂
+    if cos >= 0.0 {
+        return anti * (0.5 / theta.sin()) * theta;
+    }
+    // θ > π/2: recover n̂ from the symmetric part, which is well conditioned exactly where the
+    // antisymmetric part degenerates.
+    let m = ((r + r.transpose()) * 0.5 - Matrix3::identity() * cos) / (1.0 - cos);
+    let i = (0..3).max_by(|&a, &b| m[(a, a)].partial_cmp(&m[(b, b)]).unwrap()).unwrap();
+    let mut n = m.column(i) / m[(i, i)].max(0.0).sqrt();
+    let len = n.norm();
+    if len > 0.0 {
+        n /= len;
+    }
+    // Sign from the antisymmetric part wherever it carries information; at θ = π it is the zero vector and
+    // either sign is a correct log, so fall back to a fixed convention for determinism.
+    let d = anti.dot(&n);
+    let flip = if d.abs() > 1e-12 {
+        d < 0.0
+    } else {
+        n.iter().find(|c| c.abs() > 1e-12).is_some_and(|c| *c < 0.0)
+    };
+    let n = if flip { -n } else { n };
+    n * theta
 }
 
 /// Assemble a homogeneous pose from a rotation and a translation.
@@ -211,6 +267,60 @@ mod tests {
             assert!((back - xi).norm() < 1e-9, "log∘exp: {back} vs {xi}");
             // and exp∘log on the pose
             assert!(approx(&exp_se3(&back), &t, 1e-9), "exp∘log pose mismatch");
+        }
+    }
+
+    #[test]
+    fn log_so3_recovers_a_half_turn_instead_of_reporting_the_identity() {
+        // The regression this locks down: with only the antisymmetric-part branch, every one of these
+        // returned exactly (0,0,0) — a 180° rotation read as no rotation at all — because a half-turn
+        // matrix is exactly symmetric, so `vee(R − Rᵀ)` is the zero vector while `sin θ` is also ~0.
+        // diag(−1,−1,1) is precisely what the unit quaternion (w=0, z=1) produces, so this was reachable
+        // from any quaternion-sourced attitude.
+        for r in [
+            Matrix3::new(1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, -1.0), // π about x
+            Matrix3::new(-1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -1.0), // π about y
+            Matrix3::new(-1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0), // π about z
+        ] {
+            let w = log_so3(&r);
+            assert!((w.norm() - std::f64::consts::PI).abs() < 1e-9, "half-turn angle: {}", w.norm());
+            // At θ = π the log is genuinely two-valued (±π n̂), so assert the group law, not the sign.
+            assert!((exp_so3(&w) - r).abs().max() < 1e-9, "exp∘log on a half turn: {}", exp_so3(&w));
+        }
+    }
+
+    #[test]
+    fn log_so3_holds_up_through_the_pi_branch_and_keeps_the_axis_sign() {
+        // Two failures in one test, because they have to be checked together.
+        //
+        // 1. NEAR π the old single-branch form did not merely lose precision, it returned nonsense: at
+        //    θ = π − 1e-8 it produced a rotation vector of norm 2.57e8.
+        // 2. The obvious fix — take the axis from the symmetric part and pick the sign so the first
+        //    non-zero component is positive — is WRONG for θ < π, where the log is single-valued. It fails
+        //    with O(1) error on axes whose leading component is negative, and a sweep whose axes all have
+        //    a positive leading component cannot see it. Hence the negative-leading-component axes here.
+        let axes = [
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(-1.0, 0.0, 0.0),
+            Vector3::new(0.0, -1.0, 0.0),
+            Vector3::new(-0.3, 0.5, 0.81),
+            Vector3::new(-0.6, -0.2, 0.77),
+            Vector3::new(0.3, -0.5, 0.81),
+        ];
+        let pi = std::f64::consts::PI;
+        for a in axes {
+            let n = a.normalize();
+            for theta in [0.4, 1.0, pi / 2.0, 1.6, 2.5, 3.0, pi - 1e-4, pi - 1e-8] {
+                let w = n * theta;
+                let r = exp_so3(&w);
+                let back = log_so3(&r);
+                // strictly below π the log is single-valued, so the axis sign must be preserved exactly
+                assert!(
+                    (back - w).norm() < 1e-7,
+                    "log∘exp at θ={theta} about {n:?}: got {back:?}, want {w:?}"
+                );
+                assert!((exp_so3(&back) - r).abs().max() < 1e-7, "exp∘log at θ={theta}");
+            }
         }
     }
 

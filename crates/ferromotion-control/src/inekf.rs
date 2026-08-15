@@ -34,11 +34,12 @@ fn hat(w: Vector3<f64>) -> Matrix3<f64> {
     Matrix3::new(0.0, -w.z, w.y, w.z, 0.0, -w.x, -w.y, w.x, 0.0)
 }
 
+// Delegates to `ferromotion-core` (2026-08-14). This was a fourth private copy of the antisymmetric-part
+// log map, and so carried the same θ→π defect: an exactly-symmetric half-turn returned (0,0,0), which for an
+// error-state filter means a 180° attitude error enters the correction as NO error. See
+// `ferromotion_core::screw::log_so3` for the branch and why the sign cannot come from a lexicographic rule.
 fn log_so3(r: &Matrix3<f64>) -> Vector3<f64> {
-    let c = ((r.trace() - 1.0) / 2.0).clamp(-1.0, 1.0);
-    let t = c.acos();
-    let v = Vector3::new(r[(2, 1)] - r[(1, 2)], r[(0, 2)] - r[(2, 0)], r[(1, 0)] - r[(0, 1)]);
-    if t < 1e-9 { v * 0.5 } else { v * (t / (2.0 * t.sin())) }
+    ferromotion_core::screw_log_so3(r)
 }
 
 /// Left Jacobian of `SO(3)` (`J_l(θ) = J_r(−θ)`).

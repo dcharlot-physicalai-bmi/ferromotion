@@ -289,13 +289,23 @@ fn vv_duration(h: f64, v0: f64, v1: f64, u: f64, lim: &Limits) -> f64 {
 /// Time-optimal unsigned velocity-to-velocity profile over distance `h`: raise the cruise level as
 /// high as displacement allows (capped at vmax), by bisection.
 fn plan_vv(h: f64, v0: f64, v1: f64, lim: &Limits) -> Profile {
-    let floor = v0.max(v1);
+    let u = max_feasible_cruise(h, v0, v1, lim);
+    profile_from(v0, &vv_pieces(h, v0, v1, u, lim).expect("feasible cruise level"))
+}
+
+/// The **largest feasible cruise level**, capped at `vmax`: the upper end of the feasible interval, and
+/// therefore the cruise level of the time-optimal profile.
+///
+/// Above this, `vv_pieces` is infeasible because the accelerate and decelerate ramps alone consume more than
+/// the available displacement `h`. That boundary is the thing both bisections here need and only one of them
+/// used to have — see [`plan_vv_t`].
+fn max_feasible_cruise(h: f64, v0: f64, v1: f64, lim: &Limits) -> f64 {
     // is the full-speed profile feasible?
     if vv_pieces(h, v0, v1, lim.vmax, lim).is_some() {
-        return profile_from(v0, &vv_pieces(h, v0, v1, lim.vmax, lim).unwrap());
+        return lim.vmax;
     }
     // bisect u in (floor-ish, vmax): higher u ⇒ more displacement consumed by the ramps
-    let (mut lo, mut hi) = (floor.max(1e-9), lim.vmax);
+    let (mut lo, mut hi) = (v0.max(v1).max(1e-9), lim.vmax);
     for _ in 0..100 {
         let mid = 0.5 * (lo + hi);
         if vv_pieces(h, v0, v1, mid, lim).is_some() {
@@ -304,7 +314,7 @@ fn plan_vv(h: f64, v0: f64, v1: f64, lim: &Limits) -> Profile {
             hi = mid;
         }
     }
-    profile_from(v0, &vv_pieces(h, v0, v1, lo, lim).expect("feasible cruise level"))
+    lo
 }
 
 /// Duration-matched unsigned velocity-to-velocity profile: find the cruise level whose total
@@ -315,8 +325,23 @@ fn plan_vv_t(h: f64, v0: f64, v1: f64, t_target: f64, lim: &Limits) -> Profile {
     if t_target <= opt.duration + 1e-9 {
         return opt;
     }
+    // **Bracket on the FEASIBLE interval, not on `[1e-9, vmax]` (2026-08-14).** `vv_duration` returns
+    // `+INFINITY` above the largest feasible cruise level, and the test below reads "duration too long" as
+    // "raise `lo`" — so with `hi = vmax` every probe above that boundary pushed `lo` *into* the infeasible
+    // region. The bracket invariant was destroyed, the final `u` came out infeasible, `vv_pieces` returned
+    // `None`, and this silently fell back to `opt`: the UN-STRETCHED time-optimal profile.
+    //
+    // That fallback is the damaging part, because the caller has already committed to a synchronized segment
+    // duration. Measured on `plan_waypoints(&[[0,0], [2,0.05], [4,0.10]], …)`, where DoF 0 travels 2.0 m and
+    // sets the pace while DoF 1 travels 0.05 m: the segment is 2.396667 s and DoF 1's returned profile was
+    // 0.350724 s. `WaypointTrajectory::at` then coasts at the end velocity for the remaining 2.05 s, so DoF 1
+    // ran to 0.334893 instead of stopping at its waypoint — it overshoots and then snaps back.
+    //
+    // `hi = u_max` restores the invariant: `duration(u_max)` is `opt.duration`, which the early return above
+    // has already established is `<= t_target`, and duration rises without bound as `u → 0`.
+    let u_max = max_feasible_cruise(h, v0, v1, lim);
     // duration is monotone DEcreasing in u; find u with duration == t_target
-    let (mut lo, mut hi) = (1e-9, lim.vmax);
+    let (mut lo, mut hi) = (1e-9, u_max);
     for _ in 0..100 {
         let mid = 0.5 * (lo + hi);
         if vv_duration(h, v0, v1, mid, lim) > t_target {
@@ -517,6 +542,46 @@ mod tests {
     /// Waypoint trajectories: limits hold everywhere, every waypoint is hit exactly, position /
     /// velocity / acceleration are continuous, inner waypoints are passed WITHOUT stopping (same
     /// direction), and the whole motion beats the stop-at-every-waypoint baseline.
+    #[test]
+    fn a_short_dof_still_reaches_its_waypoint_when_a_long_dof_sets_the_pace() {
+        // `plan_vv_t` bisected on [1e-9, vmax] while `vv_duration` is +INFINITY above the largest feasible
+        // cruise level, so probes above that boundary raised `lo` INTO the infeasible region, the final `u`
+        // came out infeasible, and it silently returned the un-stretched time-optimal profile.
+        //
+        // The trigger needs one DoF whose optimal cruise level is well below its vmax, travelling alongside a
+        // DoF that sets a much longer segment duration. DoF 0 moves 2.0 m per segment; DoF 1 moves 0.05 m with
+        // vmax 2.0, so 0.05 m cannot possibly need 2.0 m/s and its optimal cruise sits far under the cap.
+        // DoF 1's profile came back 0.350724 s against a 2.396667 s segment; `at` then coasted at the end
+        // velocity for the remaining 2.05 s and ran to 0.334893 instead of stopping at 0.05.
+        let pts = vec![vec![0.0, 0.0], vec![2.0, 0.05], vec![4.0, 0.10]];
+        let lims = vec![Limits::new(1.0, 3.0, 10.0), Limits::new(2.0, 5.0, 20.0)];
+        let tr = plan_waypoints(&pts, &lims);
+
+        // The waypoint is the assertion: at the mid-time both DoFs must be AT point 1, and at the end at
+        // point 2. An overshoot-then-snap-back shows up here as a position error, not as a limit violation.
+        let mid = tr.duration / 2.0;
+        let p_mid = tr.positions(mid);
+        let p_end = tr.positions(tr.duration);
+        eprintln!("duration {:.6}  mid {:?}  end {:?}", tr.duration, p_mid, p_end);
+        assert!((p_mid[0] - 2.0).abs() < 1e-6, "DoF 0 at the waypoint: {}", p_mid[0]);
+        assert!(
+            (p_mid[1] - 0.05).abs() < 1e-6,
+            "DoF 1 overshot its waypoint: {} vs 0.05 — its profile was shorter than the segment, so `at` \
+             extrapolated at the end velocity",
+            p_mid[1]
+        );
+        assert!((p_end[0] - 4.0).abs() < 1e-6, "DoF 0 at the end: {}", p_end[0]);
+        assert!((p_end[1] - 0.10).abs() < 1e-6, "DoF 1 at the end: {}", p_end[1]);
+
+        // And the short DoF must never run past its waypoint on the way there either.
+        for k in 0..=400 {
+            let t = tr.duration * k as f64 / 400.0;
+            let p = tr.positions(t);
+            assert!(p[1] <= 0.10 + 1e-6, "DoF 1 exceeded its final waypoint at t={t}: {}", p[1]);
+            assert!(p[0] <= 4.0 + 1e-6, "DoF 0 exceeded its final waypoint at t={t}: {}", p[0]);
+        }
+    }
+
     #[test]
     fn waypoints_nonstop_within_limits_and_faster_than_stopping() {
         let lims = vec![Limits::new(1.2, 3.0, 12.0), Limits::new(0.9, 2.5, 10.0)];

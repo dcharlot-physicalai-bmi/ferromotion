@@ -120,14 +120,12 @@ mod tests {
     use super::*;
     use nalgebra::DVector;
 
+    // Delegates to `ferromotion-core` (2026-08-14). This was a private copy of the antisymmetric-part log
+    // map living inside the TEST module, which is the worst place for it: the oracle these tests measure
+    // rotation error against was itself wrong at θ→π, so a genuine preintegration defect near a half-turn
+    // would have been compared against a broken reference and could not have failed the test.
     fn log_so3(r: Matrix3<f64>) -> Vector3<f64> {
-        let c = ((r.trace() - 1.0) / 2.0).clamp(-1.0, 1.0);
-        let t = c.acos();
-        if t < 1e-9 {
-            Vector3::new(r[(2, 1)] - r[(1, 2)], r[(0, 2)] - r[(2, 0)], r[(1, 0)] - r[(0, 1)]) * 0.5
-        } else {
-            Vector3::new(r[(2, 1)] - r[(1, 2)], r[(0, 2)] - r[(2, 0)], r[(1, 0)] - r[(0, 1)]) * (t / (2.0 * t.sin()))
-        }
+        ferromotion_core::screw_log_so3(&r)
     }
 
     // A synthetic IMU stream (gyro, specific-force accel) and its ground-truth direct integration.

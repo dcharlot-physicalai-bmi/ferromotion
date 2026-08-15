@@ -109,11 +109,26 @@ impl Rod {
     }
 
     /// Relax to static equilibrium (heavy damping); returns the max residual force.
+    ///
+    /// **The reduction propagates `NaN` on purpose (2026-08-14).** This used to end in
+    /// `.fold(0.0, f64::max)`, and `f64::max` returns the *non-`NaN`* argument by IEEE-754 `maxNum` — so
+    /// `[NaN, NaN].fold(0.0, f64::max)` is `0.0`, and `0.0.is_finite()` is `true`. A rod that had diverged to
+    /// all-`NaN` therefore reported a max residual force of **exactly zero**: perfect static equilibrium, for
+    /// a rod that no longer had positions. `step` is explicit, so stretch stability needs
+    /// `dt ≪ 2/√(k_s/m)`; the README's own rod (`k_s = 200`, `m = 0.5`) has a bound near `dt = 4.5e-3`, and
+    /// at `dt = 5e-3` the state is non-finite by step 89 while the old return value read `0.0 < tol`.
+    ///
+    /// The same defect was fixed in `ferromotion-cloth::vbd` first. It is fixed here by inlining the
+    /// semantics rather than by depending on that crate: `ferromotion-rod` carries only `nalgebra` so it can
+    /// be used standalone and stays WASM-clean, and one reduction is not worth a crate edge.
     pub fn relax(&mut self, iters: usize, dt: f64) -> f64 {
         for _ in 0..iters {
             self.step(dt, 0.9);
         }
-        self.forces(&self.x).iter().map(|f| f.norm()).fold(0.0, f64::max)
+        self.forces(&self.x)
+            .iter()
+            .map(|f| f.norm())
+            .fold(0.0f64, |a, b| if a.is_nan() || b.is_nan() { f64::NAN } else { a.max(b) })
     }
 
     /// Kinetic energy.
@@ -477,6 +492,43 @@ mod tests {
         assert!(rod.x.iter().all(|p| p.iter().all(|c| c.is_finite())), "rod blew up");
         assert!(start_min < two_r, "test must start interpenetrating: {start_min} vs 2r {two_r}");
         assert!(end_min > 0.9 * two_r, "self-contact failed to separate the strands: end {end_min} vs 2r {two_r}");
+    }
+
+    #[test]
+    fn relax_reports_divergence_instead_of_reporting_convergence() {
+        // `relax` returns "the max residual force", and a caller compares it against a tolerance. With
+        // `.fold(0.0, f64::max)` a diverged rod returned exactly 0.0 — the strongest possible claim of
+        // static equilibrium — because f64::max returns the non-NaN operand. Two halves to this test:
+        // the reduction itself, and a real integration that actually diverges.
+
+        // (a) the reduction, stated directly. This is the line that was wrong.
+        let nan_max = |vs: Vec<f64>| {
+            vs.into_iter().fold(0.0f64, |a, b| if a.is_nan() || b.is_nan() { f64::NAN } else { a.max(b) })
+        };
+        assert!(nan_max(vec![f64::NAN, f64::NAN]).is_nan(), "an all-NaN maximum must not be 0.0");
+        assert!(nan_max(vec![1.0, f64::NAN, 2.0]).is_nan(), "one NaN must reach the caller");
+        assert_eq!(nan_max(vec![1.0, 3.0, 2.0]), 3.0, "the ordinary case must be unchanged");
+        assert_eq!(nan_max(vec![]), 0.0, "empty stays at the identity of a max over norms");
+        assert!([f64::NAN, f64::NAN].iter().copied().fold(0.0, f64::max) == 0.0, "the premise: f64::max hides NaN");
+
+        // (b) end to end, on the rod the README actually shows. `step` is explicit, so stretch stability
+        // needs dt ≪ 2/√(k_s/m); with k_s = 200 and m = 1e-3 that bound is 2/447 ≈ 4.5e-3, so dt = 1e-2 is
+        // past it and dt = 1e-3 is inside it. The mass matters: at m = 0.5 the bound is 0.1 and dt = 1e-2 is
+        // perfectly stable, which is how a first version of this test failed to diverge at all.
+        let mut rod = Rod::straight(20, 1.0, 0.001, 200.0, 0.5, Vector3::new(0.0, 0.0, -9.81));
+        let residual = rod.relax(3000, 1e-2);
+        assert!(rod.x.iter().any(|p| !p.iter().all(|c| c.is_finite())), "expected this dt to diverge");
+        assert!(
+            !residual.is_finite(),
+            "a diverged rod reported a finite residual of {residual} — the old fold returned exactly 0.0 here, \
+             which reads as `converged` to every caller that compares against a tolerance"
+        );
+
+        // and the stable case still converges and still returns a finite, small residual
+        let mut ok = Rod::straight(20, 1.0, 0.001, 200.0, 0.5, Vector3::new(0.0, 0.0, -9.81));
+        let r_ok = ok.relax(3000, 1e-3);
+        assert!(r_ok.is_finite(), "a stable relaxation must still return a number, got {r_ok}");
+        assert!(ok.x.iter().all(|p| p.iter().all(|c| c.is_finite())), "stable case should stay finite");
     }
 
     #[test]

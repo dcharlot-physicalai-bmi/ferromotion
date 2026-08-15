@@ -135,6 +135,10 @@ impl ChunkClock {
     ///
     /// The first chunk has nothing to freeze against, so it is a plain sample. Every later chunk freezes its overlap to
     /// the actions the fast loop has already consumed.
+    ///
+    /// **Returns `frozen`, and `0` is ambiguous.** It means either "refused" (bad `a0` or field width) or the perfectly
+    /// healthy cases of a first chunk and of zero measured latency. A caller testing success must look at
+    /// [`ChunkClock::queued`], not at this return value.
     pub fn deliver(&mut self, field: &dyn Fn(&[f64], f64) -> Vec<f64>, a0: &[f64], inference_time: f64, steps: usize, method: Integrator) -> usize {
         let n = self.chunk_len * self.action_dim;
         if a0.len() != n {
@@ -146,12 +150,23 @@ impl ChunkClock {
         if field(a0, 0.0).len() != n {
             return 0;
         }
-        let frozen = if self.chunks == 0 {
-            0
+        // **`soft` has to be zeroed with `frozen`, not just `frozen` (2026-08-14).** The doc above says the first
+        // chunk "is a plain sample". It was not: `frozen` went to 0 but `self.soft` was still passed, and with no
+        // previous chunk `target` falls through to `vec![0.0; n]` — so the first `soft` actions were soft-guided
+        // toward an all-zero target that does not correspond to any committed action. The guided prefix converges
+        // on that fabricated target as the step count rises, so the error is unbounded in the integrator
+        // parameter, not a small blend artifact. Measured on this crate's own fixture (`ChunkClock::new(20, 2,
+        // 0.01, 3, 8)`, a constant field at 0.05): the first three commanded actions came out 0.00278, 0.00820,
+        // 0.02055 instead of 0.05 — the very first action sent to the motors was 18x too small.
+        //
+        // A freeze target and a soft-guide target are the same object here, so "nothing to freeze against" and
+        // "nothing to guide toward" are the same condition and must be handled by the same branch.
+        let (frozen, soft) = if self.chunks == 0 {
+            (0, 0)
         } else {
             // The freeze target is the tail of the previous chunk that has already run, realigned to the new chunk's
             // start. `frozen` is how many of those actions the fast loop consumed while this inference was in flight.
-            self.frozen_for(inference_time)
+            (self.frozen_for(inference_time), self.soft)
         };
         // **Realign the freeze target to the playback position.** The actions the fast loop actually executed while
         // this inference was in flight are the previous chunk's indices [consumed_in_chunk - frozen,
@@ -176,7 +191,7 @@ impl ChunkClock {
         } else {
             vec![0.0; n]
         };
-        let chunk = sample_rtc(field, a0, &target, self.chunk_len, self.action_dim, frozen, self.soft, steps, method);
+        let chunk = sample_rtc(field, a0, &target, self.chunk_len, self.action_dim, frozen, soft, steps, method);
 
         // The frozen prefix is already committed, so only the un-frozen remainder is new work for the queue. Enqueueing
         // the frozen actions again would replay motions the motors have already performed.
@@ -336,6 +351,51 @@ mod tests {
     /// *during* inference — starves at 0.10 s (130 gaps in 400 ticks). What this pins is the queue/freeze bookkeeping,
     /// not the scheduler; the headline 20 ms configuration survives either timeline.
     /// **The action stream must never gap.** The fast loop runs continuously while the slow loop delivers late.
+    #[test]
+    fn the_first_chunk_really_is_a_plain_sample() {
+        // The doc on `deliver` says so, and it was not true. `frozen` was zeroed for the first chunk but `soft`
+        // was not, and with no previous chunk the blend target falls through to all-zeros — so the first `soft`
+        // actions were guided toward a target that corresponds to no committed action anywhere. The very first
+        // action sent to the motors came out 18x too small.
+        //
+        // A constant field makes the correct answer exact: with `a0 = 0` and `g = 0.05`, every action of a plain
+        // sample is 0.05 regardless of integrator or step count.
+        let mut c = clock(); // soft = 3, so the first three actions were the corrupted ones
+        let v = const_field(vec![0.05; 40]);
+        let a0 = vec![0.0; 40];
+        // `deliver` returns `frozen`, which is legitimately 0 for a first chunk — check the queue, not the
+        // return value. See the note on `deliver` about that ambiguity.
+        c.deliver(&v, &a0, 0.0, 6, Integrator::Heun);
+        assert!(c.queued() > 0, "the first chunk should have been enqueued");
+
+        for i in 0..5 {
+            let a = c.tick().expect("the first chunk should be queued");
+            for (j, &x) in a.iter().enumerate() {
+                assert!(
+                    (x - 0.05).abs() < 1e-9,
+                    "first chunk action {i} component {j} = {x}, want 0.05 — a plain sample of a constant field. \
+                     Guiding the first chunk toward a fabricated zero target gave 0.00278 here."
+                );
+            }
+        }
+
+        // And the guard is specific to the FIRST chunk: once there is a real committed chunk to blend against,
+        // `soft` must be back in force, otherwise this fix would have silently disabled the soft ramp entirely.
+        let mut d = clock();
+        d.deliver(&v, &a0, 0.0, 6, Integrator::Heun);
+        for _ in 0..4 {
+            d.tick();
+        }
+        let w = const_field(vec![0.9; 40]);
+        d.deliver(&w, &a0, 0.05, 6, Integrator::Heun);
+        let first = d.tick().expect("second chunk queued")[0];
+        assert!(
+            (first - 0.9).abs() > 1e-6,
+            "the second chunk's leading action should still be blended toward what already ran, got {first} \
+             which is an unguided plain sample — the soft ramp was lost"
+        );
+    }
+
     #[test]
     fn the_fast_loop_never_starves_while_inference_keeps_up() {
         let mut c = clock();

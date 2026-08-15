@@ -20,15 +20,16 @@ use crate::{dlqr, exp_so3};
 use nalgebra::{DMatrix, Matrix3, Vector3};
 
 /// Log map of `SO(3)` → `so(3)` (rotation vector), the minimal-angle (geodesic) error.
+///
+/// **Delegates to [`ferromotion_core::screw_log_so3`] rather than reimplementing it (2026-08-14).** This
+/// function used to carry its own copy of the antisymmetric-part formula, and therefore its own copy of the
+/// half-turn bug: `log_so3(diag(1, −1, −1))` returned `(0, 0, 0)`, so [`EsAttitude`] fed a 180° attitude
+/// error into its LQR gain as a *zero* error and commanded exactly zero corrective torque — a controller
+/// that sits still while the body is inverted. Two independent audits found the defect once in each copy,
+/// which is the argument for having one copy: the fix and its 30 lines of reasoning live in
+/// `ferromotion-core::screw`, and this cannot drift away from it again.
 pub fn log_so3(r: &Matrix3<f64>) -> Vector3<f64> {
-    let c = ((r.trace() - 1.0) / 2.0).clamp(-1.0, 1.0);
-    let t = c.acos();
-    let v = Vector3::new(r[(2, 1)] - r[(1, 2)], r[(0, 2)] - r[(2, 0)], r[(1, 0)] - r[(0, 1)]);
-    if t < 1e-9 {
-        v * 0.5
-    } else {
-        v * (t / (2.0 * t.sin()))
-    }
+    ferromotion_core::screw_log_so3(r)
 }
 
 /// Error-state attitude controller for a rigid body with diagonal inertia `J`.

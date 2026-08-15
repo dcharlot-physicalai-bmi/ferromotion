@@ -60,6 +60,25 @@ use faer::sparse::linalg::solvers::Llt;
 use faer::sparse::{SparseColMat, Triplet};
 use faer::{Mat, Side};
 
+/// **A maximum that reports divergence instead of hiding it.**
+///
+/// `f64::max` returns the non-`NaN` argument, by IEEE-754 `maxNum` — so a running maximum seeded at `0.0` over
+/// an all-`NaN` field yields `0.0`, and `0.0.is_finite()` is `true`. Every health readout in this module used
+/// plain `f64::max`, which meant the three quantities whose entire job is to say the solve failed were the
+/// three that could not say it (2026-08-14):
+///
+/// * [`MacFluid::step`] returns the per-step velocity change, and [`MacFluid::run_to_steady`] tests it against
+///   `tol`. A diverged field gave `0.0`, so `0.0 < tol` returned "steady state reached" on the first step.
+/// * [`MacFluid::max_divergence`] is documented as "should be ~machine-zero post-projection". It returned
+///   exactly zero, the most convincing possible pass.
+/// * [`MacFluid::slip_residual`] returned zero, i.e. perfect no-slip enforcement.
+///
+/// The predictor is explicit, so this is reachable by any `dt` past the advective CFL limit — the shipped
+/// cavity test uses `dt = 0.25/n`, and nothing rejects a larger one.
+fn nan_max(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() { f64::NAN } else { a.max(b) }
+}
+
 /// A staggered-grid incompressible fluid on the unit square `[0,1]²` with no-slip walls and an
 /// optional moving lid (the classic lid-driven cavity when the top wall translates).
 pub struct MacFluid {
@@ -275,14 +294,14 @@ impl MacFluid {
         for i in 1..nx {
             for j in 0..ny {
                 let un = us[i * ny + j] - dt * (self.p[i * ny + j] - self.p[(i - 1) * ny + j]) / h;
-                max_change = max_change.max((un - self.u[i * ny + j]).abs());
+                max_change = nan_max(max_change, (un - self.u[i * ny + j]).abs());
                 self.u[i * ny + j] = un;
             }
         }
         for i in 0..nx {
             for j in 1..ny {
                 let vn = vs[i * (ny + 1) + j] - dt * (self.p[i * ny + j] - self.p[i * ny + j - 1]) / h;
-                max_change = max_change.max((vn - self.v[i * (ny + 1) + j]).abs());
+                max_change = nan_max(max_change, (vn - self.v[i * (ny + 1) + j]).abs());
                 self.v[i * (ny + 1) + j] = vn;
             }
         }
@@ -592,7 +611,7 @@ impl MacFluid {
                 let (u, v) = self.velocity_at(mx, my);
                 ((u - disk.ux).powi(2) + (v - disk.uy).powi(2)).sqrt()
             })
-            .fold(0.0f64, f64::max)
+            .fold(0.0f64, nan_max)
     }
 
     /// Step until the per-step velocity change falls below `tol` or `max_steps` elapses; returns the
@@ -613,7 +632,7 @@ impl MacFluid {
         for i in 0..nx {
             for j in 0..ny {
                 let div = (self.u[(i + 1) * ny + j] - self.u[i * ny + j]) / h + (self.v[i * (ny + 1) + j + 1] - self.v[i * (ny + 1) + j]) / h;
-                m = m.max(div.abs());
+                m = nan_max(m, div.abs());
             }
         }
         m
@@ -897,6 +916,54 @@ mod tests {
         (0.9766, 0.84123),
         (1.0000, 1.00000),
     ];
+
+    #[test]
+    fn a_diverged_field_is_reported_as_diverged_not_as_converged() {
+        // The three health readouts used plain `f64::max`, which returns the non-NaN operand, so a diverged
+        // field read as: steady state reached, divergence exactly zero, perfect no-slip.
+        assert_eq!([f64::NAN, f64::NAN].iter().copied().fold(0.0, f64::max), 0.0, "the premise");
+        assert!(nan_max(f64::NAN, 1.0).is_nan(), "one NaN must reach the caller");
+        assert!(nan_max(1.0, f64::NAN).is_nan(), "either operand");
+        assert_eq!(nan_max(1.0, 3.0), 3.0, "the ordinary case is unchanged");
+
+        // End to end, on a dt found by SWEEPING rather than assumed. The first attempt used nu = 0 and read
+        // "survived 400 steps" as stability at every CFL from 6.4 to 640 — but with no viscosity the lid has
+        // no mechanism to drive the interior at all, so kinetic energy stayed EXACTLY zero and the test was
+        // measuring nothing. A stable-looking control that never excites the system is not a control.
+        //
+        // nu = 1e-3 with dt = 0.5 on a 32² grid puts the advective CFL at 16 and the diffusion number at 0.51,
+        // both well past their explicit limits; measured, it blows up at step 6 with ke = 7.6e13.
+        let mut f = MacFluid::new(32, 32, 1e-3, 0.5, 1.0);
+        let mut steps = 0;
+        while steps < 60 && f.kinetic_energy().is_finite() && f.kinetic_energy() < 1e12 {
+            f.step();
+            steps += 1;
+        }
+        assert!(steps < 60, "this dt is supposed to diverge; it survived {steps} steps");
+        for _ in 0..6 {
+            f.step(); // carry it all the way to non-finite
+        }
+        assert!(
+            !f.max_divergence().is_finite(),
+            "max_divergence returned {} for a blown-up field — the old reduction returned exactly 0.0, against \
+             a doc that reads `should be ~machine-zero post-projection`",
+            f.max_divergence()
+        );
+
+        // `run_to_steady` consumes `step()`, so the swallowed NaN became a convergence claim: 0.0 < tol.
+        let mut g = MacFluid::new(32, 32, 1e-3, 0.5, 1.0);
+        let used = g.run_to_steady(60, 1e-8);
+        assert!(!g.max_divergence().is_finite(), "expected this configuration to blow up inside 60 steps");
+        assert_eq!(used, 60, "run_to_steady stopped at step {used} claiming a diverged field had gone steady");
+
+        // and the well-posed case still converges, still reports finite numbers, and — the point the nu = 0
+        // mistake teaches — actually has a non-zero field to report on.
+        let n = 32;
+        let mut ok = MacFluid::new(n, n, 0.01, 0.25 / n as f64, 1.0);
+        ok.run_to_steady(4000, 1e-7);
+        assert!(ok.kinetic_energy() > 1e-6, "the control must actually excite the fluid: ke = {}", ok.kinetic_energy());
+        assert!(ok.max_divergence() < 1e-9, "projected field should be divergence-free: {}", ok.max_divergence());
+    }
 
     #[test]
     fn immersed_disk_enforces_no_slip_and_drags_fluid() {
