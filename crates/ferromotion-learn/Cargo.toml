@@ -2,6 +2,7 @@
 name = "ferromotion-learn"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 homepage.workspace = true
@@ -11,7 +12,7 @@ categories.workspace = true
 description = "Differentiable physics-informed learning for ferromotion — reverse-mode autodiff, PINNs, Lagrangian/Hamiltonian nets, Neural ODEs, SINDy, and more, pure-Rust and wasm-clean."
 
 [dependencies]
-ferromotion-core = { path = "../ferromotion-core", version = "0.56.0" }
+ferromotion-core = { path = "../ferromotion-core", version = "0.57.0" }
 nalgebra.workspace = true
 
 [lints]

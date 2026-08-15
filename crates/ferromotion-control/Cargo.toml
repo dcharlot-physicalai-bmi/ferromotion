@@ -2,6 +2,7 @@
 name = "ferromotion-control"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 homepage.workspace = true
@@ -10,8 +11,13 @@ keywords.workspace = true
 categories.workspace = true
 description = "Control schemes for physical AI, in Rust — PID, computed-torque, Cartesian impedance, and more. WASM-clean."
 
+# docs.rs builds with DEFAULT features only, so the `gpu` module would be absent from the rendered docs —
+# a reader browsing docs.rs would conclude the GPU path does not exist. Document everything.
+[package.metadata.docs.rs]
+all-features = true
+
 [dependencies]
-ferromotion-core = { path = "../ferromotion-core", version = "0.56.0" }
+ferromotion-core = { path = "../ferromotion-core", version = "0.57.0" }
 nalgebra.workspace = true
 clarabel = "0.11"
 

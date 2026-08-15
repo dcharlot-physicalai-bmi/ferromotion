@@ -2,6 +2,7 @@
 name = "ferromotion-fem"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 homepage.workspace = true
@@ -9,6 +10,11 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 description = "Differentiable volumetric tetrahedral FEM (stable Neo-Hookean) for soft-body physical AI. WASM-clean."
+
+# docs.rs builds with DEFAULT features only, so the `gpu` module would be absent from the rendered docs —
+# a reader browsing docs.rs would conclude the GPU path does not exist. Document everything.
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
 nalgebra.workspace = true

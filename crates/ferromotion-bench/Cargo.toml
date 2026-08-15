@@ -8,6 +8,11 @@ name = "ferromotion-bench"
 # seen it as more restrictive than the project it belongs to.
 version.workspace = true
 edition.workspace = true
+# LOWER than the workspace floor of 1.89, deliberately. That floor comes from `nalgebra`, and this crate has
+# no dependencies at all — verified with `cargo +1.85.0 check -p ferromotion-bench`, which is the only crate
+# in the workspace that passes on 1.85. 1.85 is the edition-2024 minimum, so it cannot go lower. Keeping it
+# here means a project on an older toolchain can still use the measurement harness on its own.
+rust-version = "1.85"
 license.workspace = true
 authors.workspace = true
 homepage.workspace = true
@@ -21,9 +26,9 @@ description = "Dependency-free measurement harness for ferromotion, with the sta
 # Path dependencies need a `version` to be publishable. These are dev-only, but they are declared the same
 # way as everywhere else in the workspace so a release bump is a single find-and-replace.
 [dev-dependencies]
-ferromotion-core = { path = "../ferromotion-core", version = "0.56.0" }
-ferromotion-cloth = { path = "../ferromotion-cloth", version = "0.56.0" }
-ferromotion-control = { path = "../ferromotion-control", version = "0.56.0" }
+ferromotion-core = { path = "../ferromotion-core", version = "0.57.0" }
+ferromotion-cloth = { path = "../ferromotion-cloth", version = "0.57.0" }
+ferromotion-control = { path = "../ferromotion-control", version = "0.57.0" }
 nalgebra.workspace = true
 
 [lints]

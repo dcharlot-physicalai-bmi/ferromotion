@@ -2,6 +2,7 @@
 name = "ferromotion-coupled"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 homepage.workspace = true
@@ -12,8 +13,8 @@ description = "Two-way multiphysics coupling (soft-body FEM <-> granular DEM) fo
 
 [dependencies]
 nalgebra.workspace = true
-ferromotion-fem = { path = "../ferromotion-fem", version = "0.56.0" }
-ferromotion-dem = { path = "../ferromotion-dem", version = "0.56.0" }
+ferromotion-fem = { path = "../ferromotion-fem", version = "0.57.0" }
+ferromotion-dem = { path = "../ferromotion-dem", version = "0.57.0" }
 
 [lints]
 workspace = true

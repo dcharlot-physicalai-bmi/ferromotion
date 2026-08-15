@@ -23,8 +23,13 @@ type_complexity = "allow"
 should_implement_trait = "allow"
 
 [workspace.package]
-version = "0.56.0"
+version = "0.57.0"
 edition = "2024"
+# MEASURED, not guessed: `cargo +1.89.0 check --workspace --exclude ferromotion-viz` passes. 1.85 (the
+# edition-2024 floor) fails only because nalgebra 0.35.0 and wide 1.5.0 require 1.89 — the floor is set
+# by the dependency tree, not by this code. Two crates override it: ferromotion-bench is LOWER (no
+# dependencies at all, verified on 1.85) and ferromotion-viz is HIGHER (rerun pulls fixed@1.31 → 1.93).
+rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 authors = ["Institute for Physical AI @ BMI"]
 homepage = "https://physicalai-bmi.org"

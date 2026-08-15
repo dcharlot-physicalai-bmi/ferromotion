@@ -9,6 +9,16 @@
 //! ball inside that hull, computed from the support function `Q1 = min_d max_i (w_i·d)` over unit
 //! directions `d`: `Q1 > 0` ⟺ force closure, and larger is more robust. An LSE-smoothed version is
 //! differentiable in the contact geometry — the signal a grasp synthesizer optimizes. Pure `nalgebra` → WASM-clean.
+//!
+//! **The `Q1 > 0 ⟺ force closure` biconditional needs the rank condition to hold, and sampling alone
+//! cannot supply it (2026-08-14).** Murray, Li & Sastry (1994), *A Mathematical Introduction to Robotic
+//! Manipulation*, Prop. 5.2 states force closure as "`G` surjective **and** a strictly internal force
+//! exists", and Prop. 5.3 gives the geometric equivalents: the wrenches must *positively span* wrench
+//! space, equivalently their hull must contain a *neighbourhood* of the origin. A rank-deficient set fails
+//! both, so its true `Q1` is exactly `0` — but a minimum over finitely many directions never samples the
+//! orthogonal direction that would show it, and returns a small positive number instead. So
+//! [`force_closure_q1`] tests [`wrench_rank`] first. Note MLS Prop. 5.3 condition 4 also gives an *exact*
+//! combinatorial test for frictionless point contacts, which needs no sampling at all.
 
 use nalgebra::{Vector2, Vector3};
 
@@ -50,9 +60,59 @@ fn fib_dirs(n: usize) -> Vec<Vector3<f64>> {
         .collect()
 }
 
+/// **Numerical rank of the planar wrench set.** Below `3` the grasp cannot resist some wrench at any
+/// magnitude, so the true `Q1` is exactly zero however comfortable a sampled estimate looks.
+///
+/// This is the surjectivity requirement of the definition, not a numerical nicety. Murray, Li & Sastry
+/// (1994), *A Mathematical Introduction to Robotic Manipulation*, Proposition 5.2: a grasp is
+/// force-closure **iff `G` is surjective** and there is a strictly internal force. Proposition 5.3 gives
+/// the equivalent geometric statements — the columns of `G` must *positively span* `Rᵖ`, and their convex
+/// hull must contain a *neighbourhood of the origin*. A rank-deficient set does neither.
+pub fn wrench_rank(contacts: &[GraspContact]) -> usize {
+    let ws = primitive_wrenches(contacts);
+    if ws.is_empty() {
+        return 0;
+    }
+    let g = nalgebra::DMatrix::from_fn(3, ws.len(), |r, c| ws[c][r]);
+    let sv = g.svd(false, false).singular_values;
+    let s_max = sv.iter().fold(0.0f64, |a, b| a.max(*b));
+    if s_max <= 0.0 {
+        return 0;
+    }
+    sv.iter().filter(|s| **s > 1e-9 * s_max).count()
+}
+
 /// **Ferrari-Canny Q1** force-closure quality: `min_d max_i (w_i · d)` over sampled unit directions.
-/// `> 0` ⟺ force closure (with `Q1` the robustness margin); `≤ 0` ⟺ not force closure.
+///
+/// Returns exactly `0.0` when [`wrench_rank`] is below `3` — see that function for why this is the
+/// definition rather than a guard.
+///
+/// **The returned value is an UPPER bound on the true `Q1`, and the gate above is what makes it safe
+/// (2026-08-14).** A minimum over a *finite* set of directions can only overestimate a minimum over all
+/// directions. Where the wrench set is rank-deficient that overestimate is unbounded in the worst way: a
+/// direction orthogonal to the spanned subspace gives `max_i (w_i · d) = 0` exactly, so the true `Q1` is
+/// `0` and the grasp is **not** force closure — but no sampled direction is ever exactly orthogonal, so
+/// the estimate came back positive and merely shrank as `~1/n_dirs`, never reaching zero. Measured before
+/// the gate: three frictionless contacts at 120° on a disk, whose lines of action all pass through the
+/// reference point so every torque is identically zero, returned `+0.0250` at 800 directions and `+0.0204`
+/// at 1200 — a "robustness margin" for a grasp that cannot resist a pure moment at any magnitude. The
+/// failure was worst exactly where it mattered most.
+///
+/// **A negative return is information, so it is NOT clamped.** When the wrench set is full rank but the
+/// origin lies *outside* the hull, the sampled minimum is genuinely negative and its magnitude says how far
+/// the grasp is from closure — the same-side two-contact grasp in the tests below measures `−0.858`. A first
+/// version of this gate also clamped with `.max(0.0)`, copying the 6-D sibling, and that flattened
+/// `−0.858` to `0`: it destroys the gradient a synthesiser descends on in exactly the region where
+/// optimisation starts, and it conflates "cannot resist a wrench in some direction at any magnitude"
+/// (rank-deficient, truly `0`) with "resists nothing yet, by this margin". The rank gate is the correct
+/// place to return `0`; the sign of a full-rank result is not.
+///
+/// The 6-D sibling [`crate::grasp_spatial::force_closure_q1_spatial`] has gated on rank since it was
+/// written — but it *does* carry that `.max(0.0)` clamp, and so loses the same signal.
 pub fn force_closure_q1(contacts: &[GraspContact], n_dirs: usize) -> f64 {
+    if contacts.is_empty() || wrench_rank(contacts) < 3 {
+        return 0.0;
+    }
     let ws = primitive_wrenches(contacts);
     fib_dirs(n_dirs)
         .iter()
@@ -79,6 +139,44 @@ pub fn force_closure_soft(contacts: &[GraspContact], n_dirs: usize, beta: f64) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A rank-deficient grasp scores exactly zero, per Murray, Li & Sastry Prop. 5.2/5.3: force closure
+    /// requires the grasp map to be surjective, equivalently that the primitive wrenches positively span
+    /// wrench space. Direction sampling alone cannot deliver that answer.
+    #[test]
+    fn a_rank_deficient_grasp_scores_exactly_zero_not_a_sampling_artifact() {
+        // Frictionless contacts on the unit disk with inward radial normals: every line of action passes
+        // through the reference point, so every torque is identically zero and the wrench set lives in the
+        // (fx, fy) plane. Rank 2 of 3 — the grasp cannot resist a pure moment at ANY magnitude.
+        let radial = |deg: f64| {
+            let a = deg.to_radians();
+            let p = Vector2::new(a.cos(), a.sin());
+            GraspContact { pos: p, normal: -p, mu: 0.0 }
+        };
+        let flat = [radial(0.0), radial(120.0), radial(240.0)];
+        assert_eq!(wrench_rank(&flat), 2, "this fixture must be rank-deficient to test the gate");
+        for n in [200, 800, 1200, 4000] {
+            assert_eq!(
+                force_closure_q1(&flat, n),
+                0.0,
+                "a rank-deficient grasp must be exactly 0 at every sampling density; the un-gated \
+                 estimator returned +0.0250 at 800 directions and +0.0204 at 1200, decaying as ~1/n and \
+                 never reaching zero"
+            );
+        }
+
+        // Two antipodal frictionless contacts: wrench rank 1 (a single force line, no torque).
+        let two = [radial(0.0), radial(180.0)];
+        assert!(wrench_rank(&two) < 3, "antipodal frictionless is rank-deficient");
+        assert_eq!(force_closure_q1(&two, 800), 0.0);
+
+        // Friction restores the missing directions, so the SAME positions become force closure once mu > 0
+        // — the gate must not swallow a genuinely good grasp.
+        let gripped: Vec<GraspContact> =
+            [0.0, 120.0, 240.0].iter().map(|d| GraspContact { mu: 0.6, ..radial(*d) }).collect();
+        assert_eq!(wrench_rank(&gripped), 3, "friction should restore full rank");
+        assert!(force_closure_q1(&gripped, 800) > 1e-3, "a frictional 3-contact grasp is force closure");
+    }
 
     #[test]
     fn antipodal_grasp_is_force_closure_but_same_side_is_not() {

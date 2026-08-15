@@ -2,6 +2,7 @@
 name = "ferromotion-fluid"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 homepage.workspace = true
@@ -10,12 +11,17 @@ keywords.workspace = true
 categories.workspace = true
 description = "2D incompressible Navier-Stokes (MAC projection) for fluid–robot interaction. WASM-clean."
 
+# docs.rs builds with DEFAULT features only, so the `gpu` module would be absent from the rendered docs —
+# a reader browsing docs.rs would conclude the GPU path does not exist. Document everything.
+[package.metadata.docs.rs]
+all-features = true
+
 [dependencies]
 faer = { version = "0.24", default-features = false, features = ["std"] }
-ferromotion-core = { path = "../ferromotion-core", version = "0.56.0" }
+ferromotion-core = { path = "../ferromotion-core", version = "0.57.0" }
 
 [dev-dependencies]
-ferromotion-learn = { path = "../ferromotion-learn", version = "0.56.0" }
+ferromotion-learn = { path = "../ferromotion-learn", version = "0.57.0" }
 pollster = "0.4"
 
 [features]

@@ -185,6 +185,27 @@ fn sphere5_dirs(n: usize) -> Vec<Vector6<f64>> {
 ///
 /// Otherwise returns `min_d max_i (w_i . d)` over `n_dirs` sampled directions — an **upper bound** on the true `Q1`
 /// that decreases as `n_dirs` grows.
+///
+/// **The negative branch is no longer clamped (2026-08-14).** This used to end in `.max(0.0)`. When the wrench
+/// set is full rank but the origin lies outside the hull, the sampled minimum is genuinely negative and its
+/// magnitude says how far the grasp is from closure — clamping conflates that with the rank-deficient case,
+/// which is truly `0`, and it flattens the gradient a synthesiser descends on exactly where optimisation
+/// starts. The rank gate above is the right place to return zero; the sign of a full-rank result is not.
+///
+/// **`Q1` in six dimensions is frame- and scale-dependent, and no choice of units repairs that.** Murray, Li
+/// & Sastry, Appendix A.3.2, is explicit: *there is no inner product structure on `se(3)` invariant under
+/// change of coordinate frame*, and they name the "incorrect use of the inner product on `R⁶` as an inner
+/// product in `se(3)`" as a known source of confusion in the robotics literature. Sampling unit directions on
+/// the Euclidean sphere `S⁵` is exactly that use: the sphere mixes newtons with newton-metres, so the value
+/// depends on the length unit, and because `Ad_g` does not preserve the `R⁶` dot product for `p ≠ 0`, it also
+/// depends on where the reference point is placed. Measured, the same physical grasp expressed at different
+/// object scales gives values differing by 1.5x-3.8x.
+///
+/// A characteristic length would make the metric dimensionally consistent, which is worth doing, but it would
+/// **not** make it invariant — MLS proves no such metric exists. So `Q1` values are comparable only across
+/// grasps sharing one frame and one length scale, and a `Q1` quoted without them is not a physical quantity.
+/// This is a real limitation of the metric rather than of this implementation, and it is why the ordering of
+/// grasps is the trustworthy output here rather than the magnitude.
 pub fn force_closure_q1_spatial(contacts: &[GraspContact3], facets: usize, n_dirs: usize) -> f64 {
     if contacts.is_empty() || wrench_rank(contacts, facets) < 6 {
         return 0.0;
@@ -194,7 +215,6 @@ pub fn force_closure_q1_spatial(contacts: &[GraspContact3], facets: usize, n_dir
         .iter()
         .map(|d| ws.iter().map(|w| w.dot(d)).fold(f64::NEG_INFINITY, f64::max))
         .fold(f64::INFINITY, f64::min)
-        .max(0.0)
 }
 
 /// LSE-smoothed spatial `Q1`, differentiable in the contact geometry — the signal a grasp synthesiser can descend on.
