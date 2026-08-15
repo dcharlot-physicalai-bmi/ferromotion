@@ -10,7 +10,7 @@ that pass 6 of 6 were confirmed and 0 refuted, so the prior on these is high but
 as a hypothesis with a named experiment, and reproduce the trigger EXACTLY before concluding: two of the eight
 fixes initially failed to reproduce because a parameter was misread.
 
-**8 open items.** Two were verified and closed on 2026-08-14 and are recorded at the bottom of this file:
+**4 open items** (was 8; see the Closed section). Two were verified and closed on 2026-08-14 and are recorded at the bottom of this file:
 `Admittance::step`'s "unconditional stability" claim and `Vof`'s unconditional boundedness claim. Both were
 confirmed by direct measurement, both are now documented with their real bounds, and both crates gained a way for
 a caller to check the bound rather than discover it by divergence.
@@ -46,6 +46,8 @@ a caller to check the bound rather than discover it by divergence.
 **Reported wrong output.** facets 4 -> 5 at 8192 directions: Q1 0.330879794 -> 0.314446042, a 5.0% DECREASE; at 20000 directions 0.330879794 -> 0.287560554, a 13.1% decrease; with 2e6 random directions (a much tighter estimate of the exact polyhedral value) 0.285307653 -> 0.276632626, a 3.0% decrease — so it is the wrench polytope shrinking, not a sampling artifact. The doc says `More cone facets enlarge the inscribed polyhedral cone, so Q1 rises toward the smooth-cone value from below` and the test asserts `q >= prev - 1e-9` with the message `more facets cannot shrink the inscribed cone`; a caller who refines facets 32 -> 33 to tighten the estimate gets a smaller number (0.341815 -> 0.340984 at 20000 dirs).
 
 ## 4. `AugmentedVbd::step` — crates/ferromotion-cloth/src/vbd.rs:311
+
+**CLOSED 2026-08-15 — confirmed by measurement. See the Closed section at the end of this file.**
 
 *reported confidence 0.85*
 
@@ -111,6 +113,8 @@ a caller to check the bound rather than discover it by divergence.
 
 ## 10. `ComplementaryFilter::update_rp (and ::update, line 59)` — crates/ferromotion-control/src/complementary_filter.rs:73
 
+**CLOSED 2026-08-15 — confirmed by measurement. See the Closed section at the end of this file.**
+
 *reported confidence 0.8*
 
 **Claim.** The gyro-integrated angle and the accelerometer angle are blended by plain linear interpolation with no angle wrapping, so when the true roll crosses ±π the accel reference jumps by 2π while the integrated prediction does not, and the fused estimate is dragged toward the midpoint of two angles that are physically adjacent but numerically 2π apart.
@@ -168,3 +172,44 @@ The onset straddles the classical 0.5 MUSCL/forward-Euler bound. Doc corrected w
    ones, which reported a clean, plausible sub-interval of `[0,1]`.
 3. **Conservation outlives boundedness.** At `factor` 0.8 the volume drift was still exactly 0 while `C` was
    already negative, so **a conservation check cannot stand in for a boundedness check.**
+
+## `ComplementaryFilter::update_rp` — CONFIRMED, fixed 2026-08-15
+
+The accel reference `atan2(ay, az)` is confined to `(−π, π]`; the gyro-integrated prediction accumulates unbounded.
+A plain linear blend across ±π is therefore pulled toward the midpoint of two angles that are physically adjacent
+but numerically `2π` apart. Reproduced exactly (`ωx = 1`, `α = 0.95`, `dt = 0.01`, noiseless accel): at `t = 3.20 s`
+true roll `−3.0832`, filter returned **`+1.5355`**; worst error **3.064152263457804 rad = 175.563°** — an attitude
+filter reporting a body as level while inverted — re-converging only after ≈2.9 s, and repeating every crossing.
+
+Fixed by blending the **wrapped innovation**,
+`angle ← wrap(pred + (1−α)·wrap(acc − pred))`, identical to the classic form whenever the two agree within ±π.
+Worst error becomes `0.00°`. Mutation-verified in Rust.
+
+**Two notes.** (1) `update` now returns a **wrapped** angle — a behaviour change; a caller wanting a continuous
+angle must track its own turn count. (2) An existing test fed `acc = 0.5·k` up to **9.5 rad** as an "accel angle",
+which `atan2` cannot return; once the blend is circular, 9.5 and 9.5 − 2π are the same attitude, so the assertion
+had two right answers. Inputs now stay inside the contract; the assertion is unchanged.
+
+## `AugmentedVbd::step` — CONFIRMED, and DELIBERATELY NOT FIXED 2026-08-15
+
+Confirmed exactly. On `hanging_chain(10, 0.1, 0.05, 1e2)` run to rest, against the analytic static equilibrium
+`nL + (mg/k)·n(n+1)/2 = 1.269775 m`: `VbdSolver` at 64 sweeps gives **1.269775 m (0.0000%)**, `AugmentedVbd` gives
+**1.022610 m (−19.47%)**. Link 0 extends `0.004959` where the spring law gives `0.049050` (**10× too little**), and
+the clamp bound `k·rest = 10.0 N` is **2× the true maximum tension** `n·m·g = 4.905 N`, so the clamp is not what
+holds the answer together. `Spring::stiffness` enters the step nowhere but that clamp.
+
+**A compliance term does NOT repair it, measured.** Dividing the multiplier update by `1 + penalty/k` does drive
+`λ → k·C`, the elastic force — the algebra is right — but the applied force is `λ + penalty·C`, so the total becomes
+`(k + penalty)·C`, **101× too stiff** at `penalty = 1e4, k = 1e2`. It moved the chain only `1.0226 → 1.0311` while
+making the mixed fixture's stiff-link violation **3× worse** (`1.11e-4 → 3.37e-4 m`). Reverted.
+
+**The conclusion is structural**: for a compliant spring the correct total force is just `k·C`, so the augmented
+Lagrangian contributes nothing. It is a **hard-constraint** tool. `AugmentedVbd` solves the *inextensible* problem
+and `VbdSolver` the elastic one — different fixed points, which the module doc previously denied. Documented with
+the measurements. Making AVBD handle finite stiffness needs the adaptive-penalty formulation from the AVBD
+literature; **that is the open work, not a patch to this update.**
+
+Why it hid: `avbd_handles_a_stiffness_ratio_that_slows_plain_vbd` filters to `i % 2 == 0` — the **stiff links only**
+— so the regime where the solver is wrong was the half of its own fixture never asserted on.
+`the_soft_links_are_driven_nearly_rigid` now pins it, and fails deliberately if AVBD is later made elastic without
+the doc being updated.

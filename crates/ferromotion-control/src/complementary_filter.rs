@@ -7,10 +7,35 @@
 //!
 //! `angle ← α·(angle + gyro·dt) + (1−α)·accel_angle`.
 //!
+//! **That form is wrong across ±π, and this module blends on the CIRCLE instead (2026-08-15).** The accel
+//! reference `atan2(ay, az)` is confined to `(−π, π]` while the gyro-integrated prediction accumulates without
+//! bound, so as the true angle passes `π` the reference jumps by `2π` and a plain linear interpolation is pulled
+//! toward the midpoint of two angles that are *physically adjacent but numerically `2π` apart*. Measured on a
+//! body rolling at 1 rad/s (`α = 0.95`, `dt = 0.01`, noiseless accel): at `t = 3.20 s` the true roll is
+//! `−3.0832` and the old form returned **`+1.5355`**; the worst error was **3.0642 rad = 175.6°** at
+//! `t = 3.28 s` — *the filter reporting a body as essentially level while it is inverted* — and it took ≈2.9 s
+//! of continued rolling to re-converge. Every crossing of `±π` repeated it.
+//!
+//! The correct form applies the correction to the *wrapped innovation*:
+//!
+//! `angle ← wrap( (angle + gyro·dt) + (1−α)·wrap(accel_angle − (angle + gyro·dt)) )`
+//!
+//! which is algebraically identical to the classic form whenever the two agree to within `±π`, and finite
+//! everywhere. With it, the same sweep tracks to `0.00°`.
+//!
 //! `α ∈ (0,1)` sets the blend/time-constant `τ = α·dt/(1−α)`: large `α` trusts the gyro (smooth, but
 //! a constant gyro bias `b` leaves a bounded steady offset ≈ `b·τ` instead of an unbounded ramp),
 //! small `α` trusts the accel (fast bias rejection, more measurement noise passes through). Pure
 //! `f64` arithmetic, no state beyond the running estimate — WASM-clean.
+
+/// Wrap an angle into `(−π, π]`.
+///
+/// `rem_euclid` rather than a `while` loop: it is branch-free, exact for the large arguments an unbounded
+/// gyro integration produces, and does not spin when the input is many turns out.
+fn wrap_pi(a: f64) -> f64 {
+    let two_pi = 2.0 * std::f64::consts::PI;
+    (a + std::f64::consts::PI).rem_euclid(two_pi) - std::f64::consts::PI
+}
 
 /// First-order complementary attitude filter. Holds the running 1-axis tilt estimate plus a
 /// roll/pitch pair for the 3-axis [`update_rp`](ComplementaryFilter::update_rp) variant.
@@ -54,9 +79,12 @@ impl ComplementaryFilter {
 
     /// One 1-axis step. `gyro_rate` is the measured angular rate (rad/s) about the tilt axis,
     /// `accel_angle` the tilt inferred from the accelerometer (rad). Returns the fused angle.
+    /// **Returns a WRAPPED angle in `(−π, π]`.** The accel reference is inherently wrapped, so a fused
+    /// estimate is only meaningful modulo `2π`; a caller needing a continuous unwrapped angle must accumulate
+    /// its own turn count. See the module note on why the innovation is wrapped.
     pub fn update(&mut self, dt: f64, gyro_rate: f64, accel_angle: f64) -> f64 {
         let predicted = self.angle + gyro_rate * dt;
-        self.angle = self.alpha * predicted + (1.0 - self.alpha) * accel_angle;
+        self.angle = wrap_pi(predicted + (1.0 - self.alpha) * wrap_pi(accel_angle - predicted));
         self.angle
     }
 
@@ -70,8 +98,10 @@ impl ComplementaryFilter {
         let pitch_acc = (-ax).atan2((ay * ay + az * az).sqrt());
         let roll_pred = self.roll + gyro_xyz[0] * dt;
         let pitch_pred = self.pitch + gyro_xyz[1] * dt;
-        self.roll = self.alpha * roll_pred + (1.0 - self.alpha) * roll_acc;
-        self.pitch = self.alpha * pitch_pred + (1.0 - self.alpha) * pitch_acc;
+        // Roll is the channel that crosses ±π; pitch cannot, because atan2(−ax, √(ay²+az²)) is confined to
+        // ±π/2. Wrapping both is still correct — the pitch innovation is simply never large enough to differ.
+        self.roll = wrap_pi(roll_pred + (1.0 - self.alpha) * wrap_pi(roll_acc - roll_pred));
+        self.pitch = wrap_pi(pitch_pred + (1.0 - self.alpha) * wrap_pi(pitch_acc - pitch_pred));
         (self.roll, self.pitch)
     }
 }
@@ -214,21 +244,67 @@ mod tests {
     }
 
     #[test]
+    fn a_roll_crossing_pi_does_not_report_the_body_as_level() {
+        // The defect: the accel reference atan2(ay, az) is confined to (−π, π] while the gyro-integrated
+        // prediction accumulates unbounded, so a plain linear blend across ±π is pulled toward the midpoint of
+        // two angles that are physically adjacent but numerically 2π apart. Measured with the old form: at
+        // t = 3.20 s the true roll is −3.0832 and it returned +1.5355; worst error 3.0642 rad = 175.6°.
+        let wrap = |a: f64| {
+            let two_pi = 2.0 * std::f64::consts::PI;
+            (a + std::f64::consts::PI).rem_euclid(two_pi) - std::f64::consts::PI
+        };
+        let (alpha, dt, wx) = (0.95, 0.01, 1.0);
+        let mut f = ComplementaryFilter::new(alpha);
+        let mut worst = 0.0f64;
+        let mut crossings = 0;
+        let mut prev_true = 0.0f64;
+        for i in 0..800 {
+            let t = (i + 1) as f64 * dt;
+            let true_roll = wrap(wx * t);
+            if true_roll * prev_true < 0.0 && prev_true.abs() > 1.0 {
+                crossings += 1; // sign flip near ±π, not near 0
+            }
+            prev_true = true_roll;
+            // gravity in the body frame, so atan2(ay, az) is exactly the true roll
+            let (ay, az) = (true_roll.sin(), true_roll.cos());
+            let (roll, _) = f.update_rp(dt, [wx, 0.0, 0.0], [0.0, ay, az]);
+            if t > 0.5 {
+                worst = worst.max(wrap(roll - true_roll).abs());
+            }
+        }
+        assert!(crossings >= 1, "the sweep must actually cross ±π to be a test, got {crossings}");
+        assert!(
+            worst < 1e-9,
+            "worst roll error {worst} rad = {}° across a ±π crossing; the linear blend gave 3.0642 rad (175.6°)",
+            worst.to_degrees()
+        );
+        // and the returned angle stays in range rather than winding up
+        assert!(f.roll_pitch().0.abs() <= std::f64::consts::PI + 1e-12);
+    }
+
+    #[test]
     fn alpha_one_is_pure_integration_alpha_zero_is_pure_accel() {
         // Degenerate blends: α=1 ignores the accel entirely, α=0 ignores the gyro entirely.
+        //
+        // **Inputs stay inside `(−π, π]`, which the contract requires (2026-08-15).** This test used to feed
+        // `acc = 0.5·k`, reaching 9.5 rad — a value `atan2(ay, az)` cannot return. Once the blend became
+        // circular (see the module note; the old linear form was out by 175.6° across ±π) that input no longer
+        // means anything: 9.5 rad and 9.5 − 2π are the same attitude, so "echo the accel angle" has two
+        // different right answers. The property being checked is real; the input was not.
         let mut gyro_only = ComplementaryFilter::new(1.0);
         let mut accel_only = ComplementaryFilter::new(0.0);
         let dt = 0.1;
         let (mut integ, mut last_acc) = (0.0, 0.0);
         for k in 0..20 {
             let rate = 0.3;
-            let acc = 0.5 * k as f64;
+            let acc = 0.15 * (k as f64 - 10.0); // sweeps −1.5 .. +1.35 rad, all inside (−π, π]
             integ += rate * dt;
             last_acc = acc;
             let g = gyro_only.update(dt, rate, acc);
             let a = accel_only.update(dt, rate, acc);
-            assert!((g - integ).abs() < 1e-12, "α=1 should be pure gyro integration");
-            assert!((a - acc).abs() < 1e-12, "α=0 should echo the accel angle");
+            assert!(integ.abs() < std::f64::consts::PI, "keep the integration inside one turn too");
+            assert!((g - integ).abs() < 1e-12, "α=1 should be pure gyro integration, got {g} want {integ}");
+            assert!((a - acc).abs() < 1e-12, "α=0 should echo the accel angle, got {a} want {acc}");
         }
         assert!((gyro_only.angle() - integ).abs() < 1e-12);
         assert!((accel_only.angle() - last_acc).abs() < 1e-12);

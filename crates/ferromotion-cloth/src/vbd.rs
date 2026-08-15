@@ -248,6 +248,40 @@ impl VbdSolver {
 /// The mixed fixture this module tests (`1e7` / `1e2` alternating, penalty `1e4`) is fine despite a `1e-3` ratio against
 /// its stiff links, because the soft links leave the chain compliant enough to satisfy them. The threshold is therefore
 /// a property of the configuration, not of the ratio alone. See `examples/avbd_penalty_threshold.rs`.
+///
+/// # ⚠️ This solves the INEXTENSIBLE problem, not the elastic one (measured 2026-08-15)
+///
+/// `step` applies the force `λ + penalty·C`, in which **`Spring::stiffness` appears nowhere** except as the clamp
+/// bound on `λ`. That is the augmented Lagrangian for the *hard* constraint `C = 0`: `λ` accumulates until the link
+/// stops extending. So a deliberately soft spring is driven nearly rigid, and this solver does **not** converge to the
+/// elastic implicit-Euler solution [`VbdSolver`] targets — the two have different fixed points.
+///
+/// Measured on a uniform soft chain, `hanging_chain(10, 0.1, 0.05, 1e2)`, run to rest:
+///
+/// | | total length |
+/// |---|---|
+/// | exact static elastic equilibrium, `nL + (mg/k)·n(n+1)/2` | **1.269775 m** |
+/// | [`VbdSolver`] at 64 sweeps | 1.269775 m (0.0000% error) |
+/// | `AugmentedVbd` at 4 sweeps | **1.022610 m (−19.47%)** |
+///
+/// Link 0 extends `0.004959 m` where the spring law gives `0.049050 m` — **10× too little** — and the clamp bound
+/// `k·rest = 10.0 N` sits at **2× the true maximum tension** of `n·m·g = 4.905 N`, so the clamp permits more force
+/// than the spring could ever supply and is not what holds the answer together.
+///
+/// **A compliance term does not repair it, and I checked rather than assumed.** Dividing the update by
+/// `1 + penalty/k` does make `λ → k·C`, the elastic force — but the force *applied* is `λ + penalty·C`, so the total
+/// becomes `(k + penalty)·C`, which at `penalty = 1e4, k = 1e2` is **101× too stiff**. Measured, it moved the chain
+/// from `1.0226` to only `1.0311` while making the stiff-link violation on the mixed fixture 3× worse
+/// (`1.11e-4 → 3.37e-4 m`). For a compliant spring the correct total force is simply `k·C`, so the augmented
+/// Lagrangian contributes nothing: it is structurally a **hard-constraint** tool, and no small edit converts it.
+///
+/// **So use this for near-rigid elements and [`VbdSolver`] when the elastic solution is what you want.** Making
+/// `AugmentedVbd` handle finite stiffness correctly needs the adaptive-penalty formulation from the AVBD literature,
+/// not a patch to this update — that is recorded as open work rather than guessed at here.
+///
+/// Note also that `avbd_handles_a_stiffness_ratio_that_slows_plain_vbd` asserts only on the **stiff** links
+/// (`filter(|(i, _)| i % 2 == 0)`), so the regime where this solver is wrong is the half of its own fixture that was
+/// never measured. `the_soft_links_are_driven_nearly_rigid` now pins it.
 pub struct AugmentedVbd {
     pub solver: VbdSolver,
     /// One multiplier per spring.
@@ -357,6 +391,57 @@ mod tests {
     /// its tests cannot drift apart on the one reduction that decides whether divergence is visible.
     fn max_extent(verts: &[Vertex]) -> f64 {
         nan_propagating_max(verts.iter().map(|v| v.position.norm()))
+    }
+
+    /// **`AugmentedVbd` and `VbdSolver` have DIFFERENT fixed points, and this pins which.** The augmented
+    /// Lagrangian drives `C → 0`, so a soft spring is made nearly rigid; `VbdSolver` reaches the elastic solution.
+    /// The module doc claimed both target the implicit-Euler elastic answer. See that doc for why a compliance
+    /// term does not repair it.
+    #[test]
+    fn the_soft_links_are_driven_nearly_rigid() {
+        let (n, link, mass, k) = (10usize, 0.1, 0.05, 1e2);
+        let g = 9.81;
+        // Static equilibrium: link j carries the weight below it, so extension_j = (n-j)*m*g/k.
+        let exact: f64 = n as f64 * link + (mass * g / k) * (n * (n + 1)) as f64 / 2.0;
+        assert!((exact - 1.269775).abs() < 1e-6, "fixture arithmetic: {exact}");
+
+        let settle = |avbd: bool, sweeps: usize| -> (f64, f64) {
+            let (mut verts, springs) = hanging_chain(n, link, mass, k);
+            let mut solver = VbdSolver::new(1.0 / 60.0, sweeps).unwrap();
+            solver.damping = 0.05;
+            let mut aug = AugmentedVbd::new(solver, 10, 1e4).expect("valid avbd");
+            for _ in 0..2000 {
+                if avbd {
+                    aug.step(&mut verts, &springs);
+                } else {
+                    solver.step(&mut verts, &springs);
+                }
+            }
+            let total: f64 = springs.iter().map(|s| (verts[s.i].position - verts[s.j].position).norm()).sum();
+            let link0 = (verts[springs[0].i].position - verts[springs[0].j].position).norm() - springs[0].rest;
+            (total, link0)
+        };
+
+        // Plain VBD reaches the elastic solution — this is the reference, and it must stay exact.
+        let (t_vbd, _) = settle(false, 64);
+        assert!((t_vbd - exact).abs() < 1e-4, "VbdSolver should reach {exact}, got {t_vbd}");
+
+        // AVBD does not, and is short by ~19.5% because it is solving C = 0 instead.
+        let (t_avbd, link0_avbd) = settle(true, 4);
+        assert!(
+            t_avbd < exact - 0.2,
+            "AVBD is expected to be ~19.5% SHORT of the elastic solution ({exact}); it measured {t_avbd}. If this \
+             now matches, AugmentedVbd was changed to solve the elastic problem and the module doc needs updating."
+        );
+        assert!(t_avbd > n as f64 * link - 1e-6, "but not shorter than fully inextensible");
+        // link 0 carries the most tension, so it is where the discrepancy is largest: ~10x too little extension
+        let correct_link0 = n as f64 * mass * g / k;
+        assert!(
+            link0_avbd < correct_link0 / 5.0,
+            "link 0 should extend far less than the spring law's {correct_link0}, got {link0_avbd}"
+        );
+        // and the clamp bound is not what is holding it: it sits above the true maximum tension
+        assert!(k * link > n as f64 * mass * g, "clamp bound {} exceeds true max tension {}", k * link, n as f64 * mass * g);
     }
 
     /// **The defining claim: stable at one iteration with a large timestep and stiff springs.** Explicit Euler is run
