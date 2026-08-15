@@ -13,8 +13,8 @@ description = "Two-way multiphysics coupling (soft-body FEM <-> granular DEM) fo
 
 [dependencies]
 nalgebra.workspace = true
-ferromotion-fem = { path = "../ferromotion-fem", version = "0.57.0" }
-ferromotion-dem = { path = "../ferromotion-dem", version = "0.57.0" }
+ferromotion-fem = { path = "../ferromotion-fem", version = "0.58.0" }
+ferromotion-dem = { path = "../ferromotion-dem", version = "0.58.0" }
 
 [lints]
 workspace = true
