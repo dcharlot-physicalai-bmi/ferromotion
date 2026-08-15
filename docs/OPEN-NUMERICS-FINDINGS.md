@@ -10,12 +10,16 @@ that pass 6 of 6 were confirmed and 0 refuted, so the prior on these is high but
 as a hypothesis with a named experiment, and reproduce the trigger EXACTLY before concluding: two of the eight
 fixes initially failed to reproduce because a parameter was misread.
 
-**4 open items** (was 8; see the Closed section). Two were verified and closed on 2026-08-14 and are recorded at the bottom of this file:
+**ALL TEN RESOLVED as of 2026-08-15** — seven fixed, three documented as genuine limitations where a fix was
+impossible or could not be justified. Every one was a wrong number or a false claim reaching a caller, and not one
+was caught by the existing suite. Details for each are below and in the Closed section. Two were verified and closed on 2026-08-14 and are recorded at the bottom of this file:
 `Admittance::step`'s "unconditional stability" claim and `Vof`'s unconditional boundedness claim. Both were
 confirmed by direct measurement, both are now documented with their real bounds, and both crates gained a way for
 a caller to check the bound rather than discover it by divergence.
 
 ## 1. `force_closure_q1` — crates/ferromotion-core/src/grasp.rs:55
+
+**CLOSED 2026-08-14 — confirmed via MLS Prop. 5.2/5.3 — rank gate added.**
 
 *reported confidence 0.9*
 
@@ -27,6 +31,8 @@ a caller to check the bound rather than discover it by divergence.
 
 ## 2. `force_closure_q1_spatial (with primitive_wrenches_spatial, line 120)` — crates/ferromotion-core/src/grasp_spatial.rs:188
 
+**CLOSED 2026-08-14 — resolved as a documented limitation: MLS App. A.3.2 proves no frame-invariant metric on se(3) exists.**
+
 *reported confidence 0.9*
 
 **Claim.** The 6D wrench is assembled as [f; p x f] with no characteristic length, so a `unit direction` on S^5 mixes newtons and newton-metres; the resulting anisotropy makes the 20000-direction sampled minimum exceed a rigorous upper bound on the true Q1 by 1.5x-3.8x at any object scale other than |p| ~ 1, and it makes the module's headline planar-vs-spatial ratio a unit-of-length artifact.
@@ -36,6 +42,8 @@ a caller to check the bound rather than discover it by divergence.
 **Reported wrong output.** R = 10: returns 0.792015, but d = (0,0,1,0,0,0) (a pure +z force direction) gives max_i w_i.d = mu/sqrt(1+mu^2) = 0.514496, so true Q1 <= 0.514496 by definition — the returned value is 1.54x a provable ceiling (a 2e6-direction estimate gives 0.4936). R = 100: returns 1.976109 against the same 0.514496 ceiling, 3.84x. R = 0.1: returns 0.078750 while d = (0,0,0,1,0,0) gives 0.044557, so 1.77x a ceiling (dense estimate 0.03714, i.e. 2.1x). Separately, the doc's claim that the planar metric `overstates` the spatial one by `a consistent factor of about 1.5` (and the test `the_planar_metric_overstates_the_spatial_quality`, which asserts pl > sp and 1.3 < ratio < 1.9) inverts off the unit disk: ratio = 0.764 at R = 0.1 and 0.393 at R = 100, i.e. the planar metric UNDERSTATES the spatial one on a 10 cm object.
 
 ## 3. `module doc `Which way each approximation errs` / the facet assertion in the_two_approximations_err_in_known_directions (line 397)` — crates/ferromotion-core/src/grasp_spatial.rs:31
+
+**CLOSED 2026-08-15 — the claim was FALSE and is now conditional on nested refinement; measured 4→5 facets at −5.0% (8192 dirs) and −13.1% (20000).**
 
 *reported confidence 0.85*
 
@@ -58,6 +66,8 @@ a caller to check the bound rather than discover it by divergence.
 **Reported wrong output.** AVBD settles at total length 1.0226 m; the exact static elastic equilibrium sum_j (0.1 + (10-j)*m*g/k) is 1.2698 m, and plain `VbdSolver` at 64 sweeps reproduces 1.2698 m to 4 decimals. AVBD is 19.5% short, with per-link extension ~10x too small (link 0: +0.00496 m vs correct +0.04905 m). 8 of 10 multipliers sit pegged at the clamp +/-stiffness*rest = 10.000 N while the true tension in that link is at most 4.905 N — the clamp, not the physics, sets the answer, and it lets the multiplier pull 2x the force the spring could. This also falsifies the in-file justification at line 248 ("the mixed fixture ... is fine ... because the soft links leave the chain compliant enough"): under this update the soft links are not compliant. The existing test `avbd_handles_a_stiffness_ratio_that_slows_plain_vbd` measures only the STIFF links (`filter(|(i,_)| i % 2 == 0)`), so the regime where AVBD is wrong is the half of the fixture never asserted on.
 
 ## 5. `P2Mesh::build (consumed by solve_oseen / solve_stokes / solve_navier_stokes)` — crates/ferromotion-fluid/src/ufvm_stokes.rs:46
+
+**CLOSED 2026-08-15 — fixed — a boundary edge is one with exactly ONE incident triangle, not one whose endpoints are both boundary vertices.**
 
 *reported confidence 0.85*
 
@@ -93,6 +103,8 @@ a caller to check the bound rather than discover it by divergence.
 
 ## 8. `ChunkClock::deliver` — crates/ferromotion-policy/src/clock.rs:165
 
+**CLOSED 2026-08-15 — fixed — the latency prediction is now capped by what the fast loop actually consumed.**
+
 *reported confidence 0.82*
 
 **Claim.** `frozen` is computed purely from `inference_time` and is never reconciled with `consumed_in_chunk`; when it exceeds the actions actually consumed, `saturating_sub` silently clamps the realignment offset to 0, which both drops unexecuted actions from the stream and restores the unshifted freeze target the comment above it says it fixed.
@@ -102,6 +114,8 @@ a caller to check the bound rather than discover it by divergence.
 **Reported wrong output.** offset = 2.saturating_sub(5) = 0, so `queue` restarts at chunk index 5 while playback had reached slot 2: three trajectory slots are skipped and the commanded stream goes 0.5825, 0.6500, 0.9199 where the next action should have been 0.7174 — a boundary jump of 0.2699 against a 0.0675 median interior step, i.e. 4.0x, the same class of discontinuity the comment at clock.rs:157-163 reports having removed (16.6x). `state()` still returns Nominal and `last_frozen` reports 5; ClockHealth has no variant for the disagreement. The module doc asserts "frozen matches what executed … exactly" and "it cannot silently disagree with what actually executed".
 
 ## 9. `FemSim::forces / FemSim::psi` — crates/ferromotion-fem/src/lib.rs:191
+
+**CLOSED 2026-08-15 — fixed — the barrier has a real gradient via ∂J/∂F = cof(F); it does NOT fully rescue a degenerate element, and that limit is documented and tested.**
 
 *reported confidence 0.8*
 
@@ -213,3 +227,67 @@ Why it hid: `avbd_handles_a_stiffness_ratio_that_slows_plain_vbd` filters to `i 
 — so the regime where the solver is wrong was the half of its own fixture never asserted on.
 `the_soft_links_are_driven_nearly_rigid` now pins it, and fails deliberately if AVBD is later made elastic without
 the doc being updated.
+
+
+---
+
+# Closed 2026-08-15 — the final four
+
+## `P2Mesh::build` boundary flag — FIXED
+
+`node_boundary` was `base.boundary[a] && base.boundary[b]`: a mid-edge node counted as boundary iff both
+*endpoint vertices* were. That is strictly weaker than the edge lying on the boundary — a corner-cutting diagonal
+satisfies it while lying in the interior — so on every `TriMesh::unit_square` exactly **two** strictly interior
+velocity dofs were hard Dirichlet-pinned to `u_bc` evaluated at an interior point, i.e. *set* rather than solved.
+
+Replaced with the topological definition: an interior edge is shared by two triangles, a boundary edge by one.
+No geometry, no tolerance, valid for any triangulation. The test recounts incidence independently of `build` and
+asserts the old rule over-counted by **exactly 2**; mutating it back names the two nodes at `(0.125, 0.875)` and
+`(0.875, 0.125)`, exactly as predicted.
+
+## `FemSim` inversion barrier — FIXED, with a documented limit
+
+`psi` returned `+INFINITY` for `J ≤ 0` and called it an "infinite energy barrier" while `forces` **skipped** the
+element on the identical test — a barrier with exactly zero gradient. An inverted tet exerted no force in either
+direction and could never recover, while `energy()` was poisoned to `+inf` and the simulation carried on with
+finite positions.
+
+Now a finite `½k(J − J_recover)²` whose gradient goes through `∂J/∂F = cof(F)`, written from column
+cross-products so it is defined even at `det F = 0` — the configuration a flattening tet passes through.
+
+**It does not fully rescue an inverted element, and the test says so.** `cof(F)` vanishes as the element
+flattens, so the restoring force dies exactly where it is most needed; measured with gravity off, `J` rises
+monotonically `−0.2 → −0.0346` over 200k steps and does not cross zero. Escaping a degenerate element needs an
+energy whose gradient does not route through `∂J/∂F` — the purpose of the *stable* Neo-Hookean formulations. A
+separate test asserts healthy elements are **bit-identical** under the new branch.
+
+## `ChunkClock::deliver` realignment offset — FIXED
+
+`frozen_for` is a *prediction* from the measured inference time; `consumed_in_chunk` is what the fast loop
+actually ticked. When the prediction was larger, `offset = consumed_in_chunk.saturating_sub(frozen)` clamped to
+`0`, which restored the **unshifted** freeze target the shift exists to fix *and* restarted `queue` past where
+playback had reached, dropping the slots between. Measured with two ticks executed and a 50 ms inference
+(`frozen = 5`, `consumed = 2`): three slots skipped, boundary jump 0.2699 against a 0.0675 median interior step.
+
+Capped by reality: `frozen_for(t).min(consumed_in_chunk)`. You can only freeze against actions that ran.
+Reachable whenever the fast loop ticks slower than its nominal period — the normal condition under load.
+
+## Facet monotonicity — the CLAIM was false, now conditional
+
+The module doc stated flatly that more cone facets enlarge the inscribed polyhedral cone so `Q1` rises **from
+below**. That holds only under **nested** refinement `k → 2k`, where every coarse generator is retained. For any
+other increment the generators sit at `2πj/k` and *move*, so the finer polytope is not a superset. Measured on
+`three_coplanar(0.6)`, `4 → 5` facets: **0.330879794 → 0.314446042** at 8192 directions (**−5.0%**) and
+**→ 0.287560554** at 20000 (**−13.1%**). It is the wrench polytope rather than the sampler — at 2e6 random
+directions the drop persists, 0.285308 → 0.276633.
+
+The old test survived only because it swept `[4, 8, 16, 32, 64]` — nested doublings, the one family where
+containment holds. `facet_monotonicity_needs_nesting` now checks both halves and asserts the decrease as **real**,
+so the false claim cannot be restored by widening a tolerance.
+
+## The pattern across all ten
+
+Three of the ten hid behind a test that measured the **wrong half of its own fixture**: AVBD's test filters to
+`i % 2 == 0` (the stiff links, where it is right); the facet sweep used only nested doublings; the complementary
+filter's degenerate-blend test fed `9.5 rad` as an `atan2` output. None was a missing test. Each was a test whose
+scope excluded the failing regime — which is why a green suite of 1,290 said nothing about any of them.

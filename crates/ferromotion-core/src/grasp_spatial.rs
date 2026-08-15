@@ -28,12 +28,29 @@
 //! comfortable positive number. The failure is worst exactly where it matters, so [`wrench_rank`] is computed first and
 //! [`force_closure_q1_spatial`] returns a hard zero on deficiency rather than trusting the sample.
 //!
-//! **Which way each approximation errs.** More cone facets enlarge the inscribed polyhedral cone, so `Q1` rises toward
-//! the smooth-cone value **from below**. More sampled directions can only lower the minimum, so the estimate falls
-//! toward the true value **from above**. Both are reported and both are checked in the tests, because "converges" with
-//! no direction attached is not a useful statement. The consequence is that monotonicity in `mu` — which must hold for
-//! the true `Q1` — only appears once the direction sampling is fine enough: it fails at 4096 directions on the grasp
-//! above and holds at 20000.
+//! **Which way each approximation errs.** More sampled directions can only lower the minimum, so the estimate falls
+//! toward the true value **from above** — that one holds unconditionally, since a minimum over a superset cannot rise.
+//! Both are reported and both are checked in the tests, because "converges" with no direction attached is not a useful
+//! statement. The consequence is that monotonicity in `mu` — which must hold for the true `Q1` — only appears once the
+//! direction sampling is fine enough: it fails at 4096 directions on the grasp above and holds at 20000.
+//!
+//! **The facet claim needs a condition, and without it it is false (corrected 2026-08-15).** This said flatly that
+//! more cone facets enlarge the inscribed polyhedral cone so `Q1` rises **from below**. That holds only under *nested*
+//! refinement — `k → 2k`, where every generator of the coarse cone is retained in the finer one, so the polytopes are
+//! genuinely nested and containment forces the inequality. For an arbitrary facet count the generators sit at angles
+//! `2πj/k` and **move**, so the finer polytope is not a superset and `Q1` can genuinely fall. Measured on
+//! `three_coplanar(0.6)`:
+//!
+//! | facets | 8192 directions | 20000 directions |
+//! |---|---|---|
+//! | 4 → 5 | 0.330880 → 0.314446 (**−5.0%**) | 0.330880 → 0.287561 (**−13.1%**) |
+//! | 8 → 9 | 0.347731 → 0.341938 | 0.337708 → 0.316297 |
+//! | 14 → 16 | 0.350047 → 0.349263 | 0.335965 → — |
+//!
+//! This is the **wrench polytope**, not the sampler: at 2e6 random directions — a far tighter estimate of the exact
+//! polyhedral value — `4 → 5` still falls, 0.285308 → 0.276633 (−3.0%). The old test survived only because it swept
+//! `[4, 8, 16, 32, 64]`, the one family for which nesting holds. `facet_monotonicity_needs_nesting` now checks both
+//! halves: monotone under doubling, and *not* monotone across a non-nested increment.
 
 use nalgebra::{DMatrix, Vector3, Vector6};
 
@@ -405,16 +422,56 @@ mod tests {
         assert!(q4 > q3, "an extra contact never reduces the quality: {q4:.6} vs {q3:.6}");
     }
 
+    /// **"More facets raises Q1" is true only under NESTED refinement.** The generators sit at angles `2πj/k`, so
+    /// `k → 2k` keeps every coarse generator and the polytopes nest; any other increment *moves* them and the
+    /// finer polytope is not a superset. The module doc asserted the unconditional version, and the sweep in
+    /// `the_two_approximations_err_in_known_directions` hid it by testing only `[4, 8, 16, 32, 64]`.
+    #[test]
+    fn facet_monotonicity_needs_nesting() {
+        let cs = three_coplanar(0.6);
+
+        // Half one: under doubling it really does rise. This is the claim that survives.
+        for n in [8192usize, 20000] {
+            let mut prev = -1.0;
+            for f in [4usize, 8, 16, 32] {
+                let q = force_closure_q1_spatial(&cs, f, n);
+                assert!(q >= prev - 1e-9, "nested {f} facets at {n} dirs: {q:.9} after {prev:.9}");
+                prev = q;
+            }
+        }
+
+        // Half two: across a NON-nested increment it genuinely falls, and by a lot. Measured 4 -> 5:
+        // 0.330879794 -> 0.314446042 at 8192 directions (-5.0%), and -> 0.287560554 at 20000 (-13.1%).
+        // Asserted as a REAL DECREASE rather than tolerated, so nobody restores the false claim by widening a
+        // tolerance until this passes.
+        let q4 = force_closure_q1_spatial(&cs, 4, 8192);
+        let q5 = force_closure_q1_spatial(&cs, 5, 8192);
+        assert!(
+            q5 < q4 - 1e-6,
+            "4 -> 5 facets must DECREASE (measured 0.330880 -> 0.314446); got {q4:.9} -> {q5:.9}. If this now \
+             rises, the cone construction changed and the module doc's nesting caveat needs re-measuring."
+        );
+        let rel = (q4 - q5) / q4;
+        assert!(rel > 0.02, "the 4 -> 5 drop should be several percent, got {:.2}%", rel * 100.0);
+
+        // And it is the POLYTOPE, not the sampler: the drop persists as the direction count rises, where a
+        // sampling artifact would wash out.
+        let (a, b) = (force_closure_q1_spatial(&cs, 4, 20000), force_closure_q1_spatial(&cs, 5, 20000));
+        assert!(b < a - 1e-6, "the 4 -> 5 decrease must persist at 20000 directions: {a:.9} -> {b:.9}");
+    }
+
     /// **Which way each approximation errs**, and the estimator consequence for monotonicity in friction.
     #[test]
     fn the_two_approximations_err_in_known_directions() {
         let cs = three_coplanar(0.6);
-        eprintln!("facets (inscribed cone grows -> Q1 rises from below), 8192 directions:");
+        // NESTED refinement only — k -> 2k retains every coarse generator, so containment forces the rise. See
+        // `facet_monotonicity_needs_nesting` for why this sweep cannot be generalised to arbitrary facet counts.
+        eprintln!("facets (NESTED doubling: inscribed cone grows -> Q1 rises from below), 8192 directions:");
         let mut prev = -1.0;
         for f in [4usize, 8, 16, 32, 64] {
             let q = force_closure_q1_spatial(&cs, f, 8192);
             eprintln!("   {f:>3} facets: Q1 = {q:.6}");
-            assert!(q >= prev - 1e-9, "more facets cannot shrink the inscribed cone: {q:.6} after {prev:.6}");
+            assert!(q >= prev - 1e-9, "nested refinement cannot shrink the inscribed cone: {q:.6} after {prev:.6}");
             prev = q;
         }
         eprintln!("directions (min over a larger set -> Q1 falls from above), 32 facets:");

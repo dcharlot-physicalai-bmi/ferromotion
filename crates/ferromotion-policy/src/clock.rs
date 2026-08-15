@@ -166,7 +166,22 @@ impl ChunkClock {
         } else {
             // The freeze target is the tail of the previous chunk that has already run, realigned to the new chunk's
             // start. `frozen` is how many of those actions the fast loop consumed while this inference was in flight.
-            (self.frozen_for(inference_time), self.soft)
+            // **Reconciled against what the fast loop ACTUALLY consumed (2026-08-15).** `frozen_for` is a
+            // prediction from the measured inference time; `consumed_in_chunk` is the truth. You can only freeze
+            // the new chunk against actions that really were committed, so the prediction is capped by reality.
+            //
+            // Unreconciled, a prediction larger than the truth broke the realignment below in two ways at once.
+            // `offset = consumed_in_chunk.saturating_sub(frozen)` clamped to 0, which silently restored the
+            // UNSHIFTED freeze target — the exact defect the shift was added to fix — and simultaneously
+            // restarted `queue` at chunk index `frozen`, dropping the slots between where playback had reached
+            // and there. Measured with `ChunkClock::new(20, 1, 0.01, 0, 6)`, two ticks executed and a 50 ms
+            // inference (`frozen = 5` against `consumed_in_chunk = 2`): three trajectory slots were skipped and
+            // the commanded stream jumped by 0.2699 against a 0.0675 median interior step, a 4x boundary
+            // discontinuity in the one place RTC exists to keep continuous.
+            //
+            // This is reachable whenever the fast loop ticks slower than the nominal control period, which is
+            // the normal condition under load rather than an exotic one.
+            (self.frozen_for(inference_time).min(self.consumed_in_chunk), self.soft)
         };
         // **Realign the freeze target to the playback position.** The actions the fast loop actually executed while
         // this inference was in flight are the previous chunk's indices [consumed_in_chunk - frozen,
@@ -351,6 +366,40 @@ mod tests {
     /// *during* inference — starves at 0.10 s (130 gaps in 400 ticks). What this pins is the queue/freeze bookkeeping,
     /// not the scheduler; the headline 20 ms configuration survives either timeline.
     /// **The action stream must never gap.** The fast loop runs continuously while the slow loop delivers late.
+    #[test]
+    fn a_latency_prediction_larger_than_reality_does_not_skip_actions() {
+        // `frozen_for` predicts from inference time; `consumed_in_chunk` is what the fast loop really ticked.
+        // When the prediction is larger, the unreconciled realignment clamped `offset` to 0 — restoring the
+        // unshifted freeze target AND restarting the queue past where playback had reached, dropping the slots
+        // in between. This is the normal condition when the fast loop runs slower than its nominal period.
+        let mut c = ChunkClock::new(20, 1, 0.01, 0, 6).expect("valid");
+        let field = |a: &[f64], _t: f64| a.iter().map(|x| 0.5 + 0.3 * x).collect::<Vec<f64>>();
+        let a0: Vec<f64> = (0..20).map(|i| 0.05 * i as f64).collect();
+
+        c.deliver(&field, &a0, 0.0, 4, Integrator::Heun);
+        let mut stream = vec![c.tick().expect("first")[0], c.tick().expect("second")[0]];
+
+        // A 50 ms inference is 5 ticks at 100 Hz, so the prediction is 5 while only 2 actions ran.
+        assert_eq!(c.frozen_for(0.05), 5, "the prediction should exceed what was consumed");
+        let frozen = c.deliver(&field, &a0, 0.05, 4, Integrator::Heun);
+        assert_eq!(frozen, 2, "frozen must be capped by the 2 actions actually consumed, got {frozen}");
+
+        for _ in 0..3 {
+            stream.push(c.tick().expect("post-delivery")[0]);
+        }
+        // Continuity across the boundary: the jump must not dwarf a typical interior step.
+        let steps: Vec<f64> = stream.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
+        let boundary = steps[1];
+        let mut interior = steps.clone();
+        interior.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = interior[interior.len() / 2];
+        assert!(
+            boundary < 6.0 * median.max(1e-9),
+            "boundary jump {boundary} against median interior step {median} — the unreconciled version measured \
+             0.2699 against 0.0675, a 4x discontinuity in the one place RTC exists to keep smooth"
+        );
+    }
+
     #[test]
     fn the_first_chunk_really_is_a_plain_sample() {
         // The doc on `deliver` says so, and it was not true. `frozen` was zeroed for the first chunk but `soft`

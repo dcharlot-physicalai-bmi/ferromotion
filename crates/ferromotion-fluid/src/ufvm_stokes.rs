@@ -43,16 +43,41 @@ impl P2Mesh {
             } else {
                 let id = coords.len();
                 coords.push([(base.verts[a][0] + base.verts[b][0]) * 0.5, (base.verts[a][1] + base.verts[b][1]) * 0.5]);
-                node_boundary.push(base.boundary[a] && base.boundary[b]);
+                // Boundary flag deferred: see the incidence pass below. "Both endpoints are boundary vertices"
+                // is NOT the same test as "this edge lies on the boundary".
+                node_boundary.push(false);
                 edge_id.insert(key, id);
                 id
             }
         };
+        let mut incidence: HashMap<(usize, usize), usize> = HashMap::new();
         for t in &base.tris {
             let m12 = mid(t[1], t[2]);
             let m20 = mid(t[2], t[0]);
             let m01 = mid(t[0], t[1]);
             tri_nodes.push([t[0], t[1], t[2], m12, m20, m01]);
+            for (a, b) in [(t[1], t[2]), (t[2], t[0]), (t[0], t[1])] {
+                let key = if a < b { (a, b) } else { (b, a) };
+                *incidence.entry(key).or_insert(0) += 1;
+            }
+        }
+        // **A mid-edge node is on the boundary iff its edge belongs to exactly ONE triangle (2026-08-15).**
+        //
+        // This used to be `base.boundary[a] && base.boundary[b]` — both endpoints boundary vertices — which is a
+        // different and strictly weaker condition. A diagonal that cuts a corner has both endpoints on the
+        // boundary while lying in the interior, and on every `TriMesh::unit_square` mesh there are exactly two of
+        // them: the corner-cutting diagonals `(0, 1-h)-(h, 1)` and `(1-h, 0)-(1, h)`. Their midpoints were flagged
+        // boundary and then hard Dirichlet-pinned to `u_bc` evaluated at an interior point — `(0, 0)` under the
+        // cavity BC — so two interior velocity dofs were *set* rather than solved, giving an `O(1)` velocity error
+        // and a spurious element divergence at the two nodes nearest the top-left and bottom-right corners.
+        //
+        // Triangle incidence is the definition rather than a heuristic: an interior edge is shared by two
+        // triangles, a boundary edge by one. It needs no geometry, no tolerance, and holds for any triangulation
+        // rather than only for meshes whose diagonals happen to avoid the corners.
+        for (key, count) in &incidence {
+            if let Some(&id) = edge_id.get(key) {
+                node_boundary[id] = *count == 1;
+            }
         }
         let n_unodes = coords.len();
         let _ = nv;
@@ -317,6 +342,63 @@ mod verification {
     use super::*;
     use crate::ufvm::TriMesh;
     use std::f64::consts::PI;
+
+    /// **A mid-edge node is on the boundary iff its edge belongs to one triangle, not iff both endpoints are
+    /// boundary vertices.** The two conditions differ on exactly the corner-cutting diagonals, and the weaker
+    /// test pinned two strictly interior velocity dofs to a boundary value.
+    #[test]
+    fn only_edges_with_one_incident_triangle_are_boundary_nodes() {
+        for n in [5, 9, 17] {
+            let base = TriMesh::unit_square(n, 0.0);
+            let p2 = P2Mesh::build(&base);
+            let h = 1.0 / (n - 1) as f64;
+
+            // Recount incidence independently of build(), so this is a check rather than a restatement.
+            let mut inc: std::collections::HashMap<(usize, usize), usize> = std::collections::HashMap::new();
+            for t in &base.tris {
+                for (a, b) in [(t[1], t[2]), (t[2], t[0]), (t[0], t[1])] {
+                    *inc.entry(if a < b { (a, b) } else { (b, a) }).or_insert(0) += 1;
+                }
+            }
+            let n_boundary_edges = inc.values().filter(|c| **c == 1).count();
+            // A closed triangulated square has one boundary edge per boundary segment: 4*(n-1).
+            assert_eq!(n_boundary_edges, 4 * (n - 1), "n={n}: boundary edge count");
+
+            // The OLD rule — both endpoints boundary — would additionally flag the corner-cutting diagonals.
+            let old_rule = inc
+                .keys()
+                .filter(|(a, b)| base.boundary[*a] && base.boundary[*b])
+                .count();
+            assert_eq!(
+                old_rule,
+                n_boundary_edges + 2,
+                "n={n}: the old rule should over-count by exactly the two corner diagonals"
+            );
+
+            // Every flagged mid-edge node must lie ON a wall. This is the property that was violated: the two
+            // over-counted midpoints sit at (h/2, 1-h/2) and (1-h/2, h/2), a half-cell inside the domain.
+            let mut flagged_interior = Vec::new();
+            for id in base.verts.len()..p2.n_unodes {
+                if p2.node_boundary[id] {
+                    let [x, y] = p2.coords[id];
+                    let on_wall = x.abs() < 1e-12 || (x - 1.0).abs() < 1e-12 || y.abs() < 1e-12 || (y - 1.0).abs() < 1e-12;
+                    if !on_wall {
+                        flagged_interior.push([x, y]);
+                    }
+                }
+            }
+            assert!(
+                flagged_interior.is_empty(),
+                "n={n}: {} interior mid-edge node(s) flagged as boundary: {flagged_interior:?} — the corner \
+                 diagonals are at ({:.5}, {:.5}) and ({:.5}, {:.5})",
+                flagged_interior.len(),
+                h / 2.0,
+                1.0 - h / 2.0,
+                1.0 - h / 2.0,
+                h / 2.0
+            );
+        }
+    }
 
     // Manufactured divergence-free velocity vanishing on the walls, from ψ = sin²(πx)sin²(πy):
     //   u =  ∂ψ/∂y =  π sin²(πx) sin(2πy)
