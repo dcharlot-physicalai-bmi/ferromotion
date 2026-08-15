@@ -23,7 +23,7 @@ type_complexity = "allow"
 should_implement_trait = "allow"
 
 [workspace.package]
-version = "0.55.0"
+version = "0.56.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["Institute for Physical AI @ BMI"]

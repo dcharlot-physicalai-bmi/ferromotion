@@ -11,7 +11,7 @@ categories.workspace = true
 description = "Differentiable physics-informed learning for ferromotion — reverse-mode autodiff, PINNs, Lagrangian/Hamiltonian nets, Neural ODEs, SINDy, and more, pure-Rust and wasm-clean."
 
 [dependencies]
-ferromotion-core = { path = "../ferromotion-core", version = "0.55.0" }
+ferromotion-core = { path = "../ferromotion-core", version = "0.56.0" }
 nalgebra.workspace = true
 
 [lints]

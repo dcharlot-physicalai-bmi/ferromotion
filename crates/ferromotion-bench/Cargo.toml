@@ -1,6 +1,6 @@
 [package]
 name = "ferromotion-bench"
-version = "0.55.0"
+version = "0.56.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "Dependency-free measurement harness for ferromotion, with the statistics the claims need."
