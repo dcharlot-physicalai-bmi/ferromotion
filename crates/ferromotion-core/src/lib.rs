@@ -273,6 +273,7 @@ pub use pink::{
 pub use leg_smoother::{LegSmoother, PriorPose2, RelPose2};
 pub use cspace_sdf::{CspaceField, PlanarArm};
 pub use chained_form::ChainedForm;
+pub use grasp::is_force_closure;
 pub use reciprocal::{are_reciprocal, power, reciprocal_basis, reciprocal_product, reciprocal_product_geometric, swap_wrench_halves, Screw};
 pub use paden_kahan::{rotate_about_axis, subproblem1, subproblem2, subproblem3};
 pub use screw::{ad, adjoint, exp_se3, exp_so3, hat3, log_se3, log_so3 as screw_log_so3, poe_fk, pose, revolute_axis, rot_of, sclerp, trans_of, vee3};

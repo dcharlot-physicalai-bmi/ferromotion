@@ -82,6 +82,56 @@ pub fn wrench_rank(contacts: &[GraspContact]) -> usize {
     sv.iter().filter(|s| **s > 1e-9 * s_max).count()
 }
 
+/// **Exact force-closure decision — no sampling.** `true` iff the origin lies in the *interior* of the
+/// convex hull of the primitive wrenches.
+///
+/// Murray, Li & Sastry (1994) Prop. 5.3 condition 4: a grasp fails force closure iff there exists a
+/// `v ≠ 0` with `v · wᵢ ≥ 0` for every generator — a *supporting hyperplane through the origin*, with every
+/// wrench on one side of it. MLS notes that only finitely many candidate `v` need be considered: take any
+/// `p − 1` independent generators and let `v` be normal to them. In the plane `p = 3`, so the candidates are
+/// the cross products of generator *pairs*, and the whole test is `O(m³)` with no tolerance on direction
+/// density.
+///
+/// **This answers what [`force_closure_q1`] structurally cannot.** Q1 is a minimum over *finitely many*
+/// sampled directions, so it is an upper bound that can report a positive margin for a grasp that is not
+/// force closure — the defect the [`wrench_rank`] gate exists to catch, and which for a full-rank grasp with
+/// the origin merely *on* the hull boundary no amount of sampling resolves. This decides it exactly. Use it
+/// for the yes/no question and Q1 for *how robust*, which is the part a synthesiser needs a gradient of.
+///
+/// Note MLS states Prop. 5.3 for frictionless point contacts; the convexity argument applies unchanged to any
+/// finite generator set, which is what a linearised friction cone provides. It is therefore exact for the
+/// *linearised* problem — the same problem Q1 measures — and not for the true smooth cone.
+pub fn is_force_closure(contacts: &[GraspContact], tol: f64) -> bool {
+    let ws = primitive_wrenches(contacts);
+    if ws.len() < 3 || wrench_rank(contacts) < 3 {
+        return false; // cannot positively span ℝ³
+    }
+    for i in 0..ws.len() {
+        for j in (i + 1)..ws.len() {
+            let v = ws[i].cross(&ws[j]);
+            let n = v.norm();
+            if n <= tol {
+                continue; // parallel pair spans no plane, so it defines no candidate hyperplane
+            }
+            let v = v / n;
+            let (mut any_pos, mut any_neg) = (false, false);
+            for w in &ws {
+                let d = w.dot(&v);
+                if d > tol {
+                    any_pos = true;
+                } else if d < -tol {
+                    any_neg = true;
+                }
+            }
+            // All generators on one closed side ⇒ a supporting hyperplane through the origin exists.
+            if !(any_pos && any_neg) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// **Ferrari-Canny Q1** force-closure quality: `min_d max_i (w_i · d)` over sampled unit directions.
 ///
 /// Returns exactly `0.0` when [`wrench_rank`] is below `3` — see that function for why this is the
@@ -139,6 +189,50 @@ pub fn force_closure_soft(contacts: &[GraspContact], n_dirs: usize, beta: f64) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The exact test and the sampled metric must agree on the yes/no question**, and where they cannot,
+    /// the exact one is right. MLS Prop. 5.3 condition 4 needs no direction sampling at all.
+    #[test]
+    fn the_exact_decision_agrees_with_the_sampled_metric_and_settles_what_it_cannot() {
+        let radial = |deg: f64, mu: f64| {
+            let a: f64 = deg.to_radians();
+            let p = Vector2::new(a.cos(), a.sin());
+            GraspContact { pos: p, normal: -p, mu }
+        };
+
+        // Force closure: three frictional contacts at 120°. Both must say yes.
+        let good: Vec<GraspContact> = [0.0, 120.0, 240.0].iter().map(|d| radial(*d, 0.6)).collect();
+        assert!(is_force_closure(&good, 1e-9), "3 frictional contacts at 120° are force closure");
+        assert!(force_closure_q1(&good, 800) > 1e-3, "and Q1 should agree");
+
+        // Rank-deficient: frictionless radial contacts, every torque identically zero. Both must say no —
+        // and the exact test needs no gate to get there, because no v-candidate finds two signs.
+        let flat: Vec<GraspContact> = [0.0, 120.0, 240.0].iter().map(|d| radial(*d, 0.0)).collect();
+        assert!(!is_force_closure(&flat, 1e-9), "a rank-deficient grasp is not force closure");
+        assert_eq!(force_closure_q1(&flat, 800), 0.0);
+
+        // Same-side grasp: full rank, origin OUTSIDE the hull. The exact test says no; Q1 says no by sign.
+        let same_side = [
+            GraspContact { pos: Vector2::new(1.0, 0.3), normal: Vector2::new(-1.0, 0.0), mu: 0.5 },
+            GraspContact { pos: Vector2::new(1.0, -0.3), normal: Vector2::new(-1.0, 0.0), mu: 0.5 },
+        ];
+        assert_eq!(wrench_rank(&same_side), 3, "this one is full rank — the gate does not fire");
+        assert!(!is_force_closure(&same_side, 1e-9), "the object can escape");
+        assert!(force_closure_q1(&same_side, 800) < 0.0, "and Q1 reports it by sign");
+
+        // Antipodal frictional: force closure, and both agree.
+        let anti = [
+            GraspContact { pos: Vector2::new(1.0, 0.0), normal: Vector2::new(-1.0, 0.0), mu: 0.5 },
+            GraspContact { pos: Vector2::new(-1.0, 0.0), normal: Vector2::new(1.0, 0.0), mu: 0.5 },
+        ];
+        assert!(is_force_closure(&anti, 1e-9));
+        assert!(force_closure_q1(&anti, 800) > 1e-3);
+
+        // Two contacts cannot span ℝ³ once frictionless: refused without needing a hyperplane search.
+        let two_flat = [radial(0.0, 0.0), radial(180.0, 0.0)];
+        assert!(!is_force_closure(&two_flat, 1e-9));
+        assert!(!is_force_closure(&[], 1e-9), "no contacts is not force closure");
+    }
 
     /// A rank-deficient grasp scores exactly zero, per Murray, Li & Sastry Prop. 5.2/5.3: force closure
     /// requires the grasp map to be surjective, equivalently that the primitive wrenches positively span
