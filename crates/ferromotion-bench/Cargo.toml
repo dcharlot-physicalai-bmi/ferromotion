@@ -1,16 +1,29 @@
 [package]
 name = "ferromotion-bench"
-version = "0.56.0"
-edition = "2024"
-license = "Apache-2.0"
+# Inherits the workspace's package metadata like every sibling crate (2026-08-14). This manifest used to
+# hardcode `version` and `license` and omit authors/homepage/repository/keywords/categories entirely, which
+# had two consequences: the version had to be bumped by hand at every release, and the license read
+# `Apache-2.0` while the workspace and all seventeen sibling crates are `MIT OR Apache-2.0` with both
+# LICENSE-MIT and LICENSE-APACHE at the repository root. A consumer reading this crate's page would have
+# seen it as more restrictive than the project it belongs to.
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "Dependency-free measurement harness for ferromotion, with the statistics the claims need."
 
 [dependencies]
 
+# Path dependencies need a `version` to be publishable. These are dev-only, but they are declared the same
+# way as everywhere else in the workspace so a release bump is a single find-and-replace.
 [dev-dependencies]
-ferromotion-core = { path = "../ferromotion-core" }
-ferromotion-cloth = { path = "../ferromotion-cloth" }
-ferromotion-control = { path = "../ferromotion-control" }
+ferromotion-core = { path = "../ferromotion-core", version = "0.56.0" }
+ferromotion-cloth = { path = "../ferromotion-cloth", version = "0.56.0" }
+ferromotion-control = { path = "../ferromotion-control", version = "0.56.0" }
 nalgebra.workspace = true
 
 [lints]
