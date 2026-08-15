@@ -31,8 +31,27 @@ impl Admittance {
     /// Advance the compliant reference by `dt` under external wrench `f_ext`.
     ///
     /// `x`/`xdot` are the current commanded pose/velocity, `x_ref` the (stiff) equilibrium the
-    /// spring pulls toward. Returns `(x_next, xdot_next)`. Semi-implicit Euler is used for the
-    /// same unconditional stability the closed-loop robot tests rely on.
+    /// spring pulls toward. Returns `(x_next, xdot_next)`.
+    ///
+    /// **Conditionally stable, not unconditionally (2026-08-14).** This doc used to claim
+    /// "unconditional stability", and the scheme does not have it. It is symplectic in the *spring* —
+    /// the position update uses the NEW velocity — but the damping term is evaluated at the OLD
+    /// velocity, so damping is explicit. Writing the update as an amplification matrix and requiring
+    /// spectral radius ≤ 1 gives the exact bound
+    ///
+    /// ```text
+    /// dt²·(k/m) + 2·dt·(d/m) ≤ 4
+    /// ```
+    ///
+    /// which [`Admittance::stability_limit`] solves for `dt`. Measured on the gains this module's own
+    /// test uses (`m = 1, d = 8, k = 50`, limit `dt ≤ 0.16496`): the commanded position settles on the
+    /// documented equilibrium `x_ref + F/k` at `dt ≤ 0.164`, is already drifting at `0.165`, and
+    /// diverges geometrically past that — `5.11e4` at `dt = 0.170`, `-9.01e26` at `0.200`. It diverges
+    /// silently, with no error and no clamp.
+    ///
+    /// A 6 Hz outer compliance loop sits at `dt ≈ 0.167`, i.e. just past the limit for those gains, so
+    /// this is not an exotic regime. Check [`Admittance::stability_limit`] against your control period
+    /// when raising `k` or lowering `m`.
     pub fn step(
         &self,
         dt: f64,
@@ -46,6 +65,27 @@ impl Admittance {
         let xdot_next = xdot + xddot * dt;
         let x_next = x + xdot_next * dt;
         (x_next, xdot_next)
+    }
+
+    /// The largest `dt` for which [`Admittance::step`] is stable at these gains.
+    ///
+    /// From `dt²·ω² + 2·dt·γ ≤ 4` with `ω² = k/m` and `γ = d/m`, the positive root is
+    /// `dt = (−γ + √(γ² + 4ω²)) / ω²`. Returns `f64::INFINITY` when there is no bound to report:
+    /// with `k = 0` and `d = 0` nothing can grow, and with `k = 0` alone the condition degenerates to
+    /// the damping-only limit `dt ≤ 2m/d`.
+    ///
+    /// Exists because the scheme is conditionally stable and diverges *silently* past the limit — a
+    /// caller has no way to notice except by watching the command blow up. Compare it against your
+    /// control period; the margin shrinks as `k` rises or `m` falls.
+    pub fn stability_limit(&self) -> f64 {
+        if self.m <= 0.0 {
+            return f64::NAN; // a non-positive virtual mass is not a system, not an unstable one
+        }
+        let (w2, gamma) = (self.k / self.m, self.d / self.m);
+        if w2 <= 0.0 {
+            return if gamma > 0.0 { 2.0 / gamma } else { f64::INFINITY };
+        }
+        (-gamma + (gamma * gamma + 4.0 * w2).sqrt()) / w2
     }
 }
 
@@ -100,6 +140,51 @@ impl HybridForcePosition {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admittance_is_conditionally_stable_and_reports_its_own_limit() {
+        // The doc used to claim unconditional stability. It is symplectic in the spring but explicit in
+        // the damping, so the bound is dt²·k/m + 2·dt·d/m ≤ 4. These are the module's own test gains.
+        let adm = Admittance::new(1.0, 8.0, 50.0);
+        let lim = adm.stability_limit();
+        assert!((lim - 0.164962).abs() < 1e-5, "analytic limit for m=1,d=8,k=50: got {lim}");
+
+        // Settle from rest under a constant force and compare against the documented equilibrium.
+        let settle = |dt: f64| {
+            let (x_ref, f_ext) = (Vector3::zeros(), Vector3::new(5.0, 0.0, 0.0));
+            let (mut x, mut v) = (Vector3::zeros(), Vector3::zeros());
+            for _ in 0..(20.0 / dt) as usize {
+                let (xn, vn) = adm.step(dt, x, v, x_ref, f_ext);
+                x = xn;
+                v = vn;
+                if !x.iter().all(|c| c.is_finite()) {
+                    return f64::INFINITY;
+                }
+            }
+            x.x
+        };
+        let equilibrium = 5.0 / adm.k; // x_ref + F/k = 0.1
+
+        // Inside the bound it reaches the spring law.
+        for dt in [0.05, 0.10, 0.15, 0.16] {
+            assert!(dt < lim);
+            assert!((settle(dt) - equilibrium).abs() < 1e-6, "dt={dt} should settle on {equilibrium}");
+        }
+        // Past it, it runs away — measured 5.11e4 at dt = 0.170 and -9.01e26 at 0.200.
+        for dt in [0.17, 0.20, 0.25] {
+            assert!(dt > lim);
+            let r = settle(dt);
+            assert!(
+                !r.is_finite() || r.abs() > 1e3,
+                "dt={dt} is past the stability limit {lim} but settled at {r}; if this now converges the \
+                 scheme or the bound changed and the doc needs revisiting"
+            );
+        }
+
+        // Degenerate gains must report something usable rather than a NaN or a zero.
+        assert_eq!(Admittance::new(1.0, 0.0, 0.0).stability_limit(), f64::INFINITY, "no stiffness, no damping");
+        assert!((Admittance::new(2.0, 4.0, 0.0).stability_limit() - 1.0).abs() < 1e-12, "damping-only: 2m/d");
+    }
 
     #[test]
     fn admittance_relaxes_to_spring_law() {

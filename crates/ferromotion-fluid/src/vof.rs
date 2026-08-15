@@ -6,8 +6,28 @@
 //!
 //! - **Mass conservation.** Flux-form ⇒ `Σ C` changes only through boundary fluxes; under a
 //!   divergence-free field on a periodic grid it is conserved to machine precision.
-//! - **Boundedness.** The minmod slope limiter is TVD, so `C` never overshoots `[0,1]` — no
-//!   spurious negative or super-unity volume fractions.
+//! - **Boundedness, under a CFL condition.** The minmod limiter is TVD, but TVD for a MUSCL scheme
+//!   marched with **forward Euler** holds only below a Courant limit — and [`Vof::step`] accepts any
+//!   `dt` the caller passes. This doc previously asserted boundedness *unconditionally* ("`C` never
+//!   overshoots `[0,1]`"), which is false (2026-08-14). Measured on the solid-body-rotation benchmark
+//!   below, over 200 steps. The tests there scale `dt = factor·h/(ω·0.71)`; note that `factor` is *not*
+//!   the cell CFL, because `ω·0.71` bounds the speed **magnitude** while the per-component Courant
+//!   number governing a dimension-summed flux update is smaller by about √2. Measured
+//!   `CFL ≈ 0.69·factor`:
+//!
+//!   | `factor` | per-component CFL ([`Vof::max_cfl`]) | worst `C` |
+//!   |---|---|---|
+//!   | 0.4 | 0.28 | exactly `[0, 1]`, volume drift 1.7e-16 |
+//!   | 0.6 | 0.41 | exactly `[0, 1]` |
+//!   | **0.8** | **0.55** | **−1.34e-2 — a negative volume fraction** |
+//!   | 0.9 | 0.62 | −3.1e11 (blow-up) |
+//!   | 1.0 | 0.69 | −8.1e25 |
+//!
+//!   Keep the per-component cell CFL at or below **0.5**, the classical MUSCL/forward-Euler bound. The
+//!   measured onset straddles exactly that: bounded at 0.41, negative fractions by 0.55.
+//!   [`Vof::max_cfl`] computes it for your own `dt` and field, and [`Vof::bounds`] reports what actually
+//!   happened. Note that flux-form conservation **outlives** boundedness — at `factor` 0.8 the volume
+//!   drift was still 0 — so a conservation check cannot stand in for a boundedness check.
 //! - **Solid-body rotation.** The canonical benchmark: a disk carried once around by a rotational
 //!   field returns to its start with bounded shape error.
 
@@ -59,14 +79,49 @@ impl Vof {
     }
 
     /// Min and max of `C` (boundedness monitor).
+    ///
+    /// **Propagates `NaN` deliberately (2026-08-14).** `f64::min`/`f64::max` return the *non-`NaN`*
+    /// operand by IEEE-754, so every `NaN` cell was simply skipped and the interval described only the
+    /// finite ones — from the single function whose job is to report that `C` left `[0,1]`. The sharp
+    /// case is a field with *some* `NaN` cells among finite neighbours, which reported a clean, plausible
+    /// sub-interval of `[0,1]`. (A wholly non-finite field happened to come back as `[-inf, inf]`, which
+    /// a caller testing `is_finite` would catch — but one testing `lo >= 0 && hi <= 1` would too, and
+    /// neither catches the mixed case.) Past the CFL limit this field does go non-finite, so the monitor
+    /// has to survive the case it exists to catch.
     pub fn bounds(&self) -> (f64, f64) {
         let mut lo = f64::INFINITY;
         let mut hi = f64::NEG_INFINITY;
         for &v in &self.c {
+            if v.is_nan() {
+                return (f64::NAN, f64::NAN);
+            }
             lo = lo.min(v);
             hi = hi.max(v);
         }
         (lo, hi)
+    }
+
+    /// The largest cell Courant number `|u|·dt/h` this `dt` and velocity field produce, taken over
+    /// every face the step actually samples.
+    ///
+    /// [`Vof::step`] is a MUSCL scheme marched with forward Euler, so its TVD/boundedness property is
+    /// **conditional** on this staying small — keep it at or below `0.5`. It is offered as a check
+    /// rather than enforced inside `step`, because the caller owns the timestep and a solver that
+    /// silently clamps `dt` is a worse surprise than one that lets you assert.
+    pub fn max_cfl(&self, dt: f64, vel: impl Fn(f64, f64) -> (f64, f64)) -> f64 {
+        let (n, h) = (self.n, self.h);
+        let mut worst = 0.0f64;
+        for i in 0..n {
+            for j in 0..n {
+                let ue = vel((i as f64 + 1.0) * h, (j as f64 + 0.5) * h).0;
+                let vn = vel((i as f64 + 0.5) * h, (j as f64 + 1.0) * h).1;
+                for s in [ue, vn] {
+                    let c = s.abs() * dt / h;
+                    worst = if worst.is_nan() || c.is_nan() { f64::NAN } else { worst.max(c) };
+                }
+            }
+        }
+        worst
     }
 
     /// One explicit flux-form step under a divergence-free velocity field `vel(x,y) → (u,v)`,
@@ -127,6 +182,87 @@ mod verification {
     // Solid-body rotation about the domain center: u = −ω(y−½), v = ω(x−½). Divergence-free.
     fn rotation(omega: f64) -> impl Fn(f64, f64) -> (f64, f64) {
         move |x, y| (-omega * (y - 0.5), omega * (x - 0.5))
+    }
+
+    /// Boundedness is **conditional on the CFL number**, which the module doc used to assert
+    /// unconditionally. `step` marches a MUSCL reconstruction with forward Euler and accepts any `dt`.
+    #[test]
+    fn boundedness_is_conditional_on_the_cfl_number() {
+        let omega = 2.0;
+        let worst_over = |factor: f64| {
+            let mut f = Vof::new(48);
+            f.set_disk(0.5, 0.75, 0.15);
+            let dt = factor * f.h / (omega * 0.71);
+            let cfl = f.max_cfl(dt, rotation(omega));
+            let (mut wlo, mut whi) = (0.0f64, 1.0f64);
+            for _ in 0..200 {
+                f.step(dt, rotation(omega));
+                let (lo, hi) = f.bounds();
+                if !(lo.is_finite() && hi.is_finite()) {
+                    return (cfl, f64::NAN, f64::NAN);
+                }
+                wlo = wlo.min(lo);
+                whi = whi.max(hi);
+            }
+            (cfl, wlo, whi)
+        };
+
+        // `factor` is NOT the cell CFL. The shipped scaling divides by ω·0.71, which bounds the speed
+        // MAGNITUDE, while the Courant number that governs a dimension-summed flux update is
+        // per-component and smaller by about √2. Asserting factor == CFL is how a first version of this
+        // test failed — measured, CFL ≈ 0.69·factor. Pin that relationship so the doc's table stays
+        // honest if the field or the face sampling ever changes.
+        let (cfl04, lo04, hi04) = worst_over(0.4);
+        assert!(
+            (cfl04 - 0.276).abs() < 0.02,
+            "per-component CFL at factor 0.4 should be ≈0.276, got {cfl04}; the doc's factor→CFL table \
+             needs re-measuring"
+        );
+
+        // At and below the shipped step, C stays in [0,1] exactly. CFL here is 0.28 and 0.41.
+        assert!(lo04 >= 0.0 && hi04 <= 1.0, "factor 0.4 (CFL 0.28) must stay bounded: [{lo04}, {hi04}]");
+        let (cfl06, lo06, hi06) = worst_over(0.6);
+        assert!(cfl06 < 0.5, "factor 0.6 should still be inside the 0.5 bound, got CFL {cfl06}");
+        assert!(lo06 >= 0.0 && hi06 <= 1.0, "factor 0.6 (CFL 0.41) must stay bounded: [{lo06}, {hi06}]");
+
+        // Past 0.5 the limiter does NOT save the scheme: measured −1.34e-2 at CFL 0.55, then blow-up.
+        let (cfl08, lo08, _) = worst_over(0.8);
+        assert!(cfl08 > 0.5, "factor 0.8 should be past the 0.5 bound, got CFL {cfl08}");
+        assert!(
+            lo08 < -1e-4 || lo08.is_nan(),
+            "factor 0.8 (CFL {cfl08}) produced a bounded field ({lo08}); if the scheme or the limiter \
+             changed, the CFL table in the module doc needs re-measuring rather than trusting"
+        );
+        let (_, lo09, _) = worst_over(0.9);
+        assert!(lo09.is_nan() || lo09 < -1e6, "factor 0.9 should be a blow-up, got {lo09}");
+    }
+
+    /// The boundedness monitor must survive the case it exists to report.
+    #[test]
+    fn the_bounds_monitor_does_not_hide_a_non_finite_field() {
+        let omega = 2.0;
+        let mut f = Vof::new(32);
+        f.set_disk(0.5, 0.75, 0.15);
+        // Far past the CFL limit: this diverges to non-finite within a few hundred steps.
+        let dt = 8.0 * f.h / (omega * 0.71);
+        // Detect the NaN field INDEPENDENTLY of bounds(), via the raw accessor. The whole defect is that
+        // bounds() disagrees with the field, so using bounds() to decide when to check bounds() makes the
+        // test fail on the wrong assertion with a misleading message.
+        let n = f.n;
+        let field_has_nan = |g: &Vof| (0..n * n).any(|k| g.at(k / n, k % n).is_nan());
+        let mut steps = 0;
+        while steps < 400 && !field_has_nan(&f) {
+            f.step(dt, rotation(omega));
+            steps += 1;
+        }
+        assert!(field_has_nan(&f), "expected this CFL to drive C to NaN within 400 steps so the monitor can be checked");
+        let (lo, hi) = f.bounds();
+        assert!(
+            lo.is_nan() && hi.is_nan(),
+            "bounds() reported the finite interval [{lo}, {hi}] for a NaN field — f64::min/max return \
+             the non-NaN operand, so the boundedness monitor was the one thing that could not report \
+             unboundedness"
+        );
     }
 
     /// Flux-form ⇒ the fluid volume is conserved to machine precision under the rotational field.

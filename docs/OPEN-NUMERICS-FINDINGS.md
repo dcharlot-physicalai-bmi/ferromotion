@@ -10,7 +10,10 @@ that pass 6 of 6 were confirmed and 0 refuted, so the prior on these is high but
 as a hypothesis with a named experiment, and reproduce the trigger EXACTLY before concluding: two of the eight
 fixes initially failed to reproduce because a parameter was misread.
 
-10 open items.
+**8 open items.** Two were verified and closed on 2026-08-14 and are recorded at the bottom of this file:
+`Admittance::step`'s "unconditional stability" claim and `Vof`'s unconditional boundedness claim. Both were
+confirmed by direct measurement, both are now documented with their real bounds, and both crates gained a way for
+a caller to check the bound rather than discover it by divergence.
 
 ## 1. `force_closure_q1` — crates/ferromotion-core/src/grasp.rs:55
 
@@ -64,6 +67,8 @@ fixes initially failed to reproduce because a parameter was misread.
 
 ## 6. `Vof::step / module doc "Boundedness"` — crates/ferromotion-fluid/src/vof.rs:9
 
+**CLOSED 2026-08-14 — confirmed and fixed. See the Closed section at the end of this file for the measured numbers.**
+
 *reported confidence 0.85*
 
 **Claim.** The doc asserts boundedness unconditionally — "The minmod slope limiter is TVD, so C never overshoots [0,1] — no spurious negative or super-unity volume fractions" — but the scheme is MUSCL-minmod with FORWARD EULER, whose TVD property holds only under a CFL bound that is nowhere documented and nowhere enforced; step(dt, vel) accepts any dt from the caller.
@@ -73,6 +78,8 @@ fixes initially failed to reproduce because a parameter was misread.
 **Reported wrong output.** C reaches -1.21e-5 within 120 steps — a negative volume fraction, the exact thing the doc rules out. At factor 1.0 the field reaches +/-7.2e6 in 120 steps (total blow-up); at 1.2, +/-2.3e21. In 1D pure advection the same flux/limiter/time-stepping gives min -0.548 / max 1.551 at CFL 0.70 and min -3145 / max 3250 at CFL 0.90, while staying exactly in [0,1] up to ~0.6.
 
 ## 7. `Admittance::step` — crates/ferromotion-control/src/admittance.rs:35
+
+**CLOSED 2026-08-14 — confirmed and fixed. See the Closed section at the end of this file for the measured numbers.**
 
 *reported confidence 0.85*
 
@@ -112,3 +119,52 @@ fixes initially failed to reproduce because a parameter was misread.
 
 **Reported wrong output.** At t = 3.20 s the true roll is −3.0832 rad (wrapped) but the filter returns +1.5355 rad. Worst error after the crossing is 3.0642 rad = 175.6° at t = 3.28 s — the filter reports the body as essentially level while it is inverted — and it takes ≈ 2.9 s of continued rolling to re-converge. Every crossing of ±π repeats it. pitch is unaffected (atan2(−ax, √(ay²+az²)) is confined to ±π/2), so only the roll channel and the 1-axis `update` are hit.
 
+
+
+---
+
+# Closed
+
+## `Admittance::step` — crates/ferromotion-control/src/admittance.rs — CONFIRMED, fixed 2026-08-14
+
+The doc claimed "unconditional stability". The scheme is symplectic in the spring but evaluates damping at the
+OLD velocity, so the exact bound is `dt²·k/m + 2·dt·d/m ≤ 4`. Measured on the module's own gains
+(`m=1, d=8, k=50`, limit `dt ≤ 0.164962`), settling from rest under a constant force against the documented
+equilibrium `x_ref + F/k = 0.1`:
+
+| dt | result | bound LHS |
+|---|---|---|
+| 0.160 | 0.1000 settled | 3.84 |
+| 0.164 | 0.1028 | 3.969 |
+| 0.165 | 0.1578 drifting | 4.001 |
+| 0.170 | **5.11e4** | 4.165 |
+| 0.200 | **−9.01e26** | 5.20 |
+
+The analytic bound is sharp to three decimals. Doc corrected; added `Admittance::stability_limit()`. A 6 Hz outer
+compliance loop sits at `dt ≈ 0.167`, just past the limit for those gains, so this is not an exotic regime.
+
+## `Vof` boundedness — crates/ferromotion-fluid/src/vof.rs — CONFIRMED, fixed 2026-08-14
+
+The doc claimed `C` "never overshoots `[0,1]`" unconditionally. It is MUSCL-minmod with FORWARD EULER, so TVD is
+conditional, and `step` accepts any `dt`. Measured over 200 steps of the module's own rotation benchmark:
+
+| `factor` | per-component CFL | worst `C` |
+|---|---|---|
+| 0.4 | 0.28 | exactly `[0,1]` |
+| 0.6 | 0.41 | exactly `[0,1]` |
+| 0.8 | 0.55 | **−1.34e-2** |
+| 0.9 | 0.62 | −3.1e11 |
+
+The onset straddles the classical 0.5 MUSCL/forward-Euler bound. Doc corrected with the measured table; added
+`Vof::max_cfl()`.
+
+**Two things this one taught, both worth carrying to the remaining items.**
+
+1. **`factor` is NOT the CFL.** The shipped `dt = factor·h/(ω·0.71)` divides by the speed *magnitude*, while the
+   Courant number governing a dimension-summed flux update is per-component and smaller by ≈√2. Asserting
+   `factor == CFL` is how the first version of the new test failed. Measured, `CFL ≈ 0.69·factor`.
+2. **`Vof::bounds` — the boundedness monitor itself — swallowed `NaN`**, via the same `f64::min`/`f64::max`
+   family fixed elsewhere. It now propagates. The sharp case is a field with *some* `NaN` cells among finite
+   ones, which reported a clean, plausible sub-interval of `[0,1]`.
+3. **Conservation outlives boundedness.** At `factor` 0.8 the volume drift was still exactly 0 while `C` was
+   already negative, so **a conservation check cannot stand in for a boundedness check.**
