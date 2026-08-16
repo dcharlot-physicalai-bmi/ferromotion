@@ -34,6 +34,33 @@ clearance, and a battery whose voltage sags under the current it is asked for. T
 - **`fatigue`** — rainflow counting, S-N curves, mean-stress corrections, Miner accumulation.
 - **`actuator`** — series-elastic joints, a brushed DC motor with cogging, transport delay.
 
+Beyond the rotating motor, four actuator families with nothing in common but the job:
+
+- **`piezo`** — microns of stroke, kilonewtons of force, and a capacitive load. The useful work sits on the
+  straight load line between free displacement and blocked force, maximised exactly at a matched load.
+- **`sma`** — nitinol, at roughly **13 MJ/m³** against an electric motor's 0.1. Path-dependent: martensite
+  fraction depends on where you have been, not just on temperature and stress.
+- **`mckibben`** — braided pneumatic muscle. Everything follows from the braid angle and one application of
+  virtual work, `F = P(−dV/dL)`.
+- **`muscle`** — Hill's biological force-velocity model, which shares only the name with `mckibben`.
+
+Three results from those, each measured rather than quoted:
+
+**A piezo's coupling `k²` is measurable two entirely independent ways** — from the constitutive coefficients
+`d²/(sᴱεᵀ)`, and from the resonance/antiresonance gap `1 − (f_r/f_a)²`. Those share no arithmetic, so their
+agreement is real evidence. `k² > 1` is rejected at construction: it describes a transducer returning more work
+than it receives, and it is what mixing coefficients measured under different boundary conditions produces.
+
+**An SMA wire's bandwidth is set by cooling, and cooling is passive.** `cycle_time` returns heating and cooling
+separately because they are not symmetric: ten times the drive power heats ten times faster and cools not at
+all faster. Forced convection is the only lever. Quoting a cycle rate from the heating figure alone is the
+standard way these get oversold.
+
+**A McKibben muscle wound past 54.7356° extends instead of contracting.** The force term is
+`3cos²θ − 1`, which vanishes at `arccos(1/√3)`, so free contraction is `1 − 1/(√3 cos θ₀)` — negative for a
+braid past that angle. Same hardware, opposite sign, decided by the winding. `free_contraction` returns the
+signed value unclamped, because an extensor is a real device rather than an error.
+
 Two results from that layer worth stating, because both are measured rather than assumed:
 
 **Space-vector modulation reaches a peak phase voltage of `V_dc/√3`; sine-triangle modulation reaches

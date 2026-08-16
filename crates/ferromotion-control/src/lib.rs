@@ -21,6 +21,9 @@ mod actuator;
 mod backlash;
 mod battery;
 mod fatigue;
+mod mckibben;
+mod piezo;
+mod sma;
 mod rotordynamics;
 mod foc;
 mod friction;
@@ -103,6 +106,9 @@ pub use fatigue::{
     damage, damage_from_history, equivalent_amplitude, rainflow, repetitions_to_failure, reversals,
     total_variation, Cycle, MeanCorrection, SnCurve,
 };
+pub use mckibben::{Mckibben, MAGIC_ANGLE};
+pub use piezo::Piezo;
+pub use sma::{Direction, Sma, SmaState};
 pub use rotordynamics::{gyroscopic_moment, Rotor, WhirlResponse};
 pub use foc::{
     clarke, electrical_angle, inverse_clarke, inverse_park, modulation_index, park, spwm_duties,
