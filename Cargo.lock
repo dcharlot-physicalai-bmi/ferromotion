@@ -1282,6 +1282,7 @@ dependencies = [
  "ferromotion-cloth",
  "ferromotion-control",
  "ferromotion-core",
+ "ferromotion-learn",
  "nalgebra",
 ]
 

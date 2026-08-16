@@ -29,6 +29,7 @@ description = "Dependency-free measurement harness for ferromotion, with the sta
 ferromotion-core = { path = "../ferromotion-core", version = "0.59.0" }
 ferromotion-cloth = { path = "../ferromotion-cloth", version = "0.59.0" }
 ferromotion-control = { path = "../ferromotion-control", version = "0.59.0" }
+ferromotion-learn = { path = "../ferromotion-learn", version = "0.59.0" }
 nalgebra.workspace = true
 
 [lints]
