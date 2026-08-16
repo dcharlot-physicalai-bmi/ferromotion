@@ -12,8 +12,8 @@
 //! - **encoded** — in the *architecture* (Lagrangian/Hamiltonian nets, Neural ODEs, structure-preserving
 //!   integrators).
 //!
-//! Everything rests on one keystone: **automatic differentiation**. [`autodiff`] is reverse-mode (for
-//! gradients of a scalar loss w.r.t. many parameters — backpropagation); [`dual`] is forward-mode (for exact
+//! Everything rests on one keystone: **automatic differentiation**. [`Tape`] is reverse-mode (for
+//! gradients of a scalar loss w.r.t. many parameters — backpropagation); [`Dual`] is forward-mode (for exact
 //! higher-order derivatives w.r.t. a model's *inputs*, which PINNs and Lagrangian nets need). Both are
 //! verified against finite differences.
 

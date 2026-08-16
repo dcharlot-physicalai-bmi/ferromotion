@@ -54,7 +54,7 @@ impl Perception {
 }
 
 /// Segment `target_label` out of the camera's raytraced frame and recover its image feature and
-/// 3-D position from the range channel. Reads only the rendered [`DepthImage`], never the scene.
+/// 3-D position from the range channel. Reads only the rendered [`DepthImage`](ferromotion_core::DepthImage), never the scene.
 pub fn perceive(cam: &DepthCamera, scene: &SdfScene, target_label: i32) -> Perception {
     let img = cam.render(scene);
     let (mut su, mut sv, mut sz) = (0.0f64, 0.0f64, 0.0f64);

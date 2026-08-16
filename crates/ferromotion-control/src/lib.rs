@@ -21,6 +21,7 @@ mod actuator;
 mod backlash;
 mod battery;
 mod fatigue;
+mod rotordynamics;
 mod foc;
 mod friction;
 mod motor_thermal;
@@ -102,6 +103,7 @@ pub use fatigue::{
     damage, damage_from_history, equivalent_amplitude, rainflow, repetitions_to_failure, reversals,
     total_variation, Cycle, MeanCorrection, SnCurve,
 };
+pub use rotordynamics::{gyroscopic_moment, Rotor, WhirlResponse};
 pub use foc::{
     clarke, electrical_angle, inverse_clarke, inverse_park, modulation_index, park, spwm_duties,
     spwm_voltage_limit, svpwm_duties, svpwm_voltage_limit, PiCurrent, Pmsm,

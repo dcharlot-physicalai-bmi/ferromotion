@@ -19,7 +19,7 @@
 //!
 //! Collapsing the two biases every value estimate near the horizon downward, and the bias is worst for the
 //! *best* policies, because those are the ones that survive to the time limit. A policy that has learned to
-//! balance indefinitely gets told that balancing indefinitely ends in a valueless state. [`gae`] takes both
+//! balance indefinitely gets told that balancing indefinitely ends in a valueless state. [`gae`](crate::gae) takes both
 //! flags for exactly this reason, and [`StepResult`] keeps them separate so a wrapper cannot lose one.
 //!
 //! # Action scaling belongs here, not in the policy

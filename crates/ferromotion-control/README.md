@@ -28,6 +28,10 @@ clearance, and a battery whose voltage sags under the current it is asked for. T
 - **`friction`** — Stribeck curve and the LuGre bristle model, the latter's steady state reproducing the former.
 - **`backlash`** — lost motion as a deadband on relative position. A reversal costs the full width.
 - **`battery`** — Thévenin pack. Past `OCV/2R`, drawing more current delivers *less* power.
+- **`rotordynamics`** — the gyroscopic reaction a spinning rotor imposes on its housing, and the Jeffcott
+  whirl model with critical speeds. The rotor's spin is factored out of every multibody model because it is
+  orders of magnitude faster than any body rate, and that factoring-out silently discards both effects.
+- **`fatigue`** — rainflow counting, S-N curves, mean-stress corrections, Miner accumulation.
 - **`actuator`** — series-elastic joints, a brushed DC motor with cogging, transport delay.
 
 Two results from that layer worth stating, because both are measured rather than assumed:
@@ -36,6 +40,14 @@ Two results from that layer worth stating, because both are measured rather than
 `V_dc/2`.** That is 15.47% more voltage from the same hardware, and therefore 15.47% more speed before field
 weakening is needed, out of a change in arithmetic. The test bisects on where each modulator's duties first
 leave `[0, 1]` rather than taking the formula's word for it.
+
+**A disc-shaped rotor has no conical critical speed at any speed whatever.** Gyroscopic stiffening raises the
+forward whirl branch faster than the synchronous line rises, so for a polar-to-diametral inertia ratio
+`γ = I_p/I_d ≥ 1` the two never cross and `Ω_cr = ω_n/√(1−γ)` has no real solution. A thin disc is `γ = 2`
+exactly, so the common case is the exempt one, while a slender armature (`γ = 6r²/L² ≪ 1`) has a conical
+critical speed and must be designed around it. Relatedly: whirl amplitude peaks near `r = 1` at `e/(2ζ)` and
+then falls back to the eccentricity `e` **exactly** as `r → ∞`, because above resonance the rotor turns about
+its mass centre. The design question is not "stay below resonance" but "pick a side".
 
 **The stability bound that binds a current loop is the regulator's, not the machine's.** `Pmsm::max_stable_dt`
 is the open-loop `2L/R`; a PI regulator at bandwidth `ω_bw` imposes roughly `2/ω_bw`, which for a 500 Hz loop

@@ -2,7 +2,7 @@
 //!
 //! This is the training stage of the robot-learning pipeline: a stochastic policy, a value baseline,
 //! generalized advantage estimation, and a clipped surrogate objective, all on the reverse-mode
-//! [`crate::autodiff`] tape in pure `f64`. No Python, no BLAS, no GPU, and wasm-clean, so the same training
+//! [`Tape`] in pure `f64`. No Python, no BLAS, no GPU, and wasm-clean, so the same training
 //! loop runs on a workstation and on your own device in a browser.
 //!
 //! # Why an LQR oracle, and not a reward curve
@@ -19,7 +19,7 @@
 //!
 //! # What is reused, and what is not
 //!
-//! The value function is an ordinary [`Mlp`](crate::Mlp) trained by mean-squared error onto the GAE returns,
+//! The value function is an ordinary [`Mlp`] trained by mean-squared error onto the GAE returns,
 //! because that is precisely what a value function is: a regression onto observed returns. Reusing it means
 //! the value head shares the Adam implementation and the initialization that module already verifies.
 //!

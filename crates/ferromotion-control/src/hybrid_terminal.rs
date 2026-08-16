@@ -183,7 +183,7 @@ pub fn plastic_impact_terminal(closed_loop: &DMatrix<f64>, mass: &DMatrix<f64>, 
 }
 
 /// The LQR cost for a linear system, as the *naive* terminal cost — the one that knows nothing about the impact and
-/// that [`terminal`](crate::terminal) found to be expansive under it.
+/// that the crate's private `terminal` module found to be expansive under it.
 pub fn lqr_terminal_cost(a: &DMatrix<f64>, b: &DMatrix<f64>, q: &DMatrix<f64>, r: &DMatrix<f64>) -> Option<DMatrix<f64>> {
     // `dlqr` returns the gain, so the cost-to-go comes from the closed loop's discrete Lyapunov equation:
     // A_K^T P A_K - P + (Q + K^T R K) = 0.
