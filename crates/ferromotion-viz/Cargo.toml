@@ -8,8 +8,8 @@ repository.workspace = true
 description = "Rerun logging for ferromotion — robots, trajectories, and calibration runs in the rerun.io viewer. Native-side companion crate (not WASM)."
 
 [dependencies]
-ferromotion-core = { path = "../ferromotion-core", version = "0.58.0" }
-ferromotion-ruckig = { path = "../ferromotion-ruckig", version = "0.58.0" }
+ferromotion-core = { path = "../ferromotion-core", version = "0.59.0" }
+ferromotion-ruckig = { path = "../ferromotion-ruckig", version = "0.59.0" }
 rerun = { version = "0.34", default-features = false, features = ["sdk"] }
 nalgebra = { workspace = true }
 

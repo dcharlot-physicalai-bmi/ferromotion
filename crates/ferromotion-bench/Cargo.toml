@@ -26,9 +26,9 @@ description = "Dependency-free measurement harness for ferromotion, with the sta
 # Path dependencies need a `version` to be publishable. These are dev-only, but they are declared the same
 # way as everywhere else in the workspace so a release bump is a single find-and-replace.
 [dev-dependencies]
-ferromotion-core = { path = "../ferromotion-core", version = "0.58.0" }
-ferromotion-cloth = { path = "../ferromotion-cloth", version = "0.58.0" }
-ferromotion-control = { path = "../ferromotion-control", version = "0.58.0" }
+ferromotion-core = { path = "../ferromotion-core", version = "0.59.0" }
+ferromotion-cloth = { path = "../ferromotion-cloth", version = "0.59.0" }
+ferromotion-control = { path = "../ferromotion-control", version = "0.59.0" }
 nalgebra.workspace = true
 
 [lints]

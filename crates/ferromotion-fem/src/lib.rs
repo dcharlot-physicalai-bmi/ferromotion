@@ -16,6 +16,8 @@
 
 use nalgebra::{Matrix3, Vector3};
 
+pub mod plasticity;
+
 #[cfg(feature = "gpu")]
 pub mod gpu;
 
