@@ -34,36 +34,38 @@
 //!   PPO baseline                  10.1%        1.000      0.85
 //!   PPO quiet (sigma/16)           0.0%       -0.886      0.12
 //!   PPO long horizon              17.7%        1.000      0.54
+//!   PPO annealed sigma             8.9%        1.000      0.71
 //! ```
 //!
 //! **PPO swings up and does not catch.** Its return improved from −501 to −71 and it reached the top on every
 //! seed, so it found the energy pumping — the genuinely non-linear part, requiring several swings, with no linear
 //! solution. It then failed to stabilise there, holding 10-18% against the hand-built controller's 75%.
 //!
-//! # Two hypotheses, both tested, both refuted
+//! # Three hypotheses, all tested, all refuted
 //!
-//! The single-variable arms above exist because the first run left two guesses on the table, and a guess left in
-//! a comment is not a finding.
+//! Each is a single-variable arm, because a guess left in a comment is not a finding.
 //!
-//! * **"Exploration noise prevents the catch" is WRONG, and wrong in the opposite direction.** The reasoning was
-//!   that 0.27 N m of action noise is large against the `asin(τ_max/m g l) = 0.205 rad` basin the policy has to
-//!   stay inside. Run at 16x lower sigma, the policy scores hold 0% and peak height −0.886: it never swings up at
-//!   all. Exploration is not what spoils the catch, it is what makes the pumping *discoverable*.
-//! * **"The horizon is too short" is a real effect and not the explanation.** `γ` 0.99 → 0.997 improved hold
-//!   10.1% → 17.7% and halved effort 0.85 → 0.54. A contributor, four times too small to close the gap.
+//! * **"Exploration noise prevents the catch" is WRONG, and backwards.** The reasoning was that 0.27 N m of
+//!   action noise is large against the `asin(τ_max/m g l) = 0.205 rad` basin the policy must stay inside. Run at
+//!   16x smaller σ, the policy scores hold 0% and peak height −0.886: it never swings up at all. Exploration is
+//!   not what spoils the catch, it is what makes the pumping *discoverable*.
+//! * **"The horizon is too short" is a real effect and four times too small.** `γ` 0.99 → 0.997 moved hold
+//!   10.1% → 17.7% and halved effort 0.85 → 0.54. A contributor, not the explanation.
+//! * **"The two phases are separated in time, so annealing σ serves both" is REFUTED.** This was the
+//!   explanation the first three arms appeared to point at, which is exactly why it needed testing rather than
+//!   writing down. With a σ ceiling annealed 0.607 → 0.030 across the run, hold went 10.1% → **8.9%** and the
+//!   return got *worse*, −70.6 → −126.9.
 //!
-//! # What fits all three arms
+//! # What is left, sharpened by the refutation
 //!
-//! The two phases of this task want **different exploration scales**, and PPO here has only one to give. Coarse
-//! noise is required to find the pumping (the quiet arm proves it) and is too coarse to refine a catch into a
-//! 0.205 rad basin (the baseline arm proves it). [`GaussianPolicy`](ferromotion_learn::GaussianPolicy) carries a
-//! **state-independent** learnable log-σ, documented there as the standard choice for continuous control — and
-//! for a task whose phases need different precision, that is a real limitation of the design rather than of the
-//! budget.
+//! Annealing couples σ to **training time**. The refutation says that is the wrong axis: this pendulum needs
+//! coarse exploration while swinging and fine control near the top **within the same episode**, which no
+//! schedule over iterations can express. A **state-dependent** σ can, and
+//! [`GaussianPolicy`](ferromotion_learn::GaussianPolicy) carries a state-*independent* one by design.
 //!
-//! That is a hypothesis consistent with all three measurements, **not** a tested result: state-dependent σ has
-//! not been tried here. It is recorded because it names a specific design choice to test next, which is more
-//! use than "the gap is elsewhere".
+//! That is the surviving candidate and it is **untested here**. It is recorded rather than assumed because the
+//! previous version of this comment asserted the time-separated story as "what fits all three arms", and one arm
+//! later it was false.
 //!
 //! The reward is left alone throughout, at the standard `height − effort`. Paying specifically for dwell near the
 //! top would solve the benchmark rather than measure the learner.
@@ -207,19 +209,45 @@ fn main() {
     // Everything else is held fixed, including the reward, which stays the standard `height - effort`.
     let iterations = 200;
     let mut returns: Vec<f64> = Vec::new();
-    // Each tuple is (name, init_log_std, min_log_std, gamma).
+    // Each tuple is (name, init_log_std, min_log_std, gamma, log_std_ceiling).
     //
     // `init_log_std` is here because the first version of this ablation varied only `min_log_std`, which is a
     // FLOOR: the policy starts at the initial sigma and the floor binds only if the learned sigma descends to
-    // it. It never did, so lowering the floor from -2.0 to -3.5 changed nothing and the "quiet" arm produced
-    // results BIT-IDENTICAL to the baseline — same return to 0.1, same hold, same effort. The variable I
-    // thought I was changing was inert, and the hypothesis went untested while the output claimed otherwise.
-    let variants: [(&str, f64, f64, f64); 3] = [
-        ("PPO baseline", -0.5, -2.0, 0.99),
-        ("PPO quiet (sigma/16)", -2.5, -3.5, 0.99),
-        ("PPO long horizon", -0.5, -2.0, 0.997),
+    // it. It never did, so lowering the floor changed nothing and the "quiet" arm was BIT-IDENTICAL to the
+    // baseline. The variable I thought I was changing was inert while the output claimed a tested hypothesis.
+    //
+    // The fourth arm tests what the first three pointed at: coarse noise is REQUIRED to discover the pumping
+    // (the quiet arm proves it, at hold 0% and peak -0.886) and too coarse to refine the catch. The phases are
+    // separated in time, so a σ CEILING annealed from loose to tight can serve both. Note it must be a ceiling:
+    // a floor cannot push σ down, only stop it collapsing.
+    let variants: [(&str, f64, f64, f64, Option<(f64, f64)>); 4] = [
+        ("PPO baseline", -0.5, -2.0, 0.99, None),
+        ("PPO quiet (sigma/16)", -2.5, -3.5, 0.99, None),
+        ("PPO long horizon", -0.5, -2.0, 0.997, None),
+        ("PPO annealed sigma", -0.5, -6.0, 0.99, Some((-0.5, -3.5))),
     ];
-    for (name, init_log_std, min_log_std, gamma) in variants {
+    // Each arm costs about 40 minutes, so all four do not fit in one sitting. Optional positional args select
+    // a subset by index; with none given, all run. Arm 0 must be included for the verdict's baseline reference,
+    // and it reproduces exactly from its seed, so re-running it is cheap insurance rather than waste.
+    let selected: Vec<usize> = {
+        let args: Vec<usize> = std::env::args().skip(1).filter_map(|a| a.parse().ok()).collect();
+        if args.is_empty() {
+            (0..variants.len()).collect()
+        } else {
+            assert!(args.contains(&0), "arm 0 is the baseline the verdict compares against; include it");
+            assert!(args.iter().all(|&i| i < variants.len()), "arm index out of range");
+            args
+        }
+    };
+    if selected.len() < variants.len() {
+        println!(
+            "  running arms {:?} of {} ({} skipped)\n",
+            selected,
+            variants.len(),
+            variants.len() - selected.len()
+        );
+    }
+    for (name, init_log_std, min_log_std, gamma, ceiling) in selected.iter().map(|&i| variants[i]) {
         let cfg = PpoConfig {
             gamma,
             lambda: 0.95,
@@ -232,6 +260,7 @@ fn main() {
             steps_per_batch: 2000,
             max_episode_steps: STEPS,
             min_log_std,
+            log_std_ceiling: ceiling,
             final_lr_fraction: 0.05,
         };
         let mut env = Pendulum::default();
@@ -241,10 +270,13 @@ fn main() {
         let early: f64 = reports[..5].iter().map(|r| r.mean_return).sum::<f64>() / 5.0;
         let late: f64 = reports[reports.len() - 5..].iter().map(|r| r.mean_return).sum::<f64>() / 5.0;
         println!(
-            "  {name:<22} {iterations} x {} steps, sigma {:.4} -> floor {:.4}, gamma {gamma}, return {early:.1} -> {late:.1}",
+            "  {name:<22} {iterations} x {} steps, sigma {:.4}{}, gamma {gamma}, return {early:.1} -> {late:.1}",
             cfg.steps_per_batch,
             init_log_std.exp(),
-            min_log_std.exp()
+            match ceiling {
+                Some((a, b)) => format!(" ceiling {:.3} -> {:.3}", a.exp(), b.exp()),
+                None => format!(" floor {:.4}", min_log_std.exp()),
+            }
         );
         let space = env.action_space();
         let scores: Vec<Score> = seeds
@@ -307,8 +339,9 @@ fn main() {
         );
     } else if inert.is_empty() {
         println!(
-            "  NEITHER HYPOTHESIS HELD: the best variant reached {:.1}% against the baseline's {:.1}%, and both\n\
-             arms are confirmed to have varied, so neither explains the missing catch. The gap is elsewhere.\n",
+            "  NO HYPOTHESIS HELD: the best of {} variants reached {:.1}% against the baseline's {:.1}%, and\n\
+             every arm is confirmed to have varied, so none of them explains the missing catch.\n",
+            rows.len() - 3,
             100.0 * ppo_hold,
             100.0 * baseline_hold
         );

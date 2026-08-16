@@ -320,6 +320,7 @@ impl GaussianPolicy {
         lr: f64,
         entropy_coef: f64,
         min_log_std: f64,
+        max_log_std: Option<f64>,
     ) -> (f64, f64) {
         let (loss, grad, clip_frac) =
             self.surrogate_and_grad(obs, actions, old_log_probs, advantages, clip, entropy_coef);
@@ -338,6 +339,10 @@ impl GaussianPolicy {
             let p = &mut self.params[self.n_mean + d];
             if *p < min_log_std {
                 *p = min_log_std;
+            }
+            // The ceiling is what can actually force exploration down; the floor above only stops it collapsing.
+            if max_log_std.is_some_and(|ceil| *p > ceil) {
+                *p = max_log_std.expect("checked just above");
             }
         }
         (loss, clip_frac)
@@ -435,6 +440,23 @@ pub struct PpoConfig {
     pub max_episode_steps: usize,
     /// Floor on the learnable log-σ.
     pub min_log_std: f64,
+    /// An annealed **ceiling** on the learnable log-σ, as `(start, end)`, linear across the run. `None` leaves
+    /// σ unconstrained from above.
+    ///
+    /// **A ceiling, because `min_log_std` is a lower bound and cannot do this.** That clamp is
+    /// `if log_σ < floor { log_σ = floor }`, so lowering the floor only *relaxes* a constraint — it can never
+    /// push σ down. My first attempt at this annealed the floor downward expecting exploration to shrink, and
+    /// the test caught the learned log-σ sitting at −0.4999 with a floor of −3.0: the schedule was inert, which
+    /// is the same failure that produced a bit-identical arm in the swing-up ablation. A floor is not a setting.
+    ///
+    /// **Why anneal σ at all.** Measured on swing-up, the task has two phases wanting different exploration
+    /// scales. Coarse noise is *required* to discover the energy pumping — start σ sixteen times smaller and the
+    /// policy never swings up at all (peak height −0.886 against 1.000, hold 0%). The same coarse noise is too
+    /// blunt to refine the catch into the `asin(τ_max/m g l) = 0.205 rad` basin where the inverted equilibrium
+    /// can be held, so the policy tops out around 10-18% hold against a hand-built controller's 75%. The phases
+    /// are separated in *time*, so a ceiling that starts loose and ends tight can serve both where no fixed
+    /// value can. A **state-dependent** σ would address the same problem structurally and is the larger change.
+    pub log_std_ceiling: Option<(f64, f64)>,
     /// Fraction of `policy_lr` still in force at the last iteration, annealed linearly. `1.0` disables it.
     ///
     /// **This is not a cosmetic schedule.** Adam normalizes its own step, so its step *size* is about `lr`
@@ -461,6 +483,7 @@ impl Default for PpoConfig {
             steps_per_batch: 512,
             max_episode_steps: 200,
             min_log_std: -3.0,
+            log_std_ceiling: None,
             final_lr_fraction: 0.05,
         }
     }
@@ -483,6 +506,8 @@ pub struct IterationReport {
     pub std: Vec<f64>,
     /// The annealed policy learning rate this iteration actually used.
     pub policy_lr: f64,
+    /// The annealed log-σ ceiling this iteration used, if any.
+    pub log_std_ceiling: Option<f64>,
 }
 
 /// Collect a batch of transitions from `env` under `policy`, splitting into episodes at
@@ -596,6 +621,9 @@ pub fn train(
         // iteration there is nothing to anneal over, so the full rate is used.
         let frac = if iterations > 1 { it as f64 / (iterations - 1) as f64 } else { 0.0 };
         let lr_now = cfg.policy_lr * (1.0 + frac * (cfg.final_lr_fraction - 1.0));
+        // The σ floor anneals on the same schedule. Linear in log-σ, which is geometric in σ, because σ is a
+        // scale and halving it twice should be two equal steps.
+        let ceiling_now = cfg.log_std_ceiling.map(|(start, end)| start + frac * (end - start));
 
         let mut policy_loss = 0.0;
         let mut clip_fraction = 0.0;
@@ -609,6 +637,7 @@ pub fn train(
                 lr_now,
                 cfg.entropy_coef,
                 cfg.min_log_std,
+                ceiling_now,
             );
             policy_loss = l;
             clip_fraction = c;
@@ -623,6 +652,7 @@ pub fn train(
             clip_fraction,
             std: policy.std(),
             policy_lr: lr_now,
+            log_std_ceiling: ceiling_now,
         });
     }
     out
@@ -960,6 +990,7 @@ mod tests {
             steps_per_batch: 256,
             max_episode_steps: 24,
             min_log_std: -3.5,
+            log_std_ceiling: None,
             final_lr_fraction: 0.05,
         };
 
@@ -1024,6 +1055,7 @@ mod tests {
                     steps_per_batch: 256,
                     max_episode_steps: 24,
                     min_log_std: -3.5,
+                    log_std_ceiling: None,
                     final_lr_fraction: frac,
                 };
                 train(&mut env, &mut policy, &mut value, &cfg, 30, seed);
@@ -1109,6 +1141,55 @@ mod tests {
             "sigma should not grow: {} -> {}",
             reports[0].std[0],
             reports[reports.len() - 1].std[0]
+        );
+    }
+
+    #[test]
+    fn the_annealed_sigma_ceiling_reaches_its_endpoints_and_actually_forces_sigma_down() {
+        // A schedule nobody checks is a schedule that silently does nothing. This test was written first against
+        // an annealed FLOOR and immediately caught that a floor cannot push σ down at all: the learned log-σ sat
+        // at -0.4999 with a floor of -3.0. Hence a ceiling, and hence the second assertion, which is the one
+        // that matters — the schedule must be shown to BIND, not merely to be computed.
+        let mut env = ScalarLqr { limit: 4.0, ..ScalarLqr::default() };
+        let mut p = GaussianPolicy::new(&[1, 1], 2, -0.5);
+        let mut v = Mlp::new(&[1, 8, 1], 2);
+        let cfg = PpoConfig {
+            min_log_std: -6.0,
+            log_std_ceiling: Some((-1.0, -3.0)),
+            steps_per_batch: 128,
+            max_episode_steps: 16,
+            epochs: 2,
+            value_epochs: 2,
+            ..PpoConfig::default()
+        };
+        let r = train(&mut env, &mut p, &mut v, &cfg, 5, 1);
+        assert_eq!(r[0].log_std_ceiling, Some(-1.0), "first iteration uses the start");
+        assert_eq!(r[4].log_std_ceiling, Some(-3.0), "last uses the end");
+        for w in r.windows(2) {
+            assert!(
+                w[1].log_std_ceiling.expect("set") < w[0].log_std_ceiling.expect("set"),
+                "the ceiling must fall monotonically"
+            );
+        }
+
+        // IT BINDS: the learned σ is forced onto the annealed ceiling, not merely permitted near it. Started at
+        // exp(-0.5) = 0.607 and must end at exp(-3.0) = 0.0498.
+        let final_log_std = p.std()[0].ln();
+        assert!(
+            (final_log_std - (-3.0)).abs() < 1e-9,
+            "sigma must be forced onto the ceiling, got ln(sigma) = {final_log_std}"
+        );
+
+        // None leaves σ unconstrained above, which is what every existing caller gets.
+        let mut p2 = GaussianPolicy::new(&[1, 1], 2, -0.5);
+        let mut v2 = Mlp::new(&[1, 8, 1], 2);
+        let cfg_none = PpoConfig { log_std_ceiling: None, ..cfg.clone() };
+        let r2 = train(&mut env, &mut p2, &mut v2, &cfg_none, 4, 1);
+        assert!(r2.iter().all(|x| x.log_std_ceiling.is_none()), "None must report no ceiling");
+        assert!(
+            p2.std()[0].ln() > -1.0,
+            "and must leave sigma near where it started, got {}",
+            p2.std()[0].ln()
         );
     }
 
@@ -1398,6 +1479,7 @@ mod export_tests {
             steps_per_batch: 256,
             max_episode_steps: 24,
             min_log_std: -3.5,
+            log_std_ceiling: None,
             final_lr_fraction: 0.05,
             ..PpoConfig::default()
         };

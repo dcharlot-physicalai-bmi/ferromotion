@@ -393,6 +393,7 @@ fn main() {
         steps_per_batch: 3000,
         max_episode_steps: 200,
         min_log_std: -2.5,
+        log_std_ceiling: None,
         final_lr_fraction: 0.05,
     };
     let iterations = 60;
