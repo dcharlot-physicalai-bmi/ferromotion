@@ -27,6 +27,33 @@ Also included: nonlinear least squares (`nls`), sparse identification of dynamic
 model-structured network of local linear models (`msnn`), Neural ODEs, Deep Lagrangian Networks, Hamiltonian
 networks, and calibration.
 
+## Reinforcement learning
+
+`env` and `ppo` are the training stage of a robot-learning pipeline: an environment boundary, a
+diagonal-Gaussian policy with a learnable log-σ, generalized advantage estimation, and PPO's clipped
+surrogate. Same `f64`, same tape, same WASM-clean constraint, so a policy trains **on your own device** with
+no cloud in the loop.
+
+Two details carry most of the correctness:
+
+- **Terminated is not truncated.** A terminal state's value is exactly zero; a time-limit cutoff's successor
+  has whatever value it has. The two flags enter the advantage estimate in *different places* — termination
+  zeroes the bootstrap, either flag stops the recursion. Collapsing them into one `done` biases value
+  estimates near the horizon downward, worst for the policies that survive longest.
+- **Action scaling lives in the environment**, not the policy, so one set of weights means the same torque in
+  simulation and on hardware.
+
+The tests train against a scalar linear-quadratic problem, because it is the one control task whose optimal
+policy is known in closed form. With a linear policy the learned weight *is* a feedback gain, comparable
+directly against the Riccati solution — a bar that a rising reward curve does not clear.
+
+What that oracle establishes, and what it does not: the achieved cost lands within a few percent of the
+analytic optimum, but the **gain itself does not converge**. The LQR cost is quadratically flat near its
+optimum (a gain 24% short costs 4.6%), and Adam normalizes its own step, so in a flat basin it random-walks
+with no restoring force — measured by starting a policy exactly *at* the optimum and watching it wander off.
+Annealing the learning rate roughly halves the error, which is why `final_lr_fraction` defaults on. It does
+not remove it. The bounds the tests assert are set from that measurement rather than chosen in advance.
+
 ```rust
 use ferromotion_learn::Msnn;
 
