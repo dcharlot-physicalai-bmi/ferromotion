@@ -35,11 +35,39 @@ for _ in 0..100 {
 let e = sim.energy();
 ```
 
-**A note on the `ln J` barrier, since it bounds what this solver can be asked to do.** `ln J` diverges as
-an element inverts, so `Ψ` is `+∞` at `J ≤ 0` while `forces` skips such elements — the barrier therefore has
-no gradient, and an inverted tet neither recovers nor reports. Keep the timestep inside the range where
-elements stay non-inverted. The literature's *stable* Neo-Hookean formulations exist precisely to remove
-this barrier and remain finite and differentiable through inversion; adopting one is the natural next step
-here, and until then the constraint is real rather than cosmetic.
+## Material models
+
+- **`plasticity`** — von Mises radial return in Hencky strain, with `det(F_p) = 1` held exactly, so plastic
+  flow is volume-preserving by construction rather than to within a tolerance.
+- **`viscoelastic`** — generalized Maxwell (Prony series): creep, stress relaxation, and a frequency-dependent
+  complex modulus. This is the inelasticity that is fully recoverable and still not elastic, and the one whose
+  symptoms read as sensor drift. A gripper pad with a 4 MPa instantaneous and 1 MPa equilibrium modulus keeps
+  only **a quarter** of its grip force once it has finished relaxing; the position never changed and the
+  commanded force never changed, so nothing in a position loop can see it coming.
+
+  Its update is **exact for strain linear across the step, at any timestep** — asserted across four orders of
+  magnitude of `dt` — because the branch ODE has a closed-form solution for constant strain rate. A
+  viscoelastic material therefore adds no integration error of its own to a ramp.
+
+  Two independent cross-checks rather than algebra restated: a time-domain sinusoid reproduces the closed-form
+  storage and loss moduli in **both amplitude and phase**, and the creep integrator agrees with the relaxation
+  modulus through the Laplace identity `s² Ê(s) Ĵ(s) = 1`. Negative branch stiffness is rejected at
+  construction, because it gives `E'' < 0` over some band and a material that *generates* energy per cycle —
+  which is exactly what an unconstrained least-squares fit to noisy data produces.
+
+## A note on inversion, since it bounds what this solver can be asked to do
+
+`ln J` diverges as an element inverts, so `Ψ` is unbounded at `J → 0⁺`. Below `J = 0` the energy switches to a
+quadratic recovery well `½k(J − 0.1)²`, whose gradient routes through `∂J/∂F = cof(F)` and is therefore defined
+at `det F = 0`, the configuration a flattening tet passes through. That replaced a bare `continue`, which had
+left the advertised `+∞` barrier with **no gradient at all**: an inverted tet contributed no force in either
+direction and could never recover, while `energy()` read `+inf` forever and the simulation carried on.
+
+**This turns a zero gradient into a correctly-signed one. It does not make the model inversion-safe.** The
+cofactor entries are cross-products of `F`'s columns, so the restoring force *vanishes* as the element
+flattens — it dies exactly where it is most needed. Measured on an inverted unit tet with gravity off, `J`
+rises monotonically from `−0.2` to `−0.0346` over 200k steps and does not cross zero. Escaping a flattened
+element needs an energy whose gradient does not pass through `∂J/∂F`, which is what the literature's *stable*
+Neo-Hookean formulations exist for. Keep the timestep inside the range where elements stay non-inverted.
 
 A `gpu` feature adds a wgpu compute path for the force assembly. Dual-licensed MIT OR Apache-2.0.
