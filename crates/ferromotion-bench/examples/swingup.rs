@@ -31,28 +31,42 @@
 //!   do nothing                     0.0%       -0.997      0.00
 //!   constant max torque            0.0%       -0.942      1.00
 //!   energy shaping + catch        74.6%        1.000      0.53
-//!   PPO (200 x 2000 steps)        10.1%        1.000      0.85
+//!   PPO baseline                  10.1%        1.000      0.85
+//!   PPO quiet (sigma/16)           0.0%       -0.886      0.12
+//!   PPO long horizon              17.7%        1.000      0.54
 //! ```
 //!
 //! **PPO swings up and does not catch.** Its return improved from −501 to −71 and it reached the top on every
-//! seed, so it found the energy pumping — which is the genuinely non-linear part, requiring several swings and
-//! having no linear solution. It then failed to stabilise there, holding 10% against the hand-built controller's
-//! 75%, and spent 60% more torque doing it.
+//! seed, so it found the energy pumping — the genuinely non-linear part, requiring several swings, with no linear
+//! solution. It then failed to stabilise there, holding 10-18% against the hand-built controller's 75%.
 //!
-//! That is a *specific* failure rather than "did not learn", and the distinction is why peak height is reported
-//! next to hold. Two candidates worth trying, neither attempted here because tuning until the number improves
-//! would defeat the point of measuring it:
+//! # Two hypotheses, both tested, both refuted
 //!
-//! * **Exploration noise may be preventing the catch.** The floor on the learned σ is `min_log_std = -2.0`,
-//!   which is 0.135 in policy space, or 0.27 N m of noise against a 2 N m limit. The inverted equilibrium can
-//!   only be held within `asin(τ_max/m g l) = 0.205 rad`, so 13% action noise is large relative to the basin
-//!   the policy has to stay inside.
-//! * **The horizon may be too short to value balancing over passing through.** `γ = 0.99` is a 100-step
-//!   horizon against 500-step episodes.
+//! The single-variable arms above exist because the first run left two guesses on the table, and a guess left in
+//! a comment is not a finding.
 //!
-//! The reward is deliberately left alone. `height − effort` is the standard swing-up reward, and adding a term
-//! that pays specifically for dwelling near the top would be solving the benchmark rather than measuring the
-//! learner.
+//! * **"Exploration noise prevents the catch" is WRONG, and wrong in the opposite direction.** The reasoning was
+//!   that 0.27 N m of action noise is large against the `asin(τ_max/m g l) = 0.205 rad` basin the policy has to
+//!   stay inside. Run at 16x lower sigma, the policy scores hold 0% and peak height −0.886: it never swings up at
+//!   all. Exploration is not what spoils the catch, it is what makes the pumping *discoverable*.
+//! * **"The horizon is too short" is a real effect and not the explanation.** `γ` 0.99 → 0.997 improved hold
+//!   10.1% → 17.7% and halved effort 0.85 → 0.54. A contributor, four times too small to close the gap.
+//!
+//! # What fits all three arms
+//!
+//! The two phases of this task want **different exploration scales**, and PPO here has only one to give. Coarse
+//! noise is required to find the pumping (the quiet arm proves it) and is too coarse to refine a catch into a
+//! 0.205 rad basin (the baseline arm proves it). [`GaussianPolicy`](ferromotion_learn::GaussianPolicy) carries a
+//! **state-independent** learnable log-σ, documented there as the standard choice for continuous control — and
+//! for a task whose phases need different precision, that is a real limitation of the design rather than of the
+//! budget.
+//!
+//! That is a hypothesis consistent with all three measurements, **not** a tested result: state-dependent σ has
+//! not been tried here. It is recorded because it names a specific design choice to test next, which is more
+//! use than "the gap is elsewhere".
+//!
+//! The reward is left alone throughout, at the standard `height − effort`. Paying specifically for dwell near the
+//! top would solve the benchmark rather than measure the learner.
 //!
 //! `cargo run --release -p ferromotion-bench --example swingup`
 
@@ -181,43 +195,71 @@ fn main() {
     }
     println!();
 
-    // PPO, with a budget that is a real attempt rather than a gesture.
-    let cfg = PpoConfig {
-        gamma: 0.99,
-        lambda: 0.95,
-        clip: 0.2,
-        policy_lr: 3e-3,
-        value_lr: 3e-3,
-        epochs: 8,
-        value_epochs: 15,
-        entropy_coef: 3e-3,
-        steps_per_batch: 2000,
-        max_episode_steps: STEPS,
-        min_log_std: -2.0,
-        final_lr_fraction: 0.05,
-    };
+    // Three PPO configurations, each differing from the first in ONE variable, so that the two hypotheses the
+    // first run left open are tested rather than argued about:
+    //
+    //  - Quieter exploration. `min_log_std = -2.0` is 0.27 N m of action noise against a 2 N m limit, and the
+    //    inverted equilibrium can only be held within asin(tau_max/m g l) = 0.205 rad. If the noise is what
+    //    prevents the catch, lowering it should produce one.
+    //  - A longer horizon. gamma = 0.99 is a 100-step horizon against 500-step episodes, which may not
+    //    distinguish balancing at the top from passing through it.
+    //
+    // Everything else is held fixed, including the reward, which stays the standard `height - effort`.
     let iterations = 200;
-    let mut env = Pendulum::default();
-    let mut policy = GaussianPolicy::new(&[3, 64, 64, 1], 5, -0.5);
-    let mut value = Mlp::new(&[3, 64, 64, 1], 5);
-    let reports = train(&mut env, &mut policy, &mut value, &cfg, iterations, 5);
-    let early: f64 = reports[..5].iter().map(|r| r.mean_return).sum::<f64>() / 5.0;
-    let late: f64 = reports[reports.len() - 5..].iter().map(|r| r.mean_return).sum::<f64>() / 5.0;
-    println!(
-        "  PPO: {iterations} iterations of {} steps, return {early:.2} -> {late:.2}\n",
-        cfg.steps_per_batch
-    );
-    let space = env.action_space();
-    let ppo: Vec<Score> = seeds
-        .iter()
-        .map(|&s| {
-            run(s, |p| {
-                let obs = vec![p.theta.sin(), p.theta.cos(), p.omega];
-                space.from_unit(&policy.mean(&obs))[0]
+    let mut returns: Vec<f64> = Vec::new();
+    // Each tuple is (name, init_log_std, min_log_std, gamma).
+    //
+    // `init_log_std` is here because the first version of this ablation varied only `min_log_std`, which is a
+    // FLOOR: the policy starts at the initial sigma and the floor binds only if the learned sigma descends to
+    // it. It never did, so lowering the floor from -2.0 to -3.5 changed nothing and the "quiet" arm produced
+    // results BIT-IDENTICAL to the baseline — same return to 0.1, same hold, same effort. The variable I
+    // thought I was changing was inert, and the hypothesis went untested while the output claimed otherwise.
+    let variants: [(&str, f64, f64, f64); 3] = [
+        ("PPO baseline", -0.5, -2.0, 0.99),
+        ("PPO quiet (sigma/16)", -2.5, -3.5, 0.99),
+        ("PPO long horizon", -0.5, -2.0, 0.997),
+    ];
+    for (name, init_log_std, min_log_std, gamma) in variants {
+        let cfg = PpoConfig {
+            gamma,
+            lambda: 0.95,
+            clip: 0.2,
+            policy_lr: 3e-3,
+            value_lr: 3e-3,
+            epochs: 8,
+            value_epochs: 15,
+            entropy_coef: 3e-3,
+            steps_per_batch: 2000,
+            max_episode_steps: STEPS,
+            min_log_std,
+            final_lr_fraction: 0.05,
+        };
+        let mut env = Pendulum::default();
+        let mut policy = GaussianPolicy::new(&[3, 64, 64, 1], 5, init_log_std);
+        let mut value = Mlp::new(&[3, 64, 64, 1], 5);
+        let reports = train(&mut env, &mut policy, &mut value, &cfg, iterations, 5);
+        let early: f64 = reports[..5].iter().map(|r| r.mean_return).sum::<f64>() / 5.0;
+        let late: f64 = reports[reports.len() - 5..].iter().map(|r| r.mean_return).sum::<f64>() / 5.0;
+        println!(
+            "  {name:<22} {iterations} x {} steps, sigma {:.4} -> floor {:.4}, gamma {gamma}, return {early:.1} -> {late:.1}",
+            cfg.steps_per_batch,
+            init_log_std.exp(),
+            min_log_std.exp()
+        );
+        let space = env.action_space();
+        let scores: Vec<Score> = seeds
+            .iter()
+            .map(|&s| {
+                run(s, |p| {
+                    let obs = vec![p.theta.sin(), p.theta.cos(), p.omega];
+                    space.from_unit(&policy.mean(&obs))[0]
+                })
             })
-        })
-        .collect();
-    rows.push(("PPO".into(), mean(&ppo)));
+            .collect();
+        returns.push(late);
+        rows.push((name.to_string(), mean(&scores)));
+    }
+    println!();
 
     println!("  with PPO:\n");
     println!("  {:<24} {:>10} {:>12} {:>9}", "controller", "hold", "peak height", "effort");
@@ -227,9 +269,57 @@ fn main() {
 
     // The comparison the bench exists to make, stated either way.
     let shaped_hold = rows[2].1.hold;
-    let ppo_hold = rows[3].1.hold;
     let shaped_peak = rows[2].1.peak_height;
-    let ppo_peak = rows[3].1.peak_height;
+    // Judge on the BEST PPO variant, and say which one it was, so a win cannot be attributed to the wrong
+    // change and a loss cannot be blamed on a configuration that was not the best available.
+    let best = rows[3..]
+        .iter()
+        .max_by(|a, b| a.1.hold.partial_cmp(&b.1.hold).expect("hold is finite"))
+        .expect("at least one PPO variant");
+    let ppo_hold = best.1.hold;
+    let ppo_peak = best.1.peak_height;
+    let baseline_hold = rows[3].1.hold;
+    println!("  best PPO variant: {} (hold {:.1}%)\n", best.0, 100.0 * ppo_hold);
+
+    // PROVE THE ARMS DIFFER before interpreting any of them. A variant whose training return is identical to
+    // the baseline's did not vary anything, and reporting it as a tested hypothesis is worse than not running
+    // it: the output asserts a negative result that was never measured.
+    let mut inert = Vec::new();
+    for i in 1..returns.len() {
+        if (returns[i] - returns[0]).abs() < 1e-9 {
+            inert.push(rows[3 + i].0.as_str());
+        }
+    }
+    if !inert.is_empty() {
+        println!(
+            "  ARM(S) DID NOT VARY: {} produced a training return identical to the baseline, so whatever they\n\
+             were meant to change was inert and those hypotheses are UNTESTED, not refuted.\n",
+            inert.join(", ")
+        );
+    }
+    if ppo_hold > baseline_hold + 0.1 {
+        println!(
+            "  ONE OF THE TWO HYPOTHESES HELD: '{}' improved the hold from {:.1}% to {:.1}%, so the gap was\n\
+             not a limit of the learner but of that setting.\n",
+            best.0,
+            100.0 * baseline_hold,
+            100.0 * ppo_hold
+        );
+    } else if inert.is_empty() {
+        println!(
+            "  NEITHER HYPOTHESIS HELD: the best variant reached {:.1}% against the baseline's {:.1}%, and both\n\
+             arms are confirmed to have varied, so neither explains the missing catch. The gap is elsewhere.\n",
+            100.0 * ppo_hold,
+            100.0 * baseline_hold
+        );
+    } else {
+        println!(
+            "  NO CONCLUSION: the best variant reached {:.1}% against {:.1}%, but at least one arm was inert,\n\
+             so the set of hypotheses tested is incomplete.\n",
+            100.0 * ppo_hold,
+            100.0 * baseline_hold
+        );
+    }
     println!();
     if rows[1].1.peak_height > 0.9 {
         println!(
