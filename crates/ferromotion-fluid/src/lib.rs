@@ -480,7 +480,7 @@ impl MacFluid {
     /// General forward-sensitivity coupled step. `dsurf = ∂(disk.ux, disk.uy)/∂θ` and
     /// `dmarker = ∂(marker position)/∂θ` (a rigid translation of the body — e.g. `(1,0)` when `θ` is
     /// the x-position) select what `θ` is. When `dmarker ≠ 0` the immersed markers **move** with `θ`,
-    /// so the Peskin weights' position sensitivity (`∂w/∂X`, via [`phi_prime`]) enters both the
+    /// so the Peskin weights' position sensitivity (`∂w/∂X`, via the kernel derivative) enters both the
     /// interpolation and the spreading — the moving-boundary (shape) derivative. Returns `(Fx, ∂Fx/∂θ)`.
     pub fn step_with_disk_sensitivity(&mut self, disk: &RigidDisk, ut: &mut [f64], vt: &mut [f64], dsurf: (f64, f64), dmarker: (f64, f64)) -> (f64, f64) {
         const N_FORCE_ITERS: usize = 6;

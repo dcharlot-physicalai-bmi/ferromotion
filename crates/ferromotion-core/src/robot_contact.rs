@@ -65,7 +65,7 @@ impl RobotContactSim<'_> {
         (q_next, qd_next.as_slice().to_vec())
     }
 
-    /// Like [`step`], but also returns the control gradient `∂q̇⁺/∂τ` (dof×dof) through the contact.
+    /// Like [`RobotContactSim::step`], but also returns the control gradient `∂q̇⁺/∂τ` (dof×dof) through the contact.
     /// Chain rule: `q̇_free = q̇ + dt·M⁻¹(τ − bias)` ⇒ `∂q̇_free/∂τ = dt·M⁻¹`, then the frictional
     /// solver supplies `∂q̇⁺/∂q̇_free`, so `∂q̇⁺/∂τ = (∂q̇⁺/∂q̇_free)·dt·M⁻¹`. Differentiable even
     /// through stick↔slip and contact make/break, because the interior-point step is smoothed.

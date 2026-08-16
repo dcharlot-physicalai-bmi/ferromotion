@@ -7,7 +7,7 @@
 //!
 //! Deliberate scope: the generic path targets *differentiation*, not raw speed — forward dynamics
 //! here is O(n³) (mass matrix by RNEA columns + generic Cholesky), which is the right trade at
-//! calibration scale. The f64 O(n) Featherstone ABA in [`crate::aba`] remains the fast plain-number
+//! calibration scale. The f64 O(n) Featherstone ABA in [`forward_dynamics`](crate::forward_dynamics) remains the fast plain-number
 //! path. Everything is fixed-size-array algebra over `T` — no trait-ecosystem dependency, wasm-clean.
 
 use crate::dynamics::LinkInertia;

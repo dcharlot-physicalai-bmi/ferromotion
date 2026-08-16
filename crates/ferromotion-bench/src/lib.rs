@@ -342,8 +342,8 @@ mod tests {
 /// **An allocation counter**, for measuring whether a control loop's hot path allocates.
 ///
 /// A real-time loop that heap-allocates has a latency tail set by the allocator, not by the algorithm, and no amount of
-/// median timing reveals it. Counting is the only way to see it: install [`CountingAllocator`] as the global allocator in
-/// a binary and read [`AllocCounter`] around the code under test.
+/// median timing reveals it. Counting is the only way to see it: install a counting global allocator in
+/// a binary and read its counter around the code under test.
 ///
 /// This is the one place in the workspace that needs `unsafe`, because a `GlobalAlloc` implementation is `unsafe` by
 /// definition. It forwards every request to the system allocator and only increments a counter, so it changes allocation

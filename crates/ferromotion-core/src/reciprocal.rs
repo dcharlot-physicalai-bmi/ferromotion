@@ -79,7 +79,7 @@ pub fn power(wrench: &Vector6<f64>, twist: &Vector6<f64>) -> f64 {
 
 /// Swap the two halves of a 6-vector, converting between `[m; f]` and `[f; m]` ordering.
 ///
-/// Needed at the boundary with [`crate::grasp_spatial`], which orders wrenches force-first. A plain dot
+/// Needed at the boundary with the spatial grasp code (`grasp_spatial`), which orders wrenches force-first. A plain dot
 /// product across that boundary is not power and not frame-invariant; it is a number with mixed units.
 pub fn swap_wrench_halves(w: &Vector6<f64>) -> Vector6<f64> {
     Vector6::new(w[3], w[4], w[5], w[0], w[1], w[2])

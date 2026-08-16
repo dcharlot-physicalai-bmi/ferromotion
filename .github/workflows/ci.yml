@@ -22,8 +22,24 @@ jobs:
         run: cargo test --workspace
       - name: Benchmark (Ghia lid-driven cavity, release)
         run: cargo test -p ferromotion-fluid --release -- --ignored
+      # An EXCLUSION, not an enumeration. The enumerated list had silently omitted seven crates that do
+      # build for wasm32 — including ferromotion-learn and ferromotion-fem, whose own READMEs advertise
+      # "native + wasm32". A list of what to include drifts as crates are added; a list of what to skip
+      # fails loudly when a new crate breaks the target, which is the direction that helps.
+      #
+      # ferromotion-viz is the one genuine exception: it pulls a tokio feature set that is not supported on
+      # wasm ("Only features sync,macros,io-util,rt,time are supported on wasm").
       - name: Build (wasm32-unknown-unknown)
-        run: >
-          cargo build --target wasm32-unknown-unknown
-          -p ferromotion-core -p ferromotion-control -p ferromotion-ruckig
-          -p ferromotion-policy -p ferromotion-wasm -p ferromotion-fluid -p ferromotion-mpm -p ferromotion-cloth -p ferromotion-tactile -p ferromotion-rod
+        run: cargo build --target wasm32-unknown-unknown --workspace --exclude ferromotion-viz
+
+      # Both of these were local-only discipline until 2026-08-15 and therefore enforced only by memory.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # The doc build catches a class nothing else does: intra-doc links to private or non-existent items,
+      # which ship as broken links on docs.rs. Its first run found 22, one of which was a `pub fn` in a
+      # private module that no external caller could reach at all.
+      - name: Docs (broken intra-doc links are errors)
+        run: cargo doc --no-deps --workspace
+        env:
+          RUSTDOCFLAGS: -D warnings

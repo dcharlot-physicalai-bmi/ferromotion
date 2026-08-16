@@ -47,7 +47,7 @@ impl PlanarBody {
         self.step_actuated(dt, g, [0.0, 0.0, 0.0]);
     }
 
-    /// Like [`step`], but with an applied generalized force/torque `u = [fx, fz, τ]` at the COM.
+    /// Like [`PlanarBody::step`], but with an applied generalized force/torque `u = [fx, fz, τ]` at the COM.
     pub fn step_actuated(&mut self, dt: f64, g: f64, u: [f64; 3]) {
         let m = DMatrix::from_diagonal(&DVector::from_row_slice(&[self.mass, self.mass, self.inertia]));
         // Free generalized velocity after gravity + applied wrench.

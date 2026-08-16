@@ -259,7 +259,7 @@ pub fn force_closure_soft_spatial(contacts: &[GraspContact3], facets: usize, n_d
 
 /// **`Q1` restricted to the planar wrench subspace** `(fx, fy, mz)` — the three coordinates the planar metric uses.
 ///
-/// This is what makes the comparison against [`grasp`](crate::grasp) meaningful: the planar metric is not wrong, it is
+/// This is what makes the comparison against the planar `grasp` module meaningful: the planar metric is not wrong, it is
 /// computing the quality of a different, smaller wrench space, and restricting the spatial computation to that subspace
 /// recovers it.
 pub fn force_closure_q1_planar_subspace(contacts: &[GraspContact3], facets: usize, n_dirs: usize) -> f64 {

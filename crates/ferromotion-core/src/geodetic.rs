@@ -23,7 +23,7 @@ fn semi_minor() -> f64 {
     WGS84_A * (1.0 - WGS84_F) // b = a(1−f)
 }
 
-/// Geodetic `(lat, lon, alt)` [rad, rad, m] → ECEF `(X, Y, Z)` [m].
+/// Geodetic `(lat, lon, alt)` `(rad, rad, m)` → ECEF `(X, Y, Z)` `m`.
 pub fn lla_to_ecef(lat: f64, lon: f64, alt: f64) -> Vector3<f64> {
     let e2 = e_sq();
     let n = WGS84_A / (1.0 - e2 * lat.sin() * lat.sin()).sqrt(); // prime vertical radius
@@ -34,7 +34,7 @@ pub fn lla_to_ecef(lat: f64, lon: f64, alt: f64) -> Vector3<f64> {
     )
 }
 
-/// ECEF `(X, Y, Z)` → geodetic `(lat, lon, alt)` [rad, rad, m] via Bowring's method.
+/// ECEF `(X, Y, Z)` → geodetic `(lat, lon, alt)` `(rad, rad, m)` via Bowring's method.
 pub fn ecef_to_lla(ecef: &Vector3<f64>) -> (f64, f64, f64) {
     let (x, y, z) = (ecef.x, ecef.y, ecef.z);
     let a = WGS84_A;
@@ -62,7 +62,7 @@ fn ecef_to_enu_rotation(lat: f64, lon: f64) -> Matrix3<f64> {
     )
 }
 
-/// ECEF point → local ENU `(East, North, Up)` [m] about a reference geodetic origin `(ref_lat, ref_lon,
+/// ECEF point → local ENU `(East, North, Up)` `m` about a reference geodetic origin `(ref_lat, ref_lon,
 /// ref_alt)`.
 pub fn ecef_to_enu(ecef: &Vector3<f64>, ref_lat: f64, ref_lon: f64, ref_alt: f64) -> Vector3<f64> {
     let origin = lla_to_ecef(ref_lat, ref_lon, ref_alt);

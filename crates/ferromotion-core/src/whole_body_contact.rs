@@ -58,7 +58,7 @@ fn forward_kinematics(joints: &[Joint], parent: &[isize], base: Isometry3<f64>, 
 
 /// The `3×(6+n)` contact Jacobian mapping the generalized velocity `[v₀ (base twist, base frame); q̇]`
 /// to the **world** linear velocity of a point at `offset` on body `body`. `world[i]` are the body world
-/// poses from [`forward_kinematics`], `base` the base world pose. Base columns come from the base twist
+/// poses from forward kinematics, `base` the base world pose. Base columns come from the base twist
 /// (`ṗ = v_origin + ω × r`), joint columns from the geometric Jacobian of the ancestor joints.
 pub fn whole_body_contact_jacobian(joints: &[Joint], parent: &[isize], world: &[Isometry3<f64>], base: Isometry3<f64>, body: Option<usize>, offset: Vector3<f64>) -> DMatrix<f64> {
     let n = joints.len();
@@ -560,7 +560,7 @@ pub struct WholeBodyStep {
 /// impulses, so it stays bounded on exactly the cases that defeat the direct solve.
 ///
 /// Gap feedback uses [`PgsStabilization::default`](crate::PgsStabilization::default), which is what keeps
-/// a standing foot from chattering. [`whole_body_contact_step_pgs_with`] takes the stabilisation
+/// a standing foot from chattering. The `_with` variant of this function takes the stabilisation
 /// explicitly.
 #[allow(clippy::too_many_arguments)]
 pub fn whole_body_contact_step_pgs(

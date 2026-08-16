@@ -5,8 +5,8 @@
 //!
 //! - The projection `(u*, v*) ↦ (u, v)` is **linear, parameter-free, and self-adjoint** in the
 //!   staggered inner product — its VJP is the *same* pre-factored Poisson solve run backward, so
-//!   [`MacFluid::project_vjp`] costs one Cholesky solve, not a re-derivation.
-//! - Only `predict` is nonlinear; its VJP ([`MacFluid::predict_vjp`]) is the transpose of the
+//!   `MacFluid`'s projection VJP costs one Cholesky solve, not a re-derivation.
+//! - Only `predict` is nonlinear; its VJP is the transpose of the
 //!   advection/diffusion stencil, linearized at the checkpointed state, with the wall ghosts
 //!   (no-slip / free-slip / moving lid) routed to the right stored face and to the lid gradient.
 //!

@@ -94,7 +94,7 @@ pub fn wrench_rank(contacts: &[GraspContact]) -> usize {
 ///
 /// **This answers what [`force_closure_q1`] structurally cannot.** Q1 is a minimum over *finitely many*
 /// sampled directions, so it is an upper bound that can report a positive margin for a grasp that is not
-/// force closure — the defect the [`wrench_rank`] gate exists to catch, and which for a full-rank grasp with
+/// force closure — the defect the [`planar_wrench_rank`](crate::planar_wrench_rank) gate exists to catch, and which for a full-rank grasp with
 /// the origin merely *on* the hull boundary no amount of sampling resolves. This decides it exactly. Use it
 /// for the yes/no question and Q1 for *how robust*, which is the part a synthesiser needs a gradient of.
 ///
@@ -134,7 +134,7 @@ pub fn is_force_closure(contacts: &[GraspContact], tol: f64) -> bool {
 
 /// **Ferrari-Canny Q1** force-closure quality: `min_d max_i (w_i · d)` over sampled unit directions.
 ///
-/// Returns exactly `0.0` when [`wrench_rank`] is below `3` — see that function for why this is the
+/// Returns exactly `0.0` when [`planar_wrench_rank`](crate::planar_wrench_rank) is below `3` — see that function for why this is the
 /// definition rather than a guard.
 ///
 /// **The returned value is an UPPER bound on the true `Q1`, and the gate above is what makes it safe

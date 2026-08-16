@@ -279,6 +279,11 @@ pub use leg_smoother::{LegSmoother, PriorPose2, RelPose2};
 pub use cspace_sdf::{CspaceField, PlanarArm};
 pub use chained_form::ChainedForm;
 pub use grasp::is_force_closure;
+// The planar rank gate. Exported under a qualified name because the bare `wrench_rank` at this root is the
+// SPATIAL variant (from `grasp_spatial`), which shipped first; renaming that would break published API. The
+// planar function was `pub` inside a private module and therefore unreachable from outside the crate until
+// now — a defect the rustdoc gate surfaced and the test suite could not.
+pub use grasp::wrench_rank as planar_wrench_rank;
 pub use fourier_steering::{alpha_displacement, first_harmonic, integrate_period};
 pub use geometric_phase::{cap_area_from_latitude, geometric_phase, lift_path, psi_dot};
 pub use hall_basis::{admissible, hall_basis, witt_dimension, LieProduct};

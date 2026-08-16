@@ -321,7 +321,7 @@ impl ClothSim {
         w
     }
 
-    /// Add self-collision repulsion to `force`: the exact `−∇` of [`self_collision_energy`], with each
+    /// Add self-collision repulsion to `force`: the exact `−∇` of the self-collision energy, with each
     /// contact force `k(h−d)·n̂` split to the involved vertices by the closest-point barycentric weights.
     pub fn accumulate_self_collision_forces(&self, x: &[Vector3<f64>], thickness: f64, k: f64, force: &mut [Vector3<f64>]) {
         let nbr = self.vertex_neighbors();

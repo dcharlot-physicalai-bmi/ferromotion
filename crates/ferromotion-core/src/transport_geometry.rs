@@ -1,7 +1,7 @@
 //! **The rest of the transport geometry** — the pieces that recur across generative policies,
 //! distributional value learning, and cross-embodiment transfer.
 //!
-//! [`transport`](crate::transport) supplies the distances. This module supplies the four constructions the
+//! The `transport` module supplies the distances. This module supplies the four constructions the
 //! closed-loop theory keeps reaching for, each of which exists because a more obvious choice fails:
 //!
 //! * [`kantorovich_dual`] — `W₁` as a supremum over 1-Lipschitz test functions. The dual is what makes `W₁`
