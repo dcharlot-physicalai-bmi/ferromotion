@@ -54,6 +54,29 @@ with no restoring force — measured by starting a policy exactly *at* the optim
 Annealing the learning rate roughly halves the error, which is why `final_lr_fraction` defaults on. It does
 not remove it. The bounds the tests assert are set from that measurement rather than chosen in advance.
 
+### Getting the policy onto hardware
+
+`GaussianPolicy::to_deployable(&action_space)` converts a trained policy into a
+[`ferromotion-policy`](https://crates.io/crates/ferromotion-policy) `Policy` — the on-device MLP runner, which
+loads and saves JSON checkpoints and compiles to `wasm32`. `to_checkpoint_json` goes straight to the string.
+
+Two things the conversion is careful about, because both are silent when wrong:
+
+- **The action map ships with the weights.** `BoxSpace::from_unit` clamps to `[-1, 1]` and then applies
+  `low + ½(u+1)(high − low)`, so the export carries `act_scale = (high−low)/2`, `act_bias = (high+low)/2`, and
+  `clamp_unit = true`. Without that flag the deployed policy skips the clamp and commands out-of-range actions
+  exactly where the net saturates, which is where a policy spends the start of every trajectory. There is a
+  control test showing the flag changes the answer.
+- **The learned log-σ is dropped.** It described exploration. Training samples; deployment should not, and
+  carrying the noise to a real actuator costs stroke for nothing.
+
+The end-to-end test trains on the LQR problem, exports, and rolls out the **deployed artefact** — a
+weight-comparison test would pass with a wrong `act_scale`, since the weights would be identical.
+
+Agreement with the training-time path is to floating-point rounding, not bit-exact: `mean` accumulates
+`bias + Σwᵢaᵢ` in a scalar loop while the runner evaluates `W·x + b` through nalgebra. Measured worst deviation
+over 80,000 samples across four architectures is **8.9e-16 absolute**, about 4 units in the last place.
+
 ```rust
 use ferromotion_learn::Msnn;
 

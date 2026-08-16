@@ -84,6 +84,14 @@ pub struct Policy {
     pub obs_std: Vec<f64>,
     pub net: Mlp,
     pub squash: bool,
+    /// Clamp the net output to `[-1, 1]` **before** scaling.
+    ///
+    /// This is what makes an exported policy reproduce its training-time action map exactly. Training pipelines
+    /// that map a policy output through a bounded action space (`BoxSpace::from_unit` in `ferromotion-learn`)
+    /// clamp first; a deployment path that does not will command out-of-range actions wherever the net's output
+    /// leaves `[-1, 1]`, which is precisely where a saturating policy spends its time early in a trajectory.
+    /// Defaults to `false` so checkpoints written before this field existed load with their original behaviour.
+    pub clamp_unit: bool,
     pub act_scale: Vec<f64>,
     pub act_bias: Vec<f64>,
 }
@@ -104,6 +112,9 @@ impl Policy {
         for (i, ai) in a.iter_mut().enumerate() {
             if self.squash {
                 *ai = ai.tanh();
+            }
+            if self.clamp_unit {
+                *ai = ai.clamp(-1.0, 1.0);
             }
             let scale = self.act_scale.get(i).copied().unwrap_or(1.0);
             let bias = self.act_bias.get(i).copied().unwrap_or(0.0);
@@ -141,6 +152,8 @@ struct PolicyJson {
     #[serde(default)]
     squash: bool,
     #[serde(default)]
+    clamp_unit: bool,
+    #[serde(default)]
     act_scale: Vec<f64>,
     #[serde(default)]
     act_bias: Vec<f64>,
@@ -166,6 +179,7 @@ impl PolicyJson {
             obs_std: self.obs_std,
             net: Mlp::new(layers),
             squash: self.squash,
+            clamp_unit: self.clamp_unit,
             act_scale: self.act_scale,
             act_bias: self.act_bias,
         })
@@ -187,6 +201,7 @@ impl PolicyJson {
             obs_std: p.obs_std.clone(),
             layers,
             squash: p.squash,
+            clamp_unit: p.clamp_unit,
             act_scale: p.act_scale.clone(),
             act_bias: p.act_bias.clone(),
         }
@@ -225,6 +240,7 @@ mod tests {
             obs_std: vec![2.0, 4.0],
             net: Mlp::new(vec![layer(&[&[1.0, 0.0], &[0.0, 1.0]], &[0.0, 0.0], Activation::Identity)]),
             squash: true,
+            clamp_unit: false,
             act_scale: vec![3.0, 5.0],
             act_bias: vec![0.5, -1.0],
         };
@@ -278,7 +294,7 @@ mod tests {
             &[0.0, 0.0],
             Activation::Identity,
         )]);
-        let pol = Policy { obs_mean: vec![], obs_std: vec![], net, squash: false, act_scale: vec![], act_bias: vec![] };
+        let pol = Policy { obs_mean: vec![], obs_std: vec![], net, squash: false, clamp_unit: false, act_scale: vec![], act_bias: vec![] };
         let q_des = [0.6, -0.8];
         let (mut q, mut qd, dt) = (vec![0.0, 0.0], vec![0.0, 0.0], 1e-3);
         for _ in 0..4000 {

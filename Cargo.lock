@@ -1367,6 +1367,7 @@ name = "ferromotion-learn"
 version = "0.59.0"
 dependencies = [
  "ferromotion-core",
+ "ferromotion-policy",
  "nalgebra",
 ]
 

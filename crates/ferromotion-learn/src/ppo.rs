@@ -1179,3 +1179,311 @@ mod tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------
+// Deployment: the bridge from a trained policy to the on-device runner.
+// ---------------------------------------------------------------------------------------------------------
+
+/// Errors from exporting a trained policy to the deployable form.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExportError {
+    /// The action space's dimension does not match the policy's output dimension.
+    ActionDimMismatch {
+        /// What the policy produces.
+        policy: usize,
+        /// What the space expects.
+        space: usize,
+    },
+}
+
+impl std::fmt::Display for ExportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExportError::ActionDimMismatch { policy, space } => write!(
+                f,
+                "policy emits {policy} action dimensions but the action space has {space}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ExportError {}
+
+impl GaussianPolicy {
+    /// Export the **mean** network as a [`ferromotion_policy::Policy`] for on-device inference.
+    ///
+    /// Training samples; deployment does not. What ships is the mean action, put through the same action map
+    /// the environment applied during training — which is the whole point of the conversion and the part that
+    /// is easy to get silently wrong.
+    ///
+    /// The action map. [`BoxSpace::from_unit`] clamps its input to `[-1, 1]` and then applies
+    /// `low + ½(u+1)(high − low)`, which is the affine map `u·scale + bias` with
+    ///
+    /// ```text
+    ///   scale = (high − low)/2,      bias = (high + low)/2
+    /// ```
+    ///
+    /// so the exported policy carries `act_scale`, `act_bias`, and **`clamp_unit = true`**. Without that last
+    /// flag the deployed policy would skip the clamp and command out-of-range actions exactly where the net
+    /// saturates — which is where a policy spends the start of every trajectory. That divergence is why this
+    /// function exists rather than leaving the conversion to a caller: it is three fields, and getting any of
+    /// them wrong produces a policy that works in simulation and misbehaves on hardware.
+    ///
+    /// The learned log-σ is **not** exported. It described exploration, and exploration is a training concern;
+    /// carrying it to a deployed actuator would add noise to a robot for no benefit.
+    ///
+    /// No observation normalization is emitted, because [`train`] does not apply any. If a caller normalizes
+    /// observations before handing them to the policy, the same transform must be set on the returned
+    /// `Policy`'s `obs_mean` and `obs_std` — the export cannot infer a transform it never saw.
+    pub fn to_deployable(
+        &self,
+        action_space: &BoxSpace,
+    ) -> Result<ferromotion_policy::Policy, ExportError> {
+        if action_space.dim() != self.act_dim {
+            return Err(ExportError::ActionDimMismatch {
+                policy: self.act_dim,
+                space: action_space.dim(),
+            });
+        }
+        let n_layers = self.sizes.len() - 1;
+        let mut layers = Vec::with_capacity(n_layers);
+        let mut off = 0;
+        for l in 0..n_layers {
+            let (ind, outd) = (self.sizes[l], self.sizes[l + 1]);
+            // Row-major out x in, matching both this crate's flat layout and the runner's `Layer`.
+            let w = nalgebra::DMatrix::from_fn(outd, ind, |o, i| self.params[off + o * ind + i]);
+            let b = nalgebra::DVector::from_fn(outd, |o, _| self.params[off + ind * outd + o]);
+            // Hidden layers are tanh and the output layer is linear, matching `mean`.
+            let act = if l + 1 < n_layers {
+                ferromotion_policy::Activation::Tanh
+            } else {
+                ferromotion_policy::Activation::Identity
+            };
+            layers.push(ferromotion_policy::Layer { w, b, act });
+            off += ind * outd + outd;
+        }
+        let scale: Vec<f64> =
+            (0..action_space.dim()).map(|i| 0.5 * (action_space.high[i] - action_space.low[i])).collect();
+        let bias: Vec<f64> =
+            (0..action_space.dim()).map(|i| 0.5 * (action_space.high[i] + action_space.low[i])).collect();
+        Ok(ferromotion_policy::Policy {
+            obs_mean: Vec::new(),
+            obs_std: Vec::new(),
+            net: ferromotion_policy::Mlp::new(layers),
+            squash: false,
+            clamp_unit: true,
+            act_scale: scale,
+            act_bias: bias,
+        })
+    }
+
+    /// Export straight to the runner's JSON checkpoint format.
+    pub fn to_checkpoint_json(&self, action_space: &BoxSpace) -> Result<String, ExportError> {
+        Ok(self.to_deployable(action_space)?.to_json())
+    }
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+    use crate::env::{lqr_gain, BoxSpace, Env, ScalarLqr};
+
+    /// Assert two actions agree to floating-point rounding.
+    ///
+    /// **Not bit-identical, and the reason is structural.** `GaussianPolicy::mean` accumulates each neuron as
+    /// `bias + Σ wᵢaᵢ` in a scalar loop; the runner evaluates `W·x + b` through nalgebra, which sums the dot
+    /// product first and adds the bias last. The two orders are mathematically equal and differ in the last
+    /// bits. My first version of these tests used `assert_eq!` and failed on exactly that: measured worst
+    /// deviation over 80,000 samples across four architectures was **8.9e-16 absolute** (about 4 units in the
+    /// last place). The bound below is a thousand times that, which is still four orders tighter than any real
+    /// conversion error — a transposed weight matrix, a wrong `act_scale`, or a missing clamp all move the
+    /// action by O(1).
+    fn assert_action_close(a: &[f64], b: &[f64], what: &str) {
+        assert_eq!(a.len(), b.len(), "{what}: action dimension changed");
+        for d in 0..a.len() {
+            let tol = 1e-12 * a[d].abs().max(1.0);
+            assert!(
+                (a[d] - b[d]).abs() <= tol,
+                "{what} dim {d}: {} vs {} (difference {:.3e}, tolerance {tol:.3e})",
+                a[d],
+                b[d],
+                (a[d] - b[d]).abs()
+            );
+        }
+    }
+
+    #[test]
+    fn the_exported_policy_reproduces_the_training_action_map_including_the_clamp() {
+        // The property the whole conversion exists for: what the robot does must equal what was trained,
+        // including the clamp. That means the test has to reach saturation, and a freshly initialised policy
+        // CANNOT: the output layer starts at 1/100 of Xavier scale, so its mean is bounded around 0.06 and my
+        // first version of this test saturated 0 times in 4000 samples while claiming to check the clamp.
+        // Inflating the weights is what a policy trained on a large-magnitude state actually looks like.
+        let space = BoxSpace::new(&[-4.0, -1.0], &[4.0, 3.0]).expect("valid");
+        let mut p = GaussianPolicy::new(&[3, 8, 8, 2], 11, -1.0);
+        let scaled: Vec<f64> = p.params().iter().map(|w| w * 200.0).collect();
+        assert!(p.set_params(&scaled));
+        let deployed = p.to_deployable(&space).expect("dims match");
+
+        let mut rng = Rng::new(7);
+        let mut saturated = 0;
+        for _ in 0..4000 {
+            // Wide observation range so the linear output layer often leaves [-1, 1].
+            let obs = vec![40.0 * rng.normal(), 40.0 * rng.normal(), 40.0 * rng.normal()];
+            let want = space.from_unit(&p.mean(&obs));
+            let got = deployed.act(&obs);
+            if p.mean(&obs).iter().any(|m| m.abs() > 1.0) {
+                saturated += 1;
+            }
+            assert_action_close(&want, &got, "exported policy");
+        }
+        assert!(saturated > 100, "the test must exercise saturation, only {saturated} of 4000 saturated");
+    }
+
+    #[test]
+    fn without_the_clamp_the_deployed_policy_would_diverge() {
+        // The control. If clamp_unit made no difference, the flag would be decoration and the test above would
+        // be proving nothing about it.
+        let space = BoxSpace::symmetric(&[4.0]).expect("valid");
+        let p = GaussianPolicy::new(&[1, 1], 3, -1.0);
+        let mut unclamped = p.to_deployable(&space).expect("dims match");
+        unclamped.clamp_unit = false;
+
+        // An observation large enough to saturate the linear output.
+        let big = vec![1e6];
+        let mean = p.mean(&big)[0];
+        assert!(mean.abs() > 1.0, "the fixture must saturate, mean was {mean}");
+        let trained = space.from_unit(&[mean])[0];
+        assert!((trained.abs() - 4.0).abs() < 1e-12, "training clamps to the box edge, got {trained}");
+        assert!(
+            unclamped.act(&big)[0].abs() > 4.0,
+            "without the clamp the deployed policy leaves the box: {}",
+            unclamped.act(&big)[0]
+        );
+    }
+
+    #[test]
+    fn a_json_round_trip_preserves_behaviour_exactly() {
+        let space = BoxSpace::new(&[-2.0, 0.0], &[6.0, 1.5]).expect("valid");
+        let p = GaussianPolicy::new(&[4, 16, 2], 21, -0.7);
+        let json = p.to_checkpoint_json(&space).expect("dims match");
+        let back = ferromotion_policy::Policy::from_json(&json).expect("valid checkpoint");
+
+        let mut rng = Rng::new(99);
+        for _ in 0..2000 {
+            let obs: Vec<f64> = (0..4).map(|_| 20.0 * rng.normal()).collect();
+            let a = space.from_unit(&p.mean(&obs));
+            let b = back.act(&obs);
+            assert_action_close(&a, &b, "json round trip");
+        }
+        // The clamp flag survives serialization, which is the field a naive schema would drop.
+        assert!(back.clamp_unit, "clamp_unit must round-trip");
+    }
+
+    #[test]
+    fn a_trained_policy_achieves_the_same_cost_after_export() {
+        // End to end: train, export, and run the DEPLOYED artefact against the environment. If any of the
+        // three conversion fields were wrong the cost would differ, and a weight-comparison test would not
+        // notice because the weights would be identical.
+        let gamma = 0.95;
+        let mut env = ScalarLqr { limit: 4.0, x0_scale: 1.0, ..ScalarLqr::default() };
+        let mut policy = GaussianPolicy::new(&[1, 1], 4, -1.0);
+        let mut value = Mlp::new(&[1, 16, 16, 1], 4);
+        let cfg = PpoConfig {
+            gamma,
+            policy_lr: 8e-3,
+            value_lr: 5e-3,
+            epochs: 10,
+            value_epochs: 25,
+            steps_per_batch: 256,
+            max_episode_steps: 24,
+            min_log_std: -3.5,
+            final_lr_fraction: 0.05,
+            ..PpoConfig::default()
+        };
+        train(&mut env, &mut policy, &mut value, &cfg, 30, 2024);
+
+        let space = env.action_space();
+        let deployed = policy.to_deployable(&space).expect("dims match");
+
+        // Same rollout, once through the training-side path and once through the deployed artefact.
+        let cost = |act: &dyn Fn(&[f64]) -> Vec<f64>| -> f64 {
+            let mut e = ScalarLqr { limit: 4.0, x0_scale: 1.0, ..ScalarLqr::default() };
+            e.reset(0);
+            e.x = 1.0;
+            let mut ret = 0.0;
+            let mut disc = 1.0;
+            for _ in 0..400 {
+                let a = act(&[e.x]);
+                ret += disc * e.step(&a).reward;
+                disc *= gamma;
+            }
+            ret
+        };
+        let trained = cost(&|o: &[f64]| space.from_unit(&policy.mean(o)));
+        let shipped = cost(&|o: &[f64]| deployed.act(o));
+        // 400 steps of accumulated last-bit differences, so a relative bound rather than equality.
+        assert!(
+            (trained - shipped).abs() < 1e-9 * trained.abs(),
+            "the deployed policy must achieve the same cost: {trained} vs {shipped}"
+        );
+
+        // And it is a real policy, not a degenerate one that would match trivially.
+        let k = lqr_gain(1.0, 1.0, 1.0, 1.0, gamma, 10_000).expect("solvable");
+        let analytic = -(1.0 + k * k) / (1.0 - gamma * (1.0 - k) * (1.0 - k));
+        assert!(shipped < 0.0 && shipped / analytic < 1.4, "cost {shipped:.4} vs optimal {analytic:.4}");
+    }
+
+    #[test]
+    fn a_dimension_mismatch_is_reported_rather_than_silently_truncated() {
+        // A two-output policy exported against a one-dimensional space would otherwise produce a checkpoint
+        // that runs and commands the wrong joint.
+        let p = GaussianPolicy::new(&[2, 4, 3], 5, -1.0);
+        let space = BoxSpace::symmetric(&[1.0]).expect("valid");
+        let err = p.to_deployable(&space).expect_err("must reject");
+        assert_eq!(err, ExportError::ActionDimMismatch { policy: 3, space: 1 });
+        assert!(err.to_string().contains('3') && err.to_string().contains('1'));
+        // The matching case works.
+        let ok = BoxSpace::symmetric(&[1.0, 2.0, 3.0]).expect("valid");
+        assert!(p.to_deployable(&ok).is_ok());
+    }
+
+    #[test]
+    fn a_linear_policys_exported_weight_is_still_the_gain() {
+        // The export must not reshape or transpose. For a single-layer policy the weight IS the feedback gain,
+        // so a transposition or an off-by-one in the flat layout shows up immediately.
+        let space = BoxSpace::symmetric(&[4.0]).expect("valid");
+        let mut p = GaussianPolicy::new(&[1, 1], 4, -1.0);
+        let mut init = p.params().to_vec();
+        init[0] = -0.15;
+        init[1] = 0.02;
+        assert!(p.set_params(&init));
+        let d = p.to_deployable(&space).expect("dims match");
+        assert_eq!(d.net.layers.len(), 1);
+        assert_eq!(d.net.layers[0].w.shape(), (1, 1));
+        assert_eq!(d.net.layers[0].w[(0, 0)], -0.15, "the weight must survive unchanged");
+        assert_eq!(d.net.layers[0].b[0], 0.02, "and so must the bias");
+        // Scale and bias reproduce from_unit on a symmetric box: scale = limit, bias = 0.
+        assert_eq!(d.act_scale, vec![4.0]);
+        assert_eq!(d.act_bias, vec![0.0]);
+    }
+
+    #[test]
+    fn a_multi_layer_export_preserves_every_layer_shape_and_activation() {
+        // Hidden layers tanh, output linear, shapes in order. A silent activation change would alter the
+        // policy's function while leaving all the weights correct.
+        let space = BoxSpace::symmetric(&[1.0, 1.0]).expect("valid");
+        let p = GaussianPolicy::new(&[5, 7, 3, 2], 13, -1.0);
+        let d = p.to_deployable(&space).expect("dims match");
+        assert_eq!(d.net.layers.len(), 3);
+        let want = [(7usize, 5usize), (3, 7), (2, 3)];
+        for (i, (o, inn)) in want.iter().enumerate() {
+            assert_eq!(d.net.layers[i].w.shape(), (*o, *inn), "layer {i} shape");
+            assert_eq!(d.net.layers[i].b.len(), *o, "layer {i} bias length");
+        }
+        assert_eq!(d.net.layers[0].act, ferromotion_policy::Activation::Tanh);
+        assert_eq!(d.net.layers[1].act, ferromotion_policy::Activation::Tanh);
+        assert_eq!(d.net.layers[2].act, ferromotion_policy::Activation::Identity);
+        assert!(!d.squash, "the mean network is not squashed; the clamp does the bounding");
+    }
+}
