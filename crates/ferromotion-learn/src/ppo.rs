@@ -44,6 +44,7 @@
 
 use crate::autodiff::{Tape, Var};
 use crate::env::{gae_masks, BoxSpace, Env, Trajectory};
+use crate::obs_norm::ObsNorm;
 use crate::nn::Mlp;
 
 /// `log(2π)`, to the precision `f64` holds.
@@ -662,9 +663,13 @@ fn collect(
     cfg: &PpoConfig,
     rng: &mut Rng,
     seed_base: u64,
-) -> (Vec<Trajectory>, Vec<Vec<f64>>) {
+    norm: Option<&ObsNorm>,
+) -> (Vec<Trajectory>, Vec<Vec<f64>>, Vec<Vec<f64>>) {
     let mut episodes = Vec::new();
     let mut log_probs = Vec::new();
+    // The RAW observations, kept so the running statistics are updated from untransformed data. Folding
+    // already-normalised values back in would estimate the statistics of the output of the transform.
+    let mut raw: Vec<Vec<f64>> = Vec::new();
     let mut collected = 0usize;
     let mut ep = 0u64;
     while collected < cfg.steps_per_batch {
@@ -674,9 +679,18 @@ fn collect(
         let mut obs = env.reset(seed_base.wrapping_add(ep));
         let budget = cfg.max_episode_steps.min(cfg.steps_per_batch - collected);
         for k in 0..budget {
-            let (a_unit, lp) = policy.sample(&obs, rng);
+            // The policy ACTS on the normalised observation and the trajectory STORES that same value. If the
+            // action came from raw input while the surrogate later recomputed its log-probability from a
+            // normalised one, the importance ratio would be evaluated at a different point than the action was
+            // drawn from — a silent corruption of every gradient.
+            raw.push(obs.clone());
+            let seen = match norm {
+                Some(n) => n.normalize(&obs),
+                None => obs.clone(),
+            };
+            let (a_unit, lp) = policy.sample(&seen, rng);
             let r = env.step(&aspace.from_unit(&a_unit));
-            t.observations.push(obs);
+            t.observations.push(seen);
             t.actions.push(a_unit);
             t.rewards.push(r.reward);
             let hit_budget = k + 1 == budget;
@@ -689,13 +703,16 @@ fn collect(
                 break;
             }
         }
-        t.final_observation = obs;
+        t.final_observation = match norm {
+            Some(n) => n.normalize(&obs),
+            None => obs,
+        };
         collected += t.len();
         episodes.push(t);
         log_probs.push(lps);
         ep += 1;
     }
-    (episodes, log_probs)
+    (episodes, log_probs, raw)
 }
 
 /// Train `policy` on `env` for `iterations` batches, fitting `value` as the baseline.
@@ -711,11 +728,51 @@ pub fn train(
     iterations: usize,
     seed: u64,
 ) -> Vec<IterationReport> {
+    train_normalized(env, policy, value, None, cfg, iterations, seed)
+}
+
+/// As [`train`], with an optional [`ObsNorm`] estimated from the observations as they are collected.
+///
+/// The normalizer is **frozen for the duration of each batch** and updated from that batch's raw observations
+/// once it is complete. Two reasons, and the first is a correctness one:
+///
+/// * Every sample in a batch must be normalised by the *same* transform. The clipped surrogate compares a
+///   log-probability recomputed now against one recorded during collection; if the transform moved in between,
+///   the two are evaluated at different points and the importance ratio is meaningless.
+/// * A transform that shifts inside a batch also shifts the value function's inputs mid-fit, so the regression
+///   target and the features disagree.
+///
+/// The cost is that the first batch runs unnormalised — there is no estimate yet — which is the standard cold
+/// start and is why [`ObsNorm::normalize`] is a passthrough below two samples rather than a division by nothing.
+///
+/// Pass the same normalizer to [`GaussianPolicy::to_deployable_normalized`] afterwards so the checkpoint carries
+/// the transform. Exporting with plain [`to_deployable`](GaussianPolicy::to_deployable) after training with a
+/// normalizer ships a policy whose inputs are scaled differently from the ones it learned on.
+pub fn train_normalized(
+    env: &mut impl Env,
+    policy: &mut GaussianPolicy,
+    value: &mut Mlp,
+    mut norm: Option<&mut ObsNorm>,
+    cfg: &PpoConfig,
+    iterations: usize,
+    seed: u64,
+) -> Vec<IterationReport> {
     let mut rng = Rng::new(seed);
     let mut out = Vec::with_capacity(iterations);
 
     for it in 0..iterations {
-        let (episodes, log_probs) = collect(env, policy, cfg, &mut rng, seed.wrapping_add(it as u64 * 7919));
+        let (episodes, log_probs, raw_obs) = collect(
+            env,
+            policy,
+            cfg,
+            &mut rng,
+            seed.wrapping_add(it as u64 * 7919),
+            norm.as_deref(),
+        );
+        // Update AFTER the batch, from raw observations, so the transform held still for the whole surrogate.
+        if let Some(n) = norm.as_deref_mut() {
+            n.update_batch(&raw_obs);
+        }
 
         let mut b_obs: Vec<Vec<f64>> = Vec::new();
         let mut b_act: Vec<Vec<f64>> = Vec::new();
@@ -1634,6 +1691,13 @@ pub enum ExportError {
         /// What the space expects.
         space: usize,
     },
+    /// The normalizer's dimension does not match the policy's observation dimension.
+    ObsDimMismatch {
+        /// What the policy expects to read.
+        policy: usize,
+        /// What the normalizer was built for.
+        norm: usize,
+    },
 }
 
 impl std::fmt::Display for ExportError {
@@ -1642,6 +1706,10 @@ impl std::fmt::Display for ExportError {
             ExportError::ActionDimMismatch { policy, space } => write!(
                 f,
                 "policy emits {policy} action dimensions but the action space has {space}"
+            ),
+            ExportError::ObsDimMismatch { policy, norm } => write!(
+                f,
+                "policy reads {policy} observation dimensions but the normalizer has {norm}"
             ),
         }
     }
@@ -1721,16 +1789,49 @@ impl GaussianPolicy {
         })
     }
 
+    /// Export with an observation transform, so the deployed policy sees the same scaling it learned on.
+    ///
+    /// **Use this whenever training used a normalizer.** Exporting with plain
+    /// [`to_deployable`](GaussianPolicy::to_deployable) after training with one ships a policy whose inputs are
+    /// scaled differently from the ones it was fitted to — the weights are right and the domain is wrong, which
+    /// produces a policy that runs and behaves badly rather than one that fails.
+    ///
+    /// The statistics are taken by [`snapshot`](ObsNorm::snapshot) and are therefore **frozen**: later updates to
+    /// the normalizer cannot reach the exported checkpoint.
+    pub fn to_deployable_normalized(
+        &self,
+        action_space: &BoxSpace,
+        norm: &ObsNorm,
+    ) -> Result<ferromotion_policy::Policy, ExportError> {
+        if norm.dim() != self.sizes[0] {
+            return Err(ExportError::ObsDimMismatch { policy: self.sizes[0], norm: norm.dim() });
+        }
+        let mut p = self.to_deployable(action_space)?;
+        let (mean, std) = norm.snapshot();
+        p.obs_mean = mean;
+        p.obs_std = std;
+        Ok(p)
+    }
+
     /// Export straight to the runner's JSON checkpoint format.
     pub fn to_checkpoint_json(&self, action_space: &BoxSpace) -> Result<String, ExportError> {
         Ok(self.to_deployable(action_space)?.to_json())
+    }
+
+    /// As [`to_checkpoint_json`](GaussianPolicy::to_checkpoint_json), carrying the observation transform.
+    pub fn to_checkpoint_json_normalized(
+        &self,
+        action_space: &BoxSpace,
+        norm: &ObsNorm,
+    ) -> Result<String, ExportError> {
+        Ok(self.to_deployable_normalized(action_space, norm)?.to_json())
     }
 }
 
 #[cfg(test)]
 mod export_tests {
     use super::*;
-    use crate::env::{lqr_gain, BoxSpace, Env, ScalarLqr};
+    use crate::env::{lqr_gain, BoxSpace, Env, ScalarLqr, StepResult};
 
     /// Assert two actions agree to floating-point rounding.
     ///
@@ -1877,6 +1978,169 @@ mod export_tests {
         let k = lqr_gain(1.0, 1.0, 1.0, 1.0, gamma, 10_000).expect("solvable");
         let analytic = -(1.0 + k * k) / (1.0 - gamma * (1.0 - k) * (1.0 - k));
         assert!(shipped < 0.0 && shipped / analytic < 1.4, "cost {shipped:.4} vs optimal {analytic:.4}");
+    }
+
+    /// A scalar LQR whose observation is reported on a **badly scaled** pair of channels: the state, and the
+    /// state multiplied by 200. Both carry the same information, so the task is unchanged, but a `tanh` first
+    /// layer saturates on the large channel and cannot see the small one.
+    #[derive(Clone, Debug)]
+    struct BadlyScaled {
+        inner: ScalarLqr,
+    }
+
+    impl Env for BadlyScaled {
+        fn reset(&mut self, seed: u64) -> Vec<f64> {
+            let o = self.inner.reset(seed);
+            vec![o[0], 200.0 * o[0] + 500.0]
+        }
+        fn step(&mut self, action: &[f64]) -> StepResult {
+            let r = self.inner.step(action);
+            StepResult {
+                observation: vec![r.observation[0], 200.0 * r.observation[0] + 500.0],
+                ..r
+            }
+        }
+        fn observation_space(&self) -> BoxSpace {
+            BoxSpace::new(&[-1e6, -1e9], &[1e6, 1e9]).expect("valid")
+        }
+        fn action_space(&self) -> BoxSpace {
+            self.inner.action_space()
+        }
+    }
+
+    #[test]
+    fn normalization_rescues_a_badly_scaled_observation() {
+        // THE payoff. Both channels carry the same information and the task is identical; only the units differ.
+        // Without the transform the net saturates on the large channel, and this is the situation the actuator
+        // bench hit for real before its observations were divided by hand inside the environment.
+        let cfg = PpoConfig {
+            gamma: 0.95,
+            policy_lr: 8e-3,
+            value_lr: 5e-3,
+            epochs: 8,
+            value_epochs: 25,
+            steps_per_batch: 256,
+            max_episode_steps: 24,
+            min_log_std: -3.5,
+            ..PpoConfig::default()
+        };
+        let iterations = 40;
+
+        let run = |normalized: bool| -> f64 {
+            let mut env = BadlyScaled { inner: ScalarLqr { limit: 4.0, ..ScalarLqr::default() } };
+            let mut policy = GaussianPolicy::new(&[2, 16, 1], 4, -1.0);
+            let mut value = Mlp::new(&[2, 16, 1], 4);
+            let mut norm = ObsNorm::new(2);
+            let r = if normalized {
+                train_normalized(&mut env, &mut policy, &mut value, Some(&mut norm), &cfg, iterations, 7)
+            } else {
+                train(&mut env, &mut policy, &mut value, &cfg, iterations, 7)
+            };
+            let late: f64 = r[r.len() - 5..].iter().map(|x| x.mean_return).sum::<f64>() / 5.0;
+            late
+        };
+
+        let without = run(false);
+        let with = run(true);
+        assert!(
+            with > without,
+            "normalisation must help on a badly scaled observation: {with:.3} normalised vs {without:.3} raw"
+        );
+        // And the improvement is not marginal, or the transform would not be worth carrying.
+        assert!(
+            with - without > 0.1 * without.abs(),
+            "expected a material gain: {with:.3} vs {without:.3}"
+        );
+    }
+
+    #[test]
+    fn the_exported_checkpoint_reproduces_the_normalized_training_path() {
+        // The transform has to travel with the weights. Export without it and the weights are right while the
+        // domain is wrong, which produces a policy that runs and behaves badly rather than one that fails.
+        let space = BoxSpace::symmetric(&[4.0]).expect("valid");
+        let mut env = BadlyScaled { inner: ScalarLqr { limit: 4.0, ..ScalarLqr::default() } };
+        let mut policy = GaussianPolicy::new(&[2, 8, 1], 5, -1.0);
+        let mut value = Mlp::new(&[2, 8, 1], 5);
+        let mut norm = ObsNorm::new(2);
+        let cfg = PpoConfig {
+            steps_per_batch: 256,
+            max_episode_steps: 24,
+            epochs: 4,
+            value_epochs: 8,
+            ..PpoConfig::default()
+        };
+        train_normalized(&mut env, &mut policy, &mut value, Some(&mut norm), &cfg, 8, 3);
+        assert!(norm.count() > 100, "the normalizer must have seen the batch, count {}", norm.count());
+
+        let deployed = policy.to_deployable_normalized(&space, &norm).expect("dims match");
+        let (m, sd) = norm.snapshot();
+        assert_eq!(deployed.obs_mean, m, "the checkpoint must carry the mean");
+        assert_eq!(deployed.obs_std, sd, "and the std");
+        assert!(!deployed.obs_mean.is_empty(), "which must not be the empty passthrough here");
+
+        // The deployed pipeline must equal normalise-then-policy-then-scale, over raw observations.
+        let mut rng = Rng::new(11);
+        for _ in 0..2000 {
+            let raw = vec![3.0 * rng.normal(), 200.0 * rng.normal() + 500.0];
+            let want = space.from_unit(&policy.mean(&norm.normalize(&raw)));
+            let got = deployed.act(&raw);
+            assert_action_close(&want, &got, "normalized export");
+        }
+
+        // Exporting WITHOUT the transform gives a different answer, which is why the separate call exists.
+        let bare = policy.to_deployable(&space).expect("dims match");
+        let raw = vec![1.0, 700.0];
+        let a = deployed.act(&raw)[0];
+        let b = bare.act(&raw)[0];
+        assert!((a - b).abs() > 1e-6, "the two exports must differ: {a} vs {b}");
+
+        // A JSON round trip preserves the transform.
+        let json = policy.to_checkpoint_json_normalized(&space, &norm).expect("dims match");
+        let back = ferromotion_policy::Policy::from_json(&json).expect("valid");
+        assert_eq!(back.obs_mean, m);
+        assert_eq!(back.obs_std, sd);
+    }
+
+    #[test]
+    fn a_mismatched_normalizer_is_reported_rather_than_applied_partially() {
+        // A three-channel normalizer on a two-channel policy would leave the third channel's statistics unused
+        // and, worse, `Policy::act` pads missing entries with 0/1 — so it would run and scale wrongly.
+        let space = BoxSpace::symmetric(&[1.0]).expect("valid");
+        let p = GaussianPolicy::new(&[2, 4, 1], 1, -1.0);
+        let bad = ObsNorm::new(3);
+        let err = p.to_deployable_normalized(&space, &bad).expect_err("must reject");
+        assert_eq!(err, ExportError::ObsDimMismatch { policy: 2, norm: 3 });
+        assert!(err.to_string().contains('2') && err.to_string().contains('3'));
+        let good = ObsNorm::new(2);
+        assert!(p.to_deployable_normalized(&space, &good).is_ok());
+    }
+
+    #[test]
+    fn training_without_a_normalizer_is_unchanged() {
+        // `train` now delegates to `train_normalized` with `None`. That refactor must be behaviour-preserving,
+        // and the cheapest proof is that the same seed gives the same numbers it did before.
+        let mut env = ScalarLqr { limit: 4.0, ..ScalarLqr::default() };
+        let mut p1 = GaussianPolicy::new(&[1, 1], 5, -1.0);
+        let mut v1 = Mlp::new(&[1, 8, 1], 5);
+        let cfg = PpoConfig {
+            steps_per_batch: 128,
+            max_episode_steps: 16,
+            epochs: 3,
+            value_epochs: 5,
+            ..PpoConfig::default()
+        };
+        let a = train(&mut env, &mut p1, &mut v1, &cfg, 5, 1234);
+
+        let mut env2 = ScalarLqr { limit: 4.0, ..ScalarLqr::default() };
+        let mut p2 = GaussianPolicy::new(&[1, 1], 5, -1.0);
+        let mut v2 = Mlp::new(&[1, 8, 1], 5);
+        let b = train_normalized(&mut env2, &mut p2, &mut v2, None, &cfg, 5, 1234);
+        assert_eq!(
+            a.last().expect("ran").mean_return,
+            b.last().expect("ran").mean_return,
+            "train and train_normalized(None) must agree bit for bit"
+        );
+        assert_eq!(p1.params(), p2.params());
     }
 
     #[test]

@@ -54,6 +54,29 @@ with no restoring force — measured by starting a policy exactly *at* the optim
 Annealing the learning rate roughly halves the error, which is why `final_lr_fraction` defaults on. It does
 not remove it. The bounds the tests assert are set from that measurement rather than chosen in advance.
 
+### Observation normalization
+
+`train_normalized` estimates a per-channel mean and standard deviation from the observations as they arrive,
+applies it before the policy sees anything, and `to_deployable_normalized` **ships it in the checkpoint** — so
+`Policy`'s `obs_mean`/`obs_std` stop being dead fields.
+
+This is not cosmetic. A joint angle of order 1 alongside a rate of order 30 saturates the first `tanh` layer on
+the rate alone and the policy cannot see the error it is meant to null. The actuator bench in this workspace
+would not learn until its observations were divided by hand inside the environment — which is the wrong place,
+because the constants are then invisible to the checkpoint and changing a sensor's units silently reinterprets a
+trained policy.
+
+Three decisions worth knowing:
+
+- **The transform is frozen for the duration of each batch**, updated from raw observations once it completes.
+  The clipped surrogate compares a log-probability recomputed now against one recorded during collection; if the
+  transform moved in between, the two are evaluated at different points and the importance ratio is meaningless.
+- **Welford, not sum-of-squares.** Measured on a channel offset by `1e9` with a spread of `1e-3`: true variance
+  `3.995e-6`, Welford `4.3e-6` relative error, naive `6272` — a relative error of `1.6e9`, fifteen orders worse.
+  Welford is accurate, *not* exact, and cannot be: that offset-to-spread ratio leaves `f64` about six digits.
+- **It is a passthrough below two samples**, because with one sample the only observation seen would map to
+  exactly zero and the policy would be handed a constant.
+
 ### Getting the policy onto hardware
 
 `GaussianPolicy::to_deployable(&action_space)` converts a trained policy into a
