@@ -35,13 +35,14 @@
 //!   PPO quiet (sigma/16)           0.0%       -0.886      0.12
 //!   PPO long horizon              17.7%        1.000      0.54
 //!   PPO annealed sigma             8.9%        1.000      0.71
+//!   PPO state-dependent sd         7.5%        1.000      0.95
 //! ```
 //!
 //! **PPO swings up and does not catch.** Its return improved from −501 to −71 and it reached the top on every
 //! seed, so it found the energy pumping — the genuinely non-linear part, requiring several swings, with no linear
 //! solution. It then failed to stabilise there, holding 10-18% against the hand-built controller's 75%.
 //!
-//! # Three hypotheses, all tested, all refuted
+//! # Four hypotheses, all tested, all refuted
 //!
 //! Each is a single-variable arm, because a guess left in a comment is not a finding.
 //!
@@ -51,21 +52,27 @@
 //!   not what spoils the catch, it is what makes the pumping *discoverable*.
 //! * **"The horizon is too short" is a real effect and four times too small.** `γ` 0.99 → 0.997 moved hold
 //!   10.1% → 17.7% and halved effort 0.85 → 0.54. A contributor, not the explanation.
-//! * **"The two phases are separated in time, so annealing σ serves both" is REFUTED.** This was the
-//!   explanation the first three arms appeared to point at, which is exactly why it needed testing rather than
-//!   writing down. With a σ ceiling annealed 0.607 → 0.030 across the run, hold went 10.1% → **8.9%** and the
-//!   return got *worse*, −70.6 → −126.9.
+//! * **"The phases are separated in time, so annealing σ serves both" is REFUTED.** With a σ ceiling annealed
+//!   0.607 → 0.030 across the run, hold went 10.1% → **8.9%** and the return got worse, −70.6 → −126.9.
+//! * **"The phases are separated in state, so a state-dependent σ serves both" is ALSO REFUTED.** This was the
+//!   candidate the third refutation sharpened into, and it was written down as "the surviving candidate". With σ
+//!   predicted per-observation by a network head, hold went 10.1% → **7.5%** and the return −70.6 → −122.0.
 //!
-//! # What is left, sharpened by the refutation
+//! # The exploration-scale family is exhausted
 //!
-//! Annealing couples σ to **training time**. The refutation says that is the wrong axis: this pendulum needs
-//! coarse exploration while swinging and fine control near the top **within the same episode**, which no
-//! schedule over iterations can express. A **state-dependent** σ can, and
-//! [`GaussianPolicy`](ferromotion_learn::GaussianPolicy) carries a state-*independent* one by design.
+//! Four arms have now varied *how much* the policy explores — its magnitude, its schedule over training, and its
+//! dependence on state. None of them closes a 65-point gap against a hand-built controller, and two of them made
+//! things worse. The explanation is not in the exploration, and this bench has said so four different ways.
 //!
-//! That is the surviving candidate and it is **untested here**. It is recorded rather than assumed because the
-//! previous version of this comment asserted the time-separated story as "what fits all three arms", and one arm
-//! later it was false.
+//! Two things it has NOT varied, recorded as the honest remaining surface rather than as predictions, since the
+//! last three predictions made here were wrong:
+//!
+//! * **Budget and architecture.** 200 iterations of a `[3, 64, 64, 1]` net in `f64` is a real attempt and not
+//!   obviously a sufficient one. The catch is a narrow-basin skill that a longer run might simply find.
+//! * **The value function.** Every arm above changed the *policy*. The catch requires accurately valuing states
+//!   near an unstable equilibrium, where the value surface is steep and the data are sparse because the policy
+//!   rarely gets there. A value head that cannot represent that would starve the advantage signal exactly where
+//!   the catch has to be learned — and nothing here has looked at it.
 //!
 //! The reward is left alone throughout, at the standard `height − effort`. Paying specifically for dwell near the
 //! top would solve the benchmark rather than measure the learner.
@@ -220,11 +227,15 @@ fn main() {
     // (the quiet arm proves it, at hold 0% and peak -0.886) and too coarse to refine the catch. The phases are
     // separated in time, so a σ CEILING annealed from loose to tight can serve both. Note it must be a ceiling:
     // a floor cannot push σ down, only stop it collapsing.
-    let variants: [(&str, f64, f64, f64, Option<(f64, f64)>); 4] = [
-        ("PPO baseline", -0.5, -2.0, 0.99, None),
-        ("PPO quiet (sigma/16)", -2.5, -3.5, 0.99, None),
-        ("PPO long horizon", -0.5, -2.0, 0.997, None),
-        ("PPO annealed sigma", -0.5, -6.0, 0.99, Some((-0.5, -3.5))),
+    // The fifth arm is the surviving candidate after the annealed schedule was refuted: sigma that reads the
+    // STATE rather than the iteration, so it can be coarse while swinging and fine near the top within a single
+    // episode. That is the axis the refutation pointed at.
+    let variants: [(&str, f64, f64, f64, Option<(f64, f64)>, bool); 5] = [
+        ("PPO baseline", -0.5, -2.0, 0.99, None, false),
+        ("PPO quiet (sigma/16)", -2.5, -3.5, 0.99, None, false),
+        ("PPO long horizon", -0.5, -2.0, 0.997, None, false),
+        ("PPO annealed sigma", -0.5, -6.0, 0.99, Some((-0.5, -3.5)), false),
+        ("PPO state-dependent sd", -0.5, -6.0, 0.99, None, true),
     ];
     // Each arm costs about 40 minutes, so all four do not fit in one sitting. Optional positional args select
     // a subset by index; with none given, all run. Arm 0 must be included for the verdict's baseline reference,
@@ -247,7 +258,9 @@ fn main() {
             variants.len() - selected.len()
         );
     }
-    for (name, init_log_std, min_log_std, gamma, ceiling) in selected.iter().map(|&i| variants[i]) {
+    for (name, init_log_std, min_log_std, gamma, ceiling, state_dep) in
+        selected.iter().map(|&i| variants[i])
+    {
         let cfg = PpoConfig {
             gamma,
             lambda: 0.95,
@@ -264,7 +277,12 @@ fn main() {
             final_lr_fraction: 0.05,
         };
         let mut env = Pendulum::default();
-        let mut policy = GaussianPolicy::new(&[3, 64, 64, 1], 5, init_log_std);
+        let mut policy = if state_dep {
+            GaussianPolicy::new_state_dependent(&[3, 64, 64, 1], 5, init_log_std)
+                .expect("init_log_std in range")
+        } else {
+            GaussianPolicy::new(&[3, 64, 64, 1], 5, init_log_std)
+        };
         let mut value = Mlp::new(&[3, 64, 64, 1], 5);
         let reports = train(&mut env, &mut policy, &mut value, &cfg, iterations, 5);
         let early: f64 = reports[..5].iter().map(|r| r.mean_return).sum::<f64>() / 5.0;
@@ -273,9 +291,13 @@ fn main() {
             "  {name:<22} {iterations} x {} steps, sigma {:.4}{}, gamma {gamma}, return {early:.1} -> {late:.1}",
             cfg.steps_per_batch,
             init_log_std.exp(),
-            match ceiling {
-                Some((a, b)) => format!(" ceiling {:.3} -> {:.3}", a.exp(), b.exp()),
-                None => format!(" floor {:.4}", min_log_std.exp()),
+            if state_dep {
+                " state-dependent".to_string()
+            } else {
+                match ceiling {
+                    Some((a, b)) => format!(" ceiling {:.3} -> {:.3}", a.exp(), b.exp()),
+                    None => format!(" floor {:.4}", min_log_std.exp()),
+                }
             }
         );
         let space = env.action_space();

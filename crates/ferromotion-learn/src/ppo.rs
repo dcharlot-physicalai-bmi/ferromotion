@@ -49,6 +49,29 @@ use crate::nn::Mlp;
 /// `log(2π)`, to the precision `f64` holds.
 const LOG_2PI: f64 = 1.837_877_066_409_345_5;
 
+/// Bounds a **state-dependent** log-σ is squashed into.
+///
+/// A network head predicting log-σ must be bounded or a single bad step makes σ either zero (infinite
+/// log-density, NaN gradients) or enormous (the policy stops being a policy). The squash is
+/// `log σ = MIN + ½(MAX − MIN)(tanh(raw) + 1)`, which is **smooth everywhere** — a hard clamp would put a
+/// zero-gradient plateau in the loss exactly where the head is trying to learn its way back into range.
+const LOG_STD_MIN: f64 = -6.0;
+const LOG_STD_MAX: f64 = 1.0;
+
+/// Squash a raw head output into `[LOG_STD_MIN, LOG_STD_MAX]`.
+fn squash_log_std(raw: f64) -> f64 {
+    LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (raw.tanh() + 1.0)
+}
+
+/// The raw head value whose squash is `target`, for initialisation. `None` if `target` is out of range.
+fn unsquash_log_std(target: f64) -> Option<f64> {
+    let t = 2.0 * (target - LOG_STD_MIN) / (LOG_STD_MAX - LOG_STD_MIN) - 1.0;
+    if t <= -1.0 || t >= 1.0 {
+        return None;
+    }
+    Some(t.atanh())
+}
+
 /// A seeded xorshift generator with Box-Muller normals, so a training run is reproducible.
 #[derive(Clone, Debug)]
 pub struct Rng {
@@ -103,6 +126,9 @@ pub struct GaussianPolicy {
     params: Vec<f64>,
     n_mean: usize,
     act_dim: usize,
+    /// When true the network emits `2·act_dim` outputs — means, then raw log-σs — and there is no separate
+    /// log-σ parameter block. See [`GaussianPolicy::new_state_dependent`].
+    state_dependent: bool,
     m: Vec<f64>,
     v: Vec<f64>,
     t: u64,
@@ -150,10 +176,65 @@ impl GaussianPolicy {
             params,
             n_mean,
             act_dim,
+            state_dependent: false,
             m: vec![0.0; n],
             v: vec![0.0; n],
             t: 0,
         }
+    }
+
+    /// A policy whose **σ depends on the observation**: the network emits `2·act_dim` outputs, means then raw
+    /// log-σs, and there is no separate log-σ parameter block.
+    ///
+    /// `sizes.last()` is the **action** dimension; the doubling is internal.
+    ///
+    /// # Why this exists
+    ///
+    /// Measured on swing-up, a task with two phases wanting different exploration scales. Coarse noise is
+    /// required to discover the energy pumping — start σ sixteen times smaller and the policy never swings up at
+    /// all — and too coarse to refine the catch into the narrow basin where the inverted equilibrium can be held.
+    /// A **schedule** cannot serve both: annealing σ down across training was measured to make it *worse*
+    /// (hold 10.1% → 8.9%, return −70.6 → −126.9), because the phases are separated by **state within an
+    /// episode**, not by training time. Only a σ that reads the state can be coarse while swinging and fine near
+    /// the top.
+    ///
+    /// The config's [`min_log_std`](PpoConfig::min_log_std) and
+    /// [`log_std_ceiling`](PpoConfig::log_std_ceiling) apply to the state-*independent* mode only; here σ is
+    /// bounded by the squash into `[LOG_STD_MIN, LOG_STD_MAX]` instead, and clamping a network output would put a
+    /// dead plateau in the loss.
+    pub fn new_state_dependent(sizes: &[usize], seed: u64, init_log_std: f64) -> Option<GaussianPolicy> {
+        assert!(sizes.len() >= 2, "need at least an input and an output layer");
+        let act_dim = sizes[sizes.len() - 1];
+        let raw_bias = unsquash_log_std(init_log_std)?;
+        // Build the net with a doubled output layer, then reuse the ordinary initialisation.
+        let mut doubled = sizes.to_vec();
+        doubled[sizes.len() - 1] = 2 * act_dim;
+        let mut p = GaussianPolicy::new(&doubled, seed, 0.0);
+        // Drop the now-unused state-independent log-σ block; the head supplies σ instead.
+        p.params.truncate(p.n_mean);
+        p.act_dim = act_dim;
+        p.state_dependent = true;
+        // Bias the log-σ half of the output layer so σ STARTS where the caller asked. Left at zero the squash
+        // returns its midpoint, which on these bounds is σ = 0.082 — the setting measured to prevent the policy
+        // from discovering the swing-up at all. An initialisation that silently picks that would look like a
+        // learning failure rather than a default.
+        let last_in = doubled[doubled.len() - 2];
+        let last_out = 2 * act_dim;
+        let bias_start = p.n_mean - last_out;
+        for d in 0..act_dim {
+            p.params[bias_start + act_dim + d] = raw_bias;
+        }
+        let n = p.params.len();
+        p.m = vec![0.0; n];
+        p.v = vec![0.0; n];
+        p.t = 0;
+        let _ = last_in;
+        Some(p)
+    }
+
+    /// Whether σ is predicted from the observation rather than being a free parameter.
+    pub fn is_state_dependent(&self) -> bool {
+        self.state_dependent
     }
 
     /// Total trainable parameter count, log-σ included.
@@ -162,12 +243,42 @@ impl GaussianPolicy {
     }
 
     /// The current per-dimension standard deviations.
+    ///
+    /// For a state-dependent policy there is **no single σ**, so this reports σ at the zero observation, which
+    /// is a reference point and not a property of the policy. Use [`std_at`](GaussianPolicy::std_at) when the
+    /// state matters.
     pub fn std(&self) -> Vec<f64> {
-        self.params[self.n_mean..].iter().map(|s| s.exp()).collect()
+        if self.state_dependent {
+            let zero = vec![0.0; self.sizes[0]];
+            self.std_at(&zero)
+        } else {
+            self.params[self.n_mean..].iter().map(|s| s.exp()).collect()
+        }
+    }
+
+    /// Per-dimension σ at a given observation.
+    pub fn std_at(&self, obs: &[f64]) -> Vec<f64> {
+        self.log_std_at(obs).iter().map(|l| l.exp()).collect()
+    }
+
+    /// Per-dimension log-σ at a given observation. Constant for a state-independent policy.
+    pub fn log_std_at(&self, obs: &[f64]) -> Vec<f64> {
+        if self.state_dependent {
+            let out = self.net_forward(obs);
+            (0..self.act_dim).map(|d| squash_log_std(out[self.act_dim + d])).collect()
+        } else {
+            self.params[self.n_mean..].to_vec()
+        }
     }
 
     /// The mean action for an observation, in plain `f64` (no tape).
     pub fn mean(&self, obs: &[f64]) -> Vec<f64> {
+        let out = self.net_forward(obs);
+        out[..self.act_dim].to_vec()
+    }
+
+    /// The network's full output: `act_dim` values normally, `2·act_dim` when state-dependent.
+    fn net_forward(&self, obs: &[f64]) -> Vec<f64> {
         let layers = self.sizes.len() - 1;
         let mut a = obs.to_vec();
         let mut off = 0;
@@ -190,9 +301,10 @@ impl GaussianPolicy {
     /// Log-density of `action` under the policy at `obs`.
     pub fn log_prob(&self, obs: &[f64], action: &[f64]) -> f64 {
         let mu = self.mean(obs);
+        let log_std = self.log_std_at(obs);
         let mut lp = 0.0;
         for d in 0..self.act_dim {
-            let ls = self.params[self.n_mean + d];
+            let ls = log_std[d];
             let z = (action[d] - mu[d]) / ls.exp();
             lp += -0.5 * (z * z + LOG_2PI) - ls;
         }
@@ -202,10 +314,11 @@ impl GaussianPolicy {
     /// Sample an action in policy space, with its log-density.
     pub fn sample(&self, obs: &[f64], rng: &mut Rng) -> (Vec<f64>, f64) {
         let mu = self.mean(obs);
+        let log_std = self.log_std_at(obs);
         let mut action = Vec::with_capacity(self.act_dim);
         let mut lp = 0.0;
         for d in 0..self.act_dim {
-            let ls = self.params[self.n_mean + d];
+            let ls = log_std[d];
             let z = rng.normal();
             action.push(mu[d] + z * ls.exp());
             lp += -0.5 * (z * z + LOG_2PI) - ls;
@@ -214,12 +327,15 @@ impl GaussianPolicy {
     }
 
     /// Differential entropy, `Σ (log σ_d + ½ log 2πe)`. Higher means more exploration.
+    ///
+    /// State-dependent policies report entropy at the zero observation; see [`std`](GaussianPolicy::std).
     pub fn entropy(&self) -> f64 {
-        self.params[self.n_mean..].iter().map(|ls| ls + 0.5 * (LOG_2PI + 1.0)).sum()
+        self.log_std_at(&vec![0.0; self.sizes[0]]).iter().map(|ls| ls + 0.5 * (LOG_2PI + 1.0)).sum()
     }
 
-    /// The mean network's forward pass on the tape, so a custom loss can be differentiated through it.
-    fn mean_on_tape<'t>(&self, pv: &[Var<'t>], obs: &[f64], tape: &'t Tape) -> Vec<Var<'t>> {
+    /// The network's forward pass on the tape, so a custom loss can be differentiated through it. Returns the
+    /// full output: `act_dim` values normally, `2·act_dim` when state-dependent.
+    fn net_on_tape<'t>(&self, pv: &[Var<'t>], obs: &[f64], tape: &'t Tape) -> Vec<Var<'t>> {
         let layers = self.sizes.len() - 1;
         let mut a: Vec<Var<'t>> = obs.iter().map(|&x| tape.constant(x)).collect();
         let mut off = 0;
@@ -260,13 +376,22 @@ impl GaussianPolicy {
         let mut clipped_count = 0usize;
 
         for k in 0..n {
-            let mu = self.mean_on_tape(&pv, &obs[k], &tape);
+            let out = self.net_on_tape(&pv, &obs[k], &tape);
             // Log-density of the SAME action under the current parameters.
             let mut lp = tape.constant(0.0);
             for d in 0..self.act_dim {
-                let ls = pv[self.n_mean + d];
+                // The gradient must reach σ by whichever route produced it: a free parameter, or the head
+                // through its squash. Differentiating only the mean would leave a state-dependent σ untrained
+                // while the policy appeared to work.
+                let ls = if self.state_dependent {
+                    let raw = out[self.act_dim + d];
+                    raw.tanh() * (0.5 * (LOG_STD_MAX - LOG_STD_MIN))
+                        + (LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN))
+                } else {
+                    pv[self.n_mean + d]
+                };
                 let inv_sigma = (-ls).exp();
-                let z = (tape.constant(actions[k][d]) - mu[d]) * inv_sigma;
+                let z = (tape.constant(actions[k][d]) - out[d]) * inv_sigma;
                 lp = lp + (z * z + LOG_2PI) * -0.5 - ls;
             }
             let ratio = (lp - old_log_probs[k]).exp();
@@ -295,8 +420,22 @@ impl GaussianPolicy {
         let mut loss = total * (-1.0 / n as f64);
         if entropy_coef != 0.0 {
             let mut ent = tape.constant(0.0);
-            for d in 0..self.act_dim {
-                ent = ent + pv[self.n_mean + d] + 0.5 * (LOG_2PI + 1.0);
+            if self.state_dependent {
+                // Mean entropy over the batch, since a state-dependent σ has no single value. Averaged rather
+                // than summed so `entropy_coef` means the same thing in both modes.
+                for o in obs.iter() {
+                    let out = self.net_on_tape(&pv, o, &tape);
+                    for d in 0..self.act_dim {
+                        let raw = out[self.act_dim + d];
+                        let ls = raw.tanh() * (0.5 * (LOG_STD_MAX - LOG_STD_MIN))
+                            + (LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN));
+                        ent = ent + (ls + 0.5 * (LOG_2PI + 1.0)) * (1.0 / n as f64);
+                    }
+                }
+            } else {
+                for d in 0..self.act_dim {
+                    ent = ent + pv[self.n_mean + d] + 0.5 * (LOG_2PI + 1.0);
+                }
             }
             loss = loss + ent * -entropy_coef;
         }
@@ -335,7 +474,12 @@ impl GaussianPolicy {
             let vhat = self.v[i] / bc2;
             self.params[i] -= lr * mhat / (vhat.sqrt() + eps);
         }
+        // The floor and ceiling clamp a FREE log-σ parameter. A state-dependent σ has none: it is bounded by the
+        // squash instead, and clamping a network output would put a dead plateau in the loss.
         for d in 0..self.act_dim {
+            if self.state_dependent {
+                break;
+            }
             let p = &mut self.params[self.n_mean + d];
             if *p < min_log_std {
                 *p = min_log_std;
@@ -1194,6 +1338,221 @@ mod tests {
     }
 
     #[test]
+    fn a_state_dependent_sigma_actually_varies_with_the_observation() {
+        // THE test that the mode is not inert. This session has twice shipped a "variant" that changed nothing —
+        // a floor that never bound, then a floor annealed in the direction a floor cannot move — so the first
+        // thing to establish is that sigma genuinely responds to the state.
+        let p = GaussianPolicy::new_state_dependent(&[2, 16, 1], 9, -0.5).expect("in-range init");
+        assert!(p.is_state_dependent());
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        let mut rng = Rng::new(3);
+        for _ in 0..3000 {
+            let obs = vec![4.0 * rng.normal(), 4.0 * rng.normal()];
+            let sd = p.std_at(&obs)[0];
+            lo = lo.min(sd);
+            hi = hi.max(sd);
+        }
+        assert!(hi / lo > 1.05, "sigma must respond to the observation, range {lo:.5}..{hi:.5}");
+
+        // And a state-INDEPENDENT policy must not vary, which is the control on the check above.
+        let q = GaussianPolicy::new(&[2, 16, 1], 9, -0.5);
+        assert!(!q.is_state_dependent());
+        let a = q.std_at(&[1.0, -2.0])[0];
+        let b = q.std_at(&[-30.0, 17.0])[0];
+        assert_eq!(a, b, "a free-parameter sigma must not depend on the state");
+    }
+
+    #[test]
+    fn the_initial_sigma_is_where_the_caller_asked_not_the_squash_midpoint() {
+        // Left at a zero bias the squash returns its midpoint, which on these bounds is sigma = 0.082 — the
+        // exact setting measured to stop the swing-up policy from ever leaving the bottom. A default that picked
+        // it silently would read as a learning failure rather than as an initialisation.
+        for target in [-0.5f64, -1.5, 0.0, -4.0] {
+            let p = GaussianPolicy::new_state_dependent(&[3, 8, 2], 4, target).expect("in-range");
+            let at_zero = p.log_std_at(&[0.0, 0.0, 0.0]);
+            for d in 0..2 {
+                assert!(
+                    (at_zero[d] - target).abs() < 1e-9,
+                    "target {target}: dim {d} started at {}",
+                    at_zero[d]
+                );
+            }
+        }
+        // Out-of-range targets are refused rather than silently saturated at a bound.
+        assert!(GaussianPolicy::new_state_dependent(&[2, 4, 1], 1, LOG_STD_MIN).is_none());
+        assert!(GaussianPolicy::new_state_dependent(&[2, 4, 1], 1, LOG_STD_MAX).is_none());
+        assert!(GaussianPolicy::new_state_dependent(&[2, 4, 1], 1, -99.0).is_none());
+        assert!(GaussianPolicy::new_state_dependent(&[2, 4, 1], 1, 50.0).is_none());
+    }
+
+    #[test]
+    fn the_squash_keeps_sigma_in_bounds_for_any_observation() {
+        // A network head is unbounded; sigma must not be. Zero sigma gives an infinite log-density and NaN
+        // gradients, and an enormous one stops the policy being a policy.
+        let p = GaussianPolicy::new_state_dependent(&[2, 8, 1], 11, -0.5).expect("in-range");
+        let mut rng = Rng::new(5);
+        for _ in 0..5000 {
+            let obs = vec![1e4 * rng.normal(), 1e4 * rng.normal()];
+            let ls = p.log_std_at(&obs)[0];
+            assert!(ls > LOG_STD_MIN && ls < LOG_STD_MAX, "log sigma {ls} left its bounds");
+            assert!(p.std_at(&obs)[0].is_finite());
+        }
+        // The squash and its inverse agree on the interior.
+        for t in [-5.0f64, -2.0, 0.0, 0.5] {
+            let raw = unsquash_log_std(t).expect("in range");
+            assert!((squash_log_std(raw) - t).abs() < 1e-12, "round trip failed at {t}");
+        }
+    }
+
+    #[test]
+    fn the_density_normalises_at_several_observations_and_the_sampler_agrees() {
+        // Sigma varies, so normalisation has to hold at each state separately, not once.
+        let p = GaussianPolicy::new_state_dependent(&[2, 12, 1], 21, -0.7).expect("in-range");
+        for obs in [vec![0.0, 0.0], vec![2.5, -1.0], vec![-3.0, 4.0]] {
+            let mu = p.mean(&obs)[0];
+            let sd = p.std_at(&obs)[0];
+            let (lo, hi) = (mu - 9.0 * sd, mu + 9.0 * sd);
+            let n = 200_000;
+            let h = (hi - lo) / n as f64;
+            let mut integral = 0.0;
+            for k in 0..=n {
+                let x = lo + k as f64 * h;
+                let w = if k == 0 || k == n {
+                    1.0
+                } else if k % 2 == 1 {
+                    4.0
+                } else {
+                    2.0
+                };
+                integral += w * p.log_prob(&obs, &[x]).exp();
+            }
+            integral *= h / 3.0;
+            assert!((integral - 1.0).abs() < 1e-8, "obs {obs:?}: density integrates to {integral}");
+
+            // The sampler's reported log-prob matches, and its spread matches the advertised sigma.
+            let mut rng = Rng::new(77);
+            let n2 = 200_000;
+            let (mut s1, mut s2) = (0.0, 0.0);
+            for _ in 0..n2 {
+                let (a, lp) = p.sample(&obs, &mut rng);
+                assert!((lp - p.log_prob(&obs, &a)).abs() < 1e-12);
+                s1 += a[0];
+                s2 += a[0] * a[0];
+            }
+            let m = s1 / n2 as f64;
+            let v = s2 / n2 as f64 - m * m;
+            assert!((m - mu).abs() < 5.0 * sd / (n2 as f64).sqrt(), "sample mean {m} vs {mu}");
+            assert!((v.sqrt() - sd).abs() < 0.02 * sd, "sample sd {} vs {sd}", v.sqrt());
+        }
+    }
+
+    #[test]
+    fn the_surrogate_gradient_reaches_the_sigma_head() {
+        // The failure this guards is silent: differentiate only the mean and the policy still trains, still
+        // improves, and its sigma head never moves — a state-dependent sigma that is state-dependent in name.
+        // Finite differences over EVERY parameter catch it, because the head's weights would show zero.
+        let p = GaussianPolicy::new_state_dependent(&[2, 6, 1], 31, -0.6).expect("in-range");
+        let obs = vec![vec![0.4, -0.2], vec![-0.9, 0.5], vec![0.1, 0.1]];
+        let act = vec![vec![0.2], vec![-0.4], vec![0.05]];
+        let old: Vec<f64> = obs.iter().zip(&act).map(|(o, a)| p.log_prob(o, a) - 0.05).collect();
+        let adv = vec![1.0, -0.7, 0.3];
+        let (_, grad, _) = p.surrogate_and_grad(&obs, &act, &old, &adv, 0.2, 0.01);
+
+        let h = 1e-6;
+        let mut nonzero_in_head = 0;
+        let last_out = 2 * p.act_dim;
+        let head_start = p.n_mean - last_out;
+        for i in 0..p.n_params() {
+            let mut up = p.clone();
+            let mut dn = p.clone();
+            up.params[i] += h;
+            dn.params[i] -= h;
+            let lu = up.surrogate_and_grad(&obs, &act, &old, &adv, 0.2, 0.01).0;
+            let ld = dn.surrogate_and_grad(&obs, &act, &old, &adv, 0.2, 0.01).0;
+            let fd = (lu - ld) / (2.0 * h);
+            assert!(
+                (grad[i] - fd).abs() < 1e-6 * (1.0 + fd.abs()),
+                "param {i}: analytic {} vs finite difference {fd}",
+                grad[i]
+            );
+            // Count real gradient in the log-sigma half of the output layer's biases.
+            if i >= head_start + p.act_dim && i < head_start + last_out && grad[i].abs() > 1e-12 {
+                nonzero_in_head += 1;
+            }
+        }
+        assert!(nonzero_in_head > 0, "the sigma head must receive gradient, or it is untrained");
+    }
+
+    #[test]
+    fn exporting_a_state_dependent_policy_ships_the_means_only() {
+        // The output layer emits means THEN log-sigmas. Exporting all of it would hand the runner an action
+        // vector twice the right length whose second half is log-sigmas — a policy that runs and commands
+        // nonsense, which is worse than one that fails to load.
+        let space = BoxSpace::symmetric(&[3.0, 1.5]).expect("valid");
+        let p = GaussianPolicy::new_state_dependent(&[4, 10, 2], 13, -0.8).expect("in-range");
+        let d = p.to_deployable(&space).expect("dims match");
+        let last = d.net.layers.last().expect("at least one layer");
+        assert_eq!(last.w.nrows(), 2, "the deployed net must emit act_dim, not 2*act_dim");
+        assert_eq!(last.b.len(), 2);
+
+        let mut rng = Rng::new(101);
+        for _ in 0..2000 {
+            let obs: Vec<f64> = (0..4).map(|_| 6.0 * rng.normal()).collect();
+            let want = space.from_unit(&p.mean(&obs));
+            let got = d.act(&obs);
+            assert_eq!(got.len(), 2);
+            // Agreement is to floating-point rounding, not bit-exact: `mean` accumulates in a scalar loop and
+            // the runner uses nalgebra. Measured worst deviation elsewhere in this file is 8.9e-16 absolute.
+            for k in 0..2 {
+                let tol = 1e-12 * want[k].abs().max(1.0);
+                assert!(
+                    (want[k] - got[k]).abs() <= tol,
+                    "dim {k}: trained {} vs deployed {} (diff {:.3e})",
+                    want[k],
+                    got[k],
+                    (want[k] - got[k]).abs()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_state_dependent_policy_trains_and_its_sigma_head_moves() {
+        // End to end on the LQR problem: it must learn, and the sigma head must have changed. A head that never
+        // moves would leave the policy effectively state-independent while reporting otherwise.
+        let gamma = 0.95;
+        let mut env = ScalarLqr { limit: 4.0, x0_scale: 1.0, ..ScalarLqr::default() };
+        let mut policy = GaussianPolicy::new_state_dependent(&[1, 8, 1], 4, -1.0).expect("in-range");
+        let before: Vec<f64> = policy.params().to_vec();
+        let mut value = Mlp::new(&[1, 16, 1], 4);
+        let cfg = PpoConfig {
+            gamma,
+            policy_lr: 5e-3,
+            value_lr: 5e-3,
+            epochs: 6,
+            value_epochs: 20,
+            steps_per_batch: 256,
+            max_episode_steps: 24,
+            ..PpoConfig::default()
+        };
+        let r = train(&mut env, &mut policy, &mut value, &cfg, 25, 2024);
+        let early: f64 = r[..3].iter().map(|x| x.mean_return).sum::<f64>() / 3.0;
+        let late: f64 = r[r.len() - 3..].iter().map(|x| x.mean_return).sum::<f64>() / 3.0;
+        assert!(late > early, "a state-dependent policy must still learn: {early:.3} -> {late:.3}");
+
+        let last_out = 2 * policy.act_dim;
+        let head_start = policy.n_mean - last_out;
+        let head_moved = (head_start + policy.act_dim..head_start + last_out)
+            .any(|i| (policy.params()[i] - before[i]).abs() > 1e-9);
+        assert!(head_moved, "the sigma head's bias must have been trained");
+
+        // The floor and ceiling do not apply in this mode, so sigma is bounded only by the squash.
+        let sd = policy.std_at(&[1.0])[0];
+        assert!(sd > LOG_STD_MIN.exp() && sd < LOG_STD_MAX.exp());
+    }
+
+    #[test]
     fn a_training_run_is_reproducible_from_its_seed() {
         // Without this no reported curve can be compared to another.
         let run = |seed: u64| {
@@ -1331,9 +1690,13 @@ impl GaussianPolicy {
         let mut off = 0;
         for l in 0..n_layers {
             let (ind, outd) = (self.sizes[l], self.sizes[l + 1]);
+            // A state-dependent policy's output layer emits means THEN log-σs; only the means deploy, so the
+            // final layer is sliced to its first `act_dim` rows. Exporting all of them would hand the runner a
+            // net whose extra outputs are log-σs and whose action vector is twice the right length.
+            let keep = if l + 1 == n_layers { self.act_dim } else { outd };
             // Row-major out x in, matching both this crate's flat layout and the runner's `Layer`.
-            let w = nalgebra::DMatrix::from_fn(outd, ind, |o, i| self.params[off + o * ind + i]);
-            let b = nalgebra::DVector::from_fn(outd, |o, _| self.params[off + ind * outd + o]);
+            let w = nalgebra::DMatrix::from_fn(keep, ind, |o, i| self.params[off + o * ind + i]);
+            let b = nalgebra::DVector::from_fn(keep, |o, _| self.params[off + ind * outd + o]);
             // Hidden layers are tanh and the output layer is linear, matching `mean`.
             let act = if l + 1 < n_layers {
                 ferromotion_policy::Activation::Tanh
