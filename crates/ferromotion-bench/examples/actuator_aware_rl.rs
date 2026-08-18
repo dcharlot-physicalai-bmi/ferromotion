@@ -15,15 +15,25 @@
 //! # What it measures, with a 12-reach duty cycle on the sized joint
 //!
 //! ```text
-//!   peak winding temperature        103.2 degC   (foldback at 100, limit 120)
-//!   steps thermally derated           2.3 %
-//!   steps inside the backlash         1.4 %
-//!   energy per reach                 52.7 J
-//!   reaches to fatigue failure       6927
+//!   peak winding temperature        108.1 degC   (foldback at 100, limit 120)
+//!   steps thermally derated          32.0 %
+//!   steps inside the backlash         1.5 %
+//!   energy per reach                 63.2 J
+//!   reaches to fatigue failure       5558
 //! ```
 //!
-//! A policy that maximised position error and effort drove the drive into **current foldback**, which is
-//! authority the controller silently no longer had, and it was never told the winding existed.
+//! A policy that maximised position error and effort drove the drive into **current foldback for a third of the
+//! duty cycle**, which is authority the controller silently no longer had, and it was never told the winding
+//! existed.
+//!
+//! **A more capable policy hits the limit harder, which is the sharper form of the point.** These numbers
+//! replace an earlier run in which the observations were normalised by two constants chosen by hand inside the
+//! environment (divide by π, divide by 20). Handing the transform to
+//! [`ObsNorm`](ferromotion_learn::ObsNorm) instead improved the final return from −70.6 to **−48.7** on the
+//! identical seed, budget and architecture — and the fraction of derated steps went from 2.3% to **32.0%**. The
+//! better policy is not gentler on the hardware; it is worse, because it can now reach harder and nothing in
+//! the reward charges it for the heat. A weak policy brushing a thermal limit is a curiosity. A competent one
+//! living inside the foldback region is a design problem.
 //!
 //! # Three limits on what this supports, stated because they bound the conclusion
 //!
@@ -40,7 +50,7 @@
 //! `cargo run --release -p ferromotion-bench --example actuator_aware_rl`
 
 use ferromotion_control::{svpwm_voltage_limit, Backlash, Battery, MeanCorrection, MotorThermal, Pmsm, SnCurve};
-use ferromotion_learn::{train, BoxSpace, Env, GaussianPolicy, Mlp, PpoConfig, StepResult};
+use ferromotion_learn::{train_normalized, BoxSpace, Env, GaussianPolicy, Mlp, ObsNorm, PpoConfig, StepResult};
 use std::cell::Cell;
 
 /// Winding temperature at which the drive begins folding back current, and the limit it protects (deg C).
@@ -320,8 +330,13 @@ impl Env for Joint {
     }
 
     fn observation_space(&self) -> BoxSpace {
-        BoxSpace::new(&[-1.0, -3.0, -1.0], &[1.0, 3.0, 1.0])
-            .expect("valid observation space")
+        // Generous bounds in physical units, since the normalizer rather than the space now sets the scale the
+        // policy sees. The space still exists to document what the environment can report.
+        BoxSpace::new(
+            &[-std::f64::consts::PI, -60.0, -self.torque_limit],
+            &[std::f64::consts::PI, 60.0, self.torque_limit],
+        )
+        .expect("valid observation space")
     }
 
     fn action_space(&self) -> BoxSpace {
@@ -331,18 +346,22 @@ impl Env for Joint {
 
 impl Joint {
     fn observation(&self) -> Vec<f64> {
-        // Normalised. Feeding a rate of order 30 alongside an error of order 1 into a tanh net saturates the
-        // first layer on the rate alone and the policy cannot see the error it is meant to null.
-        vec![
-            Self::wrap_pi(self.theta - self.target) / std::f64::consts::PI,
-            self.omega / 20.0,
-            self.tau_prev / self.torque_limit,
-        ]
+        // RAW PHYSICAL UNITS. An earlier version of this bench divided by pi and by 20 here, because feeding a
+        // rate of order 30 alongside an error of order 1 saturates a tanh first layer on the rate alone and the
+        // policy cannot see the error it is meant to null. That fix was in the wrong place: the constants were
+        // invisible to the exported checkpoint, and changing a limit here would silently reinterpret a trained
+        // policy. `ObsNorm` now learns the transform during training and ships it in the checkpoint, so an
+        // environment's job is to report what it measures.
+        vec![Self::wrap_pi(self.theta - self.target), self.omega, self.tau_prev]
     }
 }
 
 /// Evaluate a greedy policy on the real chain over several targets, returning averaged telemetry.
-fn evaluate(policy: &GaussianPolicy, episodes: u64) -> (f64, Telemetry, f64) {
+/// Evaluate a greedy policy, applying the SAME observation transform it trained under.
+///
+/// Passing raw observations to a policy trained on normalised ones would measure a domain mismatch rather than
+/// the policy, which is the failure `to_deployable_normalized` exists to prevent on real hardware.
+fn evaluate(policy: &GaussianPolicy, norm: &ObsNorm, episodes: u64) -> (f64, Telemetry, f64) {
     // PASCALS. The first version wrote 900.0 and 800.0, i.e. 900 Pa and 800 Pa, so every cycle exceeded the
     // ultimate strength and `damage` correctly returned infinity for all of them.
     let sn = SnCurve::basquin(900.0e6, 5.0).expect("valid S-N curve");
@@ -358,7 +377,7 @@ fn evaluate(policy: &GaussianPolicy, episodes: u64) -> (f64, Telemetry, f64) {
         let aspace = env.action_space();
         let mut ret = 0.0;
         for _ in 0..max_steps {
-            let a = aspace.from_unit(&policy.mean(&obs));
+            let a = aspace.from_unit(&policy.mean(&norm.normalize(&obs)));
             let r = env.step(&a);
             ret += r.reward;
             let done = r.done();
@@ -406,12 +425,14 @@ fn main() {
         cfg.steps_per_batch
     );
 
-    let mut trained: Vec<(&str, GaussianPolicy, bool, f64)> = Vec::new();
+    let mut trained: Vec<(&str, GaussianPolicy, bool, f64, ObsNorm)> = Vec::new();
     for (label, ideal) in [("ideal torque source", true), ("full actuator chain", false)] {
         let mut env = Joint::new(ideal);
         let mut policy = GaussianPolicy::new(&[3, 32, 32, 1], 7, -1.0);
         let mut value = Mlp::new(&[3, 32, 32, 1], 7);
-        let reports = train(&mut env, &mut policy, &mut value, &cfg, iterations, 7);
+        let mut norm = ObsNorm::new(3);
+        let reports =
+            train_normalized(&mut env, &mut policy, &mut value, Some(&mut norm), &cfg, iterations, 7);
         let early: f64 = reports[..5].iter().map(|r| r.mean_return).sum::<f64>() / 5.0;
         let late: f64 = reports[reports.len() - 5..].iter().map(|r| r.mean_return).sum::<f64>() / 5.0;
         let improved = late > early;
@@ -419,7 +440,7 @@ fn main() {
             "  trained against {label:<22} return {early:>9.2} -> {late:>9.2}  {}",
             if improved { "" } else { "  NO IMPROVEMENT" }
         );
-        trained.push((label, policy, improved, late));
+        trained.push((label, policy, improved, late, norm));
     }
 
     println!("\nEvaluated on the full actuator chain, 12 targets each:\n");
@@ -428,8 +449,8 @@ fn main() {
         "trained against", "task cost", "joules", "peak degC", "damage/ep", "derate", "V-lim", "gap"
     );
     let mut rows = Vec::new();
-    for (label, policy, improved, final_return) in &trained {
-        let (cost, tel, damage) = evaluate(policy, 12);
+    for (label, policy, improved, final_return, norm) in &trained {
+        let (cost, tel, damage) = evaluate(policy, norm, 12);
         println!(
             "  {label:<22} {cost:>10.2} {:>10.1} {:>9.1} {damage:>12.3e} {:>8} {:>8} {:>8}",
             tel.joules, tel.peak_winding, tel.derated, tel.voltage_limited, tel.in_backlash

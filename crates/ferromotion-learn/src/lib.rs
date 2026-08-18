@@ -42,7 +42,7 @@ pub use diff_control::PidController;
 pub use dual::{Dual, HyperDual};
 pub use obs_norm::ObsNorm;
 pub use env::{gae_masks, lqr_gain, rollout, BoxSpace, Env, Pendulum, ScalarLqr, StepResult, Trajectory};
-pub use ppo::{gae, greedy, to_actuator, train, ExportError, GaussianPolicy, IterationReport, PpoConfig, Rng};
+pub use ppo::{gae, greedy, to_actuator, train, train_normalized, ExportError, GaussianPolicy, IterationReport, PpoConfig, Rng};
 pub use hnn::Hnn;
 pub use msnn::Msnn;
 pub use neural_ode::NeuralOde;
