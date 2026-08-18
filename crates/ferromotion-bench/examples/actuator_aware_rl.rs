@@ -421,6 +421,7 @@ fn main() {
         max_episode_steps: 200,
         min_log_std: -2.5,
         log_std_ceiling: None,
+        normalize_value_targets: true,
         final_lr_fraction: 0.05,
     };
     let iterations = 60;

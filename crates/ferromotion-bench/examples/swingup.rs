@@ -294,6 +294,7 @@ fn main() {
             max_episode_steps: STEPS,
             min_log_std,
             log_std_ceiling: ceiling,
+            normalize_value_targets: true,
             final_lr_fraction: 0.05,
         };
         let mut env = Pendulum::default();
