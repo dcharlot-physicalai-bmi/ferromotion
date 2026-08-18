@@ -15,33 +15,42 @@
 //! # What it measures, with a 12-reach duty cycle on the sized joint
 //!
 //! ```text
-//!   peak winding temperature        108.1 degC   (foldback at 100, limit 120)
-//!   steps thermally derated          32.0 %
-//!   steps inside the backlash         1.5 %
-//!   energy per reach                 63.2 J
-//!   reaches to fatigue failure       5558
+//!   peak winding temperature        107.5 degC   (foldback at 100, limit 120)
+//!   steps thermally derated          23.5 %
+//!   steps inside the backlash         2.2 %
+//!   energy per reach                 63.0 J
+//!   reaches to fatigue failure       5289
 //! ```
 //!
-//! A policy that maximised position error and effort drove the drive into **current foldback for a third of the
-//! duty cycle**, which is authority the controller silently no longer had, and it was never told the winding
-//! existed.
+//! A policy that maximised position error and effort drove the drive into **current foldback for a quarter of
+//! the duty cycle** — authority the controller silently no longer had — and it was never told the winding
+//! existed. `fatigue::damage` and `MotorThermal` put numbers on that; the reward function cannot.
 //!
-//! **A more capable policy hits the limit harder, which is the sharper form of the point.** These numbers
-//! replace an earlier run in which the observations were normalised by two constants chosen by hand inside the
-//! environment (divide by π, divide by 20). Handing the transform to
-//! [`ObsNorm`](ferromotion_learn::ObsNorm) instead moved the final return from **−53.6 to −48.7** (9.2%) on the
-//! identical seed, budget and architecture, task cost from 43.3 to 40.8, and the fraction of derated steps from
-//! 2.3% to **32.0%**. The better policy is not gentler on the hardware; it is worse, because it can now reach
-//! harder and nothing in the reward charges it for the heat. A weak policy brushing a thermal limit is a
-//! curiosity. A competent one living inside the foldback region for a third of its duty cycle is a design
-//! problem.
+//! # A directional claim this bench made twice and cannot support
 //!
-//! **A correction, recorded because the wrong number was published and then reasoned from.** An earlier version
-//! of this comment gave that return improvement as "−70.6 to −48.7", i.e. 31%. The −70.6 belongs to the
-//! *swing-up* bench's baseline, not to this one — two benches' numbers conflated. The real improvement here is
-//! 9.2%, and the inflated figure was subsequently cited as evidence for spending a swing-up arm on observation
-//! scaling. That arm was run and refuted anyway, so nothing downstream rests on it, but the lesson is that a
-//! number quoted from memory across two experiments is a number to re-read from the log first.
+//! Three configurations have now been measured on this joint, differing in how the policy was conditioned:
+//!
+//! ```text
+//!                                              task cost   derated   reaches to failure
+//!   hand-picked obs constants, inert value          43.3      2.3 %                6927
+//!   learned obs transform,     inert value          40.8     32.0 %                5558
+//!   learned obs transform,     working value        29.7     23.5 %                5289
+//! ```
+//!
+//! An earlier version of this comment read the middle row against the first and concluded that **"a more capable
+//! policy hits the limit harder"**. The third row contradicts it: the most capable policy by a wide margin
+//! (task cost 29.7 against 40.8) spends *less* of its duty cycle derated, not more. The relationship is not
+//! monotone in policy quality, and one pair of points was never enough to claim a direction from.
+//!
+//! The middle row is also now known to have been measured with a **value head that had learned nothing** — see
+//! `normalize_value_targets` in `ferromotion-learn`, where an unnormalised head fitting returns of this
+//! magnitude scores an MSE equal to the target variance, which is what predicting the mean scores. So that row
+//! is not a datapoint about policy capability at all.
+//!
+//! **What survives across all three:** a policy optimising task reward alone spends a substantial fraction of
+//! its duty cycle in current foldback — 2% to 32%, never zero — at peaks above the foldback threshold, and
+//! nothing in its objective can see any of it. The existence and scale of the invisible cost is the finding.
+//! Its direction as a function of policy quality is not, and this bench has now over-claimed that twice.
 //!
 //! # Three limits on what this supports, stated because they bound the conclusion
 //!
