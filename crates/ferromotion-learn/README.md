@@ -77,6 +77,32 @@ Three decisions worth knowing:
 - **It is a passthrough below two samples**, because with one sample the only observation seen would map to
   exactly zero and the policy would be handed a constant.
 
+### The value head was doing nothing
+
+Measured before anything was built to fix it, on a `V(x) = −a x²` regression at three target magnitudes, MSE as
+a fraction of the target variance:
+
+| target scale | raw | normalized |
+|---|---|---|
+| 1 | 0.0059 | 0.0005 |
+| 20 | **1.0000** | 0.0005 |
+| 200 | **1.4577** | 0.0005 |
+
+A ratio of `1.0` is exactly what predicting the mean scores. So at a target magnitude of 20 the head has learned
+**nothing**, and at 200 it is *worse* than the mean: the `tanh` hidden layers saturate and the linear output
+cannot reach the range. Both benches here have returns of order 50–100, so **their value baselines were inert and
+GAE was differencing against a useless one the whole time.**
+
+`normalize_value_targets` therefore defaults to **on**. It fits the head against normalized returns and
+un-normalizes when `V(s)` is read, since GAE adds `V` to raw rewards and needs it in reward units.
+
+**The update order is load-bearing and the value loss cannot see it.** The head predicts "normalized under the
+statistics it was fit with", so those must be the statistics used to un-normalize on the next read. Updating them
+after the fit instead of before sent the LQR oracle's achieved cost from −1.60 to **−176.5** and its recovered
+gain error from 6% to 63% — while the value loss looked healthy throughout, because it is computed in whatever
+units the fit used. `IterationReport::value_scale` exposes the pair, and there is a test that reads `V(x)` back
+and checks it against an **empirically estimated** discounted return rather than a closed form.
+
 ### Getting the policy onto hardware
 
 `GaussianPolicy::to_deployable(&action_space)` converts a trained policy into a

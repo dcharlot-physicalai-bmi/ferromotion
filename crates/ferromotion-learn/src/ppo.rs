@@ -602,6 +602,26 @@ pub struct PpoConfig {
     /// are separated in *time*, so a ceiling that starts loose and ends tight can serve both where no fixed
     /// value can. A **state-dependent** σ would address the same problem structurally and is the larger change.
     pub log_std_ceiling: Option<(f64, f64)>,
+    /// Normalize the value head's regression targets, un-normalizing when `V(s)` is read. **Defaults to `true`.**
+    ///
+    /// **The default is on because the alternative is measurably broken, not as a preference.** An `Mlp` fitting
+    /// raw returns of realistic magnitude learns nothing: measured on a `V(x) = −a x²` regression at three
+    /// magnitudes, MSE as a fraction of target variance was
+    ///
+    /// ```text
+    ///   target scale    raw    normalised
+    ///             1   0.0059      0.0005
+    ///            20   1.0000      0.0005
+    ///           200   1.4577      0.0005
+    /// ```
+    ///
+    /// A ratio of `1.0` is exactly what predicting the mean scores, so at scale 20 the head has learned nothing,
+    /// and at 200 it is *worse* than the mean. The tanh hidden layers saturate and the linear output cannot reach
+    /// the target range. Both benches in this workspace have returns of order 50-100, so their value baselines
+    /// were inert and GAE was differencing against a useless one.
+    ///
+    /// Turning this off reproduces that behaviour and is kept only so the defect can be demonstrated.
+    pub normalize_value_targets: bool,
     /// Fraction of `policy_lr` still in force at the last iteration, annealed linearly. `1.0` disables it.
     ///
     /// **This is not a cosmetic schedule.** Adam normalizes its own step, so its step *size* is about `lr`
@@ -629,6 +649,7 @@ impl Default for PpoConfig {
             max_episode_steps: 200,
             min_log_std: -3.0,
             log_std_ceiling: None,
+            normalize_value_targets: true,
             final_lr_fraction: 0.05,
         }
     }
@@ -653,6 +674,12 @@ pub struct IterationReport {
     pub policy_lr: f64,
     /// The annealed log-σ ceiling this iteration used, if any.
     pub log_std_ceiling: Option<f64>,
+    /// The `(mean, std)` the value head's targets were normalized by this iteration, if normalization is on and
+    /// an estimate exists yet.
+    ///
+    /// Exposed because without it a caller cannot read `V(s)` in reward units at all: the head predicts a
+    /// normalized value, and there is no other way to recover the scale it was fit under.
+    pub value_scale: Option<(f64, f64)>,
 }
 
 /// Collect a batch of transitions from `env` under `policy`, splitting into episodes at
@@ -759,6 +786,10 @@ pub fn train_normalized(
 ) -> Vec<IterationReport> {
     let mut rng = Rng::new(seed);
     let mut out = Vec::with_capacity(iterations);
+    // One channel: the value target. Frozen within a batch and updated from that batch's returns afterwards,
+    // for the same reason the observation transform is — a scale that moves mid-fit puts the regression target
+    // and the features on different footings.
+    let mut ret_norm = ObsNorm::new(1);
 
     for it in 0..iterations {
         let (episodes, log_probs, raw_obs) = collect(
@@ -785,10 +816,21 @@ pub fn train_normalized(
             if t.is_empty() {
                 continue;
             }
-            let values: Vec<f64> = t.observations.iter().map(|o| value.forward(o)[0]).collect();
+            // GAE adds V(s) to raw rewards, so it must be read in REWARD units. The head predicts a normalised
+            // value; un-normalising here is what keeps `delta = r + gamma V' - V` dimensionally honest. Getting
+            // this backwards would leave the advantages scaled wrongly and is invisible in the value loss.
+            let unnorm = |v: f64| -> f64 {
+                if cfg.normalize_value_targets {
+                    let (m, sd) = ret_norm.snapshot();
+                    if m.is_empty() { v } else { v * sd[0] + m[0] }
+                } else {
+                    v
+                }
+            };
+            let values: Vec<f64> = t.observations.iter().map(|o| unnorm(value.forward(o)[0])).collect();
             // Bootstrap from the final observation. On a terminated last step this is multiplied out by the
             // mask inside `gae`, so computing it unconditionally is safe and keeps the code honest.
-            let bootstrap = value.forward(&t.final_observation)[0];
+            let bootstrap = unnorm(value.forward(&t.final_observation)[0]);
             let Some((adv, ret)) =
                 gae(&t.rewards, &values, bootstrap, &t.terminated, &t.truncated, cfg.gamma, cfg.lambda)
             else {
@@ -843,7 +885,25 @@ pub fn train_normalized(
             policy_loss = l;
             clip_fraction = c;
         }
-        let value_loss = value.train(&b_obs, &b_ret, cfg.value_epochs, cfg.value_lr);
+        // Fit against normalised targets with the transform frozen for this batch, then fold the batch's raw
+        // returns in so the next one is better scaled. The reported loss is in normalised units when the
+        // transform is active, which is stated rather than silently rescaled.
+        let value_loss = if cfg.normalize_value_targets {
+            // ORDER MATTERS, and getting it wrong is a 100x regression that the value loss cannot see. The head
+            // predicts "normalised under the statistics it was fit with", so the statistics used to UN-normalise
+            // on the next iteration's read must be the same ones. Updating after the fit left the next read
+            // applying a transform the net had never been fit under: the LQR oracle's achieved cost went from
+            // -1.60 to -176.5, its recovered gain error from 6% to 63%, and the value loss looked fine
+            // throughout because it is computed in whatever units the fit used.
+            //
+            // So: fold this batch's returns in FIRST, then fit under the updated statistics, which are the ones
+            // the next read will use.
+            ret_norm.update_batch(&b_ret);
+            let targets = ret_norm.normalize_batch(&b_ret);
+            value.train(&b_obs, &targets, cfg.value_epochs, cfg.value_lr)
+        } else {
+            value.train(&b_obs, &b_ret, cfg.value_epochs, cfg.value_lr)
+        };
 
         out.push(IterationReport {
             mean_return: returns_sum / episodes.len().max(1) as f64,
@@ -854,6 +914,12 @@ pub fn train_normalized(
             std: policy.std(),
             policy_lr: lr_now,
             log_std_ceiling: ceiling_now,
+            value_scale: if cfg.normalize_value_targets {
+                let (m, sd) = ret_norm.snapshot();
+                if m.is_empty() { None } else { Some((m[0], sd[0])) }
+            } else {
+                None
+            },
         });
     }
     out
@@ -1192,6 +1258,7 @@ mod tests {
             max_episode_steps: 24,
             min_log_std: -3.5,
             log_std_ceiling: None,
+            normalize_value_targets: true,
             final_lr_fraction: 0.05,
         };
 
@@ -1257,6 +1324,7 @@ mod tests {
                     max_episode_steps: 24,
                     min_log_std: -3.5,
                     log_std_ceiling: None,
+                    normalize_value_targets: true,
                     final_lr_fraction: frac,
                 };
                 train(&mut env, &mut policy, &mut value, &cfg, 30, seed);
@@ -1610,6 +1678,77 @@ mod tests {
     }
 
     #[test]
+    fn the_value_head_reads_back_in_reward_units() {
+        // THE GUARD for an ordering bug the value loss structurally cannot see, because that loss is computed in
+        // whatever units the fit used. Updating the return statistics AFTER the fit instead of before left the
+        // next iteration un-normalising with a transform the net had never been fit under, and the symptom was
+        // the LQR oracle's achieved cost going from -1.60 to -176.5 while the value loss looked healthy.
+        //
+        // The oracle: on the LQR problem the value of the optimal policy is known in closed form, so an
+        // un-normalised V(x) must land near it. A wrong un-normalisation is off by the whole scale factor.
+        let gamma = 0.95;
+        let mut env = ScalarLqr { limit: 4.0, x0_scale: 1.0, ..ScalarLqr::default() };
+        let mut policy = GaussianPolicy::new(&[1, 1], 4, -1.0);
+        let mut value = Mlp::new(&[1, 16, 16, 1], 4);
+        let cfg = PpoConfig {
+            gamma,
+            policy_lr: 8e-3,
+            value_lr: 5e-3,
+            epochs: 8,
+            value_epochs: 40,
+            steps_per_batch: 256,
+            max_episode_steps: 24,
+            min_log_std: -3.5,
+            normalize_value_targets: true,
+            ..PpoConfig::default()
+        };
+        let reports = train(&mut env, &mut policy, &mut value, &cfg, 40, 2024);
+
+        let (m, sd) = reports.last().expect("ran").value_scale.expect("normalization is on");
+        assert!(sd > 0.0, "the value scale must be a real spread, got {sd}");
+
+        // THE ORACLE IS THE DEFINITION: V(x) is the expected discounted return from x under the CURRENT policy.
+        //
+        // My first version compared against the analytic value of the OPTIMAL DETERMINISTIC policy and failed at
+        // -6.81 versus -0.577. That was the test being wrong, not the code: the learned value correctly includes
+        // the cost of the policy's own exploration noise, which the noiseless closed form excludes. Estimating
+        // the return empirically needs no model of that noise and is what the value function actually means.
+        let x = 0.6;
+        let trials = 400;
+        let mut rng = Rng::new(99);
+        let mut total = 0.0;
+        for _ in 0..trials {
+            let mut e = ScalarLqr { limit: 4.0, x0_scale: 1.0, ..ScalarLqr::default() };
+            e.reset(0);
+            e.x = x;
+            let aspace = e.action_space();
+            let mut ret = 0.0;
+            let mut disc = 1.0;
+            // Long enough that the discounted tail past it is negligible at gamma = 0.95.
+            for _ in 0..400 {
+                let (a_unit, _) = policy.sample(&[e.x], &mut rng);
+                ret += disc * e.step(&aspace.from_unit(&a_unit)).reward;
+                disc *= gamma;
+            }
+            total += ret;
+        }
+        let v_empirical = total / trials as f64;
+        let v_read = value.forward(&[x])[0] * sd + m;
+        assert!(
+            (v_read - v_empirical).abs() < 0.35 * v_empirical.abs(),
+            "un-normalised V({x}) = {v_read:.4} should match the empirical return {v_empirical:.4}"
+        );
+
+        // And the un-normalisation is doing real work: the RAW head output is on a different scale, so a version
+        // of this test that forgot to un-normalise would not accidentally pass.
+        let v_raw = value.forward(&[x])[0];
+        assert!(
+            (v_raw - v_empirical).abs() > 0.5 * v_empirical.abs(),
+            "the raw head output must NOT already be in reward units, or this proves nothing: {v_raw:.4}"
+        );
+    }
+
+    #[test]
     fn a_training_run_is_reproducible_from_its_seed() {
         // Without this no reported curve can be compared to another.
         let run = |seed: u64| {
@@ -1944,6 +2083,7 @@ mod export_tests {
             max_episode_steps: 24,
             min_log_std: -3.5,
             log_std_ceiling: None,
+            normalize_value_targets: true,
             final_lr_fraction: 0.05,
             ..PpoConfig::default()
         };

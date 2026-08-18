@@ -332,3 +332,64 @@ mod tests {
         assert!(s0[0] > 0.0 && s1[0] > s0[0]);
     }
 }
+
+#[cfg(test)]
+mod value_conditioning {
+    use super::*;
+    use crate::nn::Mlp;
+
+    #[test]
+    fn an_unnormalised_value_head_learns_nothing_at_realistic_return_magnitudes() {
+        // MEASURED BEFORE ANYTHING WAS BUILT TO FIX IT, and the result is why `normalize_value_targets`
+        // defaults on. An MSE equal to the target variance is exactly what predicting the mean scores, so a
+        // ratio of 1.0 means the head learned nothing at all:
+        //
+        //   target scale    raw MSE/var    normalised MSE/var
+        //             1          0.0059                0.0005
+        //            20          1.0000                0.0005
+        //           200          1.4577                0.0005
+        //
+        // At scale 200 the raw head is WORSE than the mean. Both benches in this workspace have returns of
+        // order 50-100, so their value baselines were doing nothing and GAE was running on a useless one.
+        for (scale, raw_must_exceed) in [(20.0f64, 0.8), (200.0, 0.8)] {
+            let xs: Vec<Vec<f64>> = (0..200).map(|k| vec![-1.0 + 2.0 * k as f64 / 199.0]).collect();
+            let ys: Vec<Vec<f64>> = xs.iter().map(|x| vec![-scale * x[0] * x[0]]).collect();
+            let n = ys.len() as f64;
+            let m = ys.iter().map(|y| y[0]).sum::<f64>() / n;
+            let var = ys.iter().map(|y| (y[0] - m) * (y[0] - m)).sum::<f64>() / n;
+
+            let mut raw = Mlp::new(&[1, 16, 16, 1], 7);
+            let mse_raw = raw.train(&xs, &ys, 400, 3e-3) / var;
+
+            let mut norm = ObsNorm::new(1);
+            norm.update_batch(&ys);
+            let ys_n = norm.normalize_batch(&ys);
+            let mut scaled = Mlp::new(&[1, 16, 16, 1], 7);
+            let sd = norm.std()[0];
+            let mse_n = scaled.train(&xs, &ys_n, 400, 3e-3) * sd * sd / var;
+
+            assert!(
+                mse_raw > raw_must_exceed,
+                "scale {scale}: the raw head should fail, got MSE/var {mse_raw:.4}"
+            );
+            assert!(mse_n < 0.01, "scale {scale}: the normalised head should fit, got {mse_n:.5}");
+            // The contrast is the claim, and it must be large.
+            assert!(
+                mse_raw / mse_n > 100.0,
+                "scale {scale}: expected orders between them, raw {mse_raw:.4} vs normalised {mse_n:.5}"
+            );
+        }
+
+        // CONTROL: at scale 1 the raw head is fine, so the defect is about MAGNITUDE and not about the net.
+        let xs: Vec<Vec<f64>> = (0..200).map(|k| vec![-1.0 + 2.0 * k as f64 / 199.0]).collect();
+        let ys: Vec<Vec<f64>> = xs.iter().map(|x| vec![-x[0] * x[0]]).collect();
+        let n = ys.len() as f64;
+        let m = ys.iter().map(|y| y[0]).sum::<f64>() / n;
+        let var = ys.iter().map(|y| (y[0] - m) * (y[0] - m)).sum::<f64>() / n;
+        let mut raw = Mlp::new(&[1, 16, 16, 1], 7);
+        assert!(
+            raw.train(&xs, &ys, 400, 3e-3) / var < 0.05,
+            "at unit scale the same net and budget must fit, or the fixture blames the wrong thing"
+        );
+    }
+}
