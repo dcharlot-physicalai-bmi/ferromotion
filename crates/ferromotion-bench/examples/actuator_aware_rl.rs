@@ -29,11 +29,19 @@
 //! **A more capable policy hits the limit harder, which is the sharper form of the point.** These numbers
 //! replace an earlier run in which the observations were normalised by two constants chosen by hand inside the
 //! environment (divide by π, divide by 20). Handing the transform to
-//! [`ObsNorm`](ferromotion_learn::ObsNorm) instead improved the final return from −70.6 to **−48.7** on the
-//! identical seed, budget and architecture — and the fraction of derated steps went from 2.3% to **32.0%**. The
-//! better policy is not gentler on the hardware; it is worse, because it can now reach harder and nothing in
-//! the reward charges it for the heat. A weak policy brushing a thermal limit is a curiosity. A competent one
-//! living inside the foldback region is a design problem.
+//! [`ObsNorm`](ferromotion_learn::ObsNorm) instead moved the final return from **−53.6 to −48.7** (9.2%) on the
+//! identical seed, budget and architecture, task cost from 43.3 to 40.8, and the fraction of derated steps from
+//! 2.3% to **32.0%**. The better policy is not gentler on the hardware; it is worse, because it can now reach
+//! harder and nothing in the reward charges it for the heat. A weak policy brushing a thermal limit is a
+//! curiosity. A competent one living inside the foldback region for a third of its duty cycle is a design
+//! problem.
+//!
+//! **A correction, recorded because the wrong number was published and then reasoned from.** An earlier version
+//! of this comment gave that return improvement as "−70.6 to −48.7", i.e. 31%. The −70.6 belongs to the
+//! *swing-up* bench's baseline, not to this one — two benches' numbers conflated. The real improvement here is
+//! 9.2%, and the inflated figure was subsequently cited as evidence for spending a swing-up arm on observation
+//! scaling. That arm was run and refuted anyway, so nothing downstream rests on it, but the lesson is that a
+//! number quoted from memory across two experiments is a number to re-read from the log first.
 //!
 //! # Three limits on what this supports, stated because they bound the conclusion
 //!

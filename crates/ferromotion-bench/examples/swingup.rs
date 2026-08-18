@@ -36,13 +36,14 @@
 //!   PPO long horizon              17.7%        1.000      0.54
 //!   PPO annealed sigma             8.9%        1.000      0.71
 //!   PPO state-dependent sd         7.5%        1.000      0.95
+//!   PPO normalized obs            12.2%        1.000      0.91
 //! ```
 //!
 //! **PPO swings up and does not catch.** Its return improved from −501 to −71 and it reached the top on every
 //! seed, so it found the energy pumping — the genuinely non-linear part, requiring several swings, with no linear
 //! solution. It then failed to stabilise there, holding 10-18% against the hand-built controller's 75%.
 //!
-//! # Four hypotheses, all tested, all refuted
+//! # Five hypotheses, all tested, all refuted
 //!
 //! Each is a single-variable arm, because a guess left in a comment is not a finding.
 //!
@@ -57,29 +58,42 @@
 //! * **"The phases are separated in state, so a state-dependent σ serves both" is ALSO REFUTED.** This was the
 //!   candidate the third refutation sharpened into, and it was written down as "the surviving candidate". With σ
 //!   predicted per-observation by a network head, hold went 10.1% → **7.5%** and the return −70.6 → −122.0.
+//! * **"The observation is badly scaled" is REFUTED, and the justification for testing it was faulty.** The
+//!   pendulum reports `[sin θ, cos θ, ω]` on `[-1,-1,-32]` to `[1,1,32]`, a 32:1 mismatch, and the mechanism
+//!   fitted the specific failure: pumping is driven by the rate channel that dominates, the catch needs angle
+//!   precision from the channels that get swamped. With [`ObsNorm`](ferromotion_learn::ObsNorm) learning the
+//!   transform, hold went 10.1% → **12.2%** — inside single-seed noise — and the return got *worse*,
+//!   −70.6 → −75.5.
 //!
-//! # The exploration-scale family is exhausted
+//!   The stated evidence for running it was that the actuator bench measured this defect costing 31% of its
+//!   return. **That figure was wrong.** It came from conflating two benches: the actuator bench's real
+//!   improvement was 9.2% (−53.6 → −48.7), and it was measured between two *different normalisations* (hand
+//!   constants versus learned), never between normalised and raw. So the arm was justified by a number that did
+//!   not exist and an experiment that did not test what was claimed. It happens to have been worth running —
+//!   an untested hypothesis outside the exhausted family — but not for the reason given.
 //!
-//! Four arms have now varied *how much* the policy explores — its magnitude, its schedule over training, and its
-//! dependence on state. None of them closes a 65-point gap against a hand-built controller, and two of them made
-//! things worse. The explanation is not in the exploration, and this bench has said so four different ways.
+//! # Two families exhausted, and a standing lesson
 //!
-//! Two things it has NOT varied, recorded as the honest remaining surface rather than as predictions, since the
-//! last three predictions made here were wrong:
+//! Four arms varied *how much* the policy explores; a fifth varied *what it can see*. None closes a 60-point
+//! gap against a hand-built controller, and three of the five made something worse. Every prediction recorded in
+//! this file before its arm was run has turned out to be wrong — five for five — which is now the most reliable
+//! result the bench has produced.
+//!
+//! Two things it still has NOT varied, recorded as surface rather than prediction:
 //!
 //! * **Budget and architecture.** 200 iterations of a `[3, 64, 64, 1]` net in `f64` is a real attempt and not
-//!   obviously a sufficient one. The catch is a narrow-basin skill that a longer run might simply find.
-//! * **The value function.** Every arm above changed the *policy*. The catch requires accurately valuing states
-//!   near an unstable equilibrium, where the value surface is steep and the data are sparse because the policy
-//!   rarely gets there. A value head that cannot represent that would starve the advantage signal exactly where
-//!   the catch has to be learned — and nothing here has looked at it.
+//!   obviously a sufficient one. The catch is a narrow-basin skill a longer run might simply find.
+//! * **The value function.** Every arm changed the policy or its inputs. The catch requires accurately valuing
+//!   states near an unstable equilibrium, where the value surface is steep and the data sparse because the
+//!   policy rarely gets there. A value head that cannot represent that would starve the advantage signal exactly
+//!   where the catch has to be learned.
 //!
 //! The reward is left alone throughout, at the standard `height − effort`. Paying specifically for dwell near the
 //! top would solve the benchmark rather than measure the learner.
 //!
 //! `cargo run --release -p ferromotion-bench --example swingup`
 
-use ferromotion_learn::{train, Env, GaussianPolicy, Mlp, Pendulum, PpoConfig};
+use ferromotion_learn::{train, train_normalized, Env, GaussianPolicy, Mlp, ObsNorm, Pendulum, PpoConfig};
 
 /// Angular window around upright that counts as held (rad).
 const HOLD_WINDOW: f64 = 0.2;
@@ -230,12 +244,18 @@ fn main() {
     // The fifth arm is the surviving candidate after the annealed schedule was refuted: sigma that reads the
     // STATE rather than the iteration, so it can be coarse while swinging and fine near the top within a single
     // episode. That is the axis the refutation pointed at.
-    let variants: [(&str, f64, f64, f64, Option<(f64, f64)>, bool); 5] = [
-        ("PPO baseline", -0.5, -2.0, 0.99, None, false),
-        ("PPO quiet (sigma/16)", -2.5, -3.5, 0.99, None, false),
-        ("PPO long horizon", -0.5, -2.0, 0.997, None, false),
-        ("PPO annealed sigma", -0.5, -6.0, 0.99, Some((-0.5, -3.5)), false),
-        ("PPO state-dependent sd", -0.5, -6.0, 0.99, None, true),
+    // The sixth arm is from OUTSIDE the exploration family, which the first five exhausted. The pendulum's
+    // observation is `[sin θ, cos θ, ω]` on a space of [-1,-1,-32] to [1,1,32] — a 32:1 mismatch between the
+    // trigonometric channels and the rate, which saturates a tanh first layer on the rate alone. The actuator
+    // bench in this workspace measured that exact defect costing 31% of its final return, so this is an
+    // evidence-backed hypothesis rather than another guess.
+    let variants: [(&str, f64, f64, f64, Option<(f64, f64)>, bool, bool); 6] = [
+        ("PPO baseline", -0.5, -2.0, 0.99, None, false, false),
+        ("PPO quiet (sigma/16)", -2.5, -3.5, 0.99, None, false, false),
+        ("PPO long horizon", -0.5, -2.0, 0.997, None, false, false),
+        ("PPO annealed sigma", -0.5, -6.0, 0.99, Some((-0.5, -3.5)), false, false),
+        ("PPO state-dependent sd", -0.5, -6.0, 0.99, None, true, false),
+        ("PPO normalized obs", -0.5, -2.0, 0.99, None, false, true),
     ];
     // Each arm costs about 40 minutes, so all four do not fit in one sitting. Optional positional args select
     // a subset by index; with none given, all run. Arm 0 must be included for the verdict's baseline reference,
@@ -258,7 +278,7 @@ fn main() {
             variants.len() - selected.len()
         );
     }
-    for (name, init_log_std, min_log_std, gamma, ceiling, state_dep) in
+    for (name, init_log_std, min_log_std, gamma, ceiling, state_dep, normalize) in
         selected.iter().map(|&i| variants[i])
     {
         let cfg = PpoConfig {
@@ -284,14 +304,21 @@ fn main() {
             GaussianPolicy::new(&[3, 64, 64, 1], 5, init_log_std)
         };
         let mut value = Mlp::new(&[3, 64, 64, 1], 5);
-        let reports = train(&mut env, &mut policy, &mut value, &cfg, iterations, 5);
+        let mut norm = ObsNorm::new(3);
+        let reports = if normalize {
+            train_normalized(&mut env, &mut policy, &mut value, Some(&mut norm), &cfg, iterations, 5)
+        } else {
+            train(&mut env, &mut policy, &mut value, &cfg, iterations, 5)
+        };
         let early: f64 = reports[..5].iter().map(|r| r.mean_return).sum::<f64>() / 5.0;
         let late: f64 = reports[reports.len() - 5..].iter().map(|r| r.mean_return).sum::<f64>() / 5.0;
         println!(
             "  {name:<22} {iterations} x {} steps, sigma {:.4}{}, gamma {gamma}, return {early:.1} -> {late:.1}",
             cfg.steps_per_batch,
             init_log_std.exp(),
-            if state_dep {
+            if normalize {
+                " normalized obs".to_string()
+            } else if state_dep {
                 " state-dependent".to_string()
             } else {
                 match ceiling {
@@ -305,7 +332,11 @@ fn main() {
             .iter()
             .map(|&s| {
                 run(s, |p| {
-                    let obs = vec![p.theta.sin(), p.theta.cos(), p.omega];
+                    let raw = vec![p.theta.sin(), p.theta.cos(), p.omega];
+                    // The SAME transform the arm trained under, or this measures a domain mismatch rather
+                    // than the policy. `ObsNorm::normalize` is a passthrough when nothing was estimated, so
+                    // the unnormalised arms are unaffected.
+                    let obs = norm.normalize(&raw);
                     space.from_unit(&policy.mean(&obs))[0]
                 })
             })
