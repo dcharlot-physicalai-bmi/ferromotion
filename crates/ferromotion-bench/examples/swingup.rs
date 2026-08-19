@@ -27,66 +27,61 @@
 //! # The answer, measured
 //!
 //! ```text
-//!   controller                     hold  peak height    effort
-//!   do nothing                     0.0%       -0.997      0.00
-//!   constant max torque            0.0%       -0.942      1.00
-//!   energy shaping + catch        74.6%        1.000      0.53
-//!   PPO baseline                  10.1%        1.000      0.85
-//!   PPO quiet (sigma/16)           0.0%       -0.886      0.12
-//!   PPO long horizon              17.7%        1.000      0.54
-//!   PPO annealed sigma             8.9%        1.000      0.71
-//!   PPO state-dependent sd         7.5%        1.000      0.95
-//!   PPO normalized obs            12.2%        1.000      0.91
+//!   controller                     hold  peak height    effort    value head
+//!   do nothing                     0.0%       -0.997      0.00    --
+//!   constant max torque            0.0%       -0.942      1.00    --
+//!   energy shaping + catch        74.6%        1.000      0.53    --
+//!   PPO baseline                  19.8%        1.000      0.89    working
+//!   PPO long horizon              18.4%        1.000      0.53    working
+//!   PPO quiet (sigma/16)           0.0%       -0.886      0.12    INERT
+//!   PPO annealed sigma             8.9%        1.000      0.71    INERT
+//!   PPO state-dependent sd         7.5%        1.000      0.95    INERT
+//!   PPO normalized obs            12.2%        1.000      0.91    INERT
 //! ```
 //!
-//! **PPO swings up and does not catch.** Its return improved from −501 to −71 and it reached the top on every
-//! seed, so it found the energy pumping — the genuinely non-linear part, requiring several swings, with no linear
-//! solution. It then failed to stabilise there, holding 10-18% against the hand-built controller's 75%.
+//! **PPO swings up and does not catch.** It reaches the top on every seed, so it finds the energy pumping — the
+//! genuinely non-linear part, requiring several swings, with no linear solution. It then fails to stabilise
+//! there, holding 20% against the hand-built controller's 75%.
 //!
-//! # Five hypotheses, all tested, all refuted
+//! # The largest single effect was a defect, not a hypothesis
 //!
-//! Each is a single-variable arm, because a guess left in a comment is not a finding.
+//! Every arm in the first five was measured with a **value head that had learned nothing**: an `Mlp` fitting raw
+//! returns of this magnitude scores an MSE equal to the target variance, which is exactly what predicting the
+//! mean scores. GAE was therefore differencing against a useless baseline throughout. See
+//! `normalize_value_targets` in `ferromotion-learn`.
 //!
-//! * **"Exploration noise prevents the catch" is WRONG, and backwards.** The reasoning was that 0.27 N m of
-//!   action noise is large against the `asin(τ_max/m g l) = 0.205 rad` basin the policy must stay inside. Run at
-//!   16x smaller σ, the policy scores hold 0% and peak height −0.886: it never swings up at all. Exploration is
-//!   not what spoils the catch, it is what makes the pumping *discoverable*.
-//! * **"The horizon is too short" is a real effect and four times too small.** `γ` 0.99 → 0.997 moved hold
-//!   10.1% → 17.7% and halved effort 0.85 → 0.54. A contributor, not the explanation.
-//! * **"The phases are separated in time, so annealing σ serves both" is REFUTED.** With a σ ceiling annealed
-//!   0.607 → 0.030 across the run, hold went 10.1% → **8.9%** and the return got worse, −70.6 → −126.9.
-//! * **"The phases are separated in state, so a state-dependent σ serves both" is ALSO REFUTED.** This was the
-//!   candidate the third refutation sharpened into, and it was written down as "the surviving candidate". With σ
-//!   predicted per-observation by a network head, hold went 10.1% → **7.5%** and the return −70.6 → −122.0.
-//! * **"The observation is badly scaled" is REFUTED, and the justification for testing it was faulty.** The
-//!   pendulum reports `[sin θ, cos θ, ω]` on `[-1,-1,-32]` to `[1,1,32]`, a 32:1 mismatch, and the mechanism
-//!   fitted the specific failure: pumping is driven by the rate channel that dominates, the catch needs angle
-//!   precision from the channels that get swamped. With [`ObsNorm`](ferromotion_learn::ObsNorm) learning the
-//!   transform, hold went 10.1% → **12.2%** — inside single-seed noise — and the return got *worse*,
-//!   −70.6 → −75.5.
+//! Fixing it moved the baseline from **10.1% to 19.8%** hold — a larger improvement than anything the five
+//! deliberate arms produced. The value function was named in an earlier version of this file as untested
+//! *surface*, not as a prediction, and it turned out to hold the biggest available gain. It still does not close
+//! the gap.
 //!
-//!   The stated evidence for running it was that the actuator bench measured this defect costing 31% of its
-//!   return. **That figure was wrong.** It came from conflating two benches: the actuator bench's real
-//!   improvement was 9.2% (−53.6 → −48.7), and it was measured between two *different normalisations* (hand
-//!   constants versus learned), never between normalised and raw. So the arm was justified by a number that did
-//!   not exist and an experiment that did not test what was claimed. It happens to have been worth running —
-//!   an untested hypothesis outside the exhausted family — but not for the reason given.
+//! **AND IT REFUTES THE ONE POSITIVE RESULT THIS BENCH REPORTED.** The longer horizon (`γ` 0.99 → 0.997) was
+//! recorded as "a real effect and four times too small", from 10.1% → 17.7%. Re-measured on a working value
+//! head: baseline 19.8%, long horizon **18.4%** — no benefit, slightly worse. The horizon was compensating for
+//! the broken baseline, not helping the task. A contributor that disappears when an unrelated defect is fixed
+//! was never a contributor.
 //!
-//! # Two families exhausted, and a standing lesson
+//! # What each arm still supports
 //!
-//! Four arms varied *how much* the policy explores; a fifth varied *what it can see*. None closes a 60-point
-//! gap against a hand-built controller, and three of the five made something worse. Every prediction recorded in
-//! this file before its arm was run has turned out to be wrong — five for five — which is now the most reliable
-//! result the bench has produced.
+//! * **Baseline and long horizon** are re-measured on a working value head. The horizon hypothesis is refuted.
+//! * **The other four arms are NOT re-measured** and were all run under the defect. Their single-variable
+//!   structure is intact — the defect applied equally to each arm and its own baseline — but any conclusion drawn
+//!   from them is a conclusion about a configuration containing a known fault. Specifically:
+//!   * "Exploration noise prevents the catch" was refuted *backwards* (σ/16 never swings up at all, peak −0.886).
+//!     That is a large qualitative effect and unlikely to be an artifact, but it is unverified on the fix.
+//!   * The annealed-σ, state-dependent-σ and normalized-observation arms each landed within a few points of
+//!     their contemporaneous baseline. Those margins are smaller than the 9.7-point shift the value fix produced,
+//!     so **none of them can be trusted either way** until re-run.
 //!
-//! Two things it still has NOT varied, recorded as surface rather than prediction:
+//! # The standing lesson
 //!
-//! * **Budget and architecture.** 200 iterations of a `[3, 64, 64, 1]` net in `f64` is a real attempt and not
-//!   obviously a sufficient one. The catch is a narrow-basin skill a longer run might simply find.
-//! * **The value function.** Every arm changed the policy or its inputs. The catch requires accurately valuing
-//!   states near an unstable equilibrium, where the value surface is steep and the data sparse because the
-//!   policy rarely gets there. A value head that cannot represent that would starve the advantage signal exactly
-//!   where the catch has to be learned.
+//! Six predictions have now been written into this file before their measurement. All six were wrong: five arms
+//! refuted, and the one effect reported as real turned out to be an artifact of a defect elsewhere in the loop.
+//! The only thing that produced a material gain was a component nobody had looked at, found by measuring it
+//! rather than by reasoning about the task.
+//!
+//! Still not varied: budget and architecture. 200 iterations of a `[3, 64, 64, 1]` net in `f64` is a real attempt
+//! and not obviously a sufficient one, and that is recorded as surface rather than as a prediction.
 //!
 //! The reward is left alone throughout, at the standard `height − effort`. Paying specifically for dwell near the
 //! top would solve the benchmark rather than measure the learner.
