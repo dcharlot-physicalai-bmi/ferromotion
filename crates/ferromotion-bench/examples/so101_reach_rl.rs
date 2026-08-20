@@ -113,6 +113,20 @@ const OMEGA_NO_LOAD: f64 = 4.7;
 /// Gearbox ratio and rotor inertia. The estimated pair; `SENSITIVITY` exists because of them.
 const GEAR_RATIO: f64 = 345.0;
 const J_ROTOR: f64 = 1e-7;
+/// Bus voltage the catalogue figures are quoted at.
+const V_BUS: f64 = 7.4;
+
+/// **Torque constant and winding resistance, referred to the joint output.** Both follow from `TAU_STALL` and
+/// `OMEGA_NO_LOAD` — no third parameter is fitted.
+///
+/// A DC motor's back-EMF gives `k_e = V / ω_0`, and in SI `k_t = k_e`. Stall is the zero-speed corner, so
+/// `I_stall = τ_stall / k_t` and `R = V / I_stall`. Referring to the output rather than the rotor is
+/// self-consistent: the gearbox multiplies torque by `N` and divides speed by `N`, so `k_t` scales by `N` on
+/// both routes. For the STS3215 that is `k_t = 1.574` N·m/A and `R = 3.88` Ω.
+fn motor_constants() -> (f64, f64) {
+    let k_t = V_BUS / OMEGA_NO_LOAD;
+    (k_t, V_BUS / (TAU_STALL / k_t))
+}
 
 /// Reflected rotor inertia at the joint output, `N²·J_rotor` — the same expression as
 /// `SeaJoint::reflected_inertia`.
@@ -137,8 +151,13 @@ struct So101Reach {
     qd: Vec<f64>,
     target: Vector3<f64>,
     steps: usize,
-    /// Mechanical work at the joints, `∫|τ·q̇|`.
-    work: f64,
+    /// Mechanical work delivered, `∫max(0, τ·q̇)`. Positive part only: a non-regenerative drive does not
+    /// recover energy when the load back-drives it, and `∫|τ·q̇|` would score that recovery as consumption.
+    mech: f64,
+    /// Resistive loss in the windings, `∫(τ/k_t)²·R`. **This is the term a mechanical-work number misses, and
+    /// on a reaching task it is not a correction — holding a pose against gravity costs current at zero
+    /// speed, so `τ·q̇` reads zero while the servo keeps drawing.**
+    copper: f64,
 }
 
 impl So101Reach {
@@ -165,7 +184,8 @@ impl So101Reach {
             qd: vec![0.0; n],
             target: Vector3::zeros(),
             steps: 0,
-            work: 0.0,
+            mech: 0.0,
+            copper: 0.0,
         }
     }
 
@@ -221,7 +241,8 @@ impl Env for So101Reach {
         self.qd = vec![0.0; n];
         self.target = self.sample_target(seed);
         self.steps = 0;
-        self.work = 0.0;
+        self.mech = 0.0;
+        self.copper = 0.0;
         self.observation()
     }
 
@@ -241,7 +262,9 @@ impl Env for So101Reach {
                         self.qd[i] = 0.0; // a hard stop absorbs the momentum
                     }
                 }
-                self.work += (cmd[i] * self.qd[i]).abs() * h;
+                self.mech += (cmd[i] * self.qd[i]).max(0.0) * h;
+                let (k_t, r) = motor_constants();
+                self.copper += (cmd[i] / k_t).powi(2) * r * h;
             }
         }
         self.steps += 1;
@@ -280,7 +303,15 @@ struct Score {
     final_err: f64,
     best_err: f64,
     reached: f64,
-    work: f64,
+    mech: f64,
+    copper: f64,
+}
+
+impl Score {
+    /// Electrical energy drawn: delivered work plus resistive loss, with no regenerative recovery.
+    fn elec(&self) -> f64 {
+        self.mech + self.copper
+    }
 }
 
 fn mean(v: &[Score]) -> Score {
@@ -289,7 +320,8 @@ fn mean(v: &[Score]) -> Score {
         final_err: v.iter().map(|s| s.final_err).sum::<f64>() / n,
         best_err: v.iter().map(|s| s.best_err).sum::<f64>() / n,
         reached: v.iter().map(|s| s.reached).sum::<f64>() / n,
-        work: v.iter().map(|s| s.work).sum::<f64>() / n,
+        mech: v.iter().map(|s| s.mech).sum::<f64>() / n,
+        copper: v.iter().map(|s| s.copper).sum::<f64>() / n,
     }
 }
 
@@ -308,7 +340,13 @@ fn episode_with(j_refl: f64, seed: u64, substeps: usize, mut law: impl FnMut(&So
         best = best.min(env.reach_error());
     }
     let final_err = env.reach_error();
-    Score { final_err, best_err: best, reached: if final_err < REACH_TOL { 1.0 } else { 0.0 }, work: env.work }
+    Score {
+        final_err,
+        best_err: best,
+        reached: if final_err < REACH_TOL { 1.0 } else { 0.0 },
+        mech: env.mech,
+        copper: env.copper,
+    }
 }
 
 /// Solve IK for the Cartesian target, position only. The environment knows the joint configuration the target
@@ -339,7 +377,7 @@ fn ill_posed_sweep(seeds: &[u64], j_refl: f64) {
     println!("\n  The same grid at two reflected inertias:\n");
     println!(
         "  {:>5} {:>5} {:>4} | {:>9} {:>8} {:>7} | {:>9} {:>8} {:>7}",
-        "kp", "kd", "sub", "0: err", "work J", "reach", "N^2J: err", "work J", "reach"
+        "kp", "kd", "sub", "0: err", "elec J", "reach", "N^2J: err", "elec J", "reach"
     );
     let mut best: Option<(usize, f64, f64)> = None; // (substeps, err, work) for the best j_refl=0 config
     for &(kp, kd) in &[(3.0, 0.5), (8.0, 1.5), (20.0, 3.0), (40.0, 6.0)] {
@@ -361,17 +399,17 @@ fn ill_posed_sweep(seeds: &[u64], j_refl: f64) {
             };
             let (a, b) = (row(0.0), row(j_refl));
             if a.reached >= 0.9 && best.is_none_or(|(s, _, _)| sub < s) {
-                best = Some((sub, a.final_err, a.work));
+                best = Some((sub, a.final_err, a.elec()));
             }
             println!(
                 "  {kp:>5.1} {kd:>5.1} {sub:>4} | {:>9.4} {:>8.2} {:>6.0}% | {:>9.4} {:>8.2} {:>6.0}%",
-                a.final_err, a.work, 100.0 * a.reached, b.final_err, b.work, 100.0 * b.reached
+                a.final_err, a.elec(), 100.0 * a.reached, b.final_err, b.elec(), 100.0 * b.reached
             );
         }
     }
     match best {
-        Some((sub, err, work)) => println!(
-            "\n  Without the reflected inertia the plant is still controllable, but only at {sub} substeps\n               ({:.0} Hz), and it settles at {err:.4} m on {work:.1} J. With it: 4 substeps, 0.0008 m, 2.1 J.\n               The cost of the missing term is integration rate and energy, not impossibility.",
+        Some((sub, err, elec)) => println!(
+            "\n  Without the reflected inertia the plant is still controllable, but only at {sub} substeps\n               ({:.0} Hz), and it settles at {err:.4} m drawing {elec:.1} J. The cost of the missing term is\n               integration rate and energy, not impossibility.",
             sub as f64 / CONTROL_DT
         ),
         None => println!("\n  No configuration without reflected inertia reached {REACH_TOL} m on this grid."),
@@ -392,6 +430,9 @@ fn sensitivity() -> Vec<f64> {
 
 fn main() {
     let baselines_only = std::env::args().any(|a| a == "--baselines");
+    let train_seed: u64 = std::env::args()
+        .find_map(|a| a.strip_prefix("--seed=").and_then(|v| v.parse().ok()))
+        .unwrap_or(7);
     let reward = std::env::args()
         .find_map(|a| a.strip_prefix("--reward=").and_then(Reward::parse))
         .unwrap_or(Reward::Quadratic);
@@ -429,7 +470,10 @@ fn main() {
 
     // Does the conclusion depend on the estimated rotor inertia, or only on it being nonzero?
     println!("  IK + PD + gravity against reflected inertia:\n");
-    println!("  {:>12} {:>10} {:>10} {:>9} {:>8}", "j_refl", "final err", "best err", "work J", "reached");
+    println!(
+        "  {:>12} {:>10} {:>10} {:>8} {:>8} {:>8} {:>8}",
+        "j_refl", "final err", "best err", "mech J", "copper J", "elec J", "reached"
+    );
     let mut baseline: Option<Score> = None;
     for (k, &jr) in sensitivity().iter().enumerate() {
         let s = mean(
@@ -447,8 +491,8 @@ fn main() {
         );
         let mark = if k == USED_INDEX { " <- used" } else { "" };
         println!(
-            "  {jr:>12.2e} {:>10.4} {:>10.4} {:>9.2} {:>7.0}%{mark}",
-            s.final_err, s.best_err, s.work, 100.0 * s.reached
+            "  {jr:>12.2e} {:>10.4} {:>10.4} {:>8.2} {:>8.2} {:>8.2} {:>7.0}%{mark}",
+            s.final_err, s.best_err, s.mech, s.copper, s.elec(), 100.0 * s.reached
         );
         if k == USED_INDEX {
             baseline = Some(s);
@@ -492,10 +536,11 @@ fn main() {
     let iterations = 150;
     let obs_dim = 2 * n + 3;
     let mut env = So101Reach::with_reward(j_refl, reward);
-    let mut policy = GaussianPolicy::new(&[obs_dim, 64, 64, n], 7, -1.0);
-    let mut value = Mlp::new(&[obs_dim, 64, 64, 1], 7);
+    let mut policy = GaussianPolicy::new(&[obs_dim, 64, 64, n], train_seed, -1.0);
+    let mut value = Mlp::new(&[obs_dim, 64, 64, 1], train_seed);
     let mut norm = ObsNorm::new(obs_dim);
-    let reports = train_normalized(&mut env, &mut policy, &mut value, Some(&mut norm), &cfg, iterations, 7);
+    let reports =
+        train_normalized(&mut env, &mut policy, &mut value, Some(&mut norm), &cfg, iterations, train_seed);
     let early: f64 = reports[..5].iter().map(|r| r.mean_return).sum::<f64>() / 5.0;
     let late: f64 = reports[reports.len() - 5..].iter().map(|r| r.mean_return).sum::<f64>() / 5.0;
 
@@ -514,14 +559,19 @@ fn main() {
     // Returns under different rewards are NOT comparable to each other. Only the task metrics below are, which
     // is the whole reason the table reports metres and joules rather than reward.
     println!("  Returns across reward shapes are not comparable; compare the metres and joules.\n");
-    println!("  {:<22} {:>10} {:>10} {:>9} {:>8}", "controller", "final err", "best err", "work J", "reached");
     println!(
-        "  {:<22} {:>10.4} {:>10.4} {:>9.2} {:>7.0}%",
-        "IK + PD + gravity", baseline.final_err, baseline.best_err, baseline.work, 100.0 * baseline.reached
+        "  {:<22} {:>10} {:>10} {:>8} {:>8} {:>8} {:>8}",
+        "controller", "final err", "best err", "mech J", "copper J", "elec J", "reached"
     );
+    for (name, s) in [("IK + PD + gravity", baseline), ("PPO", ppo)] {
+        println!(
+            "  {name:<22} {:>10.4} {:>10.4} {:>8.2} {:>8.2} {:>8.2} {:>7.0}%",
+            s.final_err, s.best_err, s.mech, s.copper, s.elec(), 100.0 * s.reached
+        );
+    }
+    let (k_t, r) = motor_constants();
     println!(
-        "  {:<22} {:>10.4} {:>10.4} {:>9.2} {:>7.0}%",
-        "PPO", ppo.final_err, ppo.best_err, ppo.work, 100.0 * ppo.reached
+        "\n  Energy is electrical, not mechanical: k_t = {k_t:.3} N m/A and R = {r:.2} ohm both follow from the\n           stall torque and no-load speed above. Copper loss is the term a mechanical-work number misses, and it\n           is the one that matters here — holding a pose against gravity draws current at zero speed, where\n           tau*qd reads exactly zero. Regeneration is not credited."
     );
 
     println!();
