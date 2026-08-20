@@ -156,7 +156,9 @@ pub fn from_sdf(xml: &str, base: &str, tip: &str) -> Result<(Robot, Vec<LinkIner
         }
         let axis = j.child("axis").and_then(|a| a.child("xyz")).map(|x| triple(&x.text)).unwrap_or(Vector3::z());
         let kind = if jtype == "prismatic" { JointKind::Prismatic } else { JointKind::Revolute };
-        joints.push(Joint { origin, axis: Unit::new_normalize(axis), kind, limits: None });
+        // SDF carries <limit><effort> and <velocity> under <axis><limit>; neither is parsed here yet, so both
+        // are None rather than a guessed default. See `Joint::effort`.
+        joints.push(Joint { origin, axis: Unit::new_normalize(axis), kind, limits: None, effort: None, max_velocity: None });
         inertias.push(link_inertial.get(&child_link).cloned().unwrap_or(LinkInertia { mass: 0.0, com: Vector3::zeros(), inertia: Matrix3::zeros() }));
         pre = Iso::identity();
     }

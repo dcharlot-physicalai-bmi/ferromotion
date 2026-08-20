@@ -81,7 +81,9 @@ pub fn from_urdf_full(xml: &str, base: &str, tip: &str) -> Result<(Robot, Vec<Li
                 }
             }
             Revolute => {
-                joints.push(Joint::revolute(pre * origin, axis).with_limits(j.limit.lower, j.limit.upper));
+                joints.push(Joint::revolute(pre * origin, axis).with_limits(j.limit.lower, j.limit.upper)
+                    .with_effort(j.limit.effort)
+                    .with_max_velocity(j.limit.velocity));
                 inertias.push(child);
                 pre = Iso::identity();
             }
@@ -91,7 +93,9 @@ pub fn from_urdf_full(xml: &str, base: &str, tip: &str) -> Result<(Robot, Vec<Li
                 pre = Iso::identity();
             }
             Prismatic => {
-                joints.push(Joint::prismatic(pre * origin, axis).with_limits(j.limit.lower, j.limit.upper));
+                joints.push(Joint::prismatic(pre * origin, axis).with_limits(j.limit.lower, j.limit.upper)
+                    .with_effort(j.limit.effort)
+                    .with_max_velocity(j.limit.velocity));
                 inertias.push(child);
                 pre = Iso::identity();
             }
@@ -154,6 +158,37 @@ mod tests {
     <parent link="l6"/><child link="tool"/><origin xyz="0 0 0.05" rpy="0 0 0"/>
   </joint>
 </robot>"#;
+
+    #[test]
+    fn the_urdf_effort_and_velocity_limits_survive_the_loader() {
+        // These were parsed by `urdf_rs` and thrown away for the life of this crate: both loaders read `lower`
+        // and `upper` off the same `<limit>` element and neither carried `effort` or `velocity`. A controller or
+        // an RL action space therefore had to be handed a torque bound by hand, on a stack whose stated purpose
+        // is a 1:1 sim of the target hardware.
+        let (robot, _) = from_urdf_full(ARM_6DOF, "world", "tool").expect("load");
+        assert!(robot.dof() >= 3, "the fixture needs several joints, got {}", robot.dof());
+        for (i, j) in robot.joints.iter().enumerate() {
+            assert_eq!(j.effort, Some(10.0), "joint {i} should carry the URDF's effort=10");
+            assert_eq!(j.max_velocity, Some(3.0), "joint {i} should carry the URDF's velocity=3");
+            // And the position limits still arrive, so this did not displace what already worked.
+            assert!(j.limits.is_some(), "joint {i} lost its position limits");
+        }
+
+        // URDF uses effort="0" for unlimited, which must read as "unstated" and not as an immovable joint.
+        let unlimited = ARM_6DOF.replace("effort=\"10\"", "effort=\"0\"");
+        let (r2, _) = from_urdf_full(&unlimited, "world", "tool").expect("load");
+        assert!(r2.joints.iter().all(|j| j.effort.is_none()), "effort=0 must read as None, not Some(0)");
+
+        // A caller that needs a bound and finds none must be able to tell, rather than receive a default.
+        let bare = Joint::revolute(Iso::identity(), Vector3::z());
+        assert_eq!(bare.effort, None);
+        assert_eq!(bare.max_velocity, None);
+        // The builders consume `self`, so each check takes its own copy.
+        assert_eq!(bare.clone().with_effort(2.5).effort, Some(2.5));
+        assert_eq!(bare.clone().with_effort(-1.0).effort, None, "a non-positive effort is unstated");
+        assert_eq!(bare.clone().with_effort(f64::NAN).effort, None, "a NaN effort is unstated");
+        assert_eq!(bare.with_max_velocity(4.0).max_velocity, Some(4.0));
+    }
 
     #[test]
     fn loads_arm_and_folds_fixed_joints() {

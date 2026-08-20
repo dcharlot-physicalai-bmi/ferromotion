@@ -248,7 +248,10 @@ pub fn from_mjcf_constrained(xml: &str) -> Result<(Robot, Vec<LinkInertia>, crat
             let jpos = j.attr("pos").map(vec3).transpose()?.unwrap_or_else(Vector3::zeros);
             // joint frame = body frame translated to the joint's anchor point
             let origin = carry * bpose * Iso::from_parts(Translation3::from(jpos), UnitQuaternion::identity());
-            let mut joint = Joint { origin, axis: Unit::new_normalize(axis), kind, limits: None };
+            // MJCF states actuator force limits on the <actuator> element rather than the joint, so they are not
+            // available here; None rather than a guessed default. See `Joint::effort`.
+            let mut joint =
+                Joint { origin, axis: Unit::new_normalize(axis), kind, limits: None, effort: None, max_velocity: None };
             if let (Some("true") | None, Some(r)) = (j.attr("limited"), j.attr("range")) {
                 let v = floats(r)?;
                 if v.len() == 2 {

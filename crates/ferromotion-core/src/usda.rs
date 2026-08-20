@@ -608,7 +608,15 @@ pub fn robot_from_usda(stage: &UsdaStage, base: &str, tip: &str) -> Result<(Robo
             _ => None,
         };
 
-        out_joints.push(Joint { origin: Iso::from_parts(Translation3::from(pos), rot), axis: Unit::new_normalize(axis), kind, limits });
+        // USD's PhysicsDriveAPI carries maxForce; not parsed here yet, so None rather than a guessed default.
+        out_joints.push(Joint {
+            origin: Iso::from_parts(Translation3::from(pos), rot),
+            axis: Unit::new_normalize(axis),
+            kind,
+            limits,
+            effort: None,
+            max_velocity: None,
+        });
 
         // the driven body's mass properties, if the stage carries them
         let body = j.relationships.get("physics:body1").and_then(|v| v.first()).map(|p| leaf(p)).unwrap_or_default();

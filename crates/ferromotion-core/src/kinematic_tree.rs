@@ -163,8 +163,12 @@ pub fn tree_from_urdf(xml: &str, base: &str) -> Result<KinematicTree, String> {
                 }
                 Revolute | Continuous | Prismatic => {
                     let joint = match j.joint_type {
-                        Prismatic => Joint::prismatic(pre * origin, axis).with_limits(j.limit.lower, j.limit.upper),
-                        Revolute => Joint::revolute(pre * origin, axis).with_limits(j.limit.lower, j.limit.upper),
+                        Prismatic => Joint::prismatic(pre * origin, axis).with_limits(j.limit.lower, j.limit.upper)
+                    .with_effort(j.limit.effort)
+                    .with_max_velocity(j.limit.velocity),
+                        Revolute => Joint::revolute(pre * origin, axis).with_limits(j.limit.lower, j.limit.upper)
+                    .with_effort(j.limit.effort)
+                    .with_max_velocity(j.limit.velocity),
                         _ => Joint::revolute(pre * origin, axis),
                     };
                     let idx = tree.joints.len();

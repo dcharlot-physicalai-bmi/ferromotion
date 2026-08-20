@@ -298,6 +298,8 @@ mod tests {
                 axis: nalgebra::Unit::new_normalize(if i % 2 == 0 { Vector3::z() } else { Vector3::y() }),
                 kind: crate::JointKind::Revolute,
                 limits: Some((-2.5, 2.5)),
+                effort: None,
+                max_velocity: None,
             })
             .collect();
         let inertia = (0..dof)

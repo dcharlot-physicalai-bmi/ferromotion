@@ -335,15 +335,42 @@ pub struct Joint {
     pub kind: JointKind,
     /// Optional (lower, upper) position limits.
     pub limits: Option<(f64, f64)>,
+    /// Optional torque (or force, for a prismatic joint) the actuator can produce, from the URDF's
+    /// `<limit effort=...>`.
+    ///
+    /// **This was parsed and thrown away until 2026-08-20.** `urdf_rs` reads it, both loaders read `lower` and
+    /// `upper` from the same element, and nothing carried `effort` across — so a controller or a reinforcement
+    /// learning action space had no way to ask what the servo can actually deliver and had to be given a number
+    /// by hand. For a stack whose stated purpose is a 1:1 sim of target hardware, the hardware's own declared
+    /// capability is the wrong thing to guess at.
+    ///
+    /// `None` means the model did not state one (or stated zero, which URDF uses for "unlimited"), and a caller
+    /// that needs a bound must then supply it explicitly rather than receive a silent default.
+    pub effort: Option<f64>,
+    /// Optional maximum joint rate, from the URDF's `<limit velocity=...>`. Same history as [`Joint::effort`].
+    pub max_velocity: Option<f64>,
 }
 
 impl Joint {
     pub fn revolute(origin: Iso, axis: Vector3<f64>) -> Self {
-        Self { origin, axis: Unit::new_normalize(axis), kind: JointKind::Revolute, limits: None }
+        Self { origin, axis: Unit::new_normalize(axis), kind: JointKind::Revolute, limits: None, effort: None, max_velocity: None }
     }
 
     pub fn prismatic(origin: Iso, axis: Vector3<f64>) -> Self {
-        Self { origin, axis: Unit::new_normalize(axis), kind: JointKind::Prismatic, limits: None }
+        Self { origin, axis: Unit::new_normalize(axis), kind: JointKind::Prismatic, limits: None, effort: None, max_velocity: None }
+    }
+
+    /// Attach the actuator's torque/force capability. A non-positive value is treated as "unstated", matching
+    /// the URDF convention where `effort="0"` means unlimited rather than immovable.
+    pub fn with_effort(mut self, effort: f64) -> Self {
+        self.effort = if effort.is_finite() && effort > 0.0 { Some(effort) } else { None };
+        self
+    }
+
+    /// Attach the joint's maximum rate. Same non-positive convention as [`with_effort`](Joint::with_effort).
+    pub fn with_max_velocity(mut self, v: f64) -> Self {
+        self.max_velocity = if v.is_finite() && v > 0.0 { Some(v) } else { None };
+        self
     }
 
     pub fn with_limits(mut self, lower: f64, upper: f64) -> Self {
