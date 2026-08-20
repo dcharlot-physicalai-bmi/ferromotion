@@ -360,7 +360,7 @@ fn ill_posed_sweep(seeds: &[u64], j_refl: f64) {
                 )
             };
             let (a, b) = (row(0.0), row(j_refl));
-            if a.reached >= 0.9 && best.map_or(true, |(s, _, _)| sub < s) {
+            if a.reached >= 0.9 && best.is_none_or(|(s, _, _)| sub < s) {
                 best = Some((sub, a.final_err, a.work));
             }
             println!(

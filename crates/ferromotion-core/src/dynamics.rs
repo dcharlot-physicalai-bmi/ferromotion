@@ -46,7 +46,7 @@ pub(crate) fn combine_inertia(a: &LinkInertia, b: &LinkInertia) -> LinkInertia {
 /// (e.g. `Vector3::new(0,0,-9.81)`). `inertia[i]` is link `i`'s inertia (from `from_urdf_full`).
 ///
 /// Two actuator terms are added to the rigid-body result when the model states them:
-/// [`Joint::armature`] (reflected rotor inertia, `+J_a·q̈`) and [`Joint::damping`] (viscous, `+b·q̇`). Both
+/// [`crate::Joint::armature`] (reflected rotor inertia, `+J_a·q̈`) and [`crate::Joint::damping`] (viscous, `+b·q̇`). Both
 /// default to unstated and contribute exactly zero, so a model without them is bit-identical to before they
 /// existed. Adding them **here** rather than at each call site is what keeps
 /// `M(q)·q̈ + bias == inverse_dynamics(q, q̇, q̈)` true: [`mass_matrix`] is built from this function with
@@ -135,8 +135,8 @@ pub fn gravity_vector(robot: &Robot, inertia: &[LinkInertia], q: &[f64], gravity
 
 /// Joint-space inertia (mass) matrix `M(q)`: column `j` is RNEA with `q̈ = eⱼ`, no gravity/velocity.
 ///
-/// Includes [`Joint::armature`] on the diagonal, because it is built from [`inverse_dynamics`] and that is
-/// where the term is applied. Velocity is zero here, so [`Joint::damping`] cannot contribute.
+/// Includes [`crate::Joint::armature`] on the diagonal, because it is built from [`inverse_dynamics`] and that is
+/// where the term is applied. Velocity is zero here, so [`crate::Joint::damping`] cannot contribute.
 pub fn mass_matrix(robot: &Robot, inertia: &[LinkInertia], q: &[f64]) -> DMatrix<f64> {
     let n = robot.dof();
     let z = vec![0.0; n];
