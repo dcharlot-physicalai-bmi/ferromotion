@@ -103,6 +103,48 @@ gain error from 6% to 63% — while the value loss looked healthy throughout, be
 units the fit used. `IterationReport::value_scale` exposes the pair, and there is a test that reads `V(x)` back
 and checks it against an **empirically estimated** discounted return rather than a closed form.
 
+### On a real 5-DoF arm, against the controller the stack already had
+
+Everything above is a scalar problem. The bench `so101_reach_rl` points the same code at the **SO-101** loaded
+from its own URDF: five joints, real inertias, torque control through `mass_matrix` and `inverse_dynamics`, and
+a baseline of `solve_ik` + PD + `gravity_vector` that gets only the Cartesian target — never the joint
+configuration the target was generated from, which the environment knows and withholds.
+
+Three reward shapes, seeds 7 / 11 / 23, 150 × 3000 steps each, evaluated on the deterministic mean policy:
+
+| controller | final error | reached 1 cm | mechanical | copper | electrical |
+|---|---|---|---|---|---|
+| IK + PD + gravity | **0.0008 m** | **100%** | 2.10 J | 3.34 J | **5.44 J** |
+| PPO, linear reward | 0.0147 ± 0.0037 m | 36% | — | — | 16.8 J |
+| PPO, quadratic reward | 0.0573 ± 0.0234 m | 0% | — | — | 21.5 J |
+| PPO, peaked Gaussian | 0.0816 ± 0.0164 m | 3% | — | — | 20.8 J |
+
+**The model-based controller wins on both axes: 18x the accuracy and 3.1x less energy.** That is not a verdict
+on reinforcement learning, it is a statement about when it earns its keep — a reach with a known kinematic
+model is the case where inverse kinematics is simply the right tool, and a bench that hid that would be
+flattering the method it was built to exercise.
+
+Two things the reward sweep establishes:
+
+- **Gradient magnitude near the goal is what decides whether a policy settles.** `−‖e‖²` has gradient `2‖e‖`,
+  so at 2 cm the signal driving the last centimetre is 25x weaker than the one that drove the approach from
+  25 cm. The linear reward's constant gradient fixes it: 3.9x lower final error, and the per-seed ranges do not
+  overlap — every linear seed beats every quadratic seed.
+- **Sharpness where you want precision is worthless if the reward goes silent where you need guidance.** The
+  peaked bonus `exp(−(‖e‖/σ)²)` with `σ` at the tolerance is the sharpest of the three exactly where the
+  quadratic goes flat, and it came last. At the 25 cm start it is numerically zero, so it is *sparse* through
+  the whole approach.
+
+**One seed is not a measurement, and this bench carries the receipt.** The same quadratic configuration read 8%
+reached in one run and 0% in the next, differing only by an LU-versus-Cholesky solve at `1e-15` amplified
+through 150 training iterations. Across seeds the linear reward's success rate spans 17–50%. Every comparative
+claim above is from the 3-seed sweep, and single-seed output says so on its face.
+
+Energy is electrical, not mechanical. A servo holding a pose against gravity draws current at **zero speed**,
+where `τ·q̇` reads exactly zero — so copper loss is 1.6x the mechanical work here, and a mechanical-work number
+understates the draw by 2.5x. `k_t = V/ω₀` and `R = V/(τ_stall/k_t)` are derived from the two catalogue figures
+the bench already declares, not fitted.
+
 ### Getting the policy onto hardware
 
 `GaussianPolicy::to_deployable(&action_space)` converts a trained policy into a

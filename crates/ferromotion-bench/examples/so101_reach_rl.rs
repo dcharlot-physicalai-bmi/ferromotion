@@ -70,14 +70,32 @@ const STEPS: usize = 300;
 /// Counted as reached (m).
 const REACH_TOL: f64 = 0.01;
 
-/// **Which reward, and why it is the arm worth running.**
+/// **Which reward. Measured over 3 seeds each, because one seed is not a measurement.**
 ///
 /// The first run trained cleanly (return −25.0 → −2.2) and still reached only 8%: best error 2.2 cm against a
-/// 1 cm tolerance. It found the direction and not the hold. The suspect is the reward's own shape rather than
+/// 1 cm tolerance. It found the direction and not the hold. The suspect was the reward's own shape rather than
 /// the optimizer, because `−‖e‖²` has gradient `2‖e‖`, so at 2 cm the signal driving the last centimetre is
-/// **25x weaker** than the one that drove the approach from 25 cm. Two alternatives keep the signal alive:
-/// a linear term, whose gradient is constant everywhere, and a peaked Gaussian bonus, which is *sharpest*
-/// exactly where the quadratic goes flat.
+/// **25x weaker** than the one that drove the approach from 25 cm.
+///
+/// Seeds 7 / 11 / 23, 150 × 3000 steps each, evaluated on the deterministic mean policy over 12 targets:
+///
+/// | reward | final error, mean ± sd | per-seed range | reached | electrical |
+/// |---|---|---|---|---|
+/// | quadratic `−‖e‖²` | 0.0573 ± 0.0234 m | 0.0401–0.0840 | 0% | 21.5 J |
+/// | **linear `−‖e‖`** | **0.0147 ± 0.0037 m** | **0.0116–0.0188** | **36%** | 16.8 J |
+/// | peaked Gaussian | 0.0816 ± 0.0164 m | 0.0630–0.0941 | 3% | 20.8 J |
+///
+/// **Linear wins and the per-seed ranges do not overlap** — every linear seed beats every quadratic seed,
+/// 3.9x on the mean. That is the constant-gradient prediction confirmed.
+///
+/// **The peaked bonus is the informative failure.** `exp(−(‖e‖/σ)²)` with `σ` at the tolerance is the sharpest
+/// of the three exactly where the quadratic goes flat, and it came last. At the 25 cm start the bonus is
+/// numerically zero, so it is *sparse* through the entire approach: sharpening a reward where you want
+/// precision buys nothing if it goes silent where you need guidance. Its range does overlap the quadratic's,
+/// so the honest claim is "no better", not "worse".
+///
+/// Returns are **not** comparable across these shapes — linear's run −84 → −12 purely because `−‖e‖` has a
+/// different scale — which is why every column above is metres, joules or a success rate.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Reward {
     /// `−‖e‖²`. Gradient `2‖e‖`, vanishing at the goal.
@@ -569,6 +587,13 @@ fn main() {
             s.final_err, s.best_err, s.mech, s.copper, s.elec(), 100.0 * s.reached
         );
     }
+    // ONE SEED IS NOT A MEASUREMENT, and this bench has the receipt: the same quadratic configuration read
+    // 8% reached in one run and 0% in the next, differing only by an LU-versus-Cholesky solve at 1e-15
+    // amplified through 150 training iterations. Across seeds 7/11/23 the reached rate spans 17-50% for the
+    // linear reward alone. Every comparative claim in the module docs comes from the 3-seed sweep.
+    println!(
+        "\n  This is ONE seed ({train_seed}). Measured spread on `reached` between otherwise identical runs is\n           at least 8 points, and 17-50% across seeds for one reward, so read this row as a sample and not as a\n           result. Re-run with --seed to see the dispersion."
+    );
     let (k_t, r) = motor_constants();
     println!(
         "\n  Energy is electrical, not mechanical: k_t = {k_t:.3} N m/A and R = {r:.2} ohm both follow from the\n           stall torque and no-load speed above. Copper loss is the term a mechanical-work number misses, and it\n           is the one that matters here — holding a pose against gravity draws current at zero speed, where\n           tau*qd reads exactly zero. Regeneration is not credited."
