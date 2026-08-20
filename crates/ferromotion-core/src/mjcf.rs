@@ -250,8 +250,25 @@ pub fn from_mjcf_constrained(xml: &str) -> Result<(Robot, Vec<LinkInertia>, crat
             let origin = carry * bpose * Iso::from_parts(Translation3::from(jpos), UnitQuaternion::identity());
             // MJCF states actuator force limits on the <actuator> element rather than the joint, so they are not
             // available here; None rather than a guessed default. See `Joint::effort`.
-            let mut joint =
-                Joint { origin, axis: Unit::new_normalize(axis), kind, limits: None, effort: None, max_velocity: None };
+            let mut joint = Joint {
+                origin,
+                axis: Unit::new_normalize(axis),
+                kind,
+                limits: None,
+                effort: None,
+                max_velocity: None,
+                armature: None,
+                damping: None,
+            };
+            // MJCF is the one format here that states the actuator's own inertia and damping on the joint.
+            // MuJoCo carries `armature` because a URDF-derived model without it is ill-conditioned: the term
+            // is N^2 J_rotor, which on a small distal link dominates the link itself. See `Joint::armature`.
+            if let Some(a) = j.attr("armature").and_then(|v| v.trim().parse::<f64>().ok()) {
+                joint = joint.with_armature(a);
+            }
+            if let Some(d) = j.attr("damping").and_then(|v| v.trim().parse::<f64>().ok()) {
+                joint = joint.with_damping(d);
+            }
             if let (Some("true") | None, Some(r)) = (j.attr("limited"), j.attr("range")) {
                 let v = floats(r)?;
                 if v.len() == 2 {
@@ -499,5 +516,51 @@ mod tests {
         assert!(from_mjcf_full(branching).unwrap_err().contains("serial"));
         let ball = r#"<mujoco><worldbody><body><joint type="ball"/></body></worldbody></mujoco>"#;
         assert!(from_mjcf_full(ball).unwrap_err().contains("hinge/slide"));
+    }
+
+    /// **MJCF is the one format here that states the actuator's own inertia**, and it was being dropped.
+    ///
+    /// MuJoCo carries `armature` because a model built from link geometry alone is ill-conditioned wherever a
+    /// geared servo drives a light link. Reading it is not a convenience: it is the difference between a
+    /// simulable plant and one that is not. The absent case must stay absent rather than becoming zero, so a
+    /// caller can tell "this model says nothing" from "this model says the rotor is weightless".
+    #[test]
+    fn mjcf_armature_and_damping_survive_the_loader() {
+        const GEARED: &str = r#"
+<mujoco model="geared">
+  <compiler angle="radian"/>
+  <worldbody>
+    <body pos="0 0 0.3">
+      <joint type="hinge" axis="0 0 1" armature="0.0119" damping="0.64"/>
+      <inertial pos="0 0 0.1" mass="1.5" diaginertia="0.02 0.03 0.025"/>
+      <body pos="0.1 0 0.2">
+        <joint type="hinge" axis="0 1 0"/>
+        <inertial pos="0 0 0.1" mass="0.8" diaginertia="0.01 0.01 0.01"/>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>"#;
+        let (robot, inertia) = from_mjcf_full(GEARED).expect("parse");
+        assert_eq!(robot.joints[0].armature, Some(0.0119));
+        assert_eq!(robot.joints[0].damping, Some(0.64));
+        assert_eq!(
+            robot.joints[1].armature, None,
+            "a joint that states nothing must stay unstated"
+        );
+        assert_eq!(robot.joints[1].damping, None);
+
+        // It must reach the dynamics, not merely the struct: armature raises joint 0's diagonal and nothing else.
+        let m = crate::mass_matrix(&robot, &inertia, &[0.0, 0.0]);
+        let mut bare = robot.clone();
+        bare.joints[0] = bare.joints[0]
+            .clone()
+            .with_armature(-1.0)
+            .with_damping(-1.0); // clears both
+        let m0 = crate::mass_matrix(&bare, &inertia, &[0.0, 0.0]);
+        assert!(
+            (m[(0, 0)] - m0[(0, 0)] - 0.0119).abs() < 1e-14,
+            "armature must reach the mass matrix"
+        );
+        assert_eq!(m[(1, 1)], m0[(1, 1)], "and must not touch the other joint");
     }
 }

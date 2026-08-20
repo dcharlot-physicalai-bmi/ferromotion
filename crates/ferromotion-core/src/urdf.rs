@@ -83,7 +83,8 @@ pub fn from_urdf_full(xml: &str, base: &str, tip: &str) -> Result<(Robot, Vec<Li
             Revolute => {
                 joints.push(Joint::revolute(pre * origin, axis).with_limits(j.limit.lower, j.limit.upper)
                     .with_effort(j.limit.effort)
-                    .with_max_velocity(j.limit.velocity));
+                    .with_max_velocity(j.limit.velocity)
+                    .with_damping(j.dynamics.as_ref().map(|d| d.damping).unwrap_or(0.0)));
                 inertias.push(child);
                 pre = Iso::identity();
             }
@@ -95,7 +96,8 @@ pub fn from_urdf_full(xml: &str, base: &str, tip: &str) -> Result<(Robot, Vec<Li
             Prismatic => {
                 joints.push(Joint::prismatic(pre * origin, axis).with_limits(j.limit.lower, j.limit.upper)
                     .with_effort(j.limit.effort)
-                    .with_max_velocity(j.limit.velocity));
+                    .with_max_velocity(j.limit.velocity)
+                    .with_damping(j.dynamics.as_ref().map(|d| d.damping).unwrap_or(0.0)));
                 inertias.push(child);
                 pre = Iso::identity();
             }
@@ -223,6 +225,46 @@ mod tests {
         assert!(res.converged, "did not converge: err={} iters={}", res.error, res.iters);
         assert!(pose_error(&r.fk(&res.q), &target).norm() < 1e-4);
     }
+
+    /// **URDF carries `<dynamics damping=...>` and it was being dropped too.**
+    ///
+    /// Found while writing a README table that claimed URDF had no damping field. It does, `urdf_rs` parses it
+    /// into `Joint::dynamics`, and this loader ignored it — the third instance of the same defect in one
+    /// session, after `effort`/`velocity` here and the whole set in the SDF loader. Checking the claim before
+    /// publishing it is what surfaced this one.
+    ///
+    /// `<dynamics friction=...>` (Coulomb) is parsed by `urdf_rs` and still not read here, because `Joint` has
+    /// nowhere to put it: the RNEA term would be discontinuous at zero velocity and wants a smoothing choice
+    /// that belongs to the caller, not the loader.
+    #[test]
+    fn the_urdf_damping_survives_the_loader() {
+        const DAMPED: &str = r#"<robot name="d">
+          <link name="base"/>
+          <link name="l1"><inertial><origin xyz="0.5 0 0"/><mass value="2.0"/>
+            <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/></inertial></link>
+          <link name="l2"><inertial><origin xyz="0.2 0 0"/><mass value="1.0"/>
+            <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/></inertial></link>
+          <link name="tool"/>
+          <joint name="j1" type="revolute"><parent link="base"/><child link="l1"/><origin xyz="0 0 0"/>
+            <axis xyz="0 1 0"/><limit lower="-3" upper="3" effort="7" velocity="2"/>
+            <dynamics damping="0.42" friction="0.1"/></joint>
+          <joint name="j2" type="revolute"><parent link="l1"/><child link="l2"/><origin xyz="0.6 0 0"/>
+            <axis xyz="0 1 0"/><limit lower="-3" upper="3" effort="7" velocity="2"/></joint>
+          <joint name="jt" type="fixed"><parent link="l2"/><child link="tool"/><origin xyz="0.3 0 0"/></joint>
+        </robot>"#;
+        let (robot, inertia) = crate::from_urdf_full(DAMPED, "base", "tool").unwrap();
+        assert_eq!(robot.joints[0].damping, Some(0.42));
+        assert_eq!(robot.joints[1].damping, None, "a joint with no <dynamics> must stay unstated");
+
+        // And it must reach the dynamics: at nonzero rate the damped joint needs 0.42*qd more torque, and the
+        // undamped one needs exactly what it needed before.
+        let g = nalgebra::Vector3::new(0.0, 0.0, -9.81);
+        let (q, qd) = ([0.3, -0.5], [2.0, 1.5]);
+        let with = crate::inverse_dynamics(&robot, &inertia, &q, &qd, &[0.0, 0.0], g);
+        let mut bare = robot.clone();
+        bare.joints[0] = bare.joints[0].clone().with_damping(-1.0); // clears it
+        let without = crate::inverse_dynamics(&bare, &inertia, &q, &qd, &[0.0, 0.0], g);
+        assert!((with[0] - without[0] - 0.42 * qd[0]).abs() < 1e-12, "damping must reach inverse_dynamics");
+        assert_eq!(with[1], without[1], "and must not touch the undamped joint");
+    }
 }
-
-

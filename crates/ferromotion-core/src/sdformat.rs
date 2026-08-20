@@ -154,11 +154,39 @@ pub fn from_sdf(xml: &str, base: &str, tip: &str) -> Result<(Robot, Vec<LinkIner
             pre = origin; // fold into the next actuated joint
             continue;
         }
-        let axis = j.child("axis").and_then(|a| a.child("xyz")).map(|x| triple(&x.text)).unwrap_or(Vector3::z());
+        let ax = j.child("axis");
+        let axis = ax.and_then(|a| a.child("xyz")).map(|x| triple(&x.text)).unwrap_or(Vector3::z());
         let kind = if jtype == "prismatic" { JointKind::Prismatic } else { JointKind::Revolute };
-        // SDF carries <limit><effort> and <velocity> under <axis><limit>; neither is parsed here yet, so both
-        // are None rather than a guessed default. See `Joint::effort`.
-        joints.push(Joint { origin, axis: Unit::new_normalize(axis), kind, limits: None, effort: None, max_velocity: None });
+        // SDF keeps all of this under <axis>: position and capability bounds in <limit>, passive damping in
+        // <dynamics>. It was reachable the whole time (the accessor above already holds <axis>) and simply
+        // not read, which is the same defect `Joint::effort` records for URDF. SDF has no armature field.
+        let num = |parent: Option<&Node>, tag: &str| -> Option<f64> {
+            parent.and_then(|p| p.child(tag)).and_then(|c| c.text.trim().parse::<f64>().ok())
+        };
+        let limit = ax.and_then(|a| a.child("limit"));
+        let mut joint = Joint {
+            origin,
+            axis: Unit::new_normalize(axis),
+            kind,
+            limits: None,
+            effort: None,
+            max_velocity: None,
+            armature: None,
+            damping: None,
+        };
+        if let (Some(lo), Some(hi)) = (num(limit, "lower"), num(limit, "upper")) {
+            joint = joint.with_limits(lo, hi);
+        }
+        if let Some(e) = num(limit, "effort") {
+            joint = joint.with_effort(e);
+        }
+        if let Some(v) = num(limit, "velocity") {
+            joint = joint.with_max_velocity(v);
+        }
+        if let Some(d) = num(ax.and_then(|a| a.child("dynamics")), "damping") {
+            joint = joint.with_damping(d);
+        }
+        joints.push(joint);
         inertias.push(link_inertial.get(&child_link).cloned().unwrap_or(LinkInertia { mass: 0.0, com: Vector3::zeros(), inertia: Matrix3::zeros() }));
         pre = Iso::identity();
     }
@@ -213,5 +241,61 @@ mod verification {
         assert!((inertia[0].mass - 1.5).abs() < 1e-9 && (inertia[1].mass - 0.8).abs() < 1e-9, "masses wrong");
         assert_eq!(robot.joints[1].kind, JointKind::Prismatic);
         eprintln!("SDF 2-DoF chain: dof {}, masses {:.2}/{:.2}", robot.dof(), inertia[0].mass, inertia[1].mass);
+    }
+
+    /// **SDF states limits, effort, velocity and damping under `<axis>`, and none of it was read.**
+    ///
+    /// The parser already held the `<axis>` element to get the joint direction, so every one of these was a
+    /// single accessor away. This is the same defect `Joint::effort` records for URDF, found by fixing that one
+    /// and then checking whether the other importers had it too — a fix in one loader is a hypothesis about the
+    /// rest. SDF has no armature concept, so that stays `None`.
+    #[test]
+    fn sdf_limits_effort_velocity_and_damping_survive_the_loader() {
+        let sdf = r#"<sdf version="1.7"><model name="arm">
+          <link name="base"/>
+          <link name="l1">
+            <inertial><mass>2.0</mass><pose>0.5 0 0 0 0 0</pose>
+              <inertia><ixx>0.01</ixx><iyy>0.01</iyy><izz>0.01</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia>
+            </inertial>
+          </link>
+          <joint name="j1" type="revolute">
+            <parent>base</parent><child>l1</child><pose>0 0 0 0 0 0</pose>
+            <axis><xyz>0 1 0</xyz>
+              <limit><lower>-1.2</lower><upper>2.4</upper><effort>7.5</effort><velocity>3.25</velocity></limit>
+              <dynamics><damping>0.42</damping></dynamics>
+            </axis>
+          </joint>
+        </model></sdf>"#;
+        let (robot, _) = from_sdf(sdf, "base", "l1").unwrap();
+        let j = &robot.joints[0];
+        assert_eq!(j.limits, Some((-1.2, 2.4)));
+        assert_eq!(j.effort, Some(7.5));
+        assert_eq!(j.max_velocity, Some(3.25));
+        assert_eq!(j.damping, Some(0.42));
+        assert_eq!(j.armature, None, "SDF has no armature field to read");
+    }
+
+    /// A joint that states none of it must come back unstated, not defaulted. Without this the test above
+    /// would pass on a loader that filled in constants regardless of the file.
+    #[test]
+    fn sdf_says_nothing_when_the_file_says_nothing() {
+        let sdf = r#"<sdf version="1.7"><model name="arm">
+          <link name="base"/>
+          <link name="l1">
+            <inertial><mass>2.0</mass><pose>0.5 0 0 0 0 0</pose>
+              <inertia><ixx>0.01</ixx><iyy>0.01</iyy><izz>0.01</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia>
+            </inertial>
+          </link>
+          <joint name="j1" type="revolute">
+            <parent>base</parent><child>l1</child><pose>0 0 0 0 0 0</pose>
+            <axis><xyz>0 1 0</xyz></axis>
+          </joint>
+        </model></sdf>"#;
+        let (robot, _) = from_sdf(sdf, "base", "l1").unwrap();
+        let j = &robot.joints[0];
+        assert_eq!(
+            (j.limits, j.effort, j.max_velocity, j.damping),
+            (None, None, None, None)
+        );
     }
 }

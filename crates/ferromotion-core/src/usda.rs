@@ -608,7 +608,8 @@ pub fn robot_from_usda(stage: &UsdaStage, base: &str, tip: &str) -> Result<(Robo
             _ => None,
         };
 
-        // USD's PhysicsDriveAPI carries maxForce; not parsed here yet, so None rather than a guessed default.
+        // USD's PhysicsDriveAPI carries maxForce and damping; neither is parsed here yet, and USD has no
+        // armature concept at all. None rather than a guessed default. See `Joint::effort`.
         out_joints.push(Joint {
             origin: Iso::from_parts(Translation3::from(pos), rot),
             axis: Unit::new_normalize(axis),
@@ -616,6 +617,8 @@ pub fn robot_from_usda(stage: &UsdaStage, base: &str, tip: &str) -> Result<(Robo
             limits,
             effort: None,
             max_velocity: None,
+            armature: None,
+            damping: None,
         });
 
         // the driven body's mass properties, if the stage carries them

@@ -213,6 +213,8 @@ impl RunningCostLab {
                 limits: Some((-2.5, 2.5)),
                 effort: None,
                 max_velocity: None,
+                armature: None,
+                damping: None,
             })
             .collect();
         let inertia: Vec<LinkInertia> = (0..self.dof)

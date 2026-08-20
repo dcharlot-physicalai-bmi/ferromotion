@@ -349,15 +349,38 @@ pub struct Joint {
     pub effort: Option<f64>,
     /// Optional maximum joint rate, from the URDF's `<limit velocity=...>`. Same history as [`Joint::effort`].
     pub max_velocity: Option<f64>,
+    /// **Rotor inertia reflected through the gearbox**, `N²·J_rotor`, added to this joint's diagonal of the
+    /// joint-space inertia matrix. MuJoCo's `armature`; MJCF states it, URDF has no field for it.
+    ///
+    /// This is not a numerical fudge, it is a term of the plant. A geared servo's rotor accelerates with the
+    /// joint and its apparent inertia scales as the *square* of the ratio, so on a small distal link it does
+    /// not merely contribute to the joint-space inertia — it is the larger term. Measured on the SO-101,
+    /// whose wrist link inertia is `3.45e-5` kg·m² against a reflected `1.19e-2`: a factor of **345**.
+    /// Omitting it made torque control of that arm unsolvable at every gain and substep tried (0 of 32
+    /// configurations reached a 1 cm target, spending 500 J); including it reached 100% on 5 J. See the
+    /// `so101_reach_rl` bench.
+    ///
+    /// `None` behaves exactly as zero, so a model that does not state one is unaffected.
+    pub armature: Option<f64>,
+    /// Optional joint viscous damping (N·m·s/rad), the passive torque `b·q̇` opposing motion. URDF's
+    /// `<dynamics damping=...>`, MJCF's `damping`, SDF's `<axis><dynamics><damping>`.
+    ///
+    /// For a DC servo the dominant part of this is not friction but **back-EMF speed droop**: available
+    /// torque falls linearly to zero at no-load speed, so `b = τ_stall / ω_0` follows from two catalogue
+    /// numbers rather than being fitted. Modelling it this way also removes the need for a hard velocity
+    /// clamp, which injects energy at every clamp event.
+    ///
+    /// `None` behaves exactly as zero.
+    pub damping: Option<f64>,
 }
 
 impl Joint {
     pub fn revolute(origin: Iso, axis: Vector3<f64>) -> Self {
-        Self { origin, axis: Unit::new_normalize(axis), kind: JointKind::Revolute, limits: None, effort: None, max_velocity: None }
+        Self { origin, axis: Unit::new_normalize(axis), kind: JointKind::Revolute, limits: None, effort: None, max_velocity: None, armature: None, damping: None }
     }
 
     pub fn prismatic(origin: Iso, axis: Vector3<f64>) -> Self {
-        Self { origin, axis: Unit::new_normalize(axis), kind: JointKind::Prismatic, limits: None, effort: None, max_velocity: None }
+        Self { origin, axis: Unit::new_normalize(axis), kind: JointKind::Prismatic, limits: None, effort: None, max_velocity: None, armature: None, damping: None }
     }
 
     /// Attach the actuator's torque/force capability. A non-positive value is treated as "unstated", matching
@@ -370,6 +393,20 @@ impl Joint {
     /// Attach the joint's maximum rate. Same non-positive convention as [`with_effort`](Joint::with_effort).
     pub fn with_max_velocity(mut self, v: f64) -> Self {
         self.max_velocity = if v.is_finite() && v > 0.0 { Some(v) } else { None };
+        self
+    }
+
+    /// Attach the reflected rotor inertia `N²·J_rotor`. Same non-positive convention as
+    /// [`with_effort`](Joint::with_effort): a zero or negative value is "unstated", not "weightless rotor".
+    pub fn with_armature(mut self, armature: f64) -> Self {
+        self.armature = if armature.is_finite() && armature > 0.0 { Some(armature) } else { None };
+        self
+    }
+
+    /// Attach the joint's viscous damping. Same non-positive convention as
+    /// [`with_effort`](Joint::with_effort).
+    pub fn with_damping(mut self, damping: f64) -> Self {
+        self.damping = if damping.is_finite() && damping > 0.0 { Some(damping) } else { None };
         self
     }
 

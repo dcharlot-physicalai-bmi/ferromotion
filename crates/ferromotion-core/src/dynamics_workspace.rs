@@ -300,6 +300,8 @@ mod tests {
                 limits: Some((-2.5, 2.5)),
                 effort: None,
                 max_velocity: None,
+                armature: None,
+                damping: None,
             })
             .collect();
         let inertia = (0..dof)
