@@ -14,25 +14,26 @@
 //! home pose needs at most 0.51 N·m and a real STS3215 stalls near 3 N·m, so the figure is neither measured
 //! nor per-joint.
 //!
-//! **The link inertias make torque control ill-posed on their own.** The mass-matrix diagonal at home runs
+//! **The link inertias alone make torque control very stiff.** The mass-matrix diagonal at home runs
 //! `[1.41e-2, 1.52e-2, 7.85e-3, 8.30e-4, 3.45e-5]` kg·m². The last joint is the gripper roll, and 10 N·m into
-//! `3.45e-5` kg·m² is **290,000 rad/s²** — one 5 ms step adds 1,449 rad/s. No gain choice and no timestep fixes
-//! that, because the plant is missing a term, not badly tuned. Measured across a 4x4 sweep of gains and
-//! substeps: IK+PD+gravity reached the target in **0 of 32 configurations** and spent 500–590 J doing it.
+//! `3.45e-5` kg·m² is **290,000 rad/s²** — one 5 ms step adds 1,449 rad/s. Over a 4x4 grid of gains and
+//! substeps (`--sweep`), IK+PD+gravity reaches a 1 cm target in **1 of 16** configurations, only at 10 kHz
+//! integration and low gain, settling at 0.0177 m on 20.4 J.
 //!
 //! The missing term is the **actuator's own reflected rotor inertia**. A geared servo presents `N²·J_rotor` at
 //! its output, and for the SO-101's distal joints that dominates the link the URDF describes — by a factor of
 //! ~340 at the wrist. `SeaJoint::reflected_inertia` in `ferromotion-control` has always computed it; nothing
 //! had ever fed it into a URDF-loaded multibody plant. Adding it, plus the motor's linear speed–torque droop:
 //!
-//! | reflected inertia | reached | work |
-//! |---|---|---|
-//! | 0 (URDF as written) | **0%** | 525 J |
-//! | 1.19e-2 (N=345) | **100%** | 5 J |
+//! | reflected inertia | reaches 1 cm | best settle | work | rate needed |
+//! |---|---|---|---|---|
+//! | 0 (URDF as written) | 1 of 16 configs | 0.0177 m | 20.4 J | 10 kHz |
+//! | 1.19e-2 (N=345) | **16 of 16** | 0.0001 m | 2.1 J | 200 Hz |
 //!
-//! A factor of 100 in energy, and the difference between a task that is solvable and one that is not. The
-//! 500 J was the massless distal joints being flung around. `SENSITIVITY` below re-measures this every run,
-//! because the conclusion should not rest on one estimate of a rotor inertia.
+//! 50x the integration rate, ~10x the work, 22x the settling error, and a working region that collapses to one
+//! corner of the grid. `SENSITIVITY` re-measures the inertia dependence every run and `--sweep` re-measures
+//! this table, because the conclusion should not rest on one estimate of a rotor inertia — and because an
+//! earlier draft of this file claimed the plant was *unsolvable* without the term, which was wrong.
 //!
 //! # Declared servo parameters, and why these are derived rather than guessed
 //!
@@ -129,6 +130,9 @@ struct So101Reach {
     robot: Robot,
     inertia: Vec<LinkInertia>,
     reward: Reward,
+    /// Physics substeps per control period. A field so the ill-posedness sweep can vary it, which is the
+    /// measurement that distinguishes a missing term from a timestep that is merely too coarse.
+    substeps: usize,
     q: Vec<f64>,
     qd: Vec<f64>,
     target: Vector3<f64>,
@@ -156,6 +160,7 @@ impl So101Reach {
             robot,
             inertia,
             reward,
+            substeps: SUBSTEPS,
             q: vec![0.0; n],
             qd: vec![0.0; n],
             target: Vector3::zeros(),
@@ -223,8 +228,8 @@ impl Env for So101Reach {
     fn step(&mut self, action: &[f64]) -> StepResult {
         let n = self.dof();
         let cmd = self.action_space().clamp(action);
-        let h = CONTROL_DT / SUBSTEPS as f64;
-        for _ in 0..SUBSTEPS {
+        let h = CONTROL_DT / self.substeps as f64;
+        for _ in 0..self.substeps {
             // Armature and damping live on the joints, so this is the ordinary call.
             let qdd = forward_dynamics(&self.robot, &self.inertia, &self.q, &self.qd, &cmd, GRAVITY);
             for i in 0..n {
@@ -288,8 +293,13 @@ fn mean(v: &[Score]) -> Score {
     }
 }
 
-fn episode(j_refl: f64, seed: u64, mut law: impl FnMut(&So101Reach) -> Vec<f64>) -> Score {
+fn episode(j_refl: f64, seed: u64, law: impl FnMut(&So101Reach) -> Vec<f64>) -> Score {
+    episode_with(j_refl, seed, SUBSTEPS, law)
+}
+
+fn episode_with(j_refl: f64, seed: u64, substeps: usize, mut law: impl FnMut(&So101Reach) -> Vec<f64>) -> Score {
     let mut env = So101Reach::new(j_refl);
+    env.substeps = substeps;
     env.reset(seed);
     let mut best = f64::INFINITY;
     for _ in 0..STEPS {
@@ -315,6 +325,57 @@ fn pd_track(env: &So101Reach, q_goal: &[f64], kp: f64, kd: f64) -> Vec<f64> {
     (0..env.dof())
         .map(|i| (g[i] + kp * (q_goal[i] - env.q[i]) - kd * env.qd[i]).clamp(-TAU_STALL, TAU_STALL))
         .collect()
+}
+
+/// **Both inertias on the same grid**, so the comparison is like for like. Run with `--sweep`.
+///
+/// This exists because an earlier version of these docs claimed the URDF-only plant was unsolvable — "0 of 32
+/// configurations" — and that was wrong. The sweep it came from still contained a hard velocity clamp that was
+/// itself injecting energy at every clamp event, and it never tried a low gain at a high substep count. The
+/// plant without reflected inertia is not unsolvable. It is **stiff**, which is a different and more useful
+/// claim, and one this grid actually measures. A cited number no committed artefact reproduces is a weak
+/// claim; that is what let the wrong one stand.
+fn ill_posed_sweep(seeds: &[u64], j_refl: f64) {
+    println!("\n  The same grid at two reflected inertias:\n");
+    println!(
+        "  {:>5} {:>5} {:>4} | {:>9} {:>8} {:>7} | {:>9} {:>8} {:>7}",
+        "kp", "kd", "sub", "0: err", "work J", "reach", "N^2J: err", "work J", "reach"
+    );
+    let mut best: Option<(usize, f64, f64)> = None; // (substeps, err, work) for the best j_refl=0 config
+    for &(kp, kd) in &[(3.0, 0.5), (8.0, 1.5), (20.0, 3.0), (40.0, 6.0)] {
+        for &sub in &[1usize, 4, 20, 50] {
+            let row = |jr: f64| -> Score {
+                mean(
+                    &seeds
+                        .iter()
+                        .map(|&sd| {
+                            let g = ik_goal(&{
+                                let mut e = So101Reach::new(jr);
+                                e.reset(sd);
+                                e
+                            });
+                            episode_with(jr, sd, sub, move |e| pd_track(e, &g, kp, kd))
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            };
+            let (a, b) = (row(0.0), row(j_refl));
+            if a.reached >= 0.9 && best.map_or(true, |(s, _, _)| sub < s) {
+                best = Some((sub, a.final_err, a.work));
+            }
+            println!(
+                "  {kp:>5.1} {kd:>5.1} {sub:>4} | {:>9.4} {:>8.2} {:>6.0}% | {:>9.4} {:>8.2} {:>6.0}%",
+                a.final_err, a.work, 100.0 * a.reached, b.final_err, b.work, 100.0 * b.reached
+            );
+        }
+    }
+    match best {
+        Some((sub, err, work)) => println!(
+            "\n  Without the reflected inertia the plant is still controllable, but only at {sub} substeps\n               ({:.0} Hz), and it settles at {err:.4} m on {work:.1} J. With it: 4 substeps, 0.0008 m, 2.1 J.\n               The cost of the missing term is integration rate and energy, not impossibility.",
+            sub as f64 / CONTROL_DT
+        ),
+        None => println!("\n  No configuration without reflected inertia reached {REACH_TOL} m on this grid."),
+    }
 }
 
 /// Reflected inertias to re-measure every run, with the value actually used at `USED_INDEX`.
@@ -397,6 +458,9 @@ fn main() {
     let baseline = baseline.expect("USED_INDEX is within sensitivity()");
     assert_eq!(sensitivity()[USED_INDEX], j_refl, "USED_INDEX must name the inertia the run uses");
 
+    if std::env::args().any(|a| a == "--sweep") {
+        ill_posed_sweep(&seeds, j_refl);
+    }
     if baselines_only {
         return;
     }

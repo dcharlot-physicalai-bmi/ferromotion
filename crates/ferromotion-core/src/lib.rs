@@ -356,9 +356,19 @@ pub struct Joint {
     /// joint and its apparent inertia scales as the *square* of the ratio, so on a small distal link it does
     /// not merely contribute to the joint-space inertia — it is the larger term. Measured on the SO-101,
     /// whose wrist link inertia is `3.45e-5` kg·m² against a reflected `1.19e-2`: a factor of **345**.
-    /// Omitting it made torque control of that arm unsolvable at every gain and substep tried (0 of 32
-    /// configurations reached a 1 cm target, spending 500 J); including it reached 100% on 5 J. See the
-    /// `so101_reach_rl` bench.
+    ///
+    /// What omitting it costs, over a 4×4 grid of PD gains and substep counts (`so101_reach_rl --sweep`):
+    ///
+    /// | | reaches a 1 cm target | best settle | work | control rate needed |
+    /// |---|---|---|---|---|
+    /// | without | **1 of 16** configurations | 0.0177 m | 20.4 J | 10 kHz |
+    /// | with | **16 of 16** | 0.0001 m | 2.1 J | 200 Hz |
+    ///
+    /// So the plant is not unsolvable without it — it is **stiff**: 50x the integration rate, ~10x the work,
+    /// 22x the settling error, and a working region that shrinks to one corner of the grid. An earlier
+    /// version of this note claimed "unsolvable, 0 of 32", which was wrong; that sweep still contained a hard
+    /// velocity clamp that was itself injecting energy, and it never tried a low gain at a high substep
+    /// count.
     ///
     /// `None` behaves exactly as zero, so a model that does not state one is unaffected.
     pub armature: Option<f64>,

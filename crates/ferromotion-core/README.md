@@ -33,10 +33,21 @@ the LeRobot original:
 | reflected rotor, `345²·1e-7` | `1.19e-2` kg·m² |
 
 A factor of **345**. With the link term alone, 10 N·m is 289,728 rad/s² and one 5 ms step adds 1,449 rad/s.
-Torque control of that arm was unsolvable at every gain and substep tried — 0 of 32 configurations reached a
-1 cm target, at 500 J. With the armature applied: 100% reached, 0.0008 m, **5 J**. See the `so101_reach_rl`
-bench, which re-measures the sweep on every run because the conclusion should rest on the term being present
-rather than on one estimate of a rotor inertia.
+What that costs, measured over a 4×4 grid of PD gains and substep counts (`so101_reach_rl --sweep`):
+
+| | reaches a 1 cm target | best settle | work | control rate needed |
+|---|---|---|---|---|
+| link inertia only | **1 of 16** configurations | 0.0177 m | 20.4 J | 10 kHz |
+| plus reflected rotor | **16 of 16** | 0.0001 m | 2.1 J | 200 Hz |
+
+The plant is not unsolvable without the term. It is **stiff**: 50x the integration rate, ~10x the work, 22x
+the settling error, and a working region that collapses to one corner of the grid. An earlier draft of this
+section claimed it was unsolvable outright, from a sweep that still contained a hard velocity clamp injecting
+energy at every clamp event and never tried a low gain at a high substep count. The `--sweep` mode exists so
+the number is reproducible from committed code, which is what would have caught the wrong claim sooner.
+
+The bench also re-measures the inertia sensitivity every run, because the conclusion should rest on the term
+being present rather than on one estimate of a rotor inertia.
 
 MuJoCo has carried `armature` for exactly this reason and MJCF states it per joint; URDF has no field for it at
 all, so a URDF-only pipeline has no way to express the dominant term. Which format carries what, and which of
