@@ -173,6 +173,63 @@ pub fn forward_dynamics(
     }
 }
 
+/// What a joint's **declared** actuator capability implies about its acceleration, per joint.
+///
+/// One row per degree of freedom, from [`actuator_plausibility`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ActuatorReport {
+    pub joint: usize,
+    /// The model's declared torque or force limit, from [`crate::Joint::effort`]. `None` if unstated.
+    pub declared_effort: Option<f64>,
+    /// This joint's own diagonal of `M(q)`, **including** any stated armature.
+    pub joint_inertia: f64,
+    /// `effort / M_ii` — the acceleration the declared limit implies against this joint alone. `None` when the
+    /// model states no effort limit, because there is then nothing to check.
+    pub implied_acceleration: Option<f64>,
+    /// Whether the model stated an armature for this joint.
+    pub armature_stated: bool,
+}
+
+/// **Does the model's declared actuator capability make physical sense against its own inertias?**
+///
+/// This is the check that would have caught the SO-101 in minutes instead of hours. Its wrist link inertia is
+/// `3.45e-5` kg·m² and its URDF declares `effort="10"` N·m, which implies **289,728 rad/s²** — a number no
+/// geared servo produces, because the servo's own rotor inertia is the dominant term and URDF has nowhere to
+/// state it. The symptom at simulation time was a plant that thrashed at every gain, which reads as a tuning
+/// problem and is not one.
+///
+/// Interpretation, and why this function reports rather than judges: there is no universal threshold, because
+/// the honest bound depends on the drive. A geared hobby servo like the STS3215 manages a few hundred rad/s²
+/// at its output (3 N·m into a reflected `1.19e-2` kg·m² is 252); a quasi-direct-drive actuator reaches a few
+/// thousand. So a joint implying **10⁴ rad/s² or more, with no armature stated**, is almost always missing the
+/// rotor term rather than describing a remarkable motor. The caller knows its hardware and this function does
+/// not, so it returns the numbers and documents the rule of thumb instead of returning a verdict — the same
+/// reason `Joint::effort` stores `None` rather than a default.
+pub fn actuator_plausibility(
+    robot: &Robot,
+    inertia: &[LinkInertia],
+    q: &[f64],
+) -> Vec<ActuatorReport> {
+    let m = mass_matrix(robot, inertia, q);
+    (0..robot.dof())
+        .map(|i| {
+            let joint_inertia = m[(i, i)];
+            let declared_effort = robot.joints[i].effort;
+            ActuatorReport {
+                joint: i,
+                declared_effort,
+                joint_inertia,
+                // A non-positive or non-finite inertia cannot bound an acceleration, so say nothing rather
+                // than return an infinity that reads like a measurement.
+                implied_acceleration: declared_effort
+                    .filter(|_| joint_inertia > 0.0 && joint_inertia.is_finite())
+                    .map(|e| e / joint_inertia),
+                armature_stated: robot.joints[i].armature.is_some(),
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,5 +513,70 @@ mod tests {
             end_d < end_u / 10.0,
             "damped left {end_d:.3e} of {start_d:.3e}; undamped left {end_u:.3e}, so the loss is not damping"
         );
+    }
+
+    /// **The check that would have caught the SO-101 in minutes.**
+    ///
+    /// Its wrist declares `effort="10"` N·m against a link inertia of `3.45e-5` kg·m², implying 289,728 rad/s².
+    /// The symptom at simulation time was a plant that thrashed at every gain and substep, which reads as a
+    /// tuning problem and is not one. Asserts the flag fires before the armature is applied and stops firing
+    /// after, so a passing test cannot mean the function returns a constant.
+    #[test]
+    fn a_declared_effort_can_be_physically_impossible() {
+        let so101 = include_str!("../examples/so101.urdf");
+        let (mut robot, inertia) = from_urdf_full(so101, "base_link", "gripper_link").unwrap();
+        let n = robot.dof();
+        let q = vec![0.0; n];
+
+        // The rule of thumb the doc states: 1e4 rad/s^2 with no armature stated means a missing rotor term.
+        let suspicious = |rs: &[ActuatorReport]| -> Vec<usize> {
+            rs.iter()
+                .filter(|r| !r.armature_stated && r.implied_acceleration.is_some_and(|a| a >= 1e4))
+                .map(|r| r.joint)
+                .collect()
+        };
+
+        let before = actuator_plausibility(&robot, &inertia, &q);
+        assert_eq!(before.len(), n);
+        let flagged = suspicious(&before);
+        assert!(flagged.contains(&(n - 1)), "the wrist should be flagged, got {flagged:?}");
+        let wrist = before[n - 1];
+        assert_eq!(wrist.declared_effort, Some(10.0));
+        assert!(!wrist.armature_stated);
+        let acc = wrist.implied_acceleration.expect("effort is stated, so this must be Some");
+        assert!(acc > 1e5, "implied acceleration {acc:.3e} should be enormous");
+
+        // Applying the rotor term is what makes the model plausible. If this still flagged, the function would
+        // be reporting something other than what it claims.
+        for j in robot.joints.iter_mut() {
+            *j = j.clone().with_armature(345.0f64.powi(2) * 1e-7);
+        }
+        let after = actuator_plausibility(&robot, &inertia, &q);
+        assert!(suspicious(&after).is_empty(), "nothing should be flagged now, got {:?}", suspicious(&after));
+        assert!(after[n - 1].armature_stated);
+        assert!(
+            after[n - 1].implied_acceleration.unwrap() < 1e4,
+            "implied acceleration should now be plausible, got {:.3e}",
+            after[n - 1].implied_acceleration.unwrap()
+        );
+    }
+
+    /// A model that states no effort limit has nothing to check, and must say so rather than return a number.
+    #[test]
+    fn an_unstated_effort_yields_no_implied_acceleration() {
+        let (robot, inertia) = from_urdf_full(TWO_LINK, "base", "tool").unwrap();
+        let mut bare = robot.clone();
+        for j in bare.joints.iter_mut() {
+            *j = j.clone().with_effort(-1.0); // clears it
+        }
+        let rs = actuator_plausibility(&bare, &inertia, &[0.0, 0.0]);
+        for r in &rs {
+            assert_eq!(r.declared_effort, None);
+            assert_eq!(r.implied_acceleration, None, "no effort stated means no implied acceleration");
+            assert!(r.joint_inertia > 0.0, "the inertia is still reported, since it is known");
+        }
+        // The control: with an effort stated, the same call DOES produce a number.
+        let rs = actuator_plausibility(&robot, &inertia, &[0.0, 0.0]);
+        assert!(rs.iter().all(|r| r.implied_acceleration.is_some()));
     }
 }

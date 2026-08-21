@@ -18,20 +18,21 @@
 //! `[1.41e-2, 1.52e-2, 7.85e-3, 8.30e-4, 3.45e-5]` kg·m². The last joint is the gripper roll, and 10 N·m into
 //! `3.45e-5` kg·m² is **290,000 rad/s²** — one 5 ms step adds 1,449 rad/s. Over a 4x4 grid of gains and
 //! substeps (`--sweep`), IK+PD+gravity reaches a 1 cm target in **1 of 16** configurations, only at 10 kHz
-//! integration and low gain, settling at 0.0177 m on 20.4 J.
+//! integration and low gain, settling at 0.0177 m on 13.8 J. `actuator_plausibility` flags exactly the two
+//! joints responsible, from the model alone, before any simulation runs.
 //!
 //! The missing term is the **actuator's own reflected rotor inertia**. A geared servo presents `N²·J_rotor` at
 //! its output, and for the SO-101's distal joints that dominates the link the URDF describes — by a factor of
 //! ~340 at the wrist. `SeaJoint::reflected_inertia` in `ferromotion-control` has always computed it; nothing
 //! had ever fed it into a URDF-loaded multibody plant. Adding it, plus the motor's linear speed–torque droop:
 //!
-//! | reflected inertia | reaches 1 cm | best settle | work | rate needed |
+//! | reflected inertia | reaches 1 cm | best settle | electrical | rate needed |
 //! |---|---|---|---|---|
-//! | 0 (URDF as written) | 1 of 16 configs | 0.0177 m | 20.4 J | 10 kHz |
-//! | 1.19e-2 (N=345) | **16 of 16** | 0.0001 m | 2.1 J | 200 Hz |
+//! | 0 (URDF as written) | 1 of 16 configs | 0.0177 m | 13.8 J | 10 kHz |
+//! | 1.19e-2 (N=345) | **16 of 16** | 0.0001 m | 4.0 J | 200 Hz |
 //!
-//! 50x the integration rate, ~10x the work, 22x the settling error, and a working region that collapses to one
-//! corner of the grid. `SENSITIVITY` re-measures the inertia dependence every run and `--sweep` re-measures
+//! 50x the integration rate, and at identical gains 4.2x the settling error and 3.5x the energy, with a
+//! working region that collapses to one corner of the grid. `SENSITIVITY` re-measures the inertia dependence every run and `--sweep` re-measures
 //! this table, because the conclusion should not rest on one estimate of a rotor inertia — and because an
 //! earlier draft of this file claimed the plant was *unsolvable* without the term, which was wrong.
 //!
@@ -55,7 +56,8 @@
 //! `cargo run --release -p ferromotion-bench --example so101_reach_rl`
 
 use ferromotion_core::{
-    forward_dynamics, from_urdf_full, gravity_vector, mass_matrix, solve_ik, IkOptions, Iso, LinkInertia, Robot,
+    actuator_plausibility, forward_dynamics, from_urdf_full, gravity_vector, mass_matrix, solve_ik, IkOptions,
+    Iso, LinkInertia, Robot,
 };
 use ferromotion_learn::{train_normalized, BoxSpace, Env, GaussianPolicy, Mlp, ObsNorm, PpoConfig, StepResult};
 use nalgebra::Vector3;
@@ -427,7 +429,7 @@ fn ill_posed_sweep(seeds: &[u64], j_refl: f64) {
     }
     match best {
         Some((sub, err, elec)) => println!(
-            "\n  Without the reflected inertia the plant is still controllable, but only at {sub} substeps\n               ({:.0} Hz), and it settles at {err:.4} m drawing {elec:.1} J. The cost of the missing term is\n               integration rate and energy, not impossibility.",
+            "\n  Without the reflected inertia the plant is still controllable, but only at {sub} substeps\n  ({:.0} Hz), and it settles at {err:.4} m drawing {elec:.1} J. The cost of the missing term is\n  integration rate and energy, not impossibility.",
             sub as f64 / CONTROL_DT
         ),
         None => println!("\n  No configuration without reflected inertia reached {REACH_TOL} m on this grid."),
@@ -473,10 +475,25 @@ fn main() {
         "  link-only mass matrix diagonal at home: {:?} kg m^2",
         (0..n).map(|i| format!("{:.2e}", m[(i, i)])).collect::<Vec<_>>()
     );
+    // The library's own check, rather than a number computed here: `actuator_plausibility` exists because of
+    // this arm, and running it on the arm is the honest demonstration.
+    let report = actuator_plausibility(&bare.robot, &bare.inertia, &vec![0.0; n]);
+    println!("\n  actuator_plausibility on the model as written:\n");
+    println!("  {:>6} {:>9} {:>11} {:>14} {:>9}", "joint", "effort", "M_ii", "implied qdd", "armature");
+    for r in &report {
+        let flag = if !r.armature_stated && r.implied_acceleration.is_some_and(|a| a >= 1e4) { "  <- implausible" } else { "" };
+        println!(
+            "  {:>6} {:>9} {:>11.2e} {:>14} {:>9}{flag}",
+            r.joint,
+            r.declared_effort.map_or("none".to_string(), |e| format!("{e:.1}")),
+            r.joint_inertia,
+            r.implied_acceleration.map_or("n/a".to_string(), |a| format!("{a:.0}")),
+            if r.armature_stated { "stated" } else { "none" }
+        );
+    }
     let i_min = (0..n).map(|i| m[(i, i)]).fold(f64::INFINITY, f64::min);
     println!(
-        "  10 N m into the smallest ({i_min:.2e}) is {:.0} rad/s^2 — one {:.0} ms step adds {:.0} rad/s\n",
-        10.0 / i_min,
+        "\n  One {:.0} ms step at the worst joint adds {:.0} rad/s. That is the whole problem, and the check\n  above finds it from the model alone without running a single simulation step.\n",
         CONTROL_DT * 1e3,
         10.0 / i_min * CONTROL_DT
     );
@@ -592,11 +609,11 @@ fn main() {
     // amplified through 150 training iterations. Across seeds 7/11/23 the reached rate spans 17-50% for the
     // linear reward alone. Every comparative claim in the module docs comes from the 3-seed sweep.
     println!(
-        "\n  This is ONE seed ({train_seed}). Measured spread on `reached` between otherwise identical runs is\n           at least 8 points, and 17-50% across seeds for one reward, so read this row as a sample and not as a\n           result. Re-run with --seed to see the dispersion."
+        "\n  This is ONE seed ({train_seed}). Measured spread on `reached` between otherwise identical runs is\n  at least 8 points, and 17-50% across seeds for one reward, so read this row as a sample and not as a\n  result. Re-run with --seed to see the dispersion."
     );
     let (k_t, r) = motor_constants();
     println!(
-        "\n  Energy is electrical, not mechanical: k_t = {k_t:.3} N m/A and R = {r:.2} ohm both follow from the\n           stall torque and no-load speed above. Copper loss is the term a mechanical-work number misses, and it\n           is the one that matters here — holding a pose against gravity draws current at zero speed, where\n           tau*qd reads exactly zero. Regeneration is not credited."
+        "\n  Energy is electrical, not mechanical: k_t = {k_t:.3} N m/A and R = {r:.2} ohm both follow from the\n  stall torque and no-load speed above. Copper loss is the term a mechanical-work number misses, and it\n  is the one that matters here — holding a pose against gravity draws current at zero speed, where\n  tau*qd reads exactly zero. Regeneration is not credited."
     );
 
     println!();

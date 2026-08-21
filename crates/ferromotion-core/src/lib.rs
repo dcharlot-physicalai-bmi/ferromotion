@@ -191,7 +191,10 @@ pub use contact::{
 };
 pub use diffik::{solve_diffik, DiffIkOptions, DiffIkResult, FrameTaskDef};
 pub use dcol::{proximity, proximity_grad_spheres, Primitive};
-pub use dynamics::{forward_dynamics, gravity_vector, inverse_dynamics, mass_matrix, LinkInertia};
+pub use dynamics::{
+    actuator_plausibility, forward_dynamics, gravity_vector, inverse_dynamics, mass_matrix, ActuatorReport,
+    LinkInertia,
+};
 pub use grasp_spatial::{force_closure_q1_planar_subspace, force_closure_q1_spatial, force_closure_soft_spatial, grasp_matrix, grasp_split, net_wrench, primitive_wrenches_spatial, wrench_rank, GraspContact3, GraspSplit};
 pub use grasp::{force_closure_q1, force_closure_soft, primitive_wrenches, GraspContact};
 pub use great_circle::{cross_track_distance, destination, haversine_distance, initial_bearing, EARTH_RADIUS};
@@ -359,13 +362,15 @@ pub struct Joint {
     ///
     /// What omitting it costs, over a 4×4 grid of PD gains and substep counts (`so101_reach_rl --sweep`):
     ///
-    /// | | reaches a 1 cm target | best settle | work | control rate needed |
+    /// | | reaches a 1 cm target | best settle | electrical | control rate |
     /// |---|---|---|---|---|
-    /// | without | **1 of 16** configurations | 0.0177 m | 20.4 J | 10 kHz |
-    /// | with | **16 of 16** | 0.0001 m | 2.1 J | 200 Hz |
+    /// | without | **1 of 16** configurations | 0.0177 m | 13.8 J | 10 kHz |
+    /// | with | **16 of 16** | 0.0001 m | 4.0 J | 200 Hz |
     ///
-    /// So the plant is not unsolvable without it — it is **stiff**: 50x the integration rate, ~10x the work,
-    /// 22x the settling error, and a working region that shrinks to one corner of the grid. An earlier
+    /// So the plant is not unsolvable without it — it is **stiff**: 50x the integration rate, and at identical
+    /// gains 4.2x the settling error and 3.5x the energy, with a working region that shrinks to one corner of
+    /// the grid. [`crate::actuator_plausibility`] finds this from the model alone,
+    /// without running a simulation step. An earlier
     /// version of this note claimed "unsolvable, 0 of 32", which was wrong; that sweep still contained a hard
     /// velocity clamp that was itself injecting energy, and it never tried a low gain at a high substep
     /// count.

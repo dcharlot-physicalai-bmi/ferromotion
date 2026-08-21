@@ -35,13 +35,18 @@ the LeRobot original:
 A factor of **345**. With the link term alone, 10 N·m is 289,728 rad/s² and one 5 ms step adds 1,449 rad/s.
 What that costs, measured over a 4×4 grid of PD gains and substep counts (`so101_reach_rl --sweep`):
 
-| | reaches a 1 cm target | best settle | work | control rate needed |
+| | reaches a 1 cm target | best settle | electrical | control rate |
 |---|---|---|---|---|
-| link inertia only | **1 of 16** configurations | 0.0177 m | 20.4 J | 10 kHz |
-| plus reflected rotor | **16 of 16** | 0.0001 m | 2.1 J | 200 Hz |
+| link inertia only | **1 of 16** configurations | 0.0177 m | 13.8 J | 10 kHz |
+| plus reflected rotor | **16 of 16** | 0.0001 m | 4.0 J | 200 Hz |
 
-The plant is not unsolvable without the term. It is **stiff**: 50x the integration rate, ~10x the work, 22x
-the settling error, and a working region that collapses to one corner of the grid. An earlier draft of this
+At *identical* gains and substeps the term is worth 4.2x the settling accuracy and 3.5x the energy; the whole
+grid is what shows the other half, that without it only one corner works at all.
+
+The plant is not unsolvable without the term. It is **stiff**, and a working region that collapses to one
+corner of the grid. `actuator_plausibility` reports this straight off the model — for the SO-101 it flags
+joints 3 and 4 at 12,049 and 289,728 rad/s² implied acceleration, with no simulation run. An earlier draft of
+this
 section claimed it was unsolvable outright, from a sweep that still contained a hard velocity clamp injecting
 energy at every clamp event and never tried a low gain at a high substep count. The `--sweep` mode exists so
 the number is reproducible from committed code, which is what would have caught the wrong claim sooner.
