@@ -136,6 +136,15 @@ const J_ROTOR: f64 = 1e-7;
 /// Bus voltage the catalogue figures are quoted at.
 const V_BUS: f64 = 7.4;
 
+/// **Power drawn by the computer running the controller**, for the compute half of `E_task`.
+///
+/// The bench measures actuation in joules and would be telling half the story without this. A declared
+/// estimate rather than a measurement, and the one number here that is: a Raspberry Pi 5 under load, the usual
+/// companion for an arm this size, sits around 6 W. Compute energy scales linearly in it, so the ratio the
+/// table reports is what matters and the absolute value is a stated assumption. Measured on THIS machine's
+/// wall clock, so it is a fair comparison between the two controllers and not a claim about embedded silicon.
+const COMPUTE_WATTS: f64 = 6.0;
+
 /// **Torque constant and winding resistance, referred to the joint output.** Both follow from `TAU_STALL` and
 /// `OMEGA_NO_LOAD` — no third parameter is fitted.
 ///
@@ -325,12 +334,26 @@ struct Score {
     reached: f64,
     mech: f64,
     copper: f64,
+    /// Wall-clock seconds spent **in the controller**, excluding the physics step. The whole point of
+    /// separating it: a simulator's cost is not a robot's cost, but the controller's is.
+    compute_s: f64,
 }
 
 impl Score {
-    /// Electrical energy drawn: delivered work plus resistive loss, with no regenerative recovery.
+    /// Actuation energy: delivered work plus resistive loss, no regenerative recovery.
     fn elec(&self) -> f64 {
         self.mech + self.copper
+    }
+
+    /// Compute energy at the declared platform power.
+    fn compute_j(&self) -> f64 {
+        self.compute_s * COMPUTE_WATTS
+    }
+
+    /// `E_task = E_actuation + E_compute` — the quantity the institute's own metric names, which a bench
+    /// reporting only actuation cannot claim to measure.
+    fn total_j(&self) -> f64 {
+        self.elec() + self.compute_j()
     }
 }
 
@@ -342,6 +365,7 @@ fn mean(v: &[Score]) -> Score {
         reached: v.iter().map(|s| s.reached).sum::<f64>() / n,
         mech: v.iter().map(|s| s.mech).sum::<f64>() / n,
         copper: v.iter().map(|s| s.copper).sum::<f64>() / n,
+        compute_s: v.iter().map(|s| s.compute_s).sum::<f64>() / n,
     }
 }
 
@@ -349,13 +373,30 @@ fn episode(j_refl: f64, seed: u64, law: impl FnMut(&So101Reach) -> Vec<f64>) -> 
     episode_with(j_refl, seed, SUBSTEPS, law)
 }
 
-fn episode_with(j_refl: f64, seed: u64, substeps: usize, mut law: impl FnMut(&So101Reach) -> Vec<f64>) -> Score {
+fn episode_with(j_refl: f64, seed: u64, substeps: usize, law: impl FnMut(&So101Reach) -> Vec<f64>) -> Score {
+    episode_timed(j_refl, seed, substeps, 0.0, law)
+}
+
+/// `setup_s` folds in one-off controller cost paid before the loop — the IK solve, which PPO has no equivalent
+/// of. Charging it to the episode is the honest accounting: the baseline cannot reach without it.
+fn episode_timed(
+    j_refl: f64,
+    seed: u64,
+    substeps: usize,
+    setup_s: f64,
+    mut law: impl FnMut(&So101Reach) -> Vec<f64>,
+) -> Score {
     let mut env = So101Reach::new(j_refl);
     env.substeps = substeps;
     env.reset(seed);
     let mut best = f64::INFINITY;
+    // Time the CONTROLLER only. `env.step` is the simulator and a real robot does not pay for it; the control
+    // law is the part that has to run on the robot's computer at 200 Hz.
+    let mut compute_s = 0.0;
     for _ in 0..STEPS {
+        let t = std::time::Instant::now();
         let a = law(&env);
+        compute_s += t.elapsed().as_secs_f64();
         env.step(&a);
         best = best.min(env.reach_error());
     }
@@ -366,6 +407,7 @@ fn episode_with(j_refl: f64, seed: u64, substeps: usize, mut law: impl FnMut(&So
         reached: if final_err < REACH_TOL { 1.0 } else { 0.0 },
         mech: env.mech,
         copper: env.copper,
+        compute_s: compute_s + setup_s,
     }
 }
 
@@ -383,6 +425,115 @@ fn pd_track(env: &So101Reach, q_goal: &[f64], kp: f64, kd: f64) -> Vec<f64> {
     (0..env.dof())
         .map(|i| (g[i] + kp * (q_goal[i] - env.q[i]) - kd * env.qd[i]).clamp(-TAU_STALL, TAU_STALL))
         .collect()
+}
+
+/// **What the two control laws cost to evaluate**, head to head. Run with `--compute`.
+///
+/// The arithmetic cost of a policy does not depend on the values of its weights, so this needs no training run
+/// and is not an estimate: it times the same `pd_track` and `GaussianPolicy::mean` the scored controllers call.
+/// Reported per control step and per 1.5 s episode, because that is what a robot's computer actually pays.
+///
+/// **Minimum of repeated trials, with the spread printed.** A single wall-clock reading on a loaded machine is
+/// not a measurement: back-to-back runs of a median-based version of this function moved 30% and its reported
+/// ratio wandered over 5.05x / 5.87x / 7.23x / 9.23x; switching to the minimum tightened the per-step spread
+/// to about 1.5x and the ratio to 6-10x. The minimum is the right statistic and the median is not, because
+/// noise is **one-sided** — contention, migration and interrupts only ever add time to a fixed amount of
+/// arithmetic, so the fastest trial is the closest look at the real cost. (That is the opposite of the rule for
+/// comparing GPU and CPU floating point, where the concern is disagreement rather than delay.)
+///
+/// The trial ranges are printed so a reader can see whether the comparison is resolved at all: PD's slowest
+/// trial has stayed below the policy's fastest in every run, which is what makes the direction solid even while
+/// the machine is too loaded to pin the ratio down.
+fn compute_cost(n_calls: usize) {
+    let env = So101Reach::new(reflected_inertia());
+    let n = env.dof();
+    let obs_dim = 2 * n + 3;
+    let q_goal = vec![0.1; n];
+    let policy = GaussianPolicy::new(&[obs_dim, 64, 64, n], 7, -1.0);
+    let norm = ObsNorm::new(obs_dim);
+    let space = env.action_space();
+
+    // Warm both paths first: a cold branch predictor and a cold cache would be measured as the controller.
+    for _ in 0..2000 {
+        std::hint::black_box(pd_track(&env, &q_goal, 8.0, 1.5));
+        std::hint::black_box(space.from_unit(&policy.mean(&norm.normalize(&env.observation()))));
+    }
+
+    // Interleave the two so a drifting machine load hits both equally, and take the median of the trials.
+    const TRIALS: usize = 7;
+    let per = n_calls / TRIALS;
+    let (mut pd_t, mut mlp_t) = (Vec::new(), Vec::new());
+    for _ in 0..TRIALS {
+        let t = std::time::Instant::now();
+        for _ in 0..per {
+            std::hint::black_box(pd_track(&env, &q_goal, 8.0, 1.5));
+        }
+        pd_t.push(t.elapsed().as_nanos() as f64 / per as f64);
+
+        let t = std::time::Instant::now();
+        for _ in 0..per {
+            std::hint::black_box(space.from_unit(&policy.mean(&norm.normalize(&env.observation()))));
+        }
+        mlp_t.push(t.elapsed().as_nanos() as f64 / per as f64);
+    }
+    let stats = |v: &mut Vec<f64>| -> (f64, f64, f64) {
+        v.sort_by(|a, b| a.partial_cmp(b).expect("timings are finite"));
+        (v[0], v[0], v[v.len() - 1]) // best estimate is the fastest trial; range printed for the reader
+    };
+    let (pd_ns, pd_lo, pd_hi) = stats(&mut pd_t);
+    let (mlp_ns, mlp_lo, mlp_hi) = stats(&mut mlp_t);
+
+    // And the one-off the baseline pays that the policy does not.
+    let mut probe = So101Reach::new(reflected_inertia());
+    probe.reset(0);
+    let t = std::time::Instant::now();
+    for _ in 0..64 {
+        std::hint::black_box(ik_goal(&probe));
+    }
+    let ik_us = t.elapsed().as_secs_f64() * 1e6 / 64.0;
+
+    let ep = |ns: f64, setup_us: f64| (ns * STEPS as f64 + setup_us * 1e3) * 1e-9 * COMPUTE_WATTS;
+    println!("\n  Cost of evaluating each control law (fastest of {TRIALS} trials x {per} calls, warmed):\n");
+    println!("  {:<34} {:>12} {:>17} {:>11} {:>10}", "control law", "per step", "trial range", "per episode", "energy");
+    println!(
+        "  {:<34} {:>9.0} ns {:>7.0}-{:<7.0} ns {:>8.2} ms {:>8.5} J",
+        "PD + gravity_vector (RNEA)", pd_ns, pd_lo, pd_hi, pd_ns * STEPS as f64 * 1e-6, ep(pd_ns, 0.0)
+    );
+    println!(
+        "  {:<34} {:>9.0} ns {:>7.0}-{:<7.0} ns {:>8.2} ms {:>8.5} J",
+        "GaussianPolicy 13-64-64-5 + ObsNorm", mlp_ns, mlp_lo, mlp_hi, mlp_ns * STEPS as f64 * 1e-6, ep(mlp_ns, 0.0)
+    );
+    println!(
+        "  {:<34} {:>12} {:>17} {:>8.2} ms {:>8.5} J",
+        "solve_ik, once per episode", "--", "--", ik_us * 1e-3, ik_us * 1e-6 * COMPUTE_WATTS
+    );
+    // The ratio is only meaningful if the two trial ranges are separated; say so when they are not.
+    if pd_hi >= mlp_lo {
+        println!("\n  WARNING: the trial ranges OVERLAP, so the ratio below is not resolved by this measurement.");
+    }
+    // Measure the baseline's actuation rather than quoting a number that will drift out of date.
+    let act: f64 = {
+        let seeds: Vec<u64> = (0..12).collect();
+        let scores: Vec<Score> = seeds
+            .iter()
+            .map(|&sd| {
+                let mut probe = So101Reach::new(reflected_inertia());
+                probe.reset(sd);
+                let g = ik_goal(&probe);
+                episode_with(reflected_inertia(), sd, SUBSTEPS, move |e| pd_track(e, &g, 8.0, 1.5))
+            })
+            .collect();
+        mean(&scores).elec()
+    };
+    let worst_compute = ep(pd_ns.max(mlp_ns), ik_us);
+    println!(
+        "\n  About {:.0}x per step in the {}'s favour, and at least {:.1}x guaranteed by the non-overlapping\n  trial ranges. Two figures because one would overstate the precision: the point estimate has read 6.1x\n  through 10.0x across runs on this machine, while the range-to-range bound holds whatever the load.\n\n  Against the {:.2} J of actuation the baseline actually draws, compute is\n  {:.0}x smaller either way: on THIS task the energy question is settled entirely by the actuator, and a controller that saves compute at the cost of a worse trajectory loses. That is a statement\n  about a 5-DoF arm at 200 Hz, not a general law: the ratio inverts as the policy grows or the motors\n  shrink. Worth knowing before deploying this: the policy path allocates four Vecs per control step\n  (observation, normalize, mean, from_unit) against the PD law's two, and that allocator traffic is both part\n  of the cost and the largest source of the spread above. A 200 Hz loop should not touch the heap at all.",
+        if mlp_ns > pd_ns { mlp_ns / pd_ns } else { pd_ns / mlp_ns },
+        if mlp_ns > pd_ns { "PD law" } else { "policy" },
+        if mlp_lo > pd_hi { mlp_lo / pd_hi } else { 1.0 },
+        act,
+        act / worst_compute
+    );
 }
 
 /// **Both inertias on the same grid**, so the comparison is like for like. Run with `--sweep`.
@@ -407,12 +558,12 @@ fn ill_posed_sweep(seeds: &[u64], j_refl: f64) {
                     &seeds
                         .iter()
                         .map(|&sd| {
-                            let g = ik_goal(&{
-                                let mut e = So101Reach::new(jr);
-                                e.reset(sd);
-                                e
-                            });
-                            episode_with(jr, sd, sub, move |e| pd_track(e, &g, kp, kd))
+                            let mut probe = So101Reach::new(jr);
+                            probe.reset(sd);
+                            let t = std::time::Instant::now();
+                            let g = ik_goal(&probe);
+                            let ik_s = t.elapsed().as_secs_f64();
+                            episode_timed(jr, sd, sub, ik_s, move |e| pd_track(e, &g, kp, kd))
                         })
                         .collect::<Vec<_>>(),
                 )
@@ -506,8 +657,8 @@ fn main() {
     // Does the conclusion depend on the estimated rotor inertia, or only on it being nonzero?
     println!("  IK + PD + gravity against reflected inertia:\n");
     println!(
-        "  {:>12} {:>10} {:>10} {:>8} {:>8} {:>8} {:>8}",
-        "j_refl", "final err", "best err", "mech J", "copper J", "elec J", "reached"
+        "  {:>12} {:>10} {:>8} {:>8} {:>8} {:>9} {:>9} {:>7}",
+        "j_refl", "final err", "mech J", "copper J", "act J", "compute J", "total J", "reached"
     );
     let mut baseline: Option<Score> = None;
     for (k, &jr) in sensitivity().iter().enumerate() {
@@ -515,19 +666,19 @@ fn main() {
             &seeds
                 .iter()
                 .map(|&sd| {
-                    let g = ik_goal(&{
-                        let mut e = So101Reach::new(jr);
-                        e.reset(sd);
-                        e
-                    });
-                    episode(jr, sd, move |e| pd_track(e, &g, 8.0, 1.5))
+                    let mut probe = So101Reach::new(jr);
+                    probe.reset(sd);
+                    let t = std::time::Instant::now();
+                    let g = ik_goal(&probe);
+                    let ik_s = t.elapsed().as_secs_f64();
+                    episode_timed(jr, sd, SUBSTEPS, ik_s, move |e| pd_track(e, &g, 8.0, 1.5))
                 })
                 .collect::<Vec<_>>(),
         );
         let mark = if k == USED_INDEX { " <- used" } else { "" };
         println!(
-            "  {jr:>12.2e} {:>10.4} {:>10.4} {:>8.2} {:>8.2} {:>8.2} {:>7.0}%{mark}",
-            s.final_err, s.best_err, s.mech, s.copper, s.elec(), 100.0 * s.reached
+            "  {jr:>12.2e} {:>10.4} {:>8.2} {:>8.2} {:>8.2} {:>9.4} {:>9.2} {:>6.0}%{mark}",
+            s.final_err, s.mech, s.copper, s.elec(), s.compute_j(), s.total_j(), 100.0 * s.reached
         );
         if k == USED_INDEX {
             baseline = Some(s);
@@ -537,6 +688,9 @@ fn main() {
     let baseline = baseline.expect("USED_INDEX is within sensitivity()");
     assert_eq!(sensitivity()[USED_INDEX], j_refl, "USED_INDEX must name the inertia the run uses");
 
+    if std::env::args().any(|a| a == "--compute") {
+        compute_cost(200_000);
+    }
     if std::env::args().any(|a| a == "--sweep") {
         ill_posed_sweep(&seeds, j_refl);
     }
@@ -595,15 +749,23 @@ fn main() {
     // is the whole reason the table reports metres and joules rather than reward.
     println!("  Returns across reward shapes are not comparable; compare the metres and joules.\n");
     println!(
-        "  {:<22} {:>10} {:>10} {:>8} {:>8} {:>8} {:>8}",
-        "controller", "final err", "best err", "mech J", "copper J", "elec J", "reached"
+        "  {:<20} {:>10} {:>8} {:>8} {:>10} {:>9} {:>7}",
+        "controller", "final err", "act J", "compute", "compute J", "total J", "reached"
     );
     for (name, s) in [("IK + PD + gravity", baseline), ("PPO", ppo)] {
         println!(
-            "  {name:<22} {:>10.4} {:>10.4} {:>8.2} {:>8.2} {:>8.2} {:>7.0}%",
-            s.final_err, s.best_err, s.mech, s.copper, s.elec(), 100.0 * s.reached
+            "  {name:<20} {:>10.4} {:>8.2} {:>7.2}ms {:>10.4} {:>9.2} {:>6.0}%",
+            s.final_err,
+            s.elec(),
+            s.compute_s * 1e3,
+            s.compute_j(),
+            s.total_j(),
+            100.0 * s.reached
         );
     }
+    println!(
+        "\n  E_task = E_actuation + E_compute, at a declared {COMPUTE_WATTS} W for the controller's computer.\n  Compute is wall clock for the CONTROL LAW only, excluding the physics step a real robot never pays\n  for, and including the baseline's one-off IK solve, which PPO has no equivalent of."
+    );
     // ONE SEED IS NOT A MEASUREMENT, and this bench has the receipt: the same quadratic configuration read
     // 8% reached in one run and 0% in the next, differing only by an LU-versus-Cholesky solve at 1e-15
     // amplified through 150 training iterations. Across seeds 7/11/23 the reached rate spans 17-50% for the

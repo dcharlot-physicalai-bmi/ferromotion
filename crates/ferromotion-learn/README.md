@@ -135,6 +135,32 @@ Two things the reward sweep establishes:
   quadratic goes flat, and it came last. At the 25 cm start it is numerically zero, so it is *sparse* through
   the whole approach.
 
+### Compute is the other half of E_task, and it does not rescue the policy
+
+A bench reporting only actuation cannot claim to measure `E_task = E_actuation + E_compute`, so the controller's
+own cost is timed too — the control law only, excluding the physics step a real robot never pays for:
+
+| control law | per step | per 1.5 s episode | energy at 6 W |
+|---|---|---|---|
+| PD + `gravity_vector` (RNEA) | ~1.1 µs | 0.33 ms | 0.0020 J |
+| `GaussianPolicy` 13-64-64-5 + `ObsNorm` | ~6.4 µs | 1.92 ms | 0.0115 J |
+| `solve_ik`, once per episode | — | 0.02 ms | 0.0001 J |
+
+**The policy costs about 6x more per control step**, with at least 5x guaranteed by the trial ranges not
+overlapping. So it loses on all three axes: accuracy, actuation energy, and compute. And `solve_ik` — the one
+cost the baseline pays that the policy has no equivalent of — is negligible at 0.02 ms.
+
+But compute is **~470x smaller than actuation** here, so on this task the energy question is settled entirely by
+the actuator, and a controller that saves compute at the cost of a worse trajectory loses. That is a statement
+about a 5-DoF arm at 200 Hz and not a general law: the ratio inverts as the policy grows or the motors shrink.
+
+Two method notes, both of which changed the answer. **The minimum across trials is the right statistic for
+timing, not the median** — timing noise is one-sided, since contention and interrupts only ever add time to a
+fixed amount of arithmetic. A median-based version of this measurement wandered over 5.05x / 5.87x / 7.23x /
+9.23x on repeated runs; the minimum tightened the per-step spread to about 1.5x. And the policy path **allocates
+four `Vec`s per control step** (observation, normalize, mean, from_unit) against the PD law's two, which is both
+part of the cost and the largest source of what spread remains. A 200 Hz loop should not touch the heap.
+
 **One seed is not a measurement, and this bench carries the receipt.** The same quadratic configuration read 8%
 reached in one run and 0% in the next, differing only by an LU-versus-Cholesky solve at `1e-15` amplified
 through 150 training iterations. Across seeds the linear reward's success rate spans 17–50%. Every comparative
