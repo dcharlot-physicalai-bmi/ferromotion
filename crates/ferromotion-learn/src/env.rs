@@ -277,6 +277,14 @@ pub fn rollout<E: Env>(
 ///
 /// Its use here is as a **test oracle**: with zero torque and zero damping the total energy is conserved, so
 /// the integrator can be checked against a conserved quantity rather than against itself.
+///
+/// **This is an ideal torque source, not a robot.** There is no gearbox, no reflected rotor inertia, no
+/// back-EMF speed droop and no winding loss, which is the right simplification for a control-theory testbed and
+/// the wrong one for anything making a claim about hardware. The omission is not cosmetic: on a real geared arm
+/// the rotor's reflected inertia `N²·J_rotor` can exceed the link's own by two orders of magnitude, and leaving
+/// it out turned a solvable reach into one that needed a 50x higher integration rate. See
+/// `ferromotion_core::Joint::armature` and the `so101_reach_rl` bench for a plant that carries those terms, and
+/// `ferromotion_core::actuator_plausibility` for the check that spots their absence.
 #[derive(Clone, Debug)]
 pub struct Pendulum {
     /// Mass at the tip (kg).
