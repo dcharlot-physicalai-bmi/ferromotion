@@ -54,6 +54,18 @@ the number is reproducible from committed code, which is what would have caught 
 The bench also re-measures the inertia sensitivity every run, because the conclusion should rest on the term
 being present rather than on one estimate of a rotor inertia.
 
+`to_mjcf` writes a `Robot` back out, which is what makes the term usable end to end: **load a URDF, attach the
+servo model, save MJCF, and the rotor inertia survives.** Nothing could express it before, so a corrected plant
+existed only in memory. `so101_servo.mjcf` in `examples/` is that file for the SO-101 — the same arm carrying
+`N²·J_rotor` and the back-EMF droop — and a test regenerates it from the URDF on every run, so it cannot drift
+from the code that produced it. With a realistic 3 N·m limit attached, `actuator_plausibility` flags nothing on
+it; on the URDF it was derived from, it still flags two joints, which is what keeps that assertion honest.
+
+The export round-trips through `from_mjcf_full` and the test compares the **dynamics** — mass matrix, gravity
+vector, forward kinematics — not the text, because matching bytes is not the property that matters. Floats are
+written with Rust's shortest round-trip `Display`; a first version used `{:.17}` with trailing zeros trimmed and
+silently rounded `0.012900000000000002` to `0.0129`, breaking the round trip by one ulp.
+
 MuJoCo has carried `armature` for exactly this reason and MJCF states it per joint; URDF has no field for it at
 all, so a URDF-only pipeline has no way to express the dominant term. Which format carries what, and which of
 it this crate reads:

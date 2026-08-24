@@ -356,6 +356,116 @@ pub fn from_mjcf_str(xml: &str) -> Result<Robot, String> {
     from_mjcf_full(xml).map(|(r, _)| r)
 }
 
+/// **Write a `Robot` and its link inertias as MJCF.** The counterpart to [`from_mjcf_full`], and the reason it
+/// exists: **URDF has no field for reflected rotor inertia**, so a plant loaded from URDF and then given the
+/// servo terms it needs — [`crate::Joint::armature`], [`crate::Joint::damping`] — had no format to be saved in.
+/// MJCF states both per joint. This closes that gap: load a URDF, attach the actuator model, write MJCF, and
+/// the terms survive the trip.
+///
+/// The output targets exactly the subset [`from_mjcf_full`] parses, so it **round-trips**: each joint becomes a
+/// nested `<body>` whose pose is that joint's origin, with the `<joint>` anchored at the body frame and an
+/// `<inertial>` carrying mass, centre of mass and the full inertia tensor. `ee_offset` becomes a trailing
+/// jointless body. There is a test that exports, re-imports, and compares the mass matrix and gravity vector
+/// rather than the text, because matching bytes is not the property that matters.
+///
+/// Angles are radians (`<compiler angle="radian"/>`), so nothing depends on the reader's default.
+///
+/// What it does not write, because the parser does not read it back and a silent round-trip loss is worse than
+/// an absent field: geometry, materials, actuators, sensors and equality constraints. [`crate::Joint::effort`]
+/// and [`crate::Joint::max_velocity`] are among the casualties — MJCF states those on `<actuator>`, which is
+/// outside the subset, so they are dropped and the doc comment says so rather than the file pretending.
+pub fn to_mjcf(robot: &Robot, inertia: &[LinkInertia], model: &str) -> Result<String, String> {
+    if inertia.len() != robot.dof() {
+        return Err(format!("{} inertias for {} joints", inertia.len(), robot.dof()));
+    }
+    // Rust's `Display` for f64 emits the SHORTEST string that parses back to the identical bit pattern, so
+    // this is lossless. A first version used `{:.17}` and trimmed trailing zeros, which silently rounded
+    // 0.012900000000000002 to 0.0129 and broke the round trip by one ulp — a serialisation format that loses
+    // precision quietly is exactly the defect this file exists to document elsewhere.
+    let num = |v: f64| -> String {
+        if v == 0.0 { "0".to_string() } else { format!("{v}") } // `v == 0.0` also catches -0.0
+    };
+    let v3 = |v: &Vector3<f64>| format!("{} {} {}", num(v.x), num(v.y), num(v.z));
+
+    let mut out = String::new();
+    out.push_str(&format!("<mujoco model=\"{}\">\n", xml_escape(model)));
+    out.push_str("  <compiler angle=\"radian\"/>\n  <worldbody>\n");
+
+    let mut indent = 4;
+    for (i, j) in robot.joints.iter().enumerate() {
+        let pad = " ".repeat(indent);
+        let t = j.origin.translation.vector;
+        let q = j.origin.rotation;
+        // nalgebra stores (i,j,k,w); MJCF quat is (w,x,y,z).
+        out.push_str(&format!(
+            "{pad}<body name=\"link{i}\" pos=\"{}\" quat=\"{} {} {} {}\">\n",
+            v3(&t),
+            num(q.w),
+            num(q.i),
+            num(q.j),
+            num(q.k)
+        ));
+        let kind = match j.kind {
+            JointKind::Revolute => "hinge",
+            JointKind::Prismatic => "slide",
+        };
+        let mut attrs = format!("name=\"joint{i}\" type=\"{kind}\" axis=\"{}\"", v3(&j.axis.into_inner()));
+        if let Some((lo, hi)) = j.limits {
+            attrs.push_str(&format!(" limited=\"true\" range=\"{} {}\"", num(lo), num(hi)));
+        }
+        // The two the URDF could not state. Written unconditionally when present, since carrying them is the
+        // entire point of this function.
+        if let Some(a) = j.armature {
+            attrs.push_str(&format!(" armature=\"{}\"", num(a)));
+        }
+        if let Some(d) = j.damping {
+            attrs.push_str(&format!(" damping=\"{}\"", num(d)));
+        }
+        out.push_str(&format!("{pad}  <joint {attrs}/>\n"));
+
+        let li = &inertia[i];
+        let m = &li.inertia;
+        out.push_str(&format!(
+            "{pad}  <inertial pos=\"{}\" mass=\"{}\" fullinertia=\"{} {} {} {} {} {}\"/>\n",
+            v3(&li.com),
+            num(li.mass),
+            num(m[(0, 0)]),
+            num(m[(1, 1)]),
+            num(m[(2, 2)]),
+            num(m[(0, 1)]),
+            num(m[(0, 2)]),
+            num(m[(1, 2)])
+        ));
+        indent += 2;
+    }
+
+    // The tool frame as a trailing jointless body, which the parser folds into `ee_offset`.
+    let eo = robot.ee_offset;
+    let pad = " ".repeat(indent);
+    let q = eo.rotation;
+    out.push_str(&format!(
+        "{pad}<body name=\"tool\" pos=\"{}\" quat=\"{} {} {} {}\"/>\n",
+        v3(&eo.translation.vector),
+        num(q.w),
+        num(q.i),
+        num(q.j),
+        num(q.k)
+    ));
+
+    for _ in 0..robot.dof() {
+        indent -= 2;
+        out.push_str(&format!("{}</body>\n", " ".repeat(indent)));
+    }
+    out.push_str("  </worldbody>\n</mujoco>\n");
+    Ok(out)
+}
+
+/// Escape the five XML metacharacters. A robot name is caller-supplied text and a bare `&` would make the
+/// output unparseable by the very function meant to read it back.
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&apos;")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,5 +672,141 @@ mod tests {
             "armature must reach the mass matrix"
         );
         assert_eq!(m[(1, 1)], m0[(1, 1)], "and must not touch the other joint");
+    }
+
+    /// **The round trip is the test, and the plant is the comparison.** Export a robot that carries armature
+    /// and damping, read it back, and check the *dynamics* agree — mass matrix, gravity vector and forward
+    /// kinematics — rather than comparing text. Matching bytes is not the property that matters, and a text
+    /// comparison would pass on two files that describe different robots written the same way.
+    #[test]
+    fn mjcf_round_trips_through_the_dynamics() {
+        let so101 = include_str!("../examples/so101.urdf");
+        let (mut robot, inertia) = crate::from_urdf_full(so101, "base_link", "gripper_link").unwrap();
+        let n = robot.dof();
+        // Attach exactly what URDF cannot state. If these do not survive, the export is pointless.
+        for (i, j) in robot.joints.iter_mut().enumerate() {
+            *j = j.clone().with_armature(1.19e-2 + i as f64 * 1e-3).with_damping(0.64 - i as f64 * 0.05);
+        }
+
+        let xml = to_mjcf(&robot, &inertia, "so101").expect("export");
+        let (back, back_inertia) = from_mjcf_full(&xml).expect("re-import the file we just wrote");
+        assert_eq!(back.dof(), n, "degrees of freedom");
+
+        for i in 0..n {
+            let (a, b) = (&robot.joints[i], &back.joints[i]);
+            assert_eq!(b.armature, a.armature, "armature on joint {i} — the whole reason this exists");
+            assert_eq!(b.damping, a.damping, "damping on joint {i}");
+            assert_eq!(b.kind, a.kind, "kind on joint {i}");
+            let (al, bl) = (a.limits.unwrap(), b.limits.unwrap());
+            assert!((al.0 - bl.0).abs() < 1e-12 && (al.1 - bl.1).abs() < 1e-12, "limits on joint {i}");
+        }
+
+        // The dynamics are the real check: they fold origin, axis, inertia and armature together, so an error
+        // in any one of them shows up here even if the per-field checks above were satisfied.
+        let g = Vector3::new(0.0, 0.0, -9.81);
+        for q in [vec![0.0; n], vec![0.3, -0.7, 0.5, -0.2, 1.1], vec![-1.2, 0.9, -0.4, 1.3, -0.8]] {
+            let (m0, m1) = (crate::mass_matrix(&robot, &inertia, &q), crate::mass_matrix(&back, &back_inertia, &q));
+            for i in 0..n {
+                for j in 0..n {
+                    assert!((m0[(i, j)] - m1[(i, j)]).abs() < 1e-9, "M[{i},{j}] at {q:?}: {m0:?} vs {m1:?}");
+                }
+            }
+            let g0 = crate::gravity_vector(&robot, &inertia, &q, g);
+            let g1 = crate::gravity_vector(&back, &back_inertia, &q, g);
+            for i in 0..n {
+                assert!((g0[i] - g1[i]).abs() < 1e-9, "gravity[{i}] at {q:?}: {g0:?} vs {g1:?}");
+            }
+            let (p0, p1) = (robot.fk(&q).translation.vector, back.fk(&q).translation.vector);
+            assert!((p0 - p1).norm() < 1e-9, "tool position at {q:?}: {p0:?} vs {p1:?}");
+        }
+    }
+
+    /// **The control the round-trip test needs.** If `to_mjcf` dropped armature entirely, the test above would
+    /// still pass whenever the importer also defaulted it to the same thing. This proves the exported text
+    /// actually carries the term, and that a robot without one exports without one.
+    #[test]
+    fn the_exported_text_carries_armature_only_when_the_model_states_it() {
+        let so101 = include_str!("../examples/so101.urdf");
+        let (robot, inertia) = crate::from_urdf_full(so101, "base_link", "gripper_link").unwrap();
+
+        let bare = to_mjcf(&robot, &inertia, "bare").unwrap();
+        assert!(!bare.contains("armature"), "a model with no armature must not export one");
+
+        let mut geared = robot.clone();
+        for j in geared.joints.iter_mut() {
+            *j = j.clone().with_armature(0.0119);
+        }
+        let xml = to_mjcf(&geared, &inertia, "geared").unwrap();
+        assert_eq!(xml.matches("armature=").count(), geared.dof(), "one armature per joint");
+        assert!(xml.contains("angle=\"radian\""), "angles must be explicit, not left to the reader's default");
+    }
+
+    /// A caller-supplied name is text, and `&` in it would produce a file this crate's own parser rejects.
+    #[test]
+    fn a_hostile_model_name_still_produces_parseable_xml() {
+        let so101 = include_str!("../examples/so101.urdf");
+        let (robot, inertia) = crate::from_urdf_full(so101, "base_link", "gripper_link").unwrap();
+        let xml = to_mjcf(&robot, &inertia, r#"a & b <c> "d""#).unwrap();
+        assert!(xml.contains("&amp;") && xml.contains("&lt;") && xml.contains("&quot;"));
+        from_mjcf_full(&xml).expect("the escaped name must still parse");
+    }
+
+    /// Mismatched inertia count is a caller error and must be reported, not indexed past.
+    #[test]
+    fn a_wrong_inertia_count_is_an_error() {
+        let so101 = include_str!("../examples/so101.urdf");
+        let (robot, inertia) = crate::from_urdf_full(so101, "base_link", "gripper_link").unwrap();
+        assert!(to_mjcf(&robot, &inertia[..2], "short").is_err());
+    }
+
+    /// **The repo now ships a model that passes its own plausibility check.**
+    ///
+    /// `so101.urdf` declares `effort="10"` on every joint and cannot state a rotor inertia, so
+    /// `actuator_plausibility` flags its two distal joints at 12,049 and 289,728 rad/s². MJCF *can* state one.
+    /// `so101_servo.mjcf` is that same arm with the STS3215's terms attached, and this test both regenerates it
+    /// — so the committed file cannot drift from the code that produced it — and checks the property the file
+    /// exists for.
+    #[test]
+    fn the_shipped_servo_mjcf_is_current_and_plausible() {
+        const COMMITTED: &str = include_str!("../examples/so101_servo.mjcf");
+        let urdf = include_str!("../examples/so101.urdf");
+        let (mut robot, inertia) = crate::from_urdf_full(urdf, "base_link", "gripper_link").unwrap();
+        let armature = 345.0f64.powi(2) * 1e-7; // N^2 J_rotor
+        let damping = 3.0 / 4.7; // tau_stall / omega_0, the back-EMF speed droop
+        for j in robot.joints.iter_mut() {
+            *j = j.clone().with_armature(armature).with_damping(damping);
+        }
+        let regenerated = to_mjcf(&robot, &inertia, "so101_sts3215").unwrap();
+        assert_eq!(
+            regenerated, COMMITTED,
+            "so101_servo.mjcf is stale; regenerate it from so101.urdf with the STS3215 terms"
+        );
+
+        // The property the file exists for: a realistic effort limit is now physically plausible on every
+        // joint, which it is not on the URDF this was derived from.
+        let (mut back, back_inertia) = from_mjcf_full(COMMITTED).unwrap();
+        let n = back.dof();
+        for j in back.joints.iter_mut() {
+            *j = j.clone().with_effort(3.0); // STS3215 stall, the figure the URDF should have carried
+        }
+        let report = crate::actuator_plausibility(&back, &back_inertia, &vec![0.0; n]);
+        let flagged: Vec<usize> = report
+            .iter()
+            .filter(|r| r.implied_acceleration.is_some_and(|a| a >= 1e4))
+            .map(|r| r.joint)
+            .collect();
+        assert!(flagged.is_empty(), "no joint should be implausible now, flagged {flagged:?}");
+        assert!(report.iter().all(|r| r.armature_stated), "every joint must carry the rotor term");
+
+        // And the same URDF WITHOUT the term does flag, so the assertion above is not vacuous.
+        let (mut bare, bare_inertia) = crate::from_urdf_full(urdf, "base_link", "gripper_link").unwrap();
+        for j in bare.joints.iter_mut() {
+            *j = j.clone().with_effort(3.0);
+        }
+        let bare_report = crate::actuator_plausibility(&bare, &bare_inertia, &vec![0.0; n]);
+        assert!(
+            bare_report.iter().any(|r| r.implied_acceleration.is_some_and(|a| a >= 1e4)),
+            "the URDF this was derived from must still flag, or the check above proves nothing"
+        );
     }
 }

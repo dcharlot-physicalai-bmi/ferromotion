@@ -255,7 +255,7 @@ pub use savgol::SavGol;
 pub use lgvi::LgviBody;
 pub use manipulability::{condition_number, force_ellipsoid_axes, isotropy, manipulability_gradient, singular_values, yoshikawa};
 pub use modal::{modal_analysis, ModalModel};
-pub use mjcf::{from_mjcf_constrained, from_mjcf_full, from_mjcf_str};
+pub use mjcf::{from_mjcf_constrained, from_mjcf_full, from_mjcf_str, to_mjcf};
 pub use usda::{axis_token, parse_usda, robot_from_usda, usda_from_robot, ParseError, Prim, UsdaStage, Value};
 pub use urdf::from_urdf_full;
 pub use robust::solve_ik_robust;
