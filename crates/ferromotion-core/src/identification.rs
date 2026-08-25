@@ -343,11 +343,17 @@ pub struct ActuatorFit {
     pub armature: f64,
     /// Fitted viscous damping `b` (N·m·s/rad) — see [`crate::Joint::damping`].
     pub damping: f64,
-    /// **Whether this joint's data can separate the two at all.** The smaller normalized eigenvalue of the 2×2
-    /// normal matrix. It goes to zero when `q̈` and `q̇` are proportional across the samples, which is not a
-    /// contrived case: any purely exponential motion has `q̈ = k·q̇` exactly, and a single-frequency sinusoid
-    /// puts them 90° apart in phase but perfectly correlated in magnitude. When this is small the two numbers
-    /// above trade off against each other and neither is meaningful alone.
+    /// **Whether the excitation can separate the two at all** — and *only* that. The smaller normalized
+    /// eigenvalue of the 2×2 normal matrix. It goes to zero when `q̈` and `q̇` are proportional across the
+    /// samples, which is not a contrived case: any purely exponential motion has `q̈ = k·q̇` exactly. When this
+    /// is small the two numbers above trade off against each other and neither is meaningful alone.
+    ///
+    /// **A good value here does not mean the fit is good.** This is a property of the trajectory, not of the
+    /// data quality, and the two come apart badly in practice. Measured on the SO-101 (`so101_reach_rl
+    /// --identify`): reconstructing `q̈` by central differences of a 12-bit encoder puts the armature 88–217%
+    /// out and often negative, while `conditioning` sits at `1.000` for every one of those rows. Check
+    /// [`ActuatorFit::residual`] against your torque scale as well — on that same comparison it moves from
+    /// `1e-15` to `1e-1`, which is the signal that something is wrong.
     pub conditioning: f64,
     /// Root-mean-square torque residual after the fit (N·m). Large means the actuator is doing something
     /// neither term describes — friction, backlash, a saturating drive.
@@ -376,7 +382,14 @@ pub struct ActuatorFit {
 ///
 /// - **Identifiability.** `q̈` and `q̇` proportional across the samples makes the normal matrix singular and the
 ///   split between inertia and damping arbitrary. `conditioning` is that number; a small value means the pair
-///   is not separable from this data no matter how small the residual is.
+///   is not separable from this data no matter how small the residual is. The converse does **not** hold — see
+///   [`ActuatorFit::conditioning`], which reads `1.000` on data that gets the armature 200% wrong.
+///
+/// A practical note from measuring this on a real arm's numbers, because it decides whether the method is
+/// usable at all: `q̈` is not measured on hardware, it is differentiated twice from position, and quantisation
+/// arrives scaled by `1/dt²`. Damping survives that (it multiplies `q̇`, one differentiation) and armature does
+/// not. Differentiating with [`crate::SavGol`] instead of a finite difference took the armature error on a
+/// 12-bit encoder from 217% to 2.7%; a plain central difference is not good enough at any sample count.
 /// - **Physicality.** Negative values come back as-is with `physical: false`, because a clamped zero is
 ///   indistinguishable from a measured zero.
 ///

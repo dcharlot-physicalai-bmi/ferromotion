@@ -56,8 +56,8 @@
 //! `cargo run --release -p ferromotion-bench --example so101_reach_rl`
 
 use ferromotion_core::{
-    actuator_plausibility, forward_dynamics, from_urdf_full, gravity_vector, mass_matrix, solve_ik, IkOptions,
-    Iso, LinkInertia, Robot,
+    actuator_plausibility, forward_dynamics, from_urdf_full, gravity_vector, identify_actuator, inverse_dynamics,
+    mass_matrix, solve_ik, IdSample, IkOptions, Iso, LinkInertia, Robot, SavGol,
 };
 use ferromotion_learn::{train_normalized, BoxSpace, Env, GaussianPolicy, Mlp, ObsNorm, PpoConfig, StepResult};
 use nalgebra::Vector3;
@@ -536,6 +536,147 @@ fn compute_cost(n_calls: usize) {
     );
 }
 
+/// **Can the SO-101's actuator terms be identified from data a real arm could produce?** Run with `--identify`.
+///
+/// `identify_actuator` is exact on noise-free torques — that is proven on a two-link arm in
+/// `ferromotion-core`. The question this answers is the practical one: on hardware you do not measure `q̈`. You
+/// read a **quantised encoder** and differentiate twice, and double differentiation multiplies quantisation
+/// noise by `1/dt²`. At 200 Hz that factor is 40,000, so the interesting number is not whether the method works
+/// but what encoder resolution it survives.
+///
+/// The STS3215 reports 12 bits over a full turn, so one count is `2π/4096 = 1.53e-3` rad. This runs the same
+/// identification three ways: against ideal derivatives, against central differences of quantised position, and
+/// against a Savitzky-Golay fit of that same quantised position.
+///
+/// Measured. Ideal derivatives recover both terms exactly. Central differences at 12 bits put the armature
+/// **88–217% out and frequently negative** while leaving the damping inside 1% — because damping multiplies `q̇`
+/// (one differentiation) and armature multiplies `q̈` (two, so quantisation arrives scaled by `1/dt²` = 40,000
+/// at 200 Hz). A Savitzky-Golay fit over a 50 ms window at order 3 brings the armature to **1.5–2.7%**, which
+/// makes the measurement practical on the arm exactly as it ships.
+///
+/// Window length is **not monotone**: 125 ms at order 3 is several times worse than 50 ms, because an order-3
+/// polynomial cannot follow a 9 rad/s excitation over that span and over-smoothing biases the second
+/// derivative. Match the window to the excitation bandwidth rather than making it large.
+///
+/// This is also where `ActuatorFit::conditioning` shows its limit: it stays at ~1.0 across every row above,
+/// including the ones where the armature is 200% wrong. It measures whether the excitation separates the two
+/// terms, not whether the data is good enough to trust — `residual` is the field that catches that.
+fn identify_mode() {
+    let j_refl = reflected_inertia();
+    let env = So101Reach::new(j_refl);
+    let n = env.dof();
+    let truth_a = j_refl;
+    let truth_b = speed_droop();
+    println!("\n  Identifying the SO-101's actuator terms from a prescribed excitation.\n");
+    println!("  truth: armature {truth_a:.6e} kg m^2, damping {truth_b:.4} N m s/rad");
+
+    // Multi-frequency excitation. A single sinusoid per joint makes qdd proportional to qd and the two terms
+    // inseparable, which `identify_actuator` would correctly refuse — so the trajectory has to be designed, not
+    // just large. Amplitudes stay inside the joint limits.
+    let dt = CONTROL_DT;
+    let steps = 3000; // 15 s
+    let traj = |t: f64, i: usize| -> (f64, f64, f64) {
+        let (w1, w2) = (2.0 + 0.7 * i as f64, 7.0 + 1.3 * i as f64);
+        let a = 0.35;
+        (
+            a * (w1 * t).sin() + 0.4 * a * (w2 * t).sin(),
+            a * w1 * (w1 * t).cos() + 0.4 * a * w2 * (w2 * t).cos(),
+            -a * w1 * w1 * (w1 * t).sin() - 0.4 * a * w2 * w2 * (w2 * t).sin(),
+        )
+    };
+
+    let mut ideal = Vec::with_capacity(steps);
+    let mut q_hist: Vec<Vec<f64>> = Vec::with_capacity(steps);
+    for k in 0..steps {
+        let t = k as f64 * dt;
+        let (mut q, mut qd, mut qdd) = (vec![0.0; n], vec![0.0; n], vec![0.0; n]);
+        for i in 0..n {
+            let (a, b, c) = traj(t, i);
+            q[i] = a;
+            qd[i] = b;
+            qdd[i] = c;
+        }
+        // The torque a torque-controlled arm would have to command, INCLUDING the actuator terms, because the
+        // model states them. That is what a current sensor would report.
+        let tau = inverse_dynamics(&env.robot, &env.inertia, &q, &qd, &qdd, GRAVITY);
+        q_hist.push(q.clone());
+        ideal.push(IdSample { q, qd, qdd, tau });
+    }
+
+    let show = |label: &str, fits: &[ferromotion_core::ActuatorFit]| {
+        println!("\n  {label}\n");
+        println!("  {:>5} {:>13} {:>10} {:>13} {:>10} {:>12} {:>11}", "joint", "armature", "err", "damping", "err", "conditioning", "residual");
+        for f in fits {
+            println!(
+                "  {:>5} {:>13.6e} {:>9.1}% {:>13.4} {:>9.1}% {:>12.3e} {:>11.2e}",
+                f.joint,
+                f.armature,
+                100.0 * (f.armature - truth_a).abs() / truth_a,
+                f.damping,
+                100.0 * (f.damping - truth_b).abs() / truth_b,
+                f.conditioning,
+                f.residual
+            );
+        }
+    };
+    show("From ideal derivatives (the upper bound):", &identify_actuator(&env.robot, &env.inertia, &ideal, GRAVITY));
+
+    // Now the hardware version: quantise position, then reconstruct rates by central differences.
+    for bits in [12u32, 14, 16] {
+        let counts = (1u32 << bits) as f64;
+        let step = std::f64::consts::TAU / counts;
+        let quant = |v: f64| (v / step).round() * step;
+        let mut samples = Vec::with_capacity(steps);
+        for k in 1..steps - 1 {
+            let (mut q, mut qd, mut qdd) = (vec![0.0; n], vec![0.0; n], vec![0.0; n]);
+            for i in 0..n {
+                let (qm, q0, qp) = (quant(q_hist[k - 1][i]), quant(q_hist[k][i]), quant(q_hist[k + 1][i]));
+                q[i] = q0;
+                qd[i] = (qp - qm) / (2.0 * dt);
+                qdd[i] = (qp - 2.0 * q0 + qm) / (dt * dt); // the 1/dt^2 that does the damage
+            }
+            samples.push(IdSample { q, qd, qdd, tau: ideal[k].tau.clone() });
+        }
+        show(&format!("From a {bits}-bit encoder, rates by central difference:"), &identify_actuator(&env.robot, &env.inertia, &samples, GRAVITY));
+    }
+    // Central differences are the naive choice and nobody with real encoders uses them. This crate ships a
+    // Savitzky-Golay differentiator built for exactly this: fit a low-order polynomial over a sliding window
+    // and read its derivative at the centre, so noise averages out while the trend survives.
+    for (half, order) in [(10usize, 3usize), (25, 3), (50, 4)] {
+        let counts = (1u32 << 12) as f64; // the STS3215's own 12 bits, the hard case
+        let step = std::f64::consts::TAU / counts;
+        let sg = SavGol { half_window: half, order };
+        // Per joint: quantise the whole position history, then differentiate the SIGNAL rather than a triple.
+        let mut qs = Vec::with_capacity(n);
+        let mut qds = Vec::with_capacity(n);
+        let mut qdds = Vec::with_capacity(n);
+        for i in 0..n {
+            let col: Vec<f64> = q_hist.iter().map(|q| (q[i] / step).round() * step).collect();
+            qds.push(sg.apply(&col, dt, 1));
+            qdds.push(sg.apply(&col, dt, 2));
+            qs.push(col);
+        }
+        // Drop the window edges, where one-sided fits are much worse than the interior.
+        let mut samples = Vec::new();
+        for k in half..steps - half {
+            samples.push(IdSample {
+                q: (0..n).map(|i| qs[i][k]).collect(),
+                qd: (0..n).map(|i| qds[i][k]).collect(),
+                qdd: (0..n).map(|i| qdds[i][k]).collect(),
+                tau: ideal[k].tau.clone(),
+            });
+        }
+        show(
+            &format!("12-bit encoder, Savitzky-Golay (half-window {half} = {:.0} ms, order {order}):", half as f64 * dt * 1e3),
+            &identify_actuator(&env.robot, &env.inertia, &samples, GRAVITY),
+        );
+    }
+
+    println!(
+        "\n  The torques above are exact; only the kinematics are quantised, so every error is attributable to\n  differentiation alone. Two things worth reading off this table.\n\n  Damping identifies robustly and armature does not, because damping multiplies qd (one differentiation)\n  while armature multiplies qdd (two, so quantisation noise arrives scaled by 1/dt^2 = 40,000 at 200 Hz).\n\n  And `conditioning` stays at ~1.0 throughout, including where the armature is 200% wrong and negative. It\n  measures whether the EXCITATION separates the two terms, not whether the data is accurate enough to trust.\n  The residual is the field that catches this one: 1e-15 on ideal derivatives against 1e-1 on quantised ones.\n\n  The recipe, then: a 12-bit encoder is enough IF the rates come from a Savitzky-Golay fit rather than a\n  difference. That takes the worst-case armature error from 217% to 2.7%.\n\n  Window length is NOT monotone, which is the trap. 125 ms at order 3 is several times worse than 50 ms,\n  because an order-3 polynomial cannot follow a 9 rad/s excitation across 125 ms and over-smoothing biases\n  the second derivative. Order 4 recovers curvature over 250 ms but starts costing the damping instead.\n  Match the window to the excitation bandwidth; smoothing harder is the instinct and it is wrong."
+    );
+}
+
 /// **Both inertias on the same grid**, so the comparison is like for like. Run with `--sweep`.
 ///
 /// This exists because an earlier version of these docs claimed the URDF-only plant was unsolvable — "0 of 32
@@ -688,6 +829,9 @@ fn main() {
     let baseline = baseline.expect("USED_INDEX is within sensitivity()");
     assert_eq!(sensitivity()[USED_INDEX], j_refl, "USED_INDEX must name the inertia the run uses");
 
+    if std::env::args().any(|a| a == "--identify") {
+        identify_mode();
+    }
     if std::env::args().any(|a| a == "--compute") {
         compute_cost(200_000);
     }

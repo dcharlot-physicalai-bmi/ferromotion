@@ -66,6 +66,35 @@ vector, forward kinematics — not the text, because matching bytes is not the p
 written with Rust's shortest round-trip `Display`; a first version used `{:.17}` with trailing zeros trimmed and
 silently rounded `0.012900000000000002` to `0.0129`, breaking the round trip by one ulp.
 
+`identify_actuator` measures the term rather than looking it up, which matters because `J_rotor` is rarely
+published for a given servo and a gear ratio **squared** multiplies whatever error an estimate carries. No
+optimizer is involved: RNEA is linear in both terms, so subtracting the rigid-body torque leaves a two-column
+regression per joint and the joints decouple into independent exact 2-parameter fits.
+
+The practical obstacle is that hardware does not measure `q̈`. It reads a quantized encoder and differentiates
+twice, and at 200 Hz that scales quantization by `1/dt²` = 40,000. Measured on the SO-101 with exact torques and
+only the kinematics quantized (`so101_reach_rl --identify`):
+
+| rate reconstruction, 12-bit encoder | armature error | damping error |
+|---|---|---|
+| ideal derivatives | 0.0% | 0.0% |
+| central differences | **88–217%**, often negative | <1% |
+| `SavGol` 50 ms, order 3 | **1.5–2.7%** | <0.1% |
+| `SavGol` 125 ms, order 3 | 11.9–17.7% | 0.1–0.6% |
+
+Damping survives quantization and armature does not, because damping multiplies `q̇` (one differentiation) and
+armature multiplies `q̈` (two). So the encoder was never the limit — the differencing was, and `SavGol` fixes it
+on the arm exactly as it ships. Note the window length is **not monotone**: an order-3 polynomial cannot follow a
+9 rad/s excitation across 125 ms, and over-smoothing biases the second derivative. Match the window to the
+excitation bandwidth rather than making it large.
+
+Two things the fit reports rather than hides. Excitation that cannot separate the terms — `q̈` proportional to
+`q̇`, which any purely exponential motion satisfies exactly — comes back with `conditioning` at zero and the fit
+as `NaN`, instead of a readable-looking number. And a negative rotor inertia is returned as-is with
+`physical: false`, since a clamped zero is indistinguishable from a measured one. `conditioning` is about the
+trajectory and not the data quality, though: it reads `1.000` on the 217%-wrong rows above, and `residual` is
+what catches those.
+
 MuJoCo has carried `armature` for exactly this reason and MJCF states it per joint; URDF has no field for it at
 all, so a URDF-only pipeline has no way to express the dominant term. Which format carries what, and which of
 it this crate reads:
