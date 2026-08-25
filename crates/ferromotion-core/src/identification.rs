@@ -30,7 +30,7 @@
 //! rank deficiency leaves: among all parameter vectors that fit the torques equally well, prefer one that could be a
 //! body.
 
-use crate::{inertial_regressor, pseudo_inertia, IdSample, Robot, PARAMS_PER_LINK};
+use crate::{inertial_regressor, pseudo_inertia, IdSample, LinkInertia, Robot, PARAMS_PER_LINK};
 use nalgebra::{DMatrix, DVector, Matrix3, Matrix4, Vector3};
 
 /// What the data determined, and how well.
@@ -335,6 +335,134 @@ pub fn identify_consistent(robot: &Robot, samples: &[IdSample], gravity: Vector3
     })
 }
 
+/// What identifying one joint's actuator terms produced, and whether the data could support it.
+#[derive(Clone, Copy, Debug)]
+pub struct ActuatorFit {
+    pub joint: usize,
+    /// Fitted reflected rotor inertia `J_a` (kg·m²) — see [`crate::Joint::armature`].
+    pub armature: f64,
+    /// Fitted viscous damping `b` (N·m·s/rad) — see [`crate::Joint::damping`].
+    pub damping: f64,
+    /// **Whether this joint's data can separate the two at all.** The smaller normalized eigenvalue of the 2×2
+    /// normal matrix. It goes to zero when `q̈` and `q̇` are proportional across the samples, which is not a
+    /// contrived case: any purely exponential motion has `q̈ = k·q̇` exactly, and a single-frequency sinusoid
+    /// puts them 90° apart in phase but perfectly correlated in magnitude. When this is small the two numbers
+    /// above trade off against each other and neither is meaningful alone.
+    pub conditioning: f64,
+    /// Root-mean-square torque residual after the fit (N·m). Large means the actuator is doing something
+    /// neither term describes — friction, backlash, a saturating drive.
+    pub residual: f64,
+    /// Whether both fitted values are non-negative. A negative rotor inertia or negative damping is
+    /// unphysical; it is **reported rather than clamped**, because a clamped value looks like a measurement.
+    pub physical: bool,
+}
+
+/// **Identify a joint's reflected rotor inertia and viscous damping from motion data.**
+///
+/// The term a URDF cannot state is also the term hardest to look up: `J_rotor` for a given servo is rarely
+/// published, and a gear ratio squared multiplies whatever error the estimate carries. This measures it instead.
+///
+/// It is an exact linear fit, not a search, because RNEA is **linear in both terms**:
+///
+/// ```text
+///   τᵢ = τ_rigid,ᵢ(q, q̇, q̈) + J_aᵢ·q̈ᵢ + bᵢ·q̇ᵢ
+/// ```
+///
+/// so subtracting the rigid-body torque leaves a two-column regression per joint, and the joints **decouple** —
+/// each one is its own independent 2-parameter problem. That is the same structure that makes inertial
+/// identification a linear regression ([`crate::identify`]), one level further out in the drivetrain.
+///
+/// Two things this reports rather than hides:
+///
+/// - **Identifiability.** `q̈` and `q̇` proportional across the samples makes the normal matrix singular and the
+///   split between inertia and damping arbitrary. `conditioning` is that number; a small value means the pair
+///   is not separable from this data no matter how small the residual is.
+/// - **Physicality.** Negative values come back as-is with `physical: false`, because a clamped zero is
+///   indistinguishable from a measured zero.
+///
+/// The rigid-body torque is computed with the robot's **own armature and damping cleared**, so passing a model
+/// that already carries estimates returns a fresh fit rather than a fit of the leftover. That trap is quiet
+/// otherwise: the numbers would look plausible and mean something else.
+pub fn identify_actuator(
+    robot: &Robot,
+    inertia: &[LinkInertia],
+    samples: &[IdSample],
+    gravity: Vector3<f64>,
+) -> Vec<ActuatorFit> {
+    let n = robot.dof();
+    // Strip any existing estimates so the residual is the FULL actuator contribution, not what is left after
+    // whatever the model already claimed.
+    let mut rigid = robot.clone();
+    for j in rigid.joints.iter_mut() {
+        *j = j.clone().with_armature(-1.0).with_damping(-1.0);
+    }
+
+    // Per joint: accumulate the 2x2 normal matrix and 2-vector, in one pass over the samples.
+    let mut ata = vec![[0.0f64; 4]; n]; // [a11, a12, a12, a22] with a11=Σq̈², a12=Σq̈q̇, a22=Σq̇²
+    let mut atb = vec![[0.0f64; 2]; n];
+    let mut scale = vec![[0.0f64; 2]; n]; // Σq̈², Σq̇² for normalising the conditioning number
+    let mut resid_sq = vec![0.0f64; n];
+    let mut count = 0usize;
+
+    let mut rows: Vec<(Vec<f64>, Vec<f64>, Vec<f64>)> = Vec::with_capacity(samples.len());
+    for s in samples {
+        if s.q.len() != n || s.qd.len() != n || s.qdd.len() != n || s.tau.len() != n {
+            continue; // a malformed sample is dropped rather than silently reshaping the problem
+        }
+        let tr = crate::inverse_dynamics(&rigid, inertia, &s.q, &s.qd, &s.qdd, gravity);
+        let r: Vec<f64> = (0..n).map(|i| s.tau[i] - tr[i]).collect();
+        for i in 0..n {
+            let (a, v) = (s.qdd[i], s.qd[i]);
+            ata[i][0] += a * a;
+            ata[i][1] += a * v;
+            ata[i][3] += v * v;
+            atb[i][0] += a * r[i];
+            atb[i][1] += v * r[i];
+            scale[i][0] += a * a;
+            scale[i][1] += v * v;
+        }
+        rows.push((s.qdd.clone(), s.qd.clone(), r));
+        count += 1;
+    }
+    ata.iter_mut().for_each(|m| m[2] = m[1]);
+
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let (a11, a12, a22) = (ata[i][0], ata[i][1], ata[i][3]);
+        let det = a11 * a22 - a12 * a12;
+        // Normalise so `conditioning` is scale-free: it is the smaller eigenvalue of the 2x2 after each column
+        // is unit-normalised, i.e. sqrt(1 - correlation²) territory, which is what identifiability means here.
+        let norm = (scale[i][0] * scale[i][1]).sqrt();
+        let conditioning = if norm > 0.0 { (det / (norm * norm)).abs().sqrt() } else { 0.0 };
+
+        let (armature, damping) = if det.abs() > f64::EPSILON * norm.max(1.0) {
+            ((a22 * atb[i][0] - a12 * atb[i][1]) / det, (a11 * atb[i][1] - a12 * atb[i][0]) / det)
+        } else {
+            (f64::NAN, f64::NAN) // unidentifiable: say so rather than return a readable-looking number
+        };
+
+        if armature.is_finite() {
+            for (qdd, qd, r) in &rows {
+                let e = r[i] - armature * qdd[i] - damping * qd[i];
+                resid_sq[i] += e * e;
+            }
+        }
+        out.push(ActuatorFit {
+            joint: i,
+            armature,
+            damping,
+            conditioning,
+            residual: if count > 0 && armature.is_finite() {
+                (resid_sq[i] / count as f64).sqrt()
+            } else {
+                f64::NAN
+            },
+            physical: armature >= 0.0 && damping >= 0.0,
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -538,5 +666,157 @@ mod tests {
         // a sample of the wrong width is refused, not silently zero-padded
         let bad = [IdSample { q: vec![0.0; 2], qd: vec![0.0; 3], qdd: vec![0.0; 3], tau: vec![0.0; 3] }];
         assert!(identify_with_covariance(&robot, &bad, g, 1e-8).is_none());
+    }
+
+    /// A two-link arm for the actuator-identification tests.
+    fn geared_arm(armature: f64, damping: f64) -> (Robot, Vec<LinkInertia>) {
+        const URDF: &str = r#"<robot name="two">
+          <link name="base"/>
+          <link name="l1"><inertial><origin xyz="0.3 0 0"/><mass value="1.5"/>
+            <inertia ixx="0.02" ixy="0" ixz="0" iyy="0.02" iyz="0" izz="0.02"/></inertial></link>
+          <link name="l2"><inertial><origin xyz="0.2 0 0"/><mass value="0.8"/>
+            <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/></inertial></link>
+          <link name="tool"/>
+          <joint name="j1" type="revolute"><parent link="base"/><child link="l1"/><origin xyz="0 0 0"/>
+            <axis xyz="0 1 0"/><limit lower="-3" upper="3" effort="8" velocity="4"/></joint>
+          <joint name="j2" type="revolute"><parent link="l1"/><child link="l2"/><origin xyz="0.6 0 0"/>
+            <axis xyz="0 1 0"/><limit lower="-3" upper="3" effort="5" velocity="4"/></joint>
+          <joint name="jt" type="fixed"><parent link="l2"/><child link="tool"/><origin xyz="0.4 0 0"/></joint>
+        </robot>"#;
+        let (mut robot, inertia) = crate::from_urdf_full(URDF, "base", "tool").unwrap();
+        for (i, j) in robot.joints.iter_mut().enumerate() {
+            *j = j.clone().with_armature(armature + 0.003 * i as f64).with_damping(damping - 0.1 * i as f64);
+        }
+        (robot, inertia)
+    }
+
+    /// **The oracle: generate torques from known actuator terms, then recover them.**
+    ///
+    /// This is the same shape of test the inertial identification uses — synthesise from ground truth so the
+    /// answer is known, rather than checking that a fit merely converged. The excitation is deliberately
+    /// two-frequency, because a single sinusoid cannot separate inertia from damping (see the next test).
+    #[test]
+    fn identify_actuator_recovers_known_terms() {
+        let (robot, inertia) = geared_arm(0.0119, 0.64);
+        let g = Vector3::new(0.0, 0.0, -9.81);
+        let mut samples = Vec::new();
+        for k in 0..400 {
+            let t = k as f64 * 0.002;
+            // Two frequencies per joint, so q̈ and q̇ are not proportional.
+            let q = vec![0.4 * (3.0 * t).sin(), -0.3 * (5.0 * t).cos()];
+            let qd = vec![1.2 * (3.0 * t).cos() + 0.5 * (11.0 * t).cos(), 1.5 * (5.0 * t).sin()];
+            let qdd = vec![-3.6 * (3.0 * t).sin() - 5.5 * (11.0 * t).sin(), 7.5 * (5.0 * t).cos()];
+            // Ground truth INCLUDES the actuator terms, because `robot` states them.
+            let tau = crate::inverse_dynamics(&robot, &inertia, &q, &qd, &qdd, g);
+            samples.push(IdSample { q, qd, qdd, tau });
+        }
+
+        let fits = identify_actuator(&robot, &inertia, &samples, g);
+        assert_eq!(fits.len(), 2);
+        for (i, f) in fits.iter().enumerate() {
+            let (true_a, true_b) = (0.0119 + 0.003 * i as f64, 0.64 - 0.1 * i as f64);
+            assert!(f.physical, "joint {i} fit must be physical, got {f:?}");
+            assert!(f.conditioning > 1e-3, "joint {i} excitation should be identifiable, got {}", f.conditioning);
+            assert!((f.armature - true_a).abs() < 1e-9, "joint {i} armature: {} vs {true_a}", f.armature);
+            assert!((f.damping - true_b).abs() < 1e-9, "joint {i} damping: {} vs {true_b}", f.damping);
+            assert!(f.residual < 1e-9, "joint {i} residual {} should be ~0 on noise-free data", f.residual);
+        }
+    }
+
+    /// **Exponential motion cannot separate the two, and the fit must say so.**
+    ///
+    /// For `q̇ = e^{kt}` the acceleration is exactly `k·q̇`, so the two regression columns are parallel and any
+    /// `(J_a, b)` on a line through the truth fits equally well. A solver that returns a confident number here
+    /// is worse than one that refuses: the value would look like a measurement.
+    #[test]
+    fn proportional_excitation_is_reported_as_unidentifiable() {
+        let (robot, inertia) = geared_arm(0.0119, 0.64);
+        let g = Vector3::zeros(); // no gravity, to keep the degeneracy clean
+        let k = 3.0;
+        let mut samples = Vec::new();
+        for n in 0..200 {
+            let t = n as f64 * 0.002;
+            let v = (k * t).exp();
+            let qd = vec![v, 0.5 * v];
+            let qdd = vec![k * v, 0.5 * k * v]; // exactly proportional to qd
+            let q = vec![v / k, 0.5 * v / k];
+            let tau = crate::inverse_dynamics(&robot, &inertia, &q, &qd, &qdd, g);
+            samples.push(IdSample { q, qd, qdd, tau });
+        }
+        let fits = identify_actuator(&robot, &inertia, &samples, g);
+        for f in &fits {
+            assert!(
+                f.conditioning < 1e-6,
+                "joint {} should report unidentifiable, got conditioning {}",
+                f.joint,
+                f.conditioning
+            );
+        }
+        // The control: the SAME arm with two-frequency excitation IS identifiable, so the assertion above is
+        // about the data and not about the function always returning zero.
+        let mut good = Vec::new();
+        for n in 0..200 {
+            let t = n as f64 * 0.002;
+            let q = vec![0.4 * (3.0 * t).sin(), -0.3 * (5.0 * t).cos()];
+            let qd = vec![1.2 * (3.0 * t).cos() + 0.5 * (11.0 * t).cos(), 1.5 * (5.0 * t).sin()];
+            let qdd = vec![-3.6 * (3.0 * t).sin() - 5.5 * (11.0 * t).sin(), 7.5 * (5.0 * t).cos()];
+            let tau = crate::inverse_dynamics(&robot, &inertia, &q, &qd, &qdd, g);
+            good.push(IdSample { q, qd, qdd, tau });
+        }
+        assert!(identify_actuator(&robot, &inertia, &good, g).iter().all(|f| f.conditioning > 1e-3));
+    }
+
+    /// **A model that already carries estimates must get a FRESH fit, not a fit of the leftover.** This is the
+    /// quiet trap: the numbers would look plausible and mean something completely different.
+    #[test]
+    fn an_existing_estimate_does_not_bias_the_fit() {
+        let (truth, inertia) = geared_arm(0.0119, 0.64);
+        let g = Vector3::new(0.0, 0.0, -9.81);
+        let mut samples = Vec::new();
+        for n in 0..300 {
+            let t = n as f64 * 0.002;
+            let q = vec![0.4 * (3.0 * t).sin(), -0.3 * (5.0 * t).cos()];
+            let qd = vec![1.2 * (3.0 * t).cos() + 0.5 * (11.0 * t).cos(), 1.5 * (5.0 * t).sin()];
+            let qdd = vec![-3.6 * (3.0 * t).sin() - 5.5 * (11.0 * t).sin(), 7.5 * (5.0 * t).cos()];
+            let tau = crate::inverse_dynamics(&truth, &inertia, &q, &qd, &qdd, g);
+            samples.push(IdSample { q, qd, qdd, tau });
+        }
+        // Fit against a model claiming WILDLY wrong terms, and against one claiming none. Same answer.
+        let (wrong, _) = geared_arm(0.5, 9.0);
+        let (mut none, _) = geared_arm(0.0119, 0.64);
+        for j in none.joints.iter_mut() {
+            *j = j.clone().with_armature(-1.0).with_damping(-1.0);
+        }
+        let a = identify_actuator(&wrong, &inertia, &samples, g);
+        let b = identify_actuator(&none, &inertia, &samples, g);
+        for i in 0..2 {
+            assert!((a[i].armature - b[i].armature).abs() < 1e-12, "joint {i} armature must not depend on the prior");
+            assert!((a[i].damping - b[i].damping).abs() < 1e-12, "joint {i} damping must not depend on the prior");
+            assert!((a[i].armature - (0.0119 + 0.003 * i as f64)).abs() < 1e-9);
+        }
+    }
+
+    /// Friction the model does not contain shows up in the residual rather than being absorbed silently.
+    #[test]
+    fn unmodelled_friction_shows_up_in_the_residual() {
+        let (robot, inertia) = geared_arm(0.0119, 0.64);
+        let g = Vector3::new(0.0, 0.0, -9.81);
+        let coulomb = 0.15;
+        let mut samples = Vec::new();
+        for n in 0..300 {
+            let t = n as f64 * 0.002;
+            let q = vec![0.4 * (3.0 * t).sin(), -0.3 * (5.0 * t).cos()];
+            let qd = vec![1.2 * (3.0 * t).cos() + 0.5 * (11.0 * t).cos(), 1.5 * (5.0 * t).sin()];
+            let qdd = vec![-3.6 * (3.0 * t).sin() - 5.5 * (11.0 * t).sin(), 7.5 * (5.0 * t).cos()];
+            let mut tau = crate::inverse_dynamics(&robot, &inertia, &q, &qd, &qdd, g);
+            for i in 0..2 {
+                tau[i] += coulomb * qd[i].signum(); // Coulomb friction: not J_a*qdd, not b*qd
+            }
+            samples.push(IdSample { q, qd, qdd, tau });
+        }
+        let fits = identify_actuator(&robot, &inertia, &samples, g);
+        for f in &fits {
+            assert!(f.residual > 0.01, "joint {} should show an unmodelled term, residual {}", f.joint, f.residual);
+        }
     }
 }

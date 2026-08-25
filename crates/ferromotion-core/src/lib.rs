@@ -239,7 +239,10 @@ pub use quadrature::{gauss_legendre, integrate as gauss_integrate};
 pub use quat_mean::average_quaternions;
 pub use hand_object::{hand_object_step, HandObjectStep, SphereObject};
 pub use kinematic_tree::{tree_from_urdf, tree_ik, KinematicTree, TipTarget, TreeIkResult};
-pub use identification::{identify_consistent, identify_with_covariance, params_from_pseudo_inertia, ConsistentFit, IdentifiedParams};
+pub use identification::{
+    identify_actuator, identify_consistent, identify_with_covariance, params_from_pseudo_inertia, ActuatorFit,
+    ConsistentFit, IdentifiedParams,
+};
 pub use hybrid_gradient::{hybrid_jacobian, HybridGradientOptions, probe_stable_jacobian, split_residual, HybridGradientError, HybridLinearisation, HybridSystem};
 pub use hybrid::{compose_monodromy, find_limit_cycle, flow_jacobian, hybrid_certificate, impact_expansion, return_map_jacobian, plastic_impact, plastic_impact_jacobian, poincare_stability, saltation_matrix, transverse_basis, transverse_metric, transverse_restriction, HybridCertificate, HybridEvent};
 pub use hybrid_astar::{hybrid_astar, HybridConfig};
