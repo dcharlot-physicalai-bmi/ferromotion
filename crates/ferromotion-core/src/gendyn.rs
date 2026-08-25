@@ -178,6 +178,12 @@ pub struct GenLink<T> {
     pub mass: T,
     pub com: V3<T>,
     pub inertia: M3<T>,
+    /// Reflected rotor inertia at this joint, or zero when the model states none. Generic in `T` so it can be
+    /// **differentiated with respect to** — which is the point: it is the term most worth identifying from
+    /// data, and the one a URDF cannot supply. See [`crate::Joint::armature`].
+    pub armature: T,
+    /// Joint viscous damping, or zero. Also generic, for the same reason. See [`crate::Joint::damping`].
+    pub damping: T,
 }
 
 /// A serial-chain model over generic scalars, with gravity.
@@ -209,6 +215,10 @@ impl<T: Real> GenModel<T> {
                     ]),
                     axis: V3::from_f64([j.axis[0], j.axis[1], j.axis[2]]),
                     revolute: j.kind == JointKind::Revolute,
+                    // Unstated reads as zero here rather than as an Option, because these are meant to be
+                    // differentiated with respect to and a branch on presence cannot carry a derivative.
+                    armature: T::from_f64(j.armature.unwrap_or(0.0)),
+                    damping: T::from_f64(j.damping.unwrap_or(0.0)),
                     mass: T::from_f64(li.mass),
                     com: V3::from_f64([li.com[0], li.com[1], li.com[2]]),
                     inertia: M3::from_f64([
@@ -307,7 +317,11 @@ impl<T: Real> GenModel<T> {
                 .add(rr_next.mul_v(n_next))
                 .add(self.links[i].com.cross(ff[i]))
                 .add(p_next.cross(rf));
+            // Same two actuator terms `crate::inverse_dynamics` applies, at the same point in the recursion.
+            // Without these the generic path silently disagrees with the reference whenever a model states an
+            // armature, and the parity test cannot see it unless the test model states one.
             tau[i] = if self.links[i].revolute { n_i.dot(self.links[i].axis) } else { f_i.dot(self.links[i].axis) };
+            tau[i] = tau[i].add(self.links[i].armature.mul(qdd[i])).add(self.links[i].damping.mul(qd[i]));
             f_next = f_i;
             n_next = n_i;
         }
@@ -422,9 +436,18 @@ mod tests {
 
     /// The generic path instantiated at f64 must match the reference `dynamics` module to machine
     /// precision — RNEA, mass matrix, and forward dynamics.
+    ///
+    /// **The test model states an armature and a damping, and must.** Both were added to `dynamics` before
+    /// `gendyn`, and this test kept passing throughout because its model set neither — two implementations of
+    /// the same recursion silently disagreeing wherever a real model stated a rotor term. A parity test whose
+    /// fixture omits the feature is not a parity test. `armature_and_damping_are_not_free` below is the guard
+    /// that keeps this fixture honest if anyone ever zeroes them out.
     #[test]
     fn f64_instantiation_matches_the_reference_dynamics() {
-        let (robot, inertia) = test_robot();
+        let (mut robot, inertia) = test_robot();
+        for (i, j) in robot.joints.iter_mut().enumerate() {
+            *j = j.clone().with_armature(0.011 + 0.002 * i as f64).with_damping(0.64 - 0.05 * i as f64);
+        }
         let g = Vector3::new(0.0, 0.0, -9.81);
         let q = [0.3, -0.7, 0.12, 1.1, -0.4];
         let qd = [0.5, -0.2, 0.3, -0.8, 0.6];
@@ -464,5 +487,66 @@ mod tests {
         for k in 0..3 {
             assert!((p_ref[k] - p_gen.0[k]).abs() < 1e-12, "FK mismatch at {k}");
         }
+    }
+
+    /// **The fixture above must actually exercise the actuator terms.** If it did not, the parity test would
+    /// pass on two implementations that disagree the moment a model states an armature — which is exactly the
+    /// state this file was in until the terms were wired through.
+    #[test]
+    fn armature_and_damping_are_not_free() {
+        let (mut robot, inertia) = test_robot();
+        for (i, j) in robot.joints.iter_mut().enumerate() {
+            *j = j.clone().with_armature(0.011 + 0.002 * i as f64).with_damping(0.64 - 0.05 * i as f64);
+        }
+        assert!(robot.joints.iter().all(|j| j.armature.is_some() && j.damping.is_some()));
+
+        let q = [0.3, -0.7, 0.12, 1.1, -0.4];
+        let qd = [0.5, -0.2, 0.3, -0.8, 0.6];
+        let qdd = [1.2, 0.4, -0.9, 0.3, -1.1];
+        let geared = GenModel::<f64>::from_robot(&robot, &inertia, [0.0, 0.0, -9.81]);
+
+        let mut bare_robot = robot.clone();
+        for j in bare_robot.joints.iter_mut() {
+            *j = j.clone().with_armature(-1.0).with_damping(-1.0); // clears both
+        }
+        let bare = GenModel::<f64>::from_robot(&bare_robot, &inertia, [0.0, 0.0, -9.81]);
+
+        let (a, b) = (geared.rnea(&q, &qd, &qdd), bare.rnea(&q, &qd, &qdd));
+        for i in 0..a.len() {
+            let expected = 0.011 + 0.002 * i as f64;
+            let damp = 0.64 - 0.05 * i as f64;
+            let delta = expected * qdd[i] + damp * qd[i];
+            assert!(
+                (a[i] - b[i] - delta).abs() < 1e-12,
+                "joint {i}: the terms must contribute exactly J_a*qdd + b*qd, got {}",
+                a[i] - b[i]
+            );
+        }
+    }
+
+    /// The terms must be **differentiable with respect to**, which is the reason they are `T` and not `f64`.
+    /// Identifying a rotor inertia from motion data needs `∂τ/∂J_a`, and a model that stores the term as a
+    /// constant cannot supply it. The derivative of `τᵢ` with respect to `J_aᵢ` is exactly `q̈ᵢ`.
+    #[test]
+    fn the_armature_carries_a_derivative() {
+        use crate::gendyn::Real;
+        let (mut robot, inertia) = test_robot();
+        for j in robot.joints.iter_mut() {
+            *j = j.clone().with_armature(0.011);
+        }
+        let q = [0.3, -0.7, 0.12, 1.1, -0.4];
+        let qd = [0.5, -0.2, 0.3, -0.8, 0.6];
+        let qdd = [1.2, 0.4, -0.9, 0.3, -1.1];
+
+        // Central difference on joint 0's armature, against the analytic value q̈₀.
+        let tau_at = |a: f64| -> f64 {
+            let mut r = robot.clone();
+            r.joints[0] = r.joints[0].clone().with_armature(a);
+            GenModel::<f64>::from_robot(&r, &inertia, [0.0, 0.0, -9.81]).rnea(&q, &qd, &qdd)[0]
+        };
+        let h = 1e-6;
+        let numeric = (tau_at(0.011 + h) - tau_at(0.011 - h)) / (2.0 * h);
+        assert!((numeric - qdd[0]).abs() < 1e-6, "∂τ₀/∂J_a should be q̈₀ = {}, got {numeric}", qdd[0]);
+        let _ = <f64 as Real>::from_f64(0.0); // the trait is in scope, so the generic path is what was measured
     }
 }
