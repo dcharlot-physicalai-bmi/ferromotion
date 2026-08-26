@@ -84,7 +84,8 @@ pub fn from_urdf_full(xml: &str, base: &str, tip: &str) -> Result<(Robot, Vec<Li
                 joints.push(Joint::revolute(pre * origin, axis).with_limits(j.limit.lower, j.limit.upper)
                     .with_effort(j.limit.effort)
                     .with_max_velocity(j.limit.velocity)
-                    .with_damping(j.dynamics.as_ref().map(|d| d.damping).unwrap_or(0.0)));
+                    .with_damping(j.dynamics.as_ref().map(|d| d.damping).unwrap_or(0.0))
+                    .with_friction(j.dynamics.as_ref().map(|d| d.friction).unwrap_or(0.0)));
                 inertias.push(child);
                 pre = Iso::identity();
             }
@@ -97,7 +98,8 @@ pub fn from_urdf_full(xml: &str, base: &str, tip: &str) -> Result<(Robot, Vec<Li
                 joints.push(Joint::prismatic(pre * origin, axis).with_limits(j.limit.lower, j.limit.upper)
                     .with_effort(j.limit.effort)
                     .with_max_velocity(j.limit.velocity)
-                    .with_damping(j.dynamics.as_ref().map(|d| d.damping).unwrap_or(0.0)));
+                    .with_damping(j.dynamics.as_ref().map(|d| d.damping).unwrap_or(0.0))
+                    .with_friction(j.dynamics.as_ref().map(|d| d.friction).unwrap_or(0.0)));
                 inertias.push(child);
                 pre = Iso::identity();
             }
@@ -233,9 +235,12 @@ mod tests {
     /// session, after `effort`/`velocity` here and the whole set in the SDF loader. Checking the claim before
     /// publishing it is what surfaced this one.
     ///
-    /// `<dynamics friction=...>` (Coulomb) is parsed by `urdf_rs` and still not read here, because `Joint` has
-    /// nowhere to put it: the RNEA term would be discontinuous at zero velocity and wants a smoothing choice
-    /// that belongs to the caller, not the loader.
+    /// `<dynamics friction=...>` (Coulomb) is read too, into [`crate::Joint::friction`]. It was deferred once,
+    /// on the grounds that the RNEA term is discontinuous at zero velocity and the smoothing choice belonged to
+    /// the caller. That reasoning was sound and the conclusion was wrong: the workspace already had the
+    /// smoothing (`tanh(ω/1e-3)`, in the SEA model), and leaving the term out made every energy figure
+    /// optimistic in exactly the place a high-reduction drive loses the most. See
+    /// [`crate::COULOMB_SMOOTHING`], which states what the smoothing costs.
     #[test]
     fn the_urdf_damping_survives_the_loader() {
         const DAMPED: &str = r#"<robot name="d">
@@ -255,6 +260,10 @@ mod tests {
         let (robot, inertia) = crate::from_urdf_full(DAMPED, "base", "tool").unwrap();
         assert_eq!(robot.joints[0].damping, Some(0.42));
         assert_eq!(robot.joints[1].damping, None, "a joint with no <dynamics> must stay unstated");
+        // <dynamics friction> too, deferred once and then read. The fixture already stated friction="0.1",
+        // which is exactly how a deferral becomes a silent gap: the data was in the test the whole time.
+        assert_eq!(robot.joints[0].friction, Some(0.1));
+        assert_eq!(robot.joints[1].friction, None);
 
         // And it must reach the dynamics: at nonzero rate the damped joint needs 0.42*qd more torque, and the
         // undamped one needs exactly what it needed before.
@@ -262,9 +271,10 @@ mod tests {
         let (q, qd) = ([0.3, -0.5], [2.0, 1.5]);
         let with = crate::inverse_dynamics(&robot, &inertia, &q, &qd, &[0.0, 0.0], g);
         let mut bare = robot.clone();
-        bare.joints[0] = bare.joints[0].clone().with_damping(-1.0); // clears it
+        bare.joints[0] = bare.joints[0].clone().with_damping(-1.0).with_friction(-1.0); // clears both
         let without = crate::inverse_dynamics(&bare, &inertia, &q, &qd, &[0.0, 0.0], g);
-        assert!((with[0] - without[0] - 0.42 * qd[0]).abs() < 1e-12, "damping must reach inverse_dynamics");
-        assert_eq!(with[1], without[1], "and must not touch the undamped joint");
+        let expected = 0.42 * qd[0] + 0.1 * (qd[0] / crate::COULOMB_SMOOTHING).tanh();
+        assert!((with[0] - without[0] - expected).abs() < 1e-12, "both terms must reach inverse_dynamics");
+        assert_eq!(with[1], without[1], "and must not touch the joint that states neither");
     }
 }

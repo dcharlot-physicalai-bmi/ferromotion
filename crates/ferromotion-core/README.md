@@ -18,9 +18,17 @@ Kinematics, dynamics, and optimization for physical AI, in pure Rust (native + `
 
 ## A URDF is not an actuator model
 
-`Joint` carries four things a robot description states about its actuators, all of which were being parsed and
-discarded: `effort`, `max_velocity`, `armature` and `damping`. Each is `Option<f64>`, unstated by default, and
-contributes exactly nothing when absent — so a model that says nothing behaves as it always did.
+`Joint` carries five things a robot description states about its actuators, all of which were being parsed and
+discarded: `effort`, `max_velocity`, `armature`, `damping` and `friction`. Each is `Option<f64>`, unstated by
+default, and contributes exactly nothing when absent — so a model that says nothing behaves as it always did.
+
+`friction` is Coulomb friction, applied smoothed as `f·tanh(q̇/ε)` because true Coulomb is discontinuous at zero
+velocity and a discontinuous RNEA output makes any integrator chatter and any derivative meaningless.
+`COULOMB_SMOOTHING` documents what that costs: a joint dwelling below `ε` has its friction underestimated, so
+this models friction opposing *motion* and not stiction holding a pose. It matters most where a URDF is least
+likely to state it — measured on the SO-101, a 0.20 N·m friction costs 23% more energy and drops a 1 cm reach
+from 100% to **50%**, because a PD law has no integral action and parks each joint at the offset where
+`kp·error = f`.
 
 `armature` is the one that changes whether a problem is solvable. A geared servo's rotor accelerates with the
 joint, and its apparent inertia scales as the **square** of the gear ratio, so on a light distal link it does
@@ -68,8 +76,9 @@ silently rounded `0.012900000000000002` to `0.0129`, breaking the round trip by 
 
 `identify_actuator` measures the term rather than looking it up, which matters because `J_rotor` is rarely
 published for a given servo and a gear ratio **squared** multiplies whatever error an estimate carries. No
-optimizer is involved: RNEA is linear in both terms, so subtracting the rigid-body torque leaves a two-column
-regression per joint and the joints decouple into independent exact 2-parameter fits.
+optimizer is involved: RNEA is linear in all three actuator terms, so subtracting the rigid-body torque leaves a
+three-column regression per joint and the joints decouple into independent exact 3-parameter fits. The Coulomb
+column `tanh(q̇/ε)` is nonlinear in `q̇` and still linear in the *parameter*, which is all a regression needs.
 
 The practical obstacle is that hardware does not measure `q̈`. It reads a quantized encoder and differentiates
 twice, and at 200 Hz that scales quantization by `1/dt²` = 40,000. Measured on the SO-101 with exact torques and
@@ -102,6 +111,10 @@ it this crate reads:
 | | position limits | effort | velocity | armature | damping |
 |---|---|---|---|---|---|
 | URDF | read | read | read | absent from format | read |
+
+Coulomb friction: URDF states it as `<dynamics friction>`, MJCF as **`frictionloss`** (not `friction`, which on
+a `<geom>` is the contact coefficient and an entirely different quantity), SDF as `<axis><dynamics><friction>`.
+All three are read; USD has no equivalent.
 | MJCF | read | on `<actuator>`, not read | on `<actuator>`, not read | read | read |
 | SDF | read | read | read | absent from format | read |
 | USD | read | in `PhysicsDriveAPI`, not read | not read | absent from format | not read |

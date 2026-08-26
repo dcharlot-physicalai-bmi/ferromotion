@@ -215,6 +215,7 @@ impl RunningCostLab {
                 max_velocity: None,
                 armature: None,
                 damping: None,
+                friction: None,
             })
             .collect();
         let inertia: Vec<LinkInertia> = (0..self.dof)

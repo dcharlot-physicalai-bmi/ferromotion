@@ -259,6 +259,7 @@ pub fn from_mjcf_constrained(xml: &str) -> Result<(Robot, Vec<LinkInertia>, crat
                 max_velocity: None,
                 armature: None,
                 damping: None,
+                friction: None,
             };
             // MJCF is the one format here that states the actuator's own inertia and damping on the joint.
             // MuJoCo carries `armature` because a URDF-derived model without it is ill-conditioned: the term
@@ -268,6 +269,11 @@ pub fn from_mjcf_constrained(xml: &str) -> Result<(Robot, Vec<LinkInertia>, crat
             }
             if let Some(d) = j.attr("damping").and_then(|v| v.trim().parse::<f64>().ok()) {
                 joint = joint.with_damping(d);
+            }
+            // MJCF calls Coulomb friction `frictionloss`, not `friction` — `<geom friction>` is the contact
+            // coefficient and an entirely different quantity. Reading the wrong one would be silent.
+            if let Some(f) = j.attr("frictionloss").and_then(|v| v.trim().parse::<f64>().ok()) {
+                joint = joint.with_friction(f);
             }
             if let (Some("true") | None, Some(r)) = (j.attr("limited"), j.attr("range")) {
                 let v = floats(r)?;
@@ -420,6 +426,10 @@ pub fn to_mjcf(robot: &Robot, inertia: &[LinkInertia], model: &str) -> Result<St
         }
         if let Some(d) = j.damping {
             attrs.push_str(&format!(" damping=\"{}\"", num(d)));
+        }
+        // MJCF spells Coulomb friction `frictionloss`; `friction` on a <geom> is the contact coefficient.
+        if let Some(f) = j.friction {
+            attrs.push_str(&format!(" frictionloss=\"{}\"", num(f)));
         }
         out.push_str(&format!("{pad}  <joint {attrs}/>\n"));
 
@@ -685,7 +695,11 @@ mod tests {
         let n = robot.dof();
         // Attach exactly what URDF cannot state. If these do not survive, the export is pointless.
         for (i, j) in robot.joints.iter_mut().enumerate() {
-            *j = j.clone().with_armature(1.19e-2 + i as f64 * 1e-3).with_damping(0.64 - i as f64 * 0.05);
+            *j = j
+                .clone()
+                .with_armature(1.19e-2 + i as f64 * 1e-3)
+                .with_damping(0.64 - i as f64 * 0.05)
+                .with_friction(0.08 + i as f64 * 0.01);
         }
 
         let xml = to_mjcf(&robot, &inertia, "so101").expect("export");
@@ -696,6 +710,7 @@ mod tests {
             let (a, b) = (&robot.joints[i], &back.joints[i]);
             assert_eq!(b.armature, a.armature, "armature on joint {i} — the whole reason this exists");
             assert_eq!(b.damping, a.damping, "damping on joint {i}");
+            assert_eq!(b.friction, a.friction, "friction on joint {i} — MJCF calls it frictionloss");
             assert_eq!(b.kind, a.kind, "kind on joint {i}");
             let (al, bl) = (a.limits.unwrap(), b.limits.unwrap());
             assert!((al.0 - bl.0).abs() < 1e-12 && (al.1 - bl.1).abs() < 1e-12, "limits on joint {i}");

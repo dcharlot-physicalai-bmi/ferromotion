@@ -193,7 +193,7 @@ pub use diffik::{solve_diffik, DiffIkOptions, DiffIkResult, FrameTaskDef};
 pub use dcol::{proximity, proximity_grad_spheres, Primitive};
 pub use dynamics::{
     actuator_plausibility, forward_dynamics, gravity_vector, inverse_dynamics, mass_matrix, ActuatorReport,
-    LinkInertia,
+    LinkInertia, COULOMB_SMOOTHING,
 };
 pub use grasp_spatial::{force_closure_q1_planar_subspace, force_closure_q1_spatial, force_closure_soft_spatial, grasp_matrix, grasp_split, net_wrench, primitive_wrenches_spatial, wrench_rank, GraspContact3, GraspSplit};
 pub use grasp::{force_closure_q1, force_closure_soft, primitive_wrenches, GraspContact};
@@ -390,15 +390,30 @@ pub struct Joint {
     ///
     /// `None` behaves exactly as zero.
     pub damping: Option<f64>,
+    /// Optional **Coulomb friction** magnitude (N·m), the load-independent torque a joint loses to its own
+    /// bearings and gear teeth. URDF's `<dynamics friction=...>`, MJCF's `frictionloss`.
+    ///
+    /// On a high-reduction drive this is not a small correction. A 345:1 gear train is where friction is
+    /// largest, and omitting it makes an energy figure optimistic in the one place the loss concentrates —
+    /// which is why this was worth going back for after [`Joint::armature`] and [`Joint::damping`].
+    ///
+    /// Applied **smoothed**: `f·tanh(q̇/ε)` with `ε` = [`crate::COULOMB_SMOOTHING`], not `f·sign(q̇)`. True
+    /// Coulomb friction is discontinuous at zero velocity, and a discontinuity in the RNEA output makes any
+    /// integrator chatter and any derivative meaningless. The cost of smoothing is stated where the constant
+    /// is: a joint dwelling below `ε` has its friction *underestimated*, approaching zero at rest, so this
+    /// models a joint in motion and not stiction holding a pose.
+    ///
+    /// `None` behaves exactly as zero.
+    pub friction: Option<f64>,
 }
 
 impl Joint {
     pub fn revolute(origin: Iso, axis: Vector3<f64>) -> Self {
-        Self { origin, axis: Unit::new_normalize(axis), kind: JointKind::Revolute, limits: None, effort: None, max_velocity: None, armature: None, damping: None }
+        Self { origin, axis: Unit::new_normalize(axis), kind: JointKind::Revolute, limits: None, effort: None, max_velocity: None, armature: None, damping: None, friction: None }
     }
 
     pub fn prismatic(origin: Iso, axis: Vector3<f64>) -> Self {
-        Self { origin, axis: Unit::new_normalize(axis), kind: JointKind::Prismatic, limits: None, effort: None, max_velocity: None, armature: None, damping: None }
+        Self { origin, axis: Unit::new_normalize(axis), kind: JointKind::Prismatic, limits: None, effort: None, max_velocity: None, armature: None, damping: None, friction: None }
     }
 
     /// Attach the actuator's torque/force capability. A non-positive value is treated as "unstated", matching
@@ -425,6 +440,14 @@ impl Joint {
     /// [`with_effort`](Joint::with_effort).
     pub fn with_damping(mut self, damping: f64) -> Self {
         self.damping = if damping.is_finite() && damping > 0.0 { Some(damping) } else { None };
+        self
+    }
+
+    /// Attach the joint's Coulomb friction magnitude. Same non-positive convention as
+    /// [`with_effort`](Joint::with_effort) — a friction of zero is "unstated", which is the honest reading:
+    /// no real joint has exactly none.
+    pub fn with_friction(mut self, friction: f64) -> Self {
+        self.friction = if friction.is_finite() && friction > 0.0 { Some(friction) } else { None };
         self
     }
 

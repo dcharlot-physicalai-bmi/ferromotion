@@ -184,6 +184,8 @@ pub struct GenLink<T> {
     pub armature: T,
     /// Joint viscous damping, or zero. Also generic, for the same reason. See [`crate::Joint::damping`].
     pub damping: T,
+    /// Coulomb friction magnitude, or zero, applied smoothed. See [`crate::Joint::friction`].
+    pub friction: T,
 }
 
 /// A serial-chain model over generic scalars, with gravity.
@@ -219,6 +221,7 @@ impl<T: Real> GenModel<T> {
                     // differentiated with respect to and a branch on presence cannot carry a derivative.
                     armature: T::from_f64(j.armature.unwrap_or(0.0)),
                     damping: T::from_f64(j.damping.unwrap_or(0.0)),
+                    friction: T::from_f64(j.friction.unwrap_or(0.0)),
                     mass: T::from_f64(li.mass),
                     com: V3::from_f64([li.com[0], li.com[1], li.com[2]]),
                     inertia: M3::from_f64([
@@ -322,6 +325,9 @@ impl<T: Real> GenModel<T> {
             // armature, and the parity test cannot see it unless the test model states one.
             tau[i] = if self.links[i].revolute { n_i.dot(self.links[i].axis) } else { f_i.dot(self.links[i].axis) };
             tau[i] = tau[i].add(self.links[i].armature.mul(qdd[i])).add(self.links[i].damping.mul(qd[i]));
+            // Smoothed Coulomb, matching `crate::inverse_dynamics`. `tanh` is available on `Real` precisely so
+            // this stays differentiable, which a `signum` would not be.
+            tau[i] = tau[i].add(self.links[i].friction.mul(qd[i].div(T::from_f64(crate::COULOMB_SMOOTHING)).tanh()));
             f_next = f_i;
             n_next = n_i;
         }
@@ -437,16 +443,21 @@ mod tests {
     /// The generic path instantiated at f64 must match the reference `dynamics` module to machine
     /// precision — RNEA, mass matrix, and forward dynamics.
     ///
-    /// **The test model states an armature and a damping, and must.** Both were added to `dynamics` before
-    /// `gendyn`, and this test kept passing throughout because its model set neither — two implementations of
-    /// the same recursion silently disagreeing wherever a real model stated a rotor term. A parity test whose
-    /// fixture omits the feature is not a parity test. `armature_and_damping_are_not_free` below is the guard
-    /// that keeps this fixture honest if anyone ever zeroes them out.
+    /// **The test model states an armature, a damping and a friction, and must.** Armature and damping were
+    /// added to `dynamics` before `gendyn`, and this test kept passing throughout because its model set
+    /// neither — two implementations of the same recursion silently disagreeing wherever a real model stated a
+    /// rotor term. A parity test whose fixture omits the feature is not a parity test. Friction was added third
+    /// and this fixture was extended at the same time, rather than after the same bug happened again.
+    /// `armature_and_damping_are_not_free` below is the guard that keeps the fixture honest.
     #[test]
     fn f64_instantiation_matches_the_reference_dynamics() {
         let (mut robot, inertia) = test_robot();
         for (i, j) in robot.joints.iter_mut().enumerate() {
-            *j = j.clone().with_armature(0.011 + 0.002 * i as f64).with_damping(0.64 - 0.05 * i as f64);
+            *j = j
+                .clone()
+                .with_armature(0.011 + 0.002 * i as f64)
+                .with_damping(0.64 - 0.05 * i as f64)
+                .with_friction(0.07 + 0.01 * i as f64);
         }
         let g = Vector3::new(0.0, 0.0, -9.81);
         let q = [0.3, -0.7, 0.12, 1.1, -0.4];
@@ -496,9 +507,13 @@ mod tests {
     fn armature_and_damping_are_not_free() {
         let (mut robot, inertia) = test_robot();
         for (i, j) in robot.joints.iter_mut().enumerate() {
-            *j = j.clone().with_armature(0.011 + 0.002 * i as f64).with_damping(0.64 - 0.05 * i as f64);
+            *j = j
+                .clone()
+                .with_armature(0.011 + 0.002 * i as f64)
+                .with_damping(0.64 - 0.05 * i as f64)
+                .with_friction(0.07 + 0.01 * i as f64);
         }
-        assert!(robot.joints.iter().all(|j| j.armature.is_some() && j.damping.is_some()));
+        assert!(robot.joints.iter().all(|j| j.armature.is_some() && j.damping.is_some() && j.friction.is_some()));
 
         let q = [0.3, -0.7, 0.12, 1.1, -0.4];
         let qd = [0.5, -0.2, 0.3, -0.8, 0.6];
@@ -507,7 +522,7 @@ mod tests {
 
         let mut bare_robot = robot.clone();
         for j in bare_robot.joints.iter_mut() {
-            *j = j.clone().with_armature(-1.0).with_damping(-1.0); // clears both
+            *j = j.clone().with_armature(-1.0).with_damping(-1.0).with_friction(-1.0); // clears all three
         }
         let bare = GenModel::<f64>::from_robot(&bare_robot, &inertia, [0.0, 0.0, -9.81]);
 
@@ -515,10 +530,12 @@ mod tests {
         for i in 0..a.len() {
             let expected = 0.011 + 0.002 * i as f64;
             let damp = 0.64 - 0.05 * i as f64;
-            let delta = expected * qdd[i] + damp * qd[i];
+            let fric = 0.07 + 0.01 * i as f64;
+            let delta =
+                expected * qdd[i] + damp * qd[i] + fric * (qd[i] / crate::COULOMB_SMOOTHING).tanh();
             assert!(
                 (a[i] - b[i] - delta).abs() < 1e-12,
-                "joint {i}: the terms must contribute exactly J_a*qdd + b*qd, got {}",
+                "joint {i}: the terms must contribute exactly J_a*qdd + b*qd + f*tanh(qd/eps), got {}",
                 a[i] - b[i]
             );
         }

@@ -42,11 +42,23 @@ pub(crate) fn combine_inertia(a: &LinkInertia, b: &LinkInertia) -> LinkInertia {
     LinkInertia { mass, com, inertia }
 }
 
+/// **Velocity scale over which Coulomb friction is smoothed**, in rad/s (or m/s for a prismatic joint).
+///
+/// `f·tanh(q̇/ε)` replaces `f·sign(q̇)` because the latter is discontinuous at zero and makes an integrator
+/// chatter and a derivative undefined. `1e-3` is three orders below the rates a servo joint runs at, so the
+/// approximation is invisible in motion.
+///
+/// **What it costs, stated rather than hidden:** a joint dwelling below `ε` has its friction underestimated,
+/// reaching exactly zero at rest. So this models friction opposing *motion*, not stiction holding a pose. A
+/// model that needs the latter needs a different term, and this one will read low.
+pub const COULOMB_SMOOTHING: f64 = 1e-3;
+
 /// Inverse dynamics via Recursive Newton-Euler: joint torques for a desired motion under `gravity`
 /// (e.g. `Vector3::new(0,0,-9.81)`). `inertia[i]` is link `i`'s inertia (from `from_urdf_full`).
 ///
-/// Two actuator terms are added to the rigid-body result when the model states them:
-/// [`crate::Joint::armature`] (reflected rotor inertia, `+J_a·q̈`) and [`crate::Joint::damping`] (viscous, `+b·q̇`). Both
+/// Three actuator terms are added to the rigid-body result when the model states them:
+/// [`crate::Joint::armature`] (reflected rotor inertia, `+J_a·q̈`), [`crate::Joint::damping`] (viscous,
+/// `+b·q̇`) and [`crate::Joint::friction`] (Coulomb, `+f·tanh(q̇/ε)` — see [`COULOMB_SMOOTHING`]). All three
 /// default to unstated and contribute exactly zero, so a model without them is bit-identical to before they
 /// existed. Adding them **here** rather than at each call site is what keeps
 /// `M(q)·q̈ + bias == inverse_dynamics(q, q̇, q̈)` true: [`mass_matrix`] is built from this function with
@@ -120,6 +132,9 @@ pub fn inverse_dynamics(
         }
         if let Some(b) = robot.joints[i].damping {
             tau[i] += b * qd[i];
+        }
+        if let Some(f) = robot.joints[i].friction {
+            tau[i] += f * (qd[i] / COULOMB_SMOOTHING).tanh();
         }
         f_next = f_i;
         n_next = n_i;

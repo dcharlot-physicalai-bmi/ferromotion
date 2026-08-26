@@ -173,6 +173,7 @@ pub fn from_sdf(xml: &str, base: &str, tip: &str) -> Result<(Robot, Vec<LinkIner
             max_velocity: None,
             armature: None,
             damping: None,
+            friction: None,
         };
         if let (Some(lo), Some(hi)) = (num(limit, "lower"), num(limit, "upper")) {
             joint = joint.with_limits(lo, hi);
@@ -183,8 +184,12 @@ pub fn from_sdf(xml: &str, base: &str, tip: &str) -> Result<(Robot, Vec<LinkIner
         if let Some(v) = num(limit, "velocity") {
             joint = joint.with_max_velocity(v);
         }
-        if let Some(d) = num(ax.and_then(|a| a.child("dynamics")), "damping") {
+        let dyn_el = ax.and_then(|a| a.child("dynamics"));
+        if let Some(d) = num(dyn_el, "damping") {
             joint = joint.with_damping(d);
+        }
+        if let Some(f) = num(dyn_el, "friction") {
+            joint = joint.with_friction(f);
         }
         joints.push(joint);
         inertias.push(link_inertial.get(&child_link).cloned().unwrap_or(LinkInertia { mass: 0.0, com: Vector3::zeros(), inertia: Matrix3::zeros() }));
@@ -262,7 +267,7 @@ mod verification {
             <parent>base</parent><child>l1</child><pose>0 0 0 0 0 0</pose>
             <axis><xyz>0 1 0</xyz>
               <limit><lower>-1.2</lower><upper>2.4</upper><effort>7.5</effort><velocity>3.25</velocity></limit>
-              <dynamics><damping>0.42</damping></dynamics>
+              <dynamics><damping>0.42</damping><friction>0.09</friction></dynamics>
             </axis>
           </joint>
         </model></sdf>"#;
@@ -272,6 +277,7 @@ mod verification {
         assert_eq!(j.effort, Some(7.5));
         assert_eq!(j.max_velocity, Some(3.25));
         assert_eq!(j.damping, Some(0.42));
+        assert_eq!(j.friction, Some(0.09), "SDF states Coulomb friction under <axis><dynamics>");
         assert_eq!(j.armature, None, "SDF has no armature field to read");
     }
 
@@ -294,8 +300,8 @@ mod verification {
         let (robot, _) = from_sdf(sdf, "base", "l1").unwrap();
         let j = &robot.joints[0];
         assert_eq!(
-            (j.limits, j.effort, j.max_velocity, j.damping),
-            (None, None, None, None)
+            (j.limits, j.effort, j.max_velocity, j.damping, j.friction),
+            (None, None, None, None, None)
         );
     }
 }

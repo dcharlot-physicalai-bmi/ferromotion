@@ -619,6 +619,7 @@ pub fn robot_from_usda(stage: &UsdaStage, base: &str, tip: &str) -> Result<(Robo
             max_velocity: None,
             armature: None,
             damping: None,
+            friction: None,
         });
 
         // the driven body's mass properties, if the stage carries them

@@ -343,10 +343,14 @@ pub struct ActuatorFit {
     pub armature: f64,
     /// Fitted viscous damping `b` (N·m·s/rad) — see [`crate::Joint::damping`].
     pub damping: f64,
-    /// **Whether the excitation can separate the two at all** — and *only* that. The smaller normalized
-    /// eigenvalue of the 2×2 normal matrix. It goes to zero when `q̈` and `q̇` are proportional across the
-    /// samples, which is not a contrived case: any purely exponential motion has `q̈ = k·q̇` exactly. When this
-    /// is small the two numbers above trade off against each other and neither is meaningful alone.
+    /// Fitted Coulomb friction magnitude `f` (N·m) — see [`crate::Joint::friction`]. Fitted against the same
+    /// smoothed basis the dynamics apply, `tanh(q̇/ε)`, so the number means what the simulator will use.
+    pub friction: f64,
+    /// **Whether the excitation can separate the three terms at all** — and *only* that. The smallest
+    /// eigenvalue of the 3×3 normal matrix after each column is normalized to unit length, so it is scale-free
+    /// rather than a report on the units of `q̈` against `q̇`. It goes to zero when the columns become linearly
+    /// dependent, which is not a contrived case: any purely exponential motion has `q̈ = k·q̇` exactly. When
+    /// this is small the fitted values trade off against each other and none is meaningful alone.
     ///
     /// **A good value here does not mean the fit is good.** This is a property of the trajectory, not of the
     /// data quality, and the two come apart badly in practice. Measured on the SO-101 (`so101_reach_rl
@@ -358,8 +362,14 @@ pub struct ActuatorFit {
     /// Root-mean-square torque residual after the fit (N·m). Large means the actuator is doing something
     /// neither term describes — friction, backlash, a saturating drive.
     pub residual: f64,
-    /// Whether both fitted values are non-negative. A negative rotor inertia or negative damping is
+    /// Whether all three fitted values are non-negative. A negative rotor inertia, damping or friction is
     /// unphysical; it is **reported rather than clamped**, because a clamped value looks like a measurement.
+    ///
+    /// A term is allowed to be negative by up to `1e-9` of the largest fitted magnitude, because a least
+    /// squares solution for a truly-absent term lands on floating-point noise rather than exactly zero — a
+    /// noise-free fit of a frictionless joint returned `-1.4e-15` against terms of order `1e-2`. That allowance
+    /// is a **float-zero allowance and not a physical tolerance**: it is thirteen orders below any real value,
+    /// so it cannot launder a genuinely negative fit into a physical one.
     pub physical: bool,
 }
 
@@ -368,22 +378,30 @@ pub struct ActuatorFit {
 /// The term a URDF cannot state is also the term hardest to look up: `J_rotor` for a given servo is rarely
 /// published, and a gear ratio squared multiplies whatever error the estimate carries. This measures it instead.
 ///
-/// It is an exact linear fit, not a search, because RNEA is **linear in both terms**:
+/// It is an exact linear fit, not a search, because RNEA is **linear in all three terms**:
 ///
 /// ```text
-///   τᵢ = τ_rigid,ᵢ(q, q̇, q̈) + J_aᵢ·q̈ᵢ + bᵢ·q̇ᵢ
+///   τᵢ = τ_rigid,ᵢ(q, q̇, q̈) + J_aᵢ·q̈ᵢ + bᵢ·q̇ᵢ + fᵢ·tanh(q̇ᵢ/ε)
 /// ```
 ///
-/// so subtracting the rigid-body torque leaves a two-column regression per joint, and the joints **decouple** —
-/// each one is its own independent 2-parameter problem. That is the same structure that makes inertial
-/// identification a linear regression ([`crate::identify`]), one level further out in the drivetrain.
+/// The Coulomb column is nonlinear in `q̇` and still **linear in the parameter**, which is all a regression
+/// needs — `tanh(q̇/ε)` is a fixed function of a measured quantity. So subtracting the rigid-body torque leaves
+/// a three-column regression per joint, and the joints **decouple**: each one is its own independent
+/// 3-parameter problem. That is the same structure that makes inertial identification a linear regression
+/// ([`crate::identify`]), one level further out in the drivetrain.
 ///
 /// Two things this reports rather than hides:
 ///
 /// - **Identifiability.** `q̈` and `q̇` proportional across the samples makes the normal matrix singular and the
-///   split between inertia and damping arbitrary. `conditioning` is that number; a small value means the pair
-///   is not separable from this data no matter how small the residual is. The converse does **not** hold — see
+///   split between inertia and damping arbitrary. `conditioning` is that number; a small value means the terms
+///   are not separable from this data no matter how small the residual is. The converse does **not** hold — see
 ///   [`ActuatorFit::conditioning`], which reads `1.000` on data that gets the armature 200% wrong.
+///
+///   The Coulomb column costs conditioning, and it is worth knowing by how much. `tanh(q̇/ε)` with `ε` three
+///   orders below the joint rates is very nearly `sign(q̇)`, and for a sinusoidal `q̇` a square wave correlates
+///   with it at about 0.9. On the same two-frequency excitation that gave `conditioning ≈ 1.0` for the
+///   two-term fit, the three-term fit reports **0.191** — still an exact recovery on noise-free data, but a
+///   third of the margin against noise. Friction wants richer excitation than damping does.
 ///
 /// A practical note from measuring this on a real arm's numbers, because it decides whether the method is
 /// usable at all: `q̈` is not measured on hardware, it is differentiated twice from position, and quantisation
@@ -393,8 +411,8 @@ pub struct ActuatorFit {
 /// - **Physicality.** Negative values come back as-is with `physical: false`, because a clamped zero is
 ///   indistinguishable from a measured zero.
 ///
-/// The rigid-body torque is computed with the robot's **own armature and damping cleared**, so passing a model
-/// that already carries estimates returns a fresh fit rather than a fit of the leftover. That trap is quiet
+/// The rigid-body torque is computed with the robot's **own armature, damping and friction all cleared**, so
+/// passing a model that already carries estimates returns a fresh fit rather than a fit of the leftover. That trap is quiet
 /// otherwise: the numbers would look plausible and mean something else.
 pub fn identify_actuator(
     robot: &Robot,
@@ -407,56 +425,71 @@ pub fn identify_actuator(
     // whatever the model already claimed.
     let mut rigid = robot.clone();
     for j in rigid.joints.iter_mut() {
-        *j = j.clone().with_armature(-1.0).with_damping(-1.0);
+        // ALL THREE. Missing one here is silent: the baseline keeps that term, subtracting it removes the
+        // signal, and the fit confidently returns zero for it. Caught by the oracle test when friction was
+        // added and came back as -1.4e-15 against a truth of 0.08.
+        *j = j.clone().with_armature(-1.0).with_damping(-1.0).with_friction(-1.0);
     }
 
-    // Per joint: accumulate the 2x2 normal matrix and 2-vector, in one pass over the samples.
-    let mut ata = vec![[0.0f64; 4]; n]; // [a11, a12, a12, a22] with a11=Σq̈², a12=Σq̈q̇, a22=Σq̇²
-    let mut atb = vec![[0.0f64; 2]; n];
-    let mut scale = vec![[0.0f64; 2]; n]; // Σq̈², Σq̇² for normalising the conditioning number
+    // Per joint: a 3x3 normal system in (J_a, b, f), accumulated in one pass. Three columns and still a
+    // LINEAR fit, because `tanh(q̇/ε)` is a fixed function of the measured rate — the parameter multiplies it.
+    let eps = crate::COULOMB_SMOOTHING;
+    let mut ata = vec![[0.0f64; 9]; n];
+    let mut atb = vec![[0.0f64; 3]; n];
+    let mut colnorm = vec![[0.0f64; 3]; n]; // per-column Σx², for a scale-free conditioning number
     let mut resid_sq = vec![0.0f64; n];
     let mut count = 0usize;
 
-    let mut rows: Vec<(Vec<f64>, Vec<f64>, Vec<f64>)> = Vec::with_capacity(samples.len());
+    let mut rows: Vec<Vec<[f64; 4]>> = Vec::with_capacity(samples.len()); // per joint: [c0, c1, c2, residual]
     for s in samples {
         if s.q.len() != n || s.qd.len() != n || s.qdd.len() != n || s.tau.len() != n {
             continue; // a malformed sample is dropped rather than silently reshaping the problem
         }
         let tr = crate::inverse_dynamics(&rigid, inertia, &s.q, &s.qd, &s.qdd, gravity);
-        let r: Vec<f64> = (0..n).map(|i| s.tau[i] - tr[i]).collect();
+        let mut row = Vec::with_capacity(n);
         for i in 0..n {
-            let (a, v) = (s.qdd[i], s.qd[i]);
-            ata[i][0] += a * a;
-            ata[i][1] += a * v;
-            ata[i][3] += v * v;
-            atb[i][0] += a * r[i];
-            atb[i][1] += v * r[i];
-            scale[i][0] += a * a;
-            scale[i][1] += v * v;
+            let c = [s.qdd[i], s.qd[i], (s.qd[i] / eps).tanh()];
+            let y = s.tau[i] - tr[i];
+            for a in 0..3 {
+                for b in 0..3 {
+                    ata[i][a * 3 + b] += c[a] * c[b];
+                }
+                atb[i][a] += c[a] * y;
+                colnorm[i][a] += c[a] * c[a];
+            }
+            row.push([c[0], c[1], c[2], y]);
         }
-        rows.push((s.qdd.clone(), s.qd.clone(), r));
+        rows.push(row);
         count += 1;
     }
-    ata.iter_mut().for_each(|m| m[2] = m[1]);
 
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
-        let (a11, a12, a22) = (ata[i][0], ata[i][1], ata[i][3]);
-        let det = a11 * a22 - a12 * a12;
-        // Normalise so `conditioning` is scale-free: it is the smaller eigenvalue of the 2x2 after each column
-        // is unit-normalised, i.e. sqrt(1 - correlation²) territory, which is what identifiability means here.
-        let norm = (scale[i][0] * scale[i][1]).sqrt();
-        let conditioning = if norm > 0.0 { (det / (norm * norm)).abs().sqrt() } else { 0.0 };
+        let m = DMatrix::from_row_slice(3, 3, &ata[i]);
+        let rhs = DVector::from_row_slice(&atb[i]);
+        // Scale-free conditioning: normalise each column to unit norm before asking how singular the system is.
+        // Comparing raw eigenvalues would just report the units of q̈ against q̇.
+        let d: Vec<f64> = (0..3).map(|k| colnorm[i][k].sqrt()).collect();
+        let scaled = DMatrix::from_fn(3, 3, |a, b| {
+            if d[a] > 0.0 && d[b] > 0.0 {
+                ata[i][a * 3 + b] / (d[a] * d[b])
+            } else {
+                f64::from(a == b)
+            }
+        });
+        let conditioning = scaled.symmetric_eigenvalues().iter().fold(f64::INFINITY, |x: f64, &y| x.min(y.abs()));
 
-        let (armature, damping) = if det.abs() > f64::EPSILON * norm.max(1.0) {
-            ((a22 * atb[i][0] - a12 * atb[i][1]) / det, (a11 * atb[i][1] - a12 * atb[i][0]) / det)
-        } else {
-            (f64::NAN, f64::NAN) // unidentifiable: say so rather than return a readable-looking number
+        let sol = m.clone().lu().solve(&rhs).filter(|_| conditioning > 1e-12);
+        let (armature, damping, friction) = match &sol {
+            Some(v) => (v[0], v[1], v[2]),
+            // Unidentifiable: say so rather than return three readable-looking numbers.
+            None => (f64::NAN, f64::NAN, f64::NAN),
         };
 
         if armature.is_finite() {
-            for (qdd, qd, r) in &rows {
-                let e = r[i] - armature * qdd[i] - damping * qd[i];
+            for row in &rows {
+                let c = &row[i];
+                let e = c[3] - armature * c[0] - damping * c[1] - friction * c[2];
                 resid_sq[i] += e * e;
             }
         }
@@ -464,13 +497,17 @@ pub fn identify_actuator(
             joint: i,
             armature,
             damping,
+            friction,
             conditioning,
             residual: if count > 0 && armature.is_finite() {
                 (resid_sq[i] / count as f64).sqrt()
             } else {
                 f64::NAN
             },
-            physical: armature >= 0.0 && damping >= 0.0,
+            physical: {
+                let floor = -1e-9 * armature.abs().max(damping.abs()).max(friction.abs());
+                armature >= floor && damping >= floor && friction >= floor
+            },
         });
     }
     out
@@ -698,7 +735,11 @@ mod tests {
         </robot>"#;
         let (mut robot, inertia) = crate::from_urdf_full(URDF, "base", "tool").unwrap();
         for (i, j) in robot.joints.iter_mut().enumerate() {
-            *j = j.clone().with_armature(armature + 0.003 * i as f64).with_damping(damping - 0.1 * i as f64);
+            *j = j
+                .clone()
+                .with_armature(armature + 0.003 * i as f64)
+                .with_damping(damping - 0.1 * i as f64)
+                .with_friction(0.08 + 0.02 * i as f64);
         }
         (robot, inertia)
     }
@@ -728,19 +769,21 @@ mod tests {
         assert_eq!(fits.len(), 2);
         for (i, f) in fits.iter().enumerate() {
             let (true_a, true_b) = (0.0119 + 0.003 * i as f64, 0.64 - 0.1 * i as f64);
+            let true_f = 0.08 + 0.02 * i as f64;
             assert!(f.physical, "joint {i} fit must be physical, got {f:?}");
             assert!(f.conditioning > 1e-3, "joint {i} excitation should be identifiable, got {}", f.conditioning);
             assert!((f.armature - true_a).abs() < 1e-9, "joint {i} armature: {} vs {true_a}", f.armature);
             assert!((f.damping - true_b).abs() < 1e-9, "joint {i} damping: {} vs {true_b}", f.damping);
+            assert!((f.friction - true_f).abs() < 1e-9, "joint {i} friction: {} vs {true_f}", f.friction);
             assert!(f.residual < 1e-9, "joint {i} residual {} should be ~0 on noise-free data", f.residual);
         }
     }
 
-    /// **Exponential motion cannot separate the two, and the fit must say so.**
+    /// **Exponential motion cannot separate the terms, and the fit must say so.**
     ///
-    /// For `q̇ = e^{kt}` the acceleration is exactly `k·q̇`, so the two regression columns are parallel and any
-    /// `(J_a, b)` on a line through the truth fits equally well. A solver that returns a confident number here
-    /// is worse than one that refuses: the value would look like a measurement.
+    /// For `q̇ = e^{kt}` the acceleration is exactly `k·q̇`, so the inertia and damping columns are parallel and
+    /// a whole family of `(J_a, b)` fits equally well. A solver that returns a confident number here is worse
+    /// than one that refuses: the value would look like a measurement.
     #[test]
     fn proportional_excitation_is_reported_as_unidentifiable() {
         let (robot, inertia) = geared_arm(0.0119, 0.64);
@@ -809,12 +852,20 @@ mod tests {
         }
     }
 
-    /// Friction the model does not contain shows up in the residual rather than being absorbed silently.
+    /// **A term the three-column basis genuinely cannot express must land in the residual.**
+    ///
+    /// This test used to inject Coulomb friction, which was the right check when the model had only inertia and
+    /// damping — and became vacuous the moment friction became a fitted term, because the fit then recovers it
+    /// and the residual drops to `1.5e-15`. So the injected term has to be one the basis cannot represent:
+    /// quadratic drag `c·q̇·|q̇|`, which is neither constant in `q̇` nor linear in it.
+    ///
+    /// The point is not the drag. It is that a residual near zero means "these three terms explain the data",
+    /// and the only way to keep that claim honest is to check the residual rises when something else is present.
     #[test]
-    fn unmodelled_friction_shows_up_in_the_residual() {
+    fn a_term_outside_the_basis_shows_up_in_the_residual() {
         let (robot, inertia) = geared_arm(0.0119, 0.64);
         let g = Vector3::new(0.0, 0.0, -9.81);
-        let coulomb = 0.15;
+        let drag = 0.05;
         let mut samples = Vec::new();
         for n in 0..300 {
             let t = n as f64 * 0.002;
@@ -823,13 +874,28 @@ mod tests {
             let qdd = vec![-3.6 * (3.0 * t).sin() - 5.5 * (11.0 * t).sin(), 7.5 * (5.0 * t).cos()];
             let mut tau = crate::inverse_dynamics(&robot, &inertia, &q, &qd, &qdd, g);
             for i in 0..2 {
-                tau[i] += coulomb * qd[i].signum(); // Coulomb friction: not J_a*qdd, not b*qd
+                tau[i] += drag * qd[i] * qd[i].abs(); // quadratic: outside span{q̈, q̇, tanh(q̇/ε)}
             }
             samples.push(IdSample { q, qd, qdd, tau });
         }
         let fits = identify_actuator(&robot, &inertia, &samples, g);
         for f in &fits {
-            assert!(f.residual > 0.01, "joint {} should show an unmodelled term, residual {}", f.joint, f.residual);
+            assert!(f.residual > 1e-3, "joint {} should show the unmodelled term, residual {}", f.joint, f.residual);
+        }
+
+        // The control: without the drag, the SAME excitation leaves a residual at floating-point zero. Without
+        // this, the assertion above could pass on a residual that is always large.
+        let mut clean = Vec::new();
+        for n in 0..300 {
+            let t = n as f64 * 0.002;
+            let q = vec![0.4 * (3.0 * t).sin(), -0.3 * (5.0 * t).cos()];
+            let qd = vec![1.2 * (3.0 * t).cos() + 0.5 * (11.0 * t).cos(), 1.5 * (5.0 * t).sin()];
+            let qdd = vec![-3.6 * (3.0 * t).sin() - 5.5 * (11.0 * t).sin(), 7.5 * (5.0 * t).cos()];
+            let tau = crate::inverse_dynamics(&robot, &inertia, &q, &qd, &qdd, g);
+            clean.push(IdSample { q, qd, qdd, tau });
+        }
+        for f in identify_actuator(&robot, &inertia, &clean, g) {
+            assert!(f.residual < 1e-9, "joint {} residual {} should be ~0 with nothing extra", f.joint, f.residual);
         }
     }
 }

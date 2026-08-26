@@ -166,11 +166,13 @@ pub fn tree_from_urdf(xml: &str, base: &str) -> Result<KinematicTree, String> {
                         Prismatic => Joint::prismatic(pre * origin, axis).with_limits(j.limit.lower, j.limit.upper)
                     .with_effort(j.limit.effort)
                     .with_max_velocity(j.limit.velocity)
-                    .with_damping(j.dynamics.as_ref().map(|d| d.damping).unwrap_or(0.0)),
+                    .with_damping(j.dynamics.as_ref().map(|d| d.damping).unwrap_or(0.0))
+                    .with_friction(j.dynamics.as_ref().map(|d| d.friction).unwrap_or(0.0)),
                         Revolute => Joint::revolute(pre * origin, axis).with_limits(j.limit.lower, j.limit.upper)
                     .with_effort(j.limit.effort)
                     .with_max_velocity(j.limit.velocity)
-                    .with_damping(j.dynamics.as_ref().map(|d| d.damping).unwrap_or(0.0)),
+                    .with_damping(j.dynamics.as_ref().map(|d| d.damping).unwrap_or(0.0))
+                    .with_friction(j.dynamics.as_ref().map(|d| d.friction).unwrap_or(0.0)),
                         _ => Joint::revolute(pre * origin, axis),
                     };
                     let idx = tree.joints.len();

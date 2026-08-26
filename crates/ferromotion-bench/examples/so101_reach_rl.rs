@@ -384,9 +384,20 @@ fn episode_timed(
     seed: u64,
     substeps: usize,
     setup_s: f64,
+    law: impl FnMut(&So101Reach) -> Vec<f64>,
+) -> Score {
+    episode_timed_on(So101Reach::new(j_refl), seed, substeps, setup_s, law)
+}
+
+/// Same, on an environment the caller has already configured — so a sweep can vary a joint property that
+/// `So101Reach::new` does not take.
+fn episode_timed_on(
+    mut env: So101Reach,
+    seed: u64,
+    substeps: usize,
+    setup_s: f64,
     mut law: impl FnMut(&So101Reach) -> Vec<f64>,
 ) -> Score {
-    let mut env = So101Reach::new(j_refl);
     env.substeps = substeps;
     env.reset(seed);
     let mut best = f64::INFINITY;
@@ -533,6 +544,65 @@ fn compute_cost(n_calls: usize) {
         if mlp_lo > pd_hi { mlp_lo / pd_hi } else { 1.0 },
         act,
         act / worst_compute
+    );
+}
+
+/// **What does the Coulomb friction term cost, on an arm whose value for it is unknown?** Run with
+/// `--friction`.
+///
+/// `Joint::friction` exists now and the SO-101 model does not state one, because no measured value for the
+/// STS3215's gear train was located. That is not a neutral omission: a 345:1 reduction is where friction
+/// concentrates, and leaving it unstated makes the energy figure optimistic in exactly that place.
+///
+/// The accounting itself is already right, which is worth being precise about — `mech` and `copper` are computed
+/// from the **commanded** torque, and a stated friction raises the torque the controller must produce, so it
+/// flows through without any change to the energy code. What is missing is the number, not the term. So rather
+/// than invent one, this sweeps plausible values and reports what each costs, which is the honest form of
+/// "this matters".
+fn friction_mode(seeds: &[u64]) {
+    let j_refl = reflected_inertia();
+    println!("\n  Coulomb friction the SO-101 model does not state, and what stating it would cost:\n");
+    println!(
+        "  {:>10} {:>11} {:>9} {:>9} {:>9} {:>8}",
+        "friction", "final err", "mech J", "copper J", "elec J", "reached"
+    );
+    let mut base = 0.0;
+    for (k, &f) in [0.0f64, 0.02, 0.05, 0.10, 0.20].iter().enumerate() {
+        let scores: Vec<Score> = seeds
+            .iter()
+            .map(|&sd| {
+                let mut env = So101Reach::new(j_refl);
+                for j in env.robot.joints.iter_mut() {
+                    *j = j.clone().with_friction(f);
+                }
+                env.reset(sd);
+                let g = ik_goal(&env);
+                let t = std::time::Instant::now();
+                let ik_s = t.elapsed().as_secs_f64();
+                let mut e2 = So101Reach::new(j_refl);
+                for j in e2.robot.joints.iter_mut() {
+                    *j = j.clone().with_friction(f);
+                }
+                episode_timed_on(e2, sd, SUBSTEPS, ik_s, move |e| pd_track(e, &g, 8.0, 1.5))
+            })
+            .collect();
+        let m = mean(&scores);
+        if k == 0 {
+            base = m.elec();
+        }
+        println!(
+            "  {:>10} {:>11.4} {:>9.2} {:>9.2} {:>9.2} {:>7.0}%{}",
+            if f == 0.0 { "unstated".to_string() } else { format!("{f:.2} N m") },
+            m.final_err,
+            m.mech,
+            m.copper,
+            m.elec(),
+            100.0 * m.reached,
+            if k == 0 { String::new() } else { format!("   {:+.0}% energy", 100.0 * (m.elec() / base - 1.0)) }
+        );
+    }
+    println!(
+        "\n  The energy code needed no change for this: friction raises the torque the controller has to command,\n  and mech and copper are both computed from the commanded torque. What was missing is a measured value for\n  this gearbox, which is what `identify_actuator` is for.\n\n  The accuracy column is the bigger finding. A PD law has no integral action, so Coulomb friction parks the\n  joint at whatever offset makes kp*error equal the friction: f/kp, or 0.025 rad at 0.20 N m and kp = 8. That\n  is the 0.0105 m of tool error in the last row, and it is why the reach rate falls to 50% while the energy\n  has only risen 23%. Feed the friction forward (the model now states it, so gravity_vector's sibling term is\n  available) or add integral action; do not raise kp, which buys the same offset back in copper loss."
     );
 }
 
@@ -829,6 +899,9 @@ fn main() {
     let baseline = baseline.expect("USED_INDEX is within sensitivity()");
     assert_eq!(sensitivity()[USED_INDEX], j_refl, "USED_INDEX must name the inertia the run uses");
 
+    if std::env::args().any(|a| a == "--friction") {
+        friction_mode(&seeds);
+    }
     if std::env::args().any(|a| a == "--identify") {
         identify_mode();
     }

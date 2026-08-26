@@ -302,6 +302,7 @@ mod tests {
                 max_velocity: None,
                 armature: None,
                 damping: None,
+                friction: None,
             })
             .collect();
         let inertia = (0..dof)
