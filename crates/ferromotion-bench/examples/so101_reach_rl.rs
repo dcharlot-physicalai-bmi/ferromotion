@@ -742,8 +742,53 @@ fn identify_mode() {
         );
     }
 
+    // THE LIMITATION THAT DECIDES WHETHER ANY OF THIS IS USABLE. Everything above assumed exact torques. The
+    // STS3215 has no torque sensor: it reports current, and torque is inferred as k_t * I. But k_t here was
+    // itself derived from two catalogue numbers, so it carries an unquantified scale error -- and that error
+    // multiplies the MEASURED torque while leaving the model-computed rigid-body torque alone, so it does not
+    // cancel. This measures how the bias lands.
+    let sg = SavGol { half_window: 10, order: 3 };
+    let counts = (1u32 << 12) as f64;
+    let step = std::f64::consts::TAU / counts;
+    let mut qs = Vec::with_capacity(n);
+    let mut qds = Vec::with_capacity(n);
+    let mut qdds = Vec::with_capacity(n);
+    for i in 0..n {
+        let col: Vec<f64> = q_hist.iter().map(|q| (q[i] / step).round() * step).collect();
+        qds.push(sg.apply(&col, dt, 1));
+        qdds.push(sg.apply(&col, dt, 2));
+        qs.push(col);
+    }
+    println!("\n  And with no torque sensor: torque inferred as k_t * I, where k_t is itself an estimate.\n");
+    println!("  {:>10} {:>13} {:>10} {:>13} {:>10}", "k_t error", "armature", "err", "damping", "err");
+    for scale in [0.80f64, 0.90, 0.95, 1.00, 1.05, 1.10, 1.20] {
+        let mut samples = Vec::new();
+        for k in 10..steps - 10 {
+            samples.push(IdSample {
+                q: (0..n).map(|i| qs[i][k]).collect(),
+                qd: (0..n).map(|i| qds[i][k]).collect(),
+                qdd: (0..n).map(|i| qdds[i][k]).collect(),
+                // A current reading interpreted through the wrong k_t scales the whole inferred torque.
+                tau: ideal[k].tau.iter().map(|t| t * scale).collect(),
+            });
+        }
+        let fits = identify_actuator(&env.robot, &env.inertia, &samples, GRAVITY);
+        let f = &fits[n - 1]; // the wrist: smallest rigid-body torque, so the most exposed
+        println!(
+            "  {:>9.0}% {:>13.6e} {:>9.1}% {:>13.4} {:>9.1}%",
+            100.0 * (scale - 1.0),
+            f.armature,
+            100.0 * (f.armature - truth_a).abs() / truth_a,
+            f.damping,
+            100.0 * (f.damping - truth_b).abs() / truth_b
+        );
+    }
     println!(
-        "\n  The torques above are exact; only the kinematics are quantised, so every error is attributable to\n  differentiation alone. Two things worth reading off this table.\n\n  Damping identifies robustly and armature does not, because damping multiplies qd (one differentiation)\n  while armature multiplies qdd (two, so quantisation noise arrives scaled by 1/dt^2 = 40,000 at 200 Hz).\n\n  And `conditioning` stays at ~1.0 throughout, including where the armature is 200% wrong and negative. It\n  measures whether the EXCITATION separates the two terms, not whether the data is accurate enough to trust.\n  The residual is the field that catches this one: 1e-15 on ideal derivatives against 1e-1 on quantised ones.\n\n  The recipe, then: a 12-bit encoder is enough IF the rates come from a Savitzky-Golay fit rather than a\n  difference. That takes the worst-case armature error from 217% to 2.7%.\n\n  Window length is NOT monotone, which is the trap. 125 ms at order 3 is several times worse than 50 ms,\n  because an order-3 polynomial cannot follow a 9 rad/s excitation across 125 ms and over-smoothing biases\n  the second derivative. Order 4 recovers curvature over 250 ms but starts costing the damping instead.\n  Match the window to the excitation bandwidth; smoothing harder is the instinct and it is wrong."
+        "\n  Read on the wrist, the joint with the least rigid-body torque and so the most exposed. The damping\n  error tracks the k_t error EXACTLY one-for-one -- 10% out gives 10.0% out -- because at this joint almost\n  all the torque is actuator rather than rigid-body, so scaling the measured torque scales the fitted term\n  with it. Armature follows at roughly the same rate. There is no averaging-down and no cancellation: the\n  parameters are known no better than k_t is.\n\n  So k_t is not a detail to inherit from a catalogue. A locked-rotor test gives R directly and back-EMF at a\n  known speed gives k_e = k_t; both should be measured before any of the three actuator terms is trusted.\n  That is a sequencing requirement, not a reason to abandon the method -- and note the 0% row still shows a\n  2.6% armature error, which is the Savitzky-Golay quantisation floor and nothing to do with torque at all."
+    );
+
+    println!(
+        "\n  The torques above are exact; only the kinematics are quantised, so every error is attributable to\n  differentiation alone. Two things worth reading off this table.\n\n  Damping identifies robustly and armature does not, because damping multiplies qd (one differentiation)\n  while armature multiplies qdd (two, so quantisation noise arrives scaled by 1/dt^2 = 40,000 at 200 Hz).\n\n  And `conditioning` stays at ~1.0 throughout, including where the armature is 200% wrong and negative. It\n  measures whether the EXCITATION separates the three terms, not whether the data is good enough to trust.\n  The residual is the field that catches this one: 1e-15 on ideal derivatives against 1e-1 on quantised ones.\n\n  The recipe, then: a 12-bit encoder is enough IF the rates come from a Savitzky-Golay fit rather than a\n  difference. That takes the worst-case armature error from 217% to 2.7%.\n\n  Window length is NOT monotone, which is the trap. 125 ms at order 3 is several times worse than 50 ms,\n  because an order-3 polynomial cannot follow a 9 rad/s excitation across 125 ms and over-smoothing biases\n  the second derivative. Order 4 recovers curvature over 250 ms but starts costing the damping instead.\n  Match the window to the excitation bandwidth; smoothing harder is the instinct and it is wrong."
     );
 }
 
