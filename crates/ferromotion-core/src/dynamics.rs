@@ -200,6 +200,10 @@ pub struct ActuatorReport {
     pub joint_inertia: f64,
     /// `effort / M_ii` — the acceleration the declared limit implies against this joint alone. `None` when the
     /// model states no effort limit, because there is then nothing to check.
+    ///
+    /// **rad/s² for a revolute joint, m/s² for a prismatic one**, since `effort` is a torque in the first case
+    /// and a force in the second. The rule of thumb below is a *rotary* one and does not transfer: 200 N into a
+    /// 2 kg carriage is 100 m/s², around 10 g, aggressive for a linear stage but nowhere near 1e4.
     pub implied_acceleration: Option<f64>,
     /// Whether the model stated an armature for this joint.
     pub armature_stated: bool,
@@ -214,7 +218,8 @@ pub struct ActuatorReport {
 /// problem and is not one.
 ///
 /// Interpretation, and why this function reports rather than judges: there is no universal threshold, because
-/// the honest bound depends on the drive. A geared hobby servo like the STS3215 manages a few hundred rad/s²
+/// the honest bound depends on the drive — and on the joint kind, since a prismatic joint's number is in m/s²
+/// and the figures below are rotary. A geared hobby servo like the STS3215 manages a few hundred rad/s²
 /// at its output (3 N·m into a reflected `1.19e-2` kg·m² is 252); a quasi-direct-drive actuator reaches a few
 /// thousand. So a joint implying **10⁴ rad/s² or more, with no armature stated**, is almost always missing the
 /// rotor term rather than describing a remarkable motor. The caller knows its hardware and this function does
@@ -593,5 +598,84 @@ mod tests {
         // The control: with an effort stated, the same call DOES produce a number.
         let rs = actuator_plausibility(&robot, &inertia, &[0.0, 0.0]);
         assert!(rs.iter().all(|r| r.implied_acceleration.is_some()));
+    }
+
+    /// **The actuator terms must work on a PRISMATIC joint too, in the units a linear drive has.**
+    ///
+    /// Everything in this series was measured on the SO-101, which is five revolute joints. That is half the
+    /// joint kinds this crate supports, and the untested half is the one where the *units change*: a leadscrew
+    /// reflects a **mass** (kg), not an inertia, so `armature` is kg, `damping` is N·s/m and `friction` is N.
+    /// The recursion applies all three after the revolute/prismatic branch, so it should already be right —
+    /// this asserts that rather than assuming it, because "should already be right" is what the gendyn
+    /// divergence looked like from the inside.
+    #[test]
+    fn the_actuator_terms_apply_to_a_prismatic_joint_in_linear_units() {
+        const SLIDER: &str = r#"<robot name="slide">
+          <link name="base"/>
+          <link name="carriage"><inertial><origin xyz="0 0 0"/><mass value="2.0"/>
+            <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/></inertial></link>
+          <link name="tool"/>
+          <joint name="j1" type="prismatic"><parent link="base"/><child link="carriage"/><origin xyz="0 0 0"/>
+            <axis xyz="1 0 0"/><limit lower="-0.5" upper="0.5" effort="200" velocity="1"/></joint>
+          <joint name="jt" type="fixed"><parent link="carriage"/><child link="tool"/><origin xyz="0.1 0 0"/></joint>
+        </robot>"#;
+        let (plain, inertia) = from_urdf_full(SLIDER, "base", "tool").unwrap();
+        assert_eq!(plain.joints[0].kind, crate::JointKind::Prismatic);
+        // Along x, with gravity along -z: the axis is horizontal, so gravity contributes nothing to this joint.
+        let g = Vector3::new(0.0, 0.0, -9.81);
+        let (q, qd, qdd) = ([0.1], [0.7], [2.0]);
+
+        // Reflected MASS of a leadscrew: m_refl = J_rotor * (2*pi/lead)^2. For J_rotor = 1e-5 kg m^2 and a
+        // 5 mm lead that is 1e-5 * (2*pi/0.005)^2 = 15.8 kg — the same "the drive dominates the load" story as
+        // the rotary case, in different units.
+        let lead = 0.005;
+        let m_refl = 1e-5 * (std::f64::consts::TAU / lead).powi(2);
+        assert!(m_refl > 15.0 && m_refl < 16.0, "reflected mass {m_refl:.2} kg");
+        let (b, f) = (30.0, 4.0); // N s/m and N
+
+        let mut driven = plain.clone();
+        driven.joints[0] = driven.joints[0].clone().with_armature(m_refl).with_damping(b).with_friction(f);
+
+        let bare = inverse_dynamics(&plain, &inertia, &q, &qd, &qdd, g);
+        let with = inverse_dynamics(&driven, &inertia, &q, &qd, &qdd, g);
+        let expected = m_refl * qdd[0] + b * qd[0] + f * (qd[0] / COULOMB_SMOOTHING).tanh();
+        assert!(
+            (with[0] - bare[0] - expected).abs() < 1e-12,
+            "prismatic force must gain m_refl*a + b*v + f*tanh(v/eps): got {}, expected {expected}",
+            with[0] - bare[0]
+        );
+
+        // And it must reach the mass matrix diagonal as a MASS, exactly as armature does for a rotary joint.
+        let m0 = mass_matrix(&plain, &inertia, &q);
+        let m1 = mass_matrix(&driven, &inertia, &q);
+        assert!((m1[(0, 0)] - m0[(0, 0)] - m_refl).abs() < 1e-12, "reflected mass on the diagonal");
+        // The load is 2 kg and the drive reflects 15.8 kg, so the drive dominates 7.9:1 — the same class of
+        // finding as the SO-101 wrist, which is the point of checking the other joint kind at all.
+        assert!(m0[(0, 0)] > 1.9 && m0[(0, 0)] < 2.1, "bare carriage mass {}", m0[(0, 0)]);
+        assert!(m_refl / m0[(0, 0)] > 7.0, "drive-to-load ratio {}", m_refl / m0[(0, 0)]);
+    }
+
+    /// `actuator_plausibility` on a prismatic joint reports an **acceleration in m/s²**, and its rule of thumb
+    /// is a rotary one — so the number is right and the threshold in the doc does not transfer. Asserting the
+    /// number here so the units are pinned even though the guidance cannot be.
+    #[test]
+    fn actuator_plausibility_reports_linear_acceleration_for_a_prismatic_joint() {
+        const SLIDER: &str = r#"<robot name="slide">
+          <link name="base"/>
+          <link name="carriage"><inertial><origin xyz="0 0 0"/><mass value="2.0"/>
+            <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/></inertial></link>
+          <link name="tool"/>
+          <joint name="j1" type="prismatic"><parent link="base"/><child link="carriage"/><origin xyz="0 0 0"/>
+            <axis xyz="1 0 0"/><limit lower="-0.5" upper="0.5" effort="200" velocity="1"/></joint>
+          <joint name="jt" type="fixed"><parent link="carriage"/><child link="tool"/><origin xyz="0.1 0 0"/></joint>
+        </robot>"#;
+        let (robot, inertia) = from_urdf_full(SLIDER, "base", "tool").unwrap();
+        let r = &actuator_plausibility(&robot, &inertia, &[0.0])[0];
+        assert_eq!(r.declared_effort, Some(200.0), "URDF effort on a prismatic joint is a FORCE in N");
+        // 200 N into 2 kg is 100 m/s^2 — around 10 g, aggressive but not absurd for a linear stage, and
+        // nowhere near the 1e4 the rotary rule of thumb flags. The units, not the threshold, are what carry.
+        let a = r.implied_acceleration.expect("effort is stated");
+        assert!((a - 100.0).abs() < 1.0, "implied linear acceleration {a:.1} m/s^2, expected ~100");
+        assert!(!r.armature_stated);
     }
 }

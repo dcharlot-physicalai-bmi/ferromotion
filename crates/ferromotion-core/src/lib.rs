@@ -356,8 +356,15 @@ pub struct Joint {
     pub effort: Option<f64>,
     /// Optional maximum joint rate, from the URDF's `<limit velocity=...>`. Same history as [`Joint::effort`].
     pub max_velocity: Option<f64>,
-    /// **Rotor inertia reflected through the gearbox**, `N²·J_rotor`, added to this joint's diagonal of the
+    /// **The drive's own inertia reflected through its transmission**, added to this joint's diagonal of the
     /// joint-space inertia matrix. MuJoCo's `armature`; MJCF states it, URDF has no field for it.
+    ///
+    /// **The units follow the joint kind**, and the quantity is not the same thing in both. For a revolute
+    /// joint it is a rotor inertia, `N²·J_rotor`, in kg·m². For a **prismatic** joint it is a reflected
+    /// **mass** in kg — a leadscrew of lead `L` reflects `J_rotor·(2π/L)²`, so a `1e-5` kg·m² rotor on a 5 mm
+    /// lead presents **15.8 kg**. Against a 2 kg carriage that is 7.9:1, the same "the drive dominates the
+    /// load" story as the SO-101's wrist, in different units. The recursion applies the term after the
+    /// revolute/prismatic branch, so both work; only the units differ.
     ///
     /// This is not a numerical fudge, it is a term of the plant. A geared servo's rotor accelerates with the
     /// joint and its apparent inertia scales as the *square* of the ratio, so on a small distal link it does
@@ -381,8 +388,10 @@ pub struct Joint {
     ///
     /// `None` behaves exactly as zero, so a model that does not state one is unaffected.
     pub armature: Option<f64>,
-    /// Optional joint viscous damping (N·m·s/rad), the passive torque `b·q̇` opposing motion. URDF's
+    /// Optional joint viscous damping, the passive resistance `b·q̇` opposing motion. URDF's
     /// `<dynamics damping=...>`, MJCF's `damping`, SDF's `<axis><dynamics><damping>`.
+    ///
+    /// N·m·s/rad on a revolute joint, **N·s/m on a prismatic one**.
     ///
     /// For a DC servo the dominant part of this is not friction but **back-EMF speed droop**: available
     /// torque falls linearly to zero at no-load speed, so `b = τ_stall / ω_0` follows from two catalogue
@@ -391,8 +400,10 @@ pub struct Joint {
     ///
     /// `None` behaves exactly as zero.
     pub damping: Option<f64>,
-    /// Optional **Coulomb friction** magnitude (N·m), the load-independent torque a joint loses to its own
+    /// Optional **Coulomb friction** magnitude, the load-independent resistance a joint loses to its own
     /// bearings and gear teeth. URDF's `<dynamics friction=...>`, MJCF's `frictionloss`.
+    ///
+    /// N·m on a revolute joint, **N on a prismatic one**.
     ///
     /// On a high-reduction drive this is not a small correction. A 345:1 gear train is where friction is
     /// largest, and omitting it makes an energy figure optimistic in the one place the loss concentrates —
@@ -430,8 +441,9 @@ impl Joint {
         self
     }
 
-    /// Attach the reflected rotor inertia `N²·J_rotor`. Same non-positive convention as
-    /// [`with_effort`](Joint::with_effort): a zero or negative value is "unstated", not "weightless rotor".
+    /// Attach the reflected drive inertia — `N²·J_rotor` in kg·m² for a revolute joint, a reflected mass in
+    /// kg for a prismatic one. Same non-positive convention as [`with_effort`](Joint::with_effort): a zero or
+    /// negative value is "unstated", not "weightless rotor".
     pub fn with_armature(mut self, armature: f64) -> Self {
         self.armature = if armature.is_finite() && armature > 0.0 { Some(armature) } else { None };
         self
