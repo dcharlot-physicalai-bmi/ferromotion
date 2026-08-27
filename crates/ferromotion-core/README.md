@@ -110,6 +110,33 @@ For such a joint, measure `k_t` from a locked-rotor and back-EMF pair and use th
 An earlier draft of this paragraph had the condition backwards, naming gravity load as the failure. It was
 caught by an adversarial review before publication, which built the vertical-axis case and demonstrated it.
 
+### Screening an excitation before you run it
+
+`conditioning` reports a degenerate fit *after* the data is collected, and it is a scalar — so it says
+*something* is confounded and can never say **what**. That gap produced a wrong conclusion in this crate: a test
+built a constant-velocity motion, saw the number collapse, and concluded the torque constant was
+unidentifiable. It wasn't. The unresolvable direction was `[0.000, 0.000, +0.707, −0.707]` — zero weight on
+`k_t` — and the real confounding was damping against friction, which the three-term fit has too.
+
+`confounding` reports that direction, from a **planned** motion with no measurement at all. For a trajectory a
+generator already knows, all four regression columns are computable — the current from the model's own torque —
+so an excitation can be rejected at the desk instead of on the bench. `worst_pair()` names the two parameters
+carrying the unresolvable direction:
+
+| planned motion | conditioning | confounded pair |
+|---|---|---|
+| constant velocity | 0.0 | **armature** (its column is dead); zero weight on `k_t` |
+| gravity-parallel axis, rich excitation | < 1e-6 | **`k_t` vs armature** |
+| gravity-loaded, same excitation | > 1e-3 | identifiable |
+
+The third row is what makes the first two mean anything: the *same* excitation is fine on a loaded arm, because
+`G(q)` supplies the independence. There is a test asserting the screening agrees with the fit it screens for —
+a screen that disagreed with its own fit would be worse than none.
+
+It depends on your prior estimates, since the predicted current comes from the model's currently-stated actuator
+terms. It is reliable about *structural* degeneracy — a column identically zero, or two columns proportional for
+geometric reasons — which is the failure mode worth screening for.
+
 The practical obstacle is that hardware does not measure `q̈`. It reads a quantized encoder and differentiates
 twice, and at 200 Hz that scales quantization by `1/dt²` = 40,000. Measured on the SO-101 with exact torques and
 only the kinematics quantized (`so101_reach_rl --identify`):

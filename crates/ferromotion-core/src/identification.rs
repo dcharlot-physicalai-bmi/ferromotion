@@ -370,6 +370,143 @@ fn solve_normal(k: usize, ata: &[f64], atb: &[f64], colnorm: &[f64]) -> (Option<
     (m.lu().solve(&rhs).filter(|_| conditioning > 1e-12), conditioning)
 }
 
+/// A motion **planned but not yet run** — the input to [`confounding`].
+///
+/// No measurement: only what a trajectory generator already knows. That is the point, because the whole value
+/// of screening an excitation is doing it before the arm moves.
+#[derive(Clone, Debug)]
+pub struct PlannedMotion {
+    pub q: Vec<f64>,
+    pub qd: Vec<f64>,
+    pub qdd: Vec<f64>,
+}
+
+/// **Which parameters a planned excitation cannot tell apart**, per joint.
+#[derive(Clone, Copy, Debug)]
+pub struct Confounding {
+    pub joint: usize,
+    /// Same scale as [`ActuatorFit::conditioning`]: the smallest eigenvalue after unit-normalising each column.
+    pub conditioning: f64,
+    /// The direction in parameter space the data cannot resolve, unit length, ordered
+    /// `(k_t, armature, damping, friction)`. This is the field a scalar cannot replace: a low `conditioning`
+    /// says *something* is confounded, and only this says **what**.
+    pub direction: [f64; 4],
+}
+
+/// Names of the four parameters, in the order [`Confounding::direction`] uses.
+pub const ACTUATOR_PARAMETERS: [&str; 4] = ["k_t", "armature", "damping", "friction"];
+
+impl Confounding {
+    /// The two parameters carrying most of the unresolvable direction, largest first. This is the answer to
+    /// "what is wrong with my trajectory", which is what a caller actually needs.
+    pub fn worst_pair(&self) -> (&'static str, &'static str) {
+        let mut idx: Vec<usize> = (0..4).collect();
+        idx.sort_by(|&a, &b| {
+            self.direction[b].abs().partial_cmp(&self.direction[a].abs()).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        (ACTUATOR_PARAMETERS[idx[0]], ACTUATOR_PARAMETERS[idx[1]])
+    }
+}
+
+/// **Screen an excitation before running it: which actuator parameters can this motion actually determine?**
+///
+/// [`ActuatorFit::conditioning`] tells you a fit was degenerate *after* you have collected the data, and it is a
+/// scalar, so it cannot say which parameters were confounded. That gap is not academic — it produced a wrong
+/// conclusion in this very crate. A test built a constant-velocity motion, saw `conditioning` collapse, and
+/// concluded the torque constant was unidentifiable. It was not: the unresolvable direction was
+/// `[0.000, 0.000, +0.707, −0.707]`, zero weight on `k_t`, and the real confounding was **damping against
+/// friction** — something the three-term fit has too. Reading the direction rather than the scalar would have
+/// said so immediately.
+///
+/// This needs no measurement. The four regression columns are `[I, −q̈, −q̇, −tanh(q̇/ε)]`, and for a *planned*
+/// motion all four are computable: the first from the model's own torque divided by `torque_constant`, the rest
+/// from the trajectory. So an excitation can be rejected at the desk instead of on the bench.
+///
+/// **It depends on your prior estimates.** The predicted current comes from the robot's currently-stated
+/// actuator terms, so a screening run against wildly wrong priors is approximate. It is reliable about
+/// *structural* degeneracy — a column that is identically zero, or two columns that are proportional for
+/// geometric reasons — which is the failure mode worth screening for.
+///
+/// The canonical structural case: a joint whose axis is **parallel to gravity** has `τ_rigid = M·q̈` with `M`
+/// constant, so the current column is proportional to `q̈` and `k_t` is inseparable from the armature at any
+/// excitation. This reports that as a `(k_t, armature)` pair, which is actionable in a way `conditioning ≈ 0`
+/// is not.
+pub fn confounding(
+    robot: &Robot,
+    inertia: &[LinkInertia],
+    plan: &[PlannedMotion],
+    gravity: Vector3<f64>,
+    torque_constant: f64,
+) -> Vec<Confounding> {
+    let n = robot.dof();
+    let mut rigid = robot.clone();
+    for j in rigid.joints.iter_mut() {
+        *j = j.clone().with_armature(-1.0).with_damping(-1.0).with_friction(-1.0);
+    }
+    let eps = crate::COULOMB_SMOOTHING;
+    const K: usize = 4;
+    let mut ata = vec![[0.0f64; K * K]; n];
+    let mut colnorm = vec![[0.0f64; K]; n];
+
+    for m in plan {
+        if m.q.len() != n || m.qd.len() != n || m.qdd.len() != n {
+            continue;
+        }
+        // What the arm would have to draw, from the model as it currently stands.
+        let full = crate::inverse_dynamics(robot, inertia, &m.q, &m.qd, &m.qdd, gravity);
+        for i in 0..n {
+            let current = if torque_constant.abs() > 0.0 { full[i] / torque_constant } else { 0.0 };
+            let c = [current, -m.qdd[i], -m.qd[i], -(m.qd[i] / eps).tanh()];
+            for a in 0..K {
+                for b in 0..K {
+                    ata[i][a * K + b] += c[a] * c[b];
+                }
+                colnorm[i][a] += c[a] * c[a];
+            }
+        }
+    }
+    let _ = &rigid; // the baseline is not needed for identifiability, only the column geometry is
+
+    (0..n)
+        .map(|i| {
+            let d: Vec<f64> = (0..K).map(|k| colnorm[i][k].sqrt()).collect();
+            // A dead column is its own answer: that parameter has no leverage, so the unresolvable direction
+            // IS that axis. Reporting a unit vector on it is more useful than refusing.
+            if let Some(dead) = (0..K).find(|&k| !d[k].is_finite() || d[k] <= 0.0) {
+                let mut dir = [0.0; K];
+                dir[dead] = 1.0;
+                return Confounding { joint: i, conditioning: 0.0, direction: dir };
+            }
+            let scaled = DMatrix::from_fn(K, K, |a, b| ata[i][a * K + b] / (d[a] * d[b]));
+            if scaled.iter().any(|x| !x.is_finite()) {
+                return Confounding { joint: i, conditioning: 0.0, direction: [0.0; K] };
+            }
+            let se = scaled.symmetric_eigen();
+            let mut best = 0usize;
+            for k in 1..K {
+                if se.eigenvalues[k].abs() < se.eigenvalues[best].abs() {
+                    best = k;
+                }
+            }
+            let v = se.eigenvectors.column(best);
+            // Sign is arbitrary for an eigenvector; fix it so the largest component is positive and two runs
+            // of the same input print the same thing.
+            let mut lead = 0usize;
+            for k in 1..K {
+                if v[k].abs() > v[lead].abs() {
+                    lead = k;
+                }
+            }
+            let sign = if v[lead] < 0.0 { -1.0 } else { 1.0 };
+            Confounding {
+                joint: i,
+                conditioning: se.eigenvalues[best].abs(),
+                direction: [sign * v[0], sign * v[1], sign * v[2], sign * v[3]],
+            }
+        })
+        .collect()
+}
+
 /// A motion sample where the **current** was recorded and the torque was not.
 ///
 /// The distinction is the whole point of [`identify_actuator_with_gain`]. A servo without a torque sensor
@@ -1269,6 +1406,142 @@ mod tests {
             // The real invariant: never an infinite conditioning, on any joint, whatever the input. On a scale
             // where larger means more identifiable, `inf` would clear every threshold a caller writes.
             assert!(f.conditioning.is_finite(), "conditioning must never be infinite: {f:?}");
+        }
+    }
+
+    /// **The diagnostic must reproduce, automatically, the two confoundings a reviewer derived by hand.**
+    ///
+    /// Both came out of an adversarial review of this module, and both were invisible to `conditioning` because
+    /// it is a scalar. Case one: a constant-velocity motion, where I asserted the *gain* was unidentifiable and
+    /// was wrong — the real confounding is damping against friction, which the three-term fit has too. Case
+    /// two: a gravity-parallel axis, where the gain genuinely is inseparable, from the armature specifically.
+    ///
+    /// If this test ever stops distinguishing those two, the diagnostic has lost the only property that makes
+    /// it worth more than the scalar it supplements.
+    #[test]
+    fn confounding_names_the_pair_a_scalar_cannot() {
+        let g = Vector3::new(0.0, 0.0, -9.81);
+        let kt = 1.574;
+
+        // CASE 1 — constant velocity. q̈ is identically zero and q̇ is constant, so −q̇ and −tanh(q̇/ε) are
+        // parallel. The armature column is dead. The reviewer's hand computation: [0, 0, +0.707, −0.707].
+        let (arm, inertia) = geared_arm(0.0119, 0.64);
+        let flat: Vec<PlannedMotion> = (0..200)
+            .map(|k| PlannedMotion {
+                q: vec![k as f64 * 0.002, k as f64 * 0.0014],
+                qd: vec![1.0, 0.7],
+                qdd: vec![0.0, 0.0],
+            })
+            .collect();
+        let c = confounding(&arm, &inertia, &flat, g, kt);
+        // The armature column is identically zero, so THAT is the unresolvable axis and the report says so
+        // directly rather than through a near-zero eigenvalue.
+        assert_eq!(c[0].conditioning, 0.0, "a dead column is not a small eigenvalue, it is no leverage at all");
+        assert!(
+            c[0].direction[1].abs() > 0.99,
+            "the dead direction must be the armature axis, got {:?}",
+            c[0].direction
+        );
+        assert!(
+            c[0].direction[0].abs() < 1e-9,
+            "and it must carry NO weight on k_t — the conclusion I drew from the scalar was that k_t was the \
+             problem, and it was not: {:?}",
+            c[0].direction
+        );
+
+        // CASE 2 — an axis parallel to gravity. τ_rigid = M·q̈ with M constant, so the current column is
+        // proportional to the q̈ column and k_t is inseparable from the ARMATURE specifically.
+        const VERTICAL: &str = r#"<robot name="yaw">
+          <link name="base"/>
+          <link name="l1"><inertial><origin xyz="0.3 0 0"/><mass value="1.5"/>
+            <inertia ixx="0.02" ixy="0" ixz="0" iyy="0.02" iyz="0" izz="0.02"/></inertial></link>
+          <link name="tool"/>
+          <joint name="j1" type="revolute"><parent link="base"/><child link="l1"/><origin xyz="0 0 0"/>
+            <axis xyz="0 0 1"/><limit lower="-3" upper="3" effort="8" velocity="4"/></joint>
+          <joint name="jt" type="fixed"><parent link="l1"/><child link="tool"/><origin xyz="0.4 0 0"/></joint>
+        </robot>"#;
+        let (mut yaw, yaw_inertia) = crate::from_urdf_full(VERTICAL, "base", "tool").unwrap();
+        for j in yaw.joints.iter_mut() {
+            *j = j.clone().with_armature(0.0119).with_damping(0.64).with_friction(0.08);
+        }
+        let rich: Vec<PlannedMotion> = (0..500)
+            .map(|k| {
+                let t = k as f64 * 0.002;
+                PlannedMotion {
+                    q: vec![0.4 * (3.0 * t).sin()],
+                    qd: vec![1.2 * (3.0 * t).cos() + 0.5 * (11.0 * t).cos()],
+                    qdd: vec![-3.6 * (3.0 * t).sin() - 5.5 * (11.0 * t).sin()],
+                }
+            })
+            .collect();
+        let v = confounding(&yaw, &yaw_inertia, &rich, g, kt);
+        assert!(v[0].conditioning < 1e-6, "a gravity-parallel axis is degenerate, got {}", v[0].conditioning);
+        let pair = v[0].worst_pair();
+        assert!(
+            (pair == ("k_t", "armature")) || (pair == ("armature", "k_t")),
+            "the confounded pair must be k_t against the armature, got {pair:?} from {:?}",
+            v[0].direction
+        );
+
+        // THE CONTROL that makes the two cases distinguishable rather than both just "degenerate": the SAME
+        // rich excitation on a gravity-LOADED arm is well conditioned, because G(q) supplies the independence.
+        let loaded: Vec<PlannedMotion> = (0..500)
+            .map(|k| {
+                let t = k as f64 * 0.002;
+                PlannedMotion {
+                    q: vec![0.4 * (3.0 * t).sin(), -0.3 * (5.0 * t).cos()],
+                    qd: vec![1.2 * (3.0 * t).cos() + 0.5 * (11.0 * t).cos(), 1.5 * (5.0 * t).sin()],
+                    qdd: vec![-3.6 * (3.0 * t).sin() - 5.5 * (11.0 * t).sin(), 7.5 * (5.0 * t).cos()],
+                }
+            })
+            .collect();
+        for r in confounding(&arm, &inertia, &loaded, g, kt) {
+            assert!(
+                r.conditioning > 1e-3,
+                "joint {} on a gravity-loaded arm should screen as identifiable, got {}",
+                r.joint,
+                r.conditioning
+            );
+        }
+    }
+
+    /// The screening must agree with what the fit actually does, or it is worse than nothing — a caller would
+    /// approve a trajectory the fit then refuses.
+    #[test]
+    fn the_screening_agrees_with_the_fit_it_screens_for() {
+        let g = Vector3::new(0.0, 0.0, -9.81);
+        let kt = 1.574;
+        let (arm, inertia) = geared_arm(0.0119, 0.64);
+        let rich: Vec<(PlannedMotion, CurrentSample)> = (0..400)
+            .map(|k| {
+                let t = k as f64 * 0.002;
+                let q = vec![0.4 * (3.0 * t).sin(), -0.3 * (5.0 * t).cos()];
+                let qd = vec![1.2 * (3.0 * t).cos() + 0.5 * (11.0 * t).cos(), 1.5 * (5.0 * t).sin()];
+                let qdd = vec![-3.6 * (3.0 * t).sin() - 5.5 * (11.0 * t).sin(), 7.5 * (5.0 * t).cos()];
+                let tau = crate::inverse_dynamics(&arm, &inertia, &q, &qd, &qdd, g);
+                let current: Vec<f64> = tau.iter().map(|x| x / kt).collect();
+                (
+                    PlannedMotion { q: q.clone(), qd: qd.clone(), qdd: qdd.clone() },
+                    CurrentSample { q, qd, qdd, current },
+                )
+            })
+            .collect();
+        let plan: Vec<PlannedMotion> = rich.iter().map(|(p, _)| p.clone()).collect();
+        let samples: Vec<CurrentSample> = rich.iter().map(|(_, c)| c.clone()).collect();
+
+        let screened = confounding(&arm, &inertia, &plan, g, kt);
+        let fitted = identify_actuator_with_gain(&arm, &inertia, &samples, g);
+        for i in 0..2 {
+            // The screening predicts the current from the model; the fit sees it measured. On noise-free data
+            // built from that same model the two must land on the same conditioning.
+            let rel = (screened[i].conditioning - fitted[i].conditioning).abs()
+                / fitted[i].conditioning.max(1e-30);
+            assert!(
+                rel < 1e-6,
+                "joint {i}: screening {} vs fit {} — a screen that disagrees with its own fit is worse than none",
+                screened[i].conditioning,
+                fitted[i].conditioning
+            );
         }
     }
 }
