@@ -80,6 +80,36 @@ optimizer is involved: RNEA is linear in all three actuator terms, so subtractin
 three-column regression per joint and the joints decouple into independent exact 3-parameter fits. The Coulomb
 column `tanh(q̇/ε)` is nonlinear in `q̇` and still linear in the *parameter*, which is all a regression needs.
 
+There is a second obstacle, and it is the one that bounds everything: hardware often does not measure torque
+either. A servo without a torque sensor reports **current**, and converting it needs `k_t` — so inheriting `k_t`
+from a catalogue caps the accuracy of every fitted term at its own error. Measured on the SO-101 wrist, a 10%
+error in `k_t` gives a **10.0%** error in the fitted damping, one for one, with nothing averaging it out.
+
+`identify_actuator_with_gain` removes that constant from the chain by fitting it. The equation of motion with the
+conversion left in is still linear in all four unknowns:
+
+```text
+  τ_rigid(q, q̇, q̈) = k_t·I − J_a·q̈ − b·q̇ − f·tanh(q̇/ε)
+```
+
+so the model-computable rigid-body torque is the target, the four unknowns multiply `[I, −q̈, −q̇, −tanh(q̇/ε)]`,
+and the joints still decouple into independent exact fits.
+
+It costs one identifiability condition, and it is not the obvious one. The current column must be linearly
+independent of the other three — equivalently, `τ_rigid` must lie **outside** `span{q̈, q̇, tanh(q̇/ε)}` — and what
+supplies that independence is the **gravity term**, since `G(q)` depends on position and none of the three
+columns does. So a gravity-loaded joint is the *best* case for `k_t`, not the worst: slowing a loaded trajectory
+10,000x still recovers it to 1.9e-13, and it is the damping that degrades there instead.
+
+The case that fails is a joint **decoupled from gravity** — an axis parallel to it, such as a base yaw or a
+wrist roll. There `τ_rigid = M·q̈` with `M` constant, so the target is exactly proportional to the `q̈` column and
+`k_t` is inseparable from the armature however rich the excitation. The fit returns `NaN` with `conditioning` at
+zero rather than picking a value, and `identify_actuator` on the same motion recovers its three terms exactly.
+For such a joint, measure `k_t` from a locked-rotor and back-EMF pair and use the three-term fit.
+
+An earlier draft of this paragraph had the condition backwards, naming gravity load as the failure. It was
+caught by an adversarial review before publication, which built the vertical-axis case and demonstrated it.
+
 The practical obstacle is that hardware does not measure `q̈`. It reads a quantized encoder and differentiates
 twice, and at 200 Hz that scales quantization by `1/dt²` = 40,000. Measured on the SO-101 with exact torques and
 only the kinematics quantized (`so101_reach_rl --identify`):

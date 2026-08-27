@@ -675,15 +675,22 @@ fn identify_mode() {
 
     let show = |label: &str, fits: &[ferromotion_core::ActuatorFit]| {
         println!("\n  {label}\n");
-        println!("  {:>5} {:>13} {:>10} {:>13} {:>10} {:>12} {:>11}", "joint", "armature", "err", "damping", "err", "conditioning", "residual");
+        println!(
+            "  {:>5} {:>13} {:>8} {:>11} {:>8} {:>11} {:>11} {:>10}",
+            "joint", "armature", "err", "damping", "err", "friction", "conditioning", "residual"
+        );
         for f in fits {
+            // Friction is FITTED now, so it has to be shown. The SO-101 model states none, so the truth is
+            // zero and a relative error is undefined — the absolute value is the honest column, and anything
+            // far from zero here means the fit is absorbing something else into it.
             println!(
-                "  {:>5} {:>13.6e} {:>9.1}% {:>13.4} {:>9.1}% {:>12.3e} {:>11.2e}",
+                "  {:>5} {:>13.6e} {:>7.1}% {:>11.4} {:>7.1}% {:>11.2e} {:>11.3e} {:>10.2e}",
                 f.joint,
                 f.armature,
                 100.0 * (f.armature - truth_a).abs() / truth_a,
                 f.damping,
                 100.0 * (f.damping - truth_b).abs() / truth_b,
+                f.friction,
                 f.conditioning,
                 f.residual
             );

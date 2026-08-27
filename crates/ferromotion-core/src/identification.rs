@@ -335,6 +335,194 @@ pub fn identify_consistent(robot: &Robot, samples: &[IdSample], gravity: Vector3
     })
 }
 
+/// **Solve one joint's normal system and report whether the data could support it.**
+///
+/// Shared by [`identify_actuator`] and [`identify_actuator_with_gain`] so the two cannot drift apart. That is
+/// not hypothetical caution: this crate shipped a version where `gendyn` and `dynamics` implemented the same
+/// recursion and silently disagreed, because the second copy was written later and one term was missed.
+///
+/// `ata`/`atb` are the accumulated normal equations, `colnorm` each column's `Σx²`. Returns the solution,
+/// a scale-free conditioning number (smallest eigenvalue after unit-normalising every column, so it reports
+/// linear dependence rather than the units of `q̈` against `q̇`), and `None` for the solution when the system is
+/// too singular to answer — a readable-looking number would be worse.
+fn solve_normal(k: usize, ata: &[f64], atb: &[f64], colnorm: &[f64]) -> (Option<DVector<f64>>, f64) {
+    let d: Vec<f64> = (0..k).map(|i| colnorm[i].sqrt()).collect();
+    // A column with zero norm carries NO information about its parameter, so the system is unidentifiable and
+    // must say so. An earlier version substituted a unit basis vector for such a column, which made a DEAD
+    // column contribute an eigenvalue of exactly 1 and inflated the conditioning number — the one thing this
+    // function exists to prevent. Bail before the eigendecomposition instead.
+    if d.iter().any(|x| !x.is_finite() || *x <= 0.0) {
+        return (None, 0.0);
+    }
+    let scaled = DMatrix::from_fn(k, k, |a, b| ata[a * k + b] / (d[a] * d[b]));
+    // FIX: a non-finite entry anywhere makes the eigenvalues meaningless, and `f64::min` SKIPS NaN, so an
+    // all-NaN spectrum would fold back to the +INFINITY seed and read as perfectly identifiable.
+    if scaled.iter().any(|x| !x.is_finite()) {
+        return (None, 0.0);
+    }
+    let conditioning = scaled
+        .symmetric_eigenvalues()
+        .iter()
+        .fold(f64::INFINITY, |x: f64, &y| x.min(y.abs()));
+    let conditioning = if conditioning.is_finite() { conditioning } else { 0.0 };
+    let m = DMatrix::from_row_slice(k, k, ata);
+    let rhs = DVector::from_row_slice(atb);
+    (m.lu().solve(&rhs).filter(|_| conditioning > 1e-12), conditioning)
+}
+
+/// A motion sample where the **current** was recorded and the torque was not.
+///
+/// The distinction is the whole point of [`identify_actuator_with_gain`]. A servo without a torque sensor
+/// reports current; converting it to torque needs `k_t`, and inheriting `k_t` from a catalogue bounds every
+/// fitted parameter by its own error — measured on the SO-101 wrist, a 10% wrong `k_t` gives a **10.0%** wrong
+/// damping (exactly one for one, because at that joint nearly all the torque is actuator rather than
+/// rigid-body) and a 7.7% wrong armature. The proportion is not universal — it depends on how much of the
+/// joint's torque is actuator versus rigid-body — but nothing averages it out.
+#[derive(Clone, Debug)]
+pub struct CurrentSample {
+    pub q: Vec<f64>,
+    pub qd: Vec<f64>,
+    pub qdd: Vec<f64>,
+    /// Measured motor current per joint (A), referred to the joint output. **Not torque.**
+    pub current: Vec<f64>,
+}
+
+/// What identifying a joint's actuator terms *and* its torque constant produced.
+#[derive(Clone, Copy, Debug)]
+pub struct ActuatorGainFit {
+    pub joint: usize,
+    /// Fitted torque constant `k_t` (N·m/A), referred to the joint output. The parameter that was previously
+    /// inherited and is now measured.
+    pub torque_constant: f64,
+    pub armature: f64,
+    pub damping: f64,
+    pub friction: f64,
+    /// Scale-free identifiability of the **four**-column system. Adding the current column needs it to be
+    /// linearly independent of `q̈`, `q̇` and `tanh(q̇/ε)`, which a gravity-loaded or friction-dominated
+    /// trajectory can easily violate: at a joint where the current is spent almost entirely on one of those
+    /// terms, the two columns are proportional and `k_t` trades off against it.
+    pub conditioning: f64,
+    pub residual: f64,
+    /// All four non-negative, within the same float-zero allowance [`ActuatorFit::physical`] documents.
+    pub physical: bool,
+}
+
+/// **Identify the actuator terms and the torque constant together, from current rather than torque.**
+///
+/// This dissolves the limitation [`identify_actuator`] carries. That function needs measured torque; a servo
+/// without a torque sensor reports current, and the `k_t` used to convert bounds every fitted parameter by its
+/// own error — 1:1 for a joint whose torque is almost all actuator, less for one dominated by its rigid-body
+/// terms, and never averaged away. Making `k_t` a *fitted* parameter removes the inherited constant entirely.
+///
+/// It remains an exact linear fit. Writing the equation of motion with the conversion left in:
+///
+/// ```text
+///   τ_rigid(q, q̇, q̈) = k_t·I − J_a·q̈ − b·q̇ − f·tanh(q̇/ε)
+/// ```
+///
+/// the model-computable rigid-body torque is the target and the four unknowns multiply four columns
+/// `[I, −q̈, −q̇, −tanh(q̇/ε)]`. Four columns, still linear, and the joints still decouple.
+///
+/// **What it costs, and the condition is not the obvious one.** The current column must be linearly independent
+/// of the other three — equivalently, the target `τ_rigid` must lie **outside** `span{q̈, q̇, tanh(q̇/ε)}`. What
+/// supplies that independence is the **gravity term**, because `G(q)` is a function of position and none of the
+/// three columns is. So a gravity-loaded joint is the *best* case for `k_t`, not the worst.
+///
+/// The case that actually fails is a joint **decoupled from gravity** — an axis parallel to gravity, such as a
+/// base yaw or a wrist roll. There `τ_rigid = M·q̈` with `M` constant, so the target is exactly proportional to
+/// the `q̈` column and `k_t` is inseparable from the armature no matter how rich the excitation. Measured on a
+/// 1-DOF vertical-axis arm under the same two-frequency excitation the oracle test uses: all four parameters
+/// come back `NaN`, while [`identify_actuator`] on the identical motion recovers its three exactly.
+///
+/// Conversely, slowing a gravity-loaded trajectory 10,000x still recovers `k_t` to 1.9e-13 — it is the
+/// *damping* that degrades there. So "excite harder" is the wrong instinct: check `conditioning`, and for a
+/// gravity-parallel joint measure `k_t` some other way (a locked-rotor and back-EMF pair) and use
+/// [`identify_actuator`] instead.
+///
+/// **What it does not fix.** `q̈` still comes from differentiating position twice, so the guidance in
+/// [`identify_actuator`] about reconstructing rates with [`crate::SavGol`] rather than finite differences
+/// applies unchanged.
+///
+/// Same contract as [`identify_actuator`] on two points worth repeating rather than cross-referencing. The
+/// rigid-body torque is computed with the robot's **own armature, damping and friction all cleared**, so a
+/// model already carrying estimates gets a fresh fit and not a fit of the leftover. And a sample whose slices
+/// do not all have length `robot.dof()` is **dropped**, not reshaped — check `residual` and `conditioning`
+/// rather than assuming every sample was used.
+pub fn identify_actuator_with_gain(
+    robot: &Robot,
+    inertia: &[LinkInertia],
+    samples: &[CurrentSample],
+    gravity: Vector3<f64>,
+) -> Vec<ActuatorGainFit> {
+    let n = robot.dof();
+    // Same clearing as `identify_actuator`, and for the same reason: ALL fitted terms must be absent from the
+    // baseline or the fit sees a leftover instead of a signal.
+    let mut rigid = robot.clone();
+    for j in rigid.joints.iter_mut() {
+        *j = j.clone().with_armature(-1.0).with_damping(-1.0).with_friction(-1.0);
+    }
+    let eps = crate::COULOMB_SMOOTHING;
+
+    const K: usize = 4;
+    let mut ata = vec![[0.0f64; K * K]; n];
+    let mut atb = vec![[0.0f64; K]; n];
+    let mut colnorm = vec![[0.0f64; K]; n];
+    let mut rows: Vec<Vec<[f64; K + 1]>> = Vec::with_capacity(samples.len());
+
+    for s in samples {
+        if s.q.len() != n || s.qd.len() != n || s.qdd.len() != n || s.current.len() != n {
+            continue;
+        }
+        let tr = crate::inverse_dynamics(&rigid, inertia, &s.q, &s.qd, &s.qdd, gravity);
+        let mut row = Vec::with_capacity(n);
+        for i in 0..n {
+            let c = [s.current[i], -s.qdd[i], -s.qd[i], -(s.qd[i] / eps).tanh()];
+            let y = tr[i];
+            for a in 0..K {
+                for b in 0..K {
+                    ata[i][a * K + b] += c[a] * c[b];
+                }
+                atb[i][a] += c[a] * y;
+                colnorm[i][a] += c[a] * c[a];
+            }
+            row.push([c[0], c[1], c[2], c[3], y]);
+        }
+        rows.push(row);
+    }
+
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let (sol, conditioning) = solve_normal(K, &ata[i], &atb[i], &colnorm[i]);
+        let (kt, a, b, f) = match &sol {
+            Some(v) => (v[0], v[1], v[2], v[3]),
+            None => (f64::NAN, f64::NAN, f64::NAN, f64::NAN),
+        };
+        let mut resid_sq = 0.0;
+        if kt.is_finite() {
+            for row in &rows {
+                let c = &row[i];
+                let e = c[4] - (kt * c[0] + a * c[1] + b * c[2] + f * c[3]);
+                resid_sq += e * e;
+            }
+        }
+        let count = rows.len().max(1);
+        out.push(ActuatorGainFit {
+            joint: i,
+            torque_constant: kt,
+            armature: a,
+            damping: b,
+            friction: f,
+            conditioning,
+            residual: if kt.is_finite() { (resid_sq / count as f64).sqrt() } else { f64::NAN },
+            physical: {
+                let floor = -1e-9 * kt.abs().max(a.abs()).max(b.abs()).max(f.abs());
+                kt >= floor && a >= floor && b >= floor && f >= floor
+            },
+        });
+    }
+    out
+}
+
 /// What identifying one joint's actuator terms produced, and whether the data could support it.
 #[derive(Clone, Copy, Debug)]
 pub struct ActuatorFit {
@@ -465,21 +653,8 @@ pub fn identify_actuator(
 
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
-        let m = DMatrix::from_row_slice(3, 3, &ata[i]);
-        let rhs = DVector::from_row_slice(&atb[i]);
-        // Scale-free conditioning: normalise each column to unit norm before asking how singular the system is.
-        // Comparing raw eigenvalues would just report the units of q̈ against q̇.
-        let d: Vec<f64> = (0..3).map(|k| colnorm[i][k].sqrt()).collect();
-        let scaled = DMatrix::from_fn(3, 3, |a, b| {
-            if d[a] > 0.0 && d[b] > 0.0 {
-                ata[i][a * 3 + b] / (d[a] * d[b])
-            } else {
-                f64::from(a == b)
-            }
-        });
-        let conditioning = scaled.symmetric_eigenvalues().iter().fold(f64::INFINITY, |x: f64, &y| x.min(y.abs()));
-
-        let sol = m.clone().lu().solve(&rhs).filter(|_| conditioning > 1e-12);
+        // The same solver `identify_actuator_with_gain` uses, so a fix to one reaches both.
+        let (sol, conditioning) = solve_normal(3, &ata[i], &atb[i], &colnorm[i]);
         let (armature, damping, friction) = match &sol {
             Some(v) => (v[0], v[1], v[2]),
             // Unidentifiable: say so rather than return three readable-looking numbers.
@@ -896,6 +1071,204 @@ mod tests {
         }
         for f in identify_actuator(&robot, &inertia, &clean, g) {
             assert!(f.residual < 1e-9, "joint {} residual {} should be ~0 with nothing extra", f.joint, f.residual);
+        }
+    }
+
+    /// **The oracle for the four-parameter fit: recover `k_t` alongside the three actuator terms, from current.**
+    ///
+    /// This is the answer to a limitation the three-term fit carries. Measured on the SO-101, inheriting `k_t`
+    /// from a catalogue put the fitted damping wrong by exactly the `k_t` error — 10% in, 10% out, no
+    /// averaging-down. Fitting `k_t` removes the inherited constant from the chain entirely.
+    #[test]
+    fn identify_actuator_with_gain_recovers_the_torque_constant_too() {
+        let (robot, inertia) = geared_arm(0.0119, 0.64);
+        let g = Vector3::new(0.0, 0.0, -9.81);
+        let true_kt = 1.574; // the STS3215 figure, treated here as ground truth to be recovered
+        let mut samples = Vec::new();
+        for k in 0..500 {
+            let t = k as f64 * 0.002;
+            let q = vec![0.4 * (3.0 * t).sin(), -0.3 * (5.0 * t).cos()];
+            let qd = vec![1.2 * (3.0 * t).cos() + 0.5 * (11.0 * t).cos(), 1.5 * (5.0 * t).sin()];
+            let qdd = vec![-3.6 * (3.0 * t).sin() - 5.5 * (11.0 * t).sin(), 7.5 * (5.0 * t).cos()];
+            // The arm needs this torque; a real current sensor would read it divided by k_t.
+            let tau = crate::inverse_dynamics(&robot, &inertia, &q, &qd, &qdd, g);
+            let current: Vec<f64> = tau.iter().map(|x| x / true_kt).collect();
+            samples.push(CurrentSample { q, qd, qdd, current });
+        }
+
+        let fits = identify_actuator_with_gain(&robot, &inertia, &samples, g);
+        assert_eq!(fits.len(), 2);
+        for (i, f) in fits.iter().enumerate() {
+            let (ta, tb, tf) = (0.0119 + 0.003 * i as f64, 0.64 - 0.1 * i as f64, 0.08 + 0.02 * i as f64);
+            assert!(f.physical, "joint {i} must be physical: {f:?}");
+            assert!(f.conditioning > 1e-6, "joint {i} four-column conditioning {}", f.conditioning);
+            assert!((f.torque_constant - true_kt).abs() < 1e-7, "joint {i} k_t: {} vs {true_kt}", f.torque_constant);
+            assert!((f.armature - ta).abs() < 1e-8, "joint {i} armature: {} vs {ta}", f.armature);
+            assert!((f.damping - tb).abs() < 1e-8, "joint {i} damping: {} vs {tb}", f.damping);
+            assert!((f.friction - tf).abs() < 1e-8, "joint {i} friction: {} vs {tf}", f.friction);
+            assert!(f.residual < 1e-8, "joint {i} residual {}", f.residual);
+        }
+    }
+
+    /// **A wrong `k_t` no longer poisons the other three, which is the whole point.**
+    ///
+    /// The three-term fit takes torque, so a `k_t` error scales its input and lands 1:1 in the parameters. The
+    /// four-term fit takes current, so `k_t` is fitted and there is no inherited constant to be wrong. This
+    /// runs both against the same motion and asserts the difference.
+    #[test]
+    fn fitting_the_gain_removes_the_torque_scale_bias() {
+        let (robot, inertia) = geared_arm(0.0119, 0.64);
+        let g = Vector3::new(0.0, 0.0, -9.81);
+        let true_kt = 1.574;
+        let assumed_kt = true_kt * 1.10; // a catalogue figure 10% off
+
+        let mut cur = Vec::new();
+        let mut tau_samples = Vec::new();
+        for k in 0..500 {
+            let t = k as f64 * 0.002;
+            let q = vec![0.4 * (3.0 * t).sin(), -0.3 * (5.0 * t).cos()];
+            let qd = vec![1.2 * (3.0 * t).cos() + 0.5 * (11.0 * t).cos(), 1.5 * (5.0 * t).sin()];
+            let qdd = vec![-3.6 * (3.0 * t).sin() - 5.5 * (11.0 * t).sin(), 7.5 * (5.0 * t).cos()];
+            let tau = crate::inverse_dynamics(&robot, &inertia, &q, &qd, &qdd, g);
+            let current: Vec<f64> = tau.iter().map(|x| x / true_kt).collect();
+            // What a user of the THREE-term fit would supply: current times the wrong constant.
+            let tau_wrong: Vec<f64> = current.iter().map(|a| a * assumed_kt).collect();
+            cur.push(CurrentSample { q: q.clone(), qd: qd.clone(), qdd: qdd.clone(), current });
+            tau_samples.push(IdSample { q, qd, qdd, tau: tau_wrong });
+        }
+
+        let biased = identify_actuator(&robot, &inertia, &tau_samples, g);
+        let unbiased = identify_actuator_with_gain(&robot, &inertia, &cur, g);
+        for i in 0..2 {
+            let truth = 0.64 - 0.1 * i as f64;
+            let biased_err = (biased[i].damping - truth).abs() / truth;
+            let unbiased_err = (unbiased[i].damping - truth).abs() / truth;
+            // The biased fit should be off by roughly the k_t error; the unbiased one should be exact.
+            assert!(biased_err > 0.02, "joint {i}: the torque-input fit should show the bias, got {biased_err}");
+            assert!(unbiased_err < 1e-8, "joint {i}: the current-input fit should be exact, got {unbiased_err}");
+            assert!((unbiased[i].torque_constant - true_kt).abs() < 1e-7, "joint {i} k_t recovered");
+        }
+    }
+
+    /// **A joint decoupled from gravity cannot have its gain identified, and the fit must say so.**
+    ///
+    /// This test replaces one that could not fail for the reason it claimed. That version used a
+    /// constant-velocity trajectory, and an adversarial review found the assertion was satisfied by a
+    /// damping-versus-friction collinearity the *three*-term fit already has: on the same motion
+    /// [`identify_actuator`] reports `1.1e-16`, and substituting a perfectly independent random current column
+    /// still passed. It gave zero coverage of the one condition the four-column API adds.
+    ///
+    /// The real condition is that `τ_rigid` lie outside `span{q̈, q̇, tanh(q̇/ε)}`, and the **gravity term** is
+    /// what supplies that. So the failure case is an axis **parallel to gravity** — a base yaw or wrist roll —
+    /// where `τ_rigid = M·q̈` with `M` constant and the current column is exactly proportional to `q̈`.
+    #[test]
+    fn a_gravity_decoupled_joint_cannot_separate_the_gain() {
+        // One revolute joint about z, with gravity also along z: no gravity torque about the axis, ever.
+        const VERTICAL: &str = r#"<robot name="yaw">
+          <link name="base"/>
+          <link name="l1"><inertial><origin xyz="0.3 0 0"/><mass value="1.5"/>
+            <inertia ixx="0.02" ixy="0" ixz="0" iyy="0.02" iyz="0" izz="0.02"/></inertial></link>
+          <link name="tool"/>
+          <joint name="j1" type="revolute"><parent link="base"/><child link="l1"/><origin xyz="0 0 0"/>
+            <axis xyz="0 0 1"/><limit lower="-3" upper="3" effort="8" velocity="4"/></joint>
+          <joint name="jt" type="fixed"><parent link="l1"/><child link="tool"/><origin xyz="0.4 0 0"/></joint>
+        </robot>"#;
+        let (mut robot, inertia) = crate::from_urdf_full(VERTICAL, "base", "tool").unwrap();
+        for j in robot.joints.iter_mut() {
+            *j = j.clone().with_armature(0.0119).with_damping(0.64).with_friction(0.08);
+        }
+        let g = Vector3::new(0.0, 0.0, -9.81); // parallel to the joint axis
+        let true_kt = 1.574;
+
+        // The SAME rich two-frequency excitation the oracle uses, so richness cannot be the explanation.
+        let mut cur = Vec::new();
+        let mut tau_samples = Vec::new();
+        for k in 0..500 {
+            let t = k as f64 * 0.002;
+            let q = vec![0.4 * (3.0 * t).sin()];
+            let qd = vec![1.2 * (3.0 * t).cos() + 0.5 * (11.0 * t).cos()];
+            let qdd = vec![-3.6 * (3.0 * t).sin() - 5.5 * (11.0 * t).sin()];
+            let tau = crate::inverse_dynamics(&robot, &inertia, &q, &qd, &qdd, g);
+            let current: Vec<f64> = tau.iter().map(|x| x / true_kt).collect();
+            cur.push(CurrentSample { q: q.clone(), qd: qd.clone(), qdd: qdd.clone(), current });
+            tau_samples.push(IdSample { q, qd, qdd, tau });
+        }
+
+        let gain_fit = identify_actuator_with_gain(&robot, &inertia, &cur, g);
+        assert!(
+            gain_fit[0].conditioning < 1e-9,
+            "a gravity-decoupled joint must report the gain as unidentifiable, got {}",
+            gain_fit[0].conditioning
+        );
+        assert!(gain_fit[0].torque_constant.is_nan(), "and must refuse rather than return a number");
+
+        // THE CONTROL, and the reason this test is not the vacuous one it replaced: on the very same motion the
+        // THREE-term fit is healthy and exact. So the degeneracy is specific to the gain column.
+        let three = identify_actuator(&robot, &inertia, &tau_samples, g);
+        assert!(three[0].conditioning > 1e-2, "the 3-term fit should be fine here, got {}", three[0].conditioning);
+        assert!((three[0].armature - 0.0119).abs() < 1e-9, "armature: {}", three[0].armature);
+        assert!((three[0].damping - 0.64).abs() < 1e-9, "damping: {}", three[0].damping);
+        assert!((three[0].friction - 0.08).abs() < 1e-9, "friction: {}", three[0].friction);
+    }
+
+    /// **Data that determines nothing must not report perfect conditioning.**
+    ///
+    /// An adversarial review found the worst-possible inputs reading as the best-possible: static poses
+    /// (`q̇ = q̈ = 0`) returned `conditioning: 1.000000` with all four parameters `NaN` — a *better* number than
+    /// the well-excited oracle earns — because a zero-norm column was being substituted with a unit basis
+    /// vector. A stuck-at-zero current sensor reported `9.9e-5`, above the `> 1e-6` bar these tests use to mean
+    /// identifiable. Both now report zero.
+    #[test]
+    fn degenerate_input_reports_zero_conditioning_not_one() {
+        let (robot, inertia) = geared_arm(0.0119, 0.64);
+        let g = Vector3::new(0.0, 0.0, -9.81);
+
+        let statics: Vec<CurrentSample> = (0..50)
+            .map(|k| CurrentSample {
+                q: vec![0.01 * k as f64, -0.01 * k as f64],
+                qd: vec![0.0, 0.0],
+                qdd: vec![0.0, 0.0],
+                current: vec![0.3, 0.2],
+            })
+            .collect();
+        for f in identify_actuator_with_gain(&robot, &inertia, &statics, g) {
+            assert_eq!(f.conditioning, 0.0, "static poses determine nothing: {f:?}");
+            assert!(f.torque_constant.is_nan());
+        }
+
+        // A current sensor stuck at zero: k_t has no leverage at all.
+        let stuck: Vec<CurrentSample> = (0..200)
+            .map(|k| {
+                let t = k as f64 * 0.002;
+                CurrentSample {
+                    q: vec![0.4 * (3.0 * t).sin(), -0.3 * (5.0 * t).cos()],
+                    qd: vec![1.2 * (3.0 * t).cos(), 1.5 * (5.0 * t).sin()],
+                    qdd: vec![-3.6 * (3.0 * t).sin(), 7.5 * (5.0 * t).cos()],
+                    current: vec![0.0, 0.0],
+                }
+            })
+            .collect();
+        for f in identify_actuator_with_gain(&robot, &inertia, &stuck, g) {
+            assert_eq!(f.conditioning, 0.0, "a dead current column determines nothing: {f:?}");
+        }
+
+        // An empty slice, and a non-finite input: neither may produce a finite-looking conditioning.
+        for f in identify_actuator_with_gain(&robot, &inertia, &[], g) {
+            assert_eq!(f.conditioning, 0.0, "no samples determine nothing");
+        }
+        // A non-finite input on ONE joint. The first version of this asserted every joint came back zero, which
+        // was wrong: poisoning joint 0's current leaves joint 1 with a perfectly ordinary column, and it
+        // reported 0.0149. The library was right and the test was wrong. What is worth asserting is the
+        // containment — the joints decouple, so poison in one must not reach the other.
+        let mut poisoned = stuck.clone();
+        poisoned[0].current = vec![f64::INFINITY, 1.0];
+        let fits = identify_actuator_with_gain(&robot, &inertia, &poisoned, g);
+        assert_eq!(fits[0].conditioning, 0.0, "the poisoned joint must refuse: {:?}", fits[0]);
+        assert!(fits[0].torque_constant.is_nan(), "and must not return a number");
+        for f in &fits {
+            // The real invariant: never an infinite conditioning, on any joint, whatever the input. On a scale
+            // where larger means more identifiable, `inf` would clear every threshold a caller writes.
+            assert!(f.conditioning.is_finite(), "conditioning must never be infinite: {f:?}");
         }
     }
 }
