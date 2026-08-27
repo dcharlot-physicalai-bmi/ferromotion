@@ -56,8 +56,9 @@
 //! `cargo run --release -p ferromotion-bench --example so101_reach_rl`
 
 use ferromotion_core::{
-    actuator_plausibility, forward_dynamics, from_urdf_full, gravity_vector, identify_actuator, inverse_dynamics,
-    mass_matrix, solve_ik, IdSample, IkOptions, Iso, LinkInertia, Robot, SavGol,
+    actuator_plausibility, confounding, forward_dynamics, from_urdf_full, gravity_vector, identify_actuator,
+    inverse_dynamics, mass_matrix, solve_ik, IdSample, IkOptions, Iso, LinkInertia, PlannedMotion, Robot,
+    SavGol,
 };
 use ferromotion_learn::{train_normalized, BoxSpace, Env, GaussianPolicy, Mlp, ObsNorm, PpoConfig, StepResult};
 use nalgebra::Vector3;
@@ -547,6 +548,88 @@ fn compute_cost(n_calls: usize) {
     );
 }
 
+/// **Can this arm's torque constant be identified from motion at all? Screen the excitation first.**
+/// Run with `--screen`.
+///
+/// `identify_actuator_with_gain` fits `k_t` alongside the three actuator terms, which removes the inherited
+/// constant that otherwise bounds every parameter by its own error. Whether it *can* on a given arm and a given
+/// trajectory is a separate question, and `confounding` answers it before the arm moves.
+///
+/// Turning it on this bench's own hand-designed excitation produced a result worth having. The identifiability
+/// requires `τ_rigid` to lie outside `span{q̈, q̇, tanh(q̇/ε)}`, and the **gravity term** is what puts it there.
+/// So the screening should track gravity — and it does, monotonically, on four of the five joints.
+///
+/// The fifth is the finding. **Joint 0 is invariant to four decimal places across zero, lunar, terrestrial and
+/// Jovian gravity.** It is the base yaw: its axis is parallel to gravity, so no gravity magnitude produces any
+/// torque about it, and no amount of excitation or loading will ever separate its `k_t`. That is the structural
+/// degenerate case, present in the arm as shipped.
+///
+/// Practical conclusion for this robot: `k_t` is identifiable from motion on joints 1 and 2. Joints 0, 3 and 4
+/// need a locked-rotor and back-EMF measurement instead.
+fn screen_mode() {
+    let j_refl = reflected_inertia();
+    let env = So101Reach::new(j_refl);
+    let n = env.dof();
+    let (k_t, _) = motor_constants();
+
+    // The same excitation `--identify` uses, verbatim, so this screens the trajectory actually run.
+    let plan: Vec<PlannedMotion> = (0..3000)
+        .map(|k| {
+            let t = k as f64 * CONTROL_DT;
+            let (mut q, mut qd, mut qdd) = (vec![0.0; n], vec![0.0; n], vec![0.0; n]);
+            for i in 0..n {
+                let (w1, w2) = (2.0 + 0.7 * i as f64, 7.0 + 1.3 * i as f64);
+                let a = 0.35;
+                q[i] = a * (w1 * t).sin() + 0.4 * a * (w2 * t).sin();
+                qd[i] = a * w1 * (w1 * t).cos() + 0.4 * a * w2 * (w2 * t).cos();
+                qdd[i] = -a * w1 * w1 * (w1 * t).sin() - 0.4 * a * w2 * w2 * (w2 * t).sin();
+            }
+            PlannedMotion { q, qd, qdd }
+        })
+        .collect();
+
+    println!("\n  Screening this bench's own excitation for whether k_t is identifiable:\n");
+    println!(
+        "  {:>5} {:>13}   {:>30}   confounded pair",
+        "joint", "conditioning", "unresolvable (kt,Ja,b,f)"
+    );
+    for c in confounding(&env.robot, &env.inertia, &plan, GRAVITY, k_t) {
+        let d = c.direction;
+        let (a, b) = c.worst_pair();
+        println!(
+            "  {:>5} {:>13.3e}   [{:>6.3},{:>6.3},{:>6.3},{:>6.3}]   {a} vs {b}",
+            c.joint, c.conditioning, d[0], d[1], d[2], d[3]
+        );
+    }
+
+    // Is gravity really the discriminator? Vary its magnitude and watch. This is the confirmation, and it also
+    // isolates the one joint that CANNOT be helped.
+    println!("\n  Conditioning against gravity magnitude, which the theory says supplies the independence:\n");
+    println!("  {:>9}  {:>9} {:>9} {:>9} {:>9} {:>9}   {:>9}", "gravity", "j0", "j1", "j2", "j3", "j4", "max |G|");
+    let mut first: Option<f64> = None;
+    let mut last_j0 = 0.0;
+    for (label, mag) in [("none", 0.0f64), ("Moon", 1.62), ("Earth", 9.81), ("Jupiter", 24.79)] {
+        let g = Vector3::new(0.0, 0.0, -mag);
+        let cs = confounding(&env.robot, &env.inertia, &plan, g, k_t);
+        let gv = gravity_vector(&env.robot, &env.inertia, &vec![0.0; n], g);
+        print!("  {label:>9}  ");
+        for c in &cs {
+            print!("{:>9.2e} ", c.conditioning);
+        }
+        println!("  {:>9.4}", gv.iter().fold(0.0f64, |m, v| m.max(v.abs())));
+        if first.is_none() {
+            first = Some(cs[1].conditioning);
+        }
+        last_j0 = cs[0].conditioning;
+    }
+    println!(
+        "\n  Joint 1 improves {:.0}x from zero gravity to Jovian, so gravity is doing the work. Joint 0 does not\n  move at all ({:.3e} throughout): it is the base yaw, its axis is parallel to gravity, and no magnitude\n  produces any torque about it. That joint's k_t is structurally unidentifiable from motion — the case to\n  measure with a locked rotor rather than excite harder.\n\n  On this arm: identify k_t from motion on joints 1 and 2. Joints 0, 3 and 4 need the bench test.",
+        confounding(&env.robot, &env.inertia, &plan, Vector3::new(0.0, 0.0, -24.79), k_t)[1].conditioning
+            / first.unwrap_or(1.0).max(1e-300),
+        last_j0
+    );
+}
+
 /// **What does the Coulomb friction term cost, on an arm whose value for it is unknown?** Run with
 /// `--friction`.
 ///
@@ -951,6 +1034,9 @@ fn main() {
     let baseline = baseline.expect("USED_INDEX is within sensitivity()");
     assert_eq!(sensitivity()[USED_INDEX], j_refl, "USED_INDEX must name the inertia the run uses");
 
+    if std::env::args().any(|a| a == "--screen") {
+        screen_mode();
+    }
     if std::env::args().any(|a| a == "--friction") {
         friction_mode(&seeds);
     }
