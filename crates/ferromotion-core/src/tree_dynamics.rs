@@ -63,8 +63,13 @@ pub fn tree_floating_forward_dynamics(
     let (mut u, mut d, mut uu) = (vec![Vector6::zeros(); n], vec![0.0; n], vec![0.0; n]);
     for i in (0..n).rev() {
         u[i] = ia[i] * s[i];
-        d[i] = s[i].dot(&u[i]);
-        uu[i] = tau[i] - s[i].dot(&pa[i]);
+        // Same actuator terms, same split as `crate::aba` and for the same reason: armature is an inertia and
+        // belongs in `d`, damping and friction are resisting forces and subtract from the driving torque.
+        d[i] = s[i].dot(&u[i]) + joints[i].armature.unwrap_or(0.0);
+        uu[i] = tau[i]
+            - s[i].dot(&pa[i])
+            - joints[i].damping.unwrap_or(0.0) * qd[i]
+            - joints[i].friction.unwrap_or(0.0) * (qd[i] / crate::COULOMB_SMOOTHING).tanh();
         let ia_bar = ia[i] - u[i] * u[i].transpose() / d[i];
         let pa_bar = pa[i] + ia_bar * c[i] + u[i] * (uu[i] / d[i]);
         let xt = xm[i].transpose();
@@ -177,9 +182,17 @@ mod tests {
 
     /// When the tree is a chain (`λ(i) = i−1`), the branched ABA must equal the serial floating-base
     /// ABA exactly (to f64) — verified against the trusted oracle over a random state.
+    ///
+    /// **The fixture states an armature, a damping and a friction, and must.** This test passed for six
+    /// releases while this function ignored all three, because the URDF states none — and a parity test whose
+    /// fixture omits the feature is not a parity test. The same omission hid the same bug in `gendyn` and in
+    /// `aba`; it is the third instance, so the fixture carries the terms now.
     #[test]
     fn tree_reduces_to_serial_chain() {
-        let (robot, inertia) = from_urdf_full(ARM, "base", "tool").unwrap();
+        let (mut robot, inertia) = from_urdf_full(ARM, "base", "tool").unwrap();
+        for (i, j) in robot.joints.iter_mut().enumerate() {
+            *j = j.clone().with_armature(0.011 + 0.002 * i as f64).with_damping(0.64).with_friction(0.08);
+        }
         let n = robot.dof();
         let base = base_body();
         let g = Vector3::new(0.0, 0.0, -9.81);

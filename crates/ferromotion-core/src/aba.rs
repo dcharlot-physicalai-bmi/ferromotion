@@ -91,8 +91,16 @@ pub fn forward_dynamics_aba(robot: &Robot, inertia: &[LinkInertia], q: &[f64], q
     let (mut u, mut d, mut uu) = (vec![Vector6::zeros(); n], vec![0.0; n], vec![0.0; n]);
     for i in (0..n).rev() {
         u[i] = ia[i] * s[i];
-        d[i] = s[i].dot(&u[i]);
-        uu[i] = tau[i] - s[i].dot(&pa[i]);
+        // THE ACTUATOR TERMS. Armature is an inertia, so it adds to the joint's articulated inertia `d`;
+        // damping and friction are resisting forces, so they subtract from the driving torque `uu`. Getting
+        // this split wrong is not a small error: without these, ABA returned numbers BIT-IDENTICAL to a model
+        // with no actuator at all, diverging 99% from `crate::forward_dynamics` on the same robot.
+        d[i] = s[i].dot(&u[i]) + robot.joints[i].armature.unwrap_or(0.0);
+        uu[i] = tau[i]
+            - s[i].dot(&pa[i])
+            - robot.joints[i].damping.unwrap_or(0.0) * qd[i]
+            - robot.joints[i].friction.unwrap_or(0.0)
+                * (qd[i] / crate::COULOMB_SMOOTHING).tanh();
         if i > 0 {
             let ia_bar = ia[i] - u[i] * u[i].transpose() / d[i];
             let pa_bar = pa[i] + ia_bar * c[i] + u[i] * (uu[i] / d[i]);
@@ -175,8 +183,16 @@ pub fn floating_base_forward_dynamics_ext(robot: &Robot, inertia: &[LinkInertia]
     let (mut u, mut d, mut uu) = (vec![Vector6::zeros(); n], vec![0.0; n], vec![0.0; n]);
     for i in (0..n).rev() {
         u[i] = ia[i] * s[i];
-        d[i] = s[i].dot(&u[i]);
-        uu[i] = tau[i] - s[i].dot(&pa[i]);
+        // THE ACTUATOR TERMS. Armature is an inertia, so it adds to the joint's articulated inertia `d`;
+        // damping and friction are resisting forces, so they subtract from the driving torque `uu`. Getting
+        // this split wrong is not a small error: without these, ABA returned numbers BIT-IDENTICAL to a model
+        // with no actuator at all, diverging 99% from `crate::forward_dynamics` on the same robot.
+        d[i] = s[i].dot(&u[i]) + robot.joints[i].armature.unwrap_or(0.0);
+        uu[i] = tau[i]
+            - s[i].dot(&pa[i])
+            - robot.joints[i].damping.unwrap_or(0.0) * qd[i]
+            - robot.joints[i].friction.unwrap_or(0.0)
+                * (qd[i] / crate::COULOMB_SMOOTHING).tanh();
         let ia_bar = ia[i] - u[i] * u[i].transpose() / d[i];
         let pa_bar = pa[i] + ia_bar * c[i] + u[i] * (uu[i] / d[i]);
         let xt = xm[i].transpose();
@@ -287,6 +303,17 @@ mod tests {
       <joint name="jt" type="fixed"><parent link="l3"/><child link="tool"/><origin xyz="0.2 0 0" rpy="0 0 0"/></joint>
     </robot>"#;
 
+    /// ABA must agree with the mass-matrix solve — **including the actuator terms**, which it silently ignored
+    /// for six releases while this test passed.
+    ///
+    /// Measured before the fix, on ARM2 with armature 0.011/0.013, damping 0.64 and friction 0.08:
+    /// `forward_dynamics` gave `[16.12, −1.67]` and ABA gave `[19.96, −17.69]` — **bit-identical to a model
+    /// with no actuator at all**, a 99% relative divergence. The test could not see it because both URDFs
+    /// state no actuator terms, so every arm below now runs twice: bare, and geared.
+    ///
+    /// Armature enters ABA's articulated inertia `d` and damping/friction subtract from the driving torque
+    /// `uu`. Getting that split backwards would still pass a bare fixture, which is the other reason to state
+    /// the terms here.
     #[test]
     fn aba_matches_the_mass_matrix_solve() {
         let g = Vector3::new(0.0, 0.0, -9.81);
@@ -294,12 +321,29 @@ mod tests {
             (ARM2, vec![0.3, -0.7], vec![0.5, -0.2], vec![0.4, 0.1]),
             (CHAIN3, vec![0.4, -0.6, 0.05], vec![-0.3, 0.7, 0.2], vec![0.2, -0.5, 0.3]),
         ] {
-            let (robot, inertia) = from_urdf_full(urdf, "base", "tool").unwrap();
-            let ref_qdd = forward_dynamics(&robot, &inertia, &q, &qd, &tau, g);
-            let aba = forward_dynamics_aba(&robot, &inertia, &q, &qd, &tau, g);
-            for i in 0..robot.dof() {
-                assert!((aba[i] - ref_qdd[i]).abs() < 1e-9, "ABA[{i}]={} vs oracle {}", aba[i], ref_qdd[i]);
+            let (bare, inertia) = from_urdf_full(urdf, "base", "tool").unwrap();
+            let mut geared = bare.clone();
+            for (i, j) in geared.joints.iter_mut().enumerate() {
+                *j = j.clone().with_armature(0.011 + 0.002 * i as f64).with_damping(0.64).with_friction(0.08);
             }
+            for (label, robot) in [("bare", &bare), ("geared", &geared)] {
+                let ref_qdd = forward_dynamics(robot, &inertia, &q, &qd, &tau, g);
+                let aba = forward_dynamics_aba(robot, &inertia, &q, &qd, &tau, g);
+                for i in 0..robot.dof() {
+                    assert!(
+                        (aba[i] - ref_qdd[i]).abs() < 1e-9,
+                        "{label}: ABA[{i}]={} vs oracle {}",
+                        aba[i],
+                        ref_qdd[i]
+                    );
+                }
+            }
+            // And the guard that makes the `geared` pass meaningful: the terms must actually change the answer,
+            // or both paths could be ignoring them together.
+            let bare_qdd = forward_dynamics_aba(&bare, &inertia, &q, &qd, &tau, g);
+            let geared_qdd = forward_dynamics_aba(&geared, &inertia, &q, &qd, &tau, g);
+            let moved = (0..bare.dof()).map(|i| (bare_qdd[i] - geared_qdd[i]).abs()).fold(0.0f64, f64::max);
+            assert!(moved > 1e-3, "the actuator terms must change ABA's answer, moved by {moved:.2e}");
         }
     }
 

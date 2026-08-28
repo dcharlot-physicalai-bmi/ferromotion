@@ -34,7 +34,12 @@ pub fn crba(robot: &Robot, inertia: &[LinkInertia], q: &[f64]) -> DMatrix<f64> {
         }
         // F = Ic_i S_i ; diagonal entry
         let mut f = ic[i] * s[i];
-        m[(i, i)] = s[i].dot(&f);
+        // Armature is part of the joint-space inertia, so it belongs on this diagonal exactly as it does in
+        // `crate::mass_matrix`. Without it CRBA diverged from that function by the armature itself, and the
+        // parity test below could not see it because its fixture stated none. Damping and friction are NOT
+        // inertias and do not appear here — `mass_matrix` does not carry them either, since it is built from
+        // RNEA at zero velocity.
+        m[(i, i)] = s[i].dot(&f) + robot.joints[i].armature.unwrap_or(0.0);
         // walk up the ancestors, transforming the force each step
         let mut j = i;
         while j > 0 {
@@ -74,19 +79,41 @@ mod verification {
     }
 
     /// CRBA reproduces the RNEA-column-built mass matrix bit-for-bit, is symmetric, and PD.
+    ///
+    /// **Run twice: bare, and with an armature stated.** This test passed for six releases while CRBA ignored
+    /// [`crate::Joint::armature`], diverging from `mass_matrix` by exactly the armature (1.3e-2 on a two-joint
+    /// arm), because the fixture states none. That is the fourth implementation in this crate to carry the same
+    /// omission behind a vacuous parity test — after `gendyn`, `aba` and `tree_dynamics` — which is why the
+    /// fixture states it now.
     #[test]
     fn crba_matches_mass_matrix() {
-        let (robot, inertia) = arm();
+        let (bare, inertia) = arm();
+        let mut geared = bare.clone();
+        for (i, j) in geared.joints.iter_mut().enumerate() {
+            *j = j.clone().with_armature(0.011 + 0.002 * i as f64);
+        }
+        // The guard that makes the geared pass meaningful: the term must move the answer.
+        let q0 = [0.3, -0.7, 0.2];
+        let moved = (crba(&geared, &inertia, &q0) - crba(&bare, &inertia, &q0)).amax();
+        assert!(moved > 1e-3, "the armature must change CRBA's answer, moved by {moved:.2e}");
+
+        for robot in [&bare, &geared] {
         for qset in [[0.0, 0.0, 0.0], [0.3, -0.7, 0.2], [1.1, 0.4, -0.3]] {
-            let m_crba = crba(&robot, &inertia, &qset);
-            let m_ref = crate::mass_matrix(&robot, &inertia, &qset);
+            let m_crba = crba(robot, &inertia, &qset);
+            let m_ref = crate::mass_matrix(robot, &inertia, &qset);
             let err = (&m_crba - &m_ref).amax();
             assert!(err < 1e-10, "CRBA ≠ mass_matrix at {qset:?}: {err}");
             // symmetry + positive-definiteness (Cholesky exists)
             assert!((&m_crba - m_crba.transpose()).amax() < 1e-12, "M not symmetric");
             assert!(m_crba.clone().cholesky().is_some(), "M not positive-definite");
         }
-        let m = crba(&robot, &inertia, &[0.3, -0.7, 0.2]);
-        eprintln!("CRBA M(q) diag = [{:.4}, {:.4}, {:.4}] (matches RNEA-column to <1e-10)", m[(0, 0)], m[(1, 1)], m[(2, 2)]);
+        }
+        let m = crba(&bare, &inertia, &[0.3, -0.7, 0.2]);
+        let mg = crba(&geared, &inertia, &[0.3, -0.7, 0.2]);
+        eprintln!(
+            "CRBA M(q) diag bare = [{:.4}, {:.4}, {:.4}], geared = [{:.4}, {:.4}, {:.4}] \
+             (both match RNEA-column to <1e-10)",
+            m[(0, 0)], m[(1, 1)], m[(2, 2)], mg[(0, 0)], mg[(1, 1)], mg[(2, 2)]
+        );
     }
 }
