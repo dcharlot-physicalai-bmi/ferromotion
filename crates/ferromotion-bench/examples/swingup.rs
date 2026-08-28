@@ -27,17 +27,20 @@
 //! # The answer, measured
 //!
 //! ```text
-//!   controller                     hold  peak height    effort    value head
-//!   do nothing                     0.0%       -0.997      0.00    --
-//!   constant max torque            0.0%       -0.942      1.00    --
-//!   energy shaping + catch        74.6%        1.000      0.53    --
-//!   PPO baseline                  19.8%        1.000      0.89    working
-//!   PPO long horizon              18.4%        1.000      0.53    working
-//!   PPO quiet (sigma/16)           0.0%       -0.886      0.12    INERT
-//!   PPO annealed sigma             8.9%        1.000      0.71    INERT
-//!   PPO state-dependent sd         7.5%        1.000      0.95    INERT
-//!   PPO normalized obs            12.2%        1.000      0.91    INERT
+//!   controller                     hold  peak height    effort
+//!   energy shaping + catch        74.6%        1.000      0.53
+//!   PPO baseline                  19.8%        1.000      0.89
+//!   PPO long horizon              18.4%        1.000      0.53
+//!   PPO normalized obs            12.8%        1.000      0.86
+//!   PPO state-dependent sd         8.3%        1.000      0.92
+//!   PPO annealed sigma             7.8%        1.000      0.89
+//!   PPO quiet (sigma/16)           5.8%        1.000      0.52
+//!   constant max torque            0.0%       -0.942      1.00
+//!   do nothing                     0.0%       -0.997      0.00
 //! ```
+//!
+//! **Every row is now measured on a working value head.** The four that were not have been re-run, and the
+//! `value head` column is gone because there is nothing left to qualify. What that cost and bought is below.
 //!
 //! **PPO swings up and does not catch.** It reaches the top on every seed, so it finds the energy pumping — the
 //! genuinely non-linear part, requiring several swings, with no linear solution. It then fails to stabilise
@@ -63,15 +66,35 @@
 //!
 //! # What each arm still supports
 //!
-//! * **Baseline and long horizon** are re-measured on a working value head. The horizon hypothesis is refuted.
-//! * **The other four arms are NOT re-measured** and were all run under the defect. Their single-variable
-//!   structure is intact — the defect applied equally to each arm and its own baseline — but any conclusion drawn
-//!   from them is a conclusion about a configuration containing a known fault. Specifically:
-//!   * "Exploration noise prevents the catch" was refuted *backwards* (σ/16 never swings up at all, peak −0.886).
-//!     That is a large qualitative effect and unlikely to be an artifact, but it is unverified on the fix.
-//!   * The annealed-σ, state-dependent-σ and normalized-observation arms each landed within a few points of
-//!     their contemporaneous baseline. Those margins are smaller than the 9.7-point shift the value fix produced,
-//!     so **none of them can be trusted either way** until re-run.
+//! * **All five deliberate arms are refuted**, now on measurements that can be trusted. Every one of them holds
+//!   *worse* than the baseline's 19.8%: normalized observations 12.8%, state-dependent sigma 8.3%, annealed
+//!   sigma 7.8%, quiet sigma 5.8%, and the longer horizon 18.4%.
+//!
+//! * **Three of the four re-runs barely moved** — annealed 8.9% → 7.8%, state-dependent 7.5% → 8.3%, normalized
+//!   12.2% → 12.8%, all inside seed noise. That is worth reading carefully rather than as "the fix did not
+//!   matter": the same fix was worth **+9.7 points on the baseline**, so each variant is doing enough harm to
+//!   swallow a benefit that nearly doubled the baseline. This bench cannot separate "the fix did not help these
+//!   arms" from "it helped them and their own harm grew to match", and does not claim to.
+//!
+//! * **The fourth re-run was qualitatively misleading, not merely imprecise.** Quiet sigma read 0.0% hold at
+//!   peak height **−0.886** on the inert head, which says the policy never reached the top — the natural
+//!   reading being that too little exploration prevented discovery. On a working value head it is 5.8% at peak
+//!   **1.000**: it discovers the swing-up perfectly well and fails to hold it. A different diagnosis, and the
+//!   one row where the defect changed the *shape* of the answer rather than its magnitude.
+//!
+//! * **Normalized observations help elsewhere and hurt here.** The same code in `ferromotion-learn` was
+//!   necessary before the actuator bench would learn at all, and it costs 7 points on this task. Worth knowing
+//!   before treating "normalize the observations" as free.
+//! * **The other four arms have now been re-measured**, and one of the four predictions this section made was
+//!   wrong. It said the σ/16 result — "never swings up at all, peak −0.886" — was "a large qualitative effect and
+//!   unlikely to be an artifact". It was an artifact. On a working value head that arm reaches peak **1.000** and
+//!   holds 5.8%: it discovers the swing-up and fails to catch it, like every other arm. The reasoning was sound
+//!   (a large qualitative gap is usually real) and the conclusion was wrong, which is the argument for re-running
+//!   rather than reasoning about which results survive a defect.
+//!
+//!   The other three predictions held: annealed σ, state-dependent σ and normalized observations each stayed
+//!   within ~1 point of their earlier figure, so their margins were indeed too small to call either way at the
+//!   time — and now that they can be called, all three are refuted.
 //!
 //! # The standing lesson
 //!
