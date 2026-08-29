@@ -33,6 +33,7 @@ mod constraints;
 mod contact_gradient;
 mod contact;
 mod contact_ipm;
+mod contact_laws;
 mod contact_pgs;
 mod cosserat;
 mod costs;
@@ -191,6 +192,7 @@ pub use contact::{
 };
 pub use diffik::{solve_diffik, DiffIkOptions, DiffIkResult, FrameTaskDef};
 pub use dcol::{proximity, proximity_grad_spheres, Primitive};
+pub use contact_laws::{contact_law_residuals, worst_contact_law_residual, ContactLawResidual};
 pub use dynamics::{
     actuator_plausibility, forward_dynamics, gravity_vector, inverse_dynamics, mass_matrix, ActuatorReport,
     LinkInertia, COULOMB_SMOOTHING,

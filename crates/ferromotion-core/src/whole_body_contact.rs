@@ -12,7 +12,18 @@
 //! [`RobotContactSim`](crate::RobotContactSim) uses, now over the base+joints together. The result is a
 //! post-contact generalized velocity, integrated on `SE(3)` for the base and in joint space for the
 //! limbs. Unlike the penalty model in [`tree_floating_contact_step`](crate::tree_floating_contact_step)
-//! this is hard non-penetration + a true friction cone. Pure `nalgebra` → WASM-clean.
+//! this is hard non-penetration + a **pyramidal** friction cone: the tangent directions built below are
+//! `±x, ±y`, a four-facet Stewart-Trinkle approximation, not the exact circular Coulomb cone. This doc claimed
+//! "a true friction cone" while the code eleven lines down built the pyramid, which is the kind of gap between
+//! a stated guarantee and a shipped one that is worth naming rather than quietly correcting.
+//!
+//! The approximation is a real choice, not a defect — a faceted cone keeps the problem an LCP, which is what
+//! makes the interior-point solve tractable and differentiable. What it costs is anisotropy: at a pyramid
+//! corner the impulse magnitude reaches `√2·μλₙ` in 3D, 41% outside the cone it approximates, so friction is
+//! stronger on the diagonals than on the axes. [`crate::contact_law_residuals`] measures that cost on any
+//! solve, and [`crate::solve_contacts_pgs`] is the alternative here that uses the exact circular cone.
+//!
+//! Pure `nalgebra` → WASM-clean.
 
 use crate::{solve_frictional_ipm, tree_floating_forward_dynamics, tree_floating_mass_matrix, Joint, JointKind, LinkInertia, StFrictionContact};
 use nalgebra::{DMatrix, DVector, Isometry3, Point3, Translation3, UnitQuaternion, Vector3, Vector6};
