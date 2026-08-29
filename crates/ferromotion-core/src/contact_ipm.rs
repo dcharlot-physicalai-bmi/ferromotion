@@ -5,6 +5,19 @@
 //! *entire* frictional step differentiable: the post-contact velocity and `∂v⁺/∂v_free` fall out via
 //! the implicit function theorem, smooth even through stick↔slip. This is Dojo's mechanism, applied
 //! per contact with `d` friction facets. Pure `nalgebra` → WASM-clean.
+//!
+//! # What the facets cost, measured
+//!
+//! The faceted cone is what keeps this an LCP, and therefore what makes the solve differentiable — but it is
+//! an approximation and it is not free. With the usual `±x, ±y` pyramid, a body sliding **on a diagonal**
+//! receives `μλₙ/√2` of friction instead of `μλₙ`: **29% less than Coulomb requires**, so it slides too
+//! easily. On an axis-aligned slide the same solver saturates exactly and is lawful.
+//!
+//! That is a violation of the maximum-dissipation principle rather than of Coulomb's law — the impulse stays
+//! *inside* the true cone, it is simply not saturated. It is invariant across eight orders of magnitude of
+//! `kappa`, so it is the facet geometry and not the central-path smoothing. Both controls are asserted in the
+//! tests. [`crate::contact_law_residuals`] reports it on any solve; [`crate::solve_contacts_pgs`] uses the
+//! exact circular cone if the anisotropy matters more than the gradient.
 
 use crate::ipm::solve_lcp_diff;
 use nalgebra::{DMatrix, DVector};
@@ -32,6 +45,20 @@ pub struct FrictionalStep {
     pub residual: f64,
     /// Worst violation of `z ≥ 0, w ≥ 0`; negative means the returned point is infeasible.
     pub feasibility: f64,
+    /// **The impulses the solve actually chose**, per contact, as `[λₙ, β₁…β_d]` — the normal impulse followed
+    /// by one non-negative magnitude per friction facet, in the order the caller supplied `jt`.
+    ///
+    /// These were computed and then discarded until 2026-08-28, which made this solver's *physical* correctness
+    /// unverifiable from outside: the laws of contact constrain impulses, and `residual` and `feasibility` both
+    /// describe the interior-point iteration rather than the answer. A solve can sit exactly on the central
+    /// path — `residual` at machine zero — while its impulse lies outside the true Coulomb cone, because the
+    /// cone this solver enforces is the **faceted** one. See [`crate::contact_law_residuals`], which takes a
+    /// contact-frame impulse and reports what the physics says about it.
+    ///
+    /// To reach the contact frame, combine the facet magnitudes with the tangent directions you supplied:
+    /// `λ_T = Σᵢ βᵢ · d̂ᵢ`. The slack variable is not included; it is an artefact of the LCP formulation and
+    /// not a physical quantity.
+    pub impulses: Vec<Vec<f64>>,
 }
 
 /// Solve one frictional contact step and its gradient. Per contact the LCP variables are
@@ -93,7 +120,13 @@ pub fn solve_frictional_ipm(m: &DMatrix<f64>, v_free: &DVector<f64>, contacts: &
         .iter()
         .chain(w.iter())
         .fold(f64::INFINITY, |m, &v| if m.is_nan() || v.is_nan() { f64::NAN } else { m.min(v) });
-    FrictionalStep { v_next, dvnext_dvfree, residual, feasibility }
+    // Per contact, the LCP block is `[λₙ, β₁…β_d, s]`; the trailing slack is dropped as non-physical.
+    let impulses = contacts
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (0..1 + c.jt.len()).map(|k| z[starts[i] + k]).collect())
+        .collect();
+    FrictionalStep { v_next, dvnext_dvfree, residual, feasibility, impulses }
 }
 
 #[cfg(test)]
@@ -196,5 +229,113 @@ mod tests {
                 assert!((s.dvnext_dvfree[(r, col)] - fd[r]).abs() < 5e-3, "∂v⁺/∂v_free[{r},{col}] mismatch");
             }
         }
+    }
+
+    /// **What the faceted cone costs this solver, measured on its own output.**
+    ///
+    /// The impulses were unreachable until they were exposed, which meant this solver's `residual` (central-path
+    /// convergence) and `feasibility` (`z, w ≥ 0`) were the only things a caller could check — and neither says
+    /// anything about the *physics*. This slides a body diagonally, which is the direction a `±x, ±y` pyramid
+    /// treats worst, reconstructs the contact-frame impulse from the facet magnitudes, and asks
+    /// [`crate::contact_law_residuals`] what the true Coulomb cone makes of it.
+    #[test]
+    fn the_faceted_cone_shows_up_in_the_law_residual_on_a_diagonal_slide() {
+        use crate::contact_law_residuals;
+        use nalgebra::Vector3;
+
+        let m = DMatrix::from_diagonal(&DVector::from_row_slice(&[1.0, 1.0, 1.0]));
+        let row = |a: [f64; 3]| DVector::from_row_slice(&a);
+        let mu = 0.5;
+        let c = StFrictionContact {
+            jn: row([0.0, 0.0, 1.0]),
+            // The pyramid this solver uses: ±x, ±y.
+            jt: vec![row([1.0, 0.0, 0.0]), row([-1.0, 0.0, 0.0]), row([0.0, 1.0, 0.0]), row([0.0, -1.0, 0.0])],
+            phi: 0.0,
+            mu,
+        };
+        // Sliding along the diagonal, pressing down.
+        let v_free = DVector::from_row_slice(&[1.0, 1.0, -0.5]);
+        let s = solve_frictional_ipm(&m, &v_free, std::slice::from_ref(&c), 1e-3, 1e-8);
+
+        assert_eq!(s.impulses.len(), 1, "one contact, one impulse block");
+        let z = &s.impulses[0];
+        assert_eq!(z.len(), 5, "[lambda_n, beta x4]");
+        let ln = z[0];
+        // Combine the facet magnitudes into the contact frame: +x and -x oppose, likewise +y and -y.
+        let lam = Vector3::new(z[1] - z[2], z[3] - z[4], ln);
+        let u = Vector3::new(
+            (c.jt[0].transpose() * &s.v_next)[0],
+            (c.jt[2].transpose() * &s.v_next)[0],
+            (c.jn.transpose() * &s.v_next)[0],
+        );
+        let r = &contact_law_residuals(&[lam], &[u], &[mu], 1e-6)[0];
+
+        eprintln!(
+            "diagonal slide: lambda_n {ln:.4}, |lambda_T| {:.4}, mu*lambda_n {:.4} -> coulomb {:.3e}, MDP {:.3e}, sliding {}",
+            (lam.x * lam.x + lam.y * lam.y).sqrt(),
+            mu * ln,
+            r.coulomb,
+            r.max_dissipation,
+            r.sliding
+        );
+
+        // The solver must be internally consistent: its own convergence measures should look healthy.
+        assert!(s.residual.is_finite() && s.residual < 1e-3, "central path met: {}", s.residual);
+        assert!(s.feasibility > -1e-9, "returned point feasible: {}", s.feasibility);
+        // And the impulse must not PULL, whatever the cone shape.
+        assert!(ln >= -1e-12, "normal impulse must not pull: {ln}");
+        // The facet magnitudes are non-negative by construction of the LCP.
+        assert!(z[1..].iter().all(|&b| b >= -1e-12), "facet magnitudes must be non-negative: {z:?}");
+        // THE MEASUREMENT. On a 45° slide this solver delivers |λ_T| = μλₙ/√2 — inside the true cone, so
+        // Coulomb is satisfied, but 29% SHORT of the friction Coulomb requires. The body slides too easily.
+        assert!(r.coulomb < 1e-9, "the impulse stays inside the true cone: {r:?}");
+        let lt = (lam.x * lam.x + lam.y * lam.y).sqrt();
+        assert!(
+            (lt - mu * ln / 2.0_f64.sqrt()).abs() < 1e-3,
+            "diagonal slide should saturate at mu*lambda_n/sqrt(2) = {:.4}, got {lt:.4}",
+            mu * ln / 2.0_f64.sqrt()
+        );
+        assert!(r.max_dissipation > 0.1, "and that under-saturation is a dissipation violation: {r:?}");
+
+        // TWO CONTROLS, because "the pyramid causes it" is a claim about cause and needs both.
+        //
+        // 1. It is NOT the central-path smoothing: the violation is invariant across eight orders of κ.
+        for kappa in [1e-4, 1e-12] {
+            let sk = solve_frictional_ipm(&m, &v_free, std::slice::from_ref(&c), 1e-3, kappa);
+            let zk = &sk.impulses[0];
+            let lk = Vector3::new(zk[1] - zk[2], zk[3] - zk[4], zk[0]);
+            let uk = Vector3::new(
+                (c.jt[0].transpose() * &sk.v_next)[0],
+                (c.jt[2].transpose() * &sk.v_next)[0],
+                (c.jn.transpose() * &sk.v_next)[0],
+            );
+            let rk = &contact_law_residuals(&[lk], &[uk], &[mu], 1e-6)[0];
+            assert!(
+                (rk.max_dissipation - r.max_dissipation).abs() < 1e-3,
+                "kappa {kappa:e} must not change it ({} vs {}) — smoothing is not the cause",
+                rk.max_dissipation,
+                r.max_dissipation
+            );
+        }
+        // 2. It IS the facet geometry: the SAME solver on an axis-aligned slide, where the pyramid coincides
+        //    with the true cone, saturates exactly and dissipates lawfully.
+        let axis = DVector::from_row_slice(&[2.0_f64.sqrt(), 0.0, -0.5]);
+        let sa = solve_frictional_ipm(&m, &axis, std::slice::from_ref(&c), 1e-3, 1e-8);
+        let za = &sa.impulses[0];
+        let la = Vector3::new(za[1] - za[2], za[3] - za[4], za[0]);
+        let ua = Vector3::new(
+            (c.jt[0].transpose() * &sa.v_next)[0],
+            (c.jt[2].transpose() * &sa.v_next)[0],
+            (c.jn.transpose() * &sa.v_next)[0],
+        );
+        let ra = &contact_law_residuals(&[la], &[ua], &[mu], 1e-6)[0];
+        assert!(
+            ra.max_dissipation < 1e-6,
+            "on-axis the pyramid IS the cone and the solver is lawful: {ra:?}"
+        );
+        assert!(
+            ((la.x * la.x + la.y * la.y).sqrt() - mu * za[0]).abs() < 1e-6,
+            "and it saturates exactly on-axis"
+        );
     }
 }
