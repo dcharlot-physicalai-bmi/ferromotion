@@ -1404,6 +1404,7 @@ version = "0.67.0"
 name = "ferromotion-tactile"
 version = "0.67.0"
 dependencies = [
+ "ferromotion-fem",
  "nalgebra",
 ]
 
