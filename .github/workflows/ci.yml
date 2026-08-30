@@ -22,6 +22,10 @@ jobs:
         run: cargo test --workspace
       - name: Benchmark (Ghia lid-driven cavity, release)
         run: cargo test -p ferromotion-fluid --release -- --ignored
+      # Settles cantilevers to rest at dt = 3e-6 to pin the near-incompressible locking bias. Seconds in
+      # release, minutes in the debug profile the main suite uses, so it lives here rather than there.
+      - name: Near-incompressible FEM locking bound (release)
+        run: cargo test -p ferromotion-fem --release -- --ignored
       # An EXCLUSION, not an enumeration. The enumerated list had silently omitted seven crates that do
       # build for wasm32 — including ferromotion-learn and ferromotion-fem, whose own READMEs advertise
       # "native + wasm32". A list of what to include drifts as crates are added; a list of what to skip

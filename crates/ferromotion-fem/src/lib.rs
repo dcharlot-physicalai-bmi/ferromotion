@@ -13,6 +13,45 @@
 //! linear or St.-Venant model. Everything is a smooth function of the vertex positions, so forces are
 //! exactly `−∇energy` and an outcome's gradient w.r.t. the material stiffness is available in closed
 //! form (both verified against finite differences). Pure `nalgebra` → WASM-clean.
+//!
+//! # Near-incompressible materials, and what they cost
+//!
+//! Soft robots are silicone, which is nearly incompressible: ν ≈ 0.49, and λ/μ ≈ 49. Constant-strain
+//! tetrahedra are the classic *locking* element, so this is the regime where the discretisation is
+//! most likely to misrepresent the material. Both effects below are measured on a cantilever settled
+//! under its own weight, not asserted.
+//!
+//! **1. The stable timestep collapses.** Explicit integration is bounded by the dilatational wave
+//! speed `c = sqrt((λ+2μ)/ρ)`, and λ diverges as ν → ½. Searching for the largest stable `dt` from
+//! above, `dt*·c` held constant to within 1.35× across a 38× range in `c` (ν = 0.30 → 0.4999), so the
+//! crate simply obeys the CFL condition. The practical consequence is the part worth stating: going
+//! from ν = 0.30 to ν = 0.499 costs roughly an order of magnitude in timestep at the same mesh, and
+//! refining the mesh costs proportionally more again. Budget for it, or the run returns NaN with no
+//! other explanation. This is also why [`FemSim::damping_rate`] must be a rate: `dt` is not a free
+//! choice here, and a per-step damping fraction would have made Poisson's ratio change the material.
+//!
+//! **2. There is mild volumetric locking, and it converges.** Bending stiffness may depend only on
+//! `E = 2μ(1+ν)`, which rises 2.6μ → 3.0μ over ν = 0.30 → 0.499, so the true tip deflection may fall
+//! at most 13%. Measured on a slender beam (0.6 × 0.05 m) in the small-deflection regime, settled to
+//! rest, deflection relative to the ν = 0.30 case:
+//!
+//! | mesh | verts | ν = 0.49 | ν = 0.499 | excess at ν = 0.499 |
+//! |---|---|---|---|---|
+//! | 24×2×2 | 225 | 76.9% | 73.4% | 1.18× |
+//! | 36×3×3 | 592 | 80.1% | 76.3% | 1.14× |
+//! | 48×4×4 | 1225 | 81.6% | 77.5% | 1.12× |
+//! | *physically allowed* | | *87.2%* | *86.7%* | *1.00×* |
+//!
+//! The excess shrinks monotonically under refinement, which is what separates a convergent element
+//! from a locked one: this element is 12–18% too stiff at silicone Poisson ratios on meshes of this
+//! size, and refining fixes it slowly rather than not at all. On a stubbier beam (0.6 × 0.1 m) the
+//! bias is larger, 1.36× at ν = 0.499, which is the case the
+//! `near_incompressible_bending_locks_mildly` test pins.
+//!
+//! Mitigations, in the order they cost: refine the mesh; or model the silicone at a lower ν, since
+//! bending is governed by `E` and the ν-dependence of `E` is weak, so ν = 0.45 buys a 5× larger
+//! timestep for a 3% error in `E`; or move to a mixed / F-bar formulation, which is the standard
+//! answer and is not implemented here.
 
 use nalgebra::{Matrix3, Vector3};
 
@@ -680,4 +719,63 @@ mod verification {
         }
         eprintln!("uniaxial stretch stores monotone energy up to {prev:.3}");
     }
+
+    /// Mild volumetric locking at silicone Poisson ratios, pinned so it cannot drift unnoticed.
+    ///
+    /// Constant-strain tets are the classic locking element and soft robots are silicone, so this is
+    /// the regime that matters most and the one nothing measured. Bending stiffness may depend only
+    /// on `E = 2 mu (1+nu)`, which rises 2.6 mu -> 3.0 mu over this range, so the tip deflection may
+    /// physically fall to 86.7% of the nu = 0.30 case. It falls to 63.6% here: the element is 1.36x
+    /// stiffer than the material allows.
+    ///
+    /// This is a *convergent* bias, not a locked element. On a slender beam refined three times the
+    /// excess went 1.18x -> 1.14x -> 1.12x, so refinement cures it slowly rather than not at all; see
+    /// the crate docs for that table. The band below is deliberately two-sided. Getting worse is a
+    /// regression, and getting better means someone improved the element and should update the
+    /// number rather than let a stale bound hide the win.
+    ///
+    /// Ignored by default: it settles two cantilevers to rest and the near-incompressible one needs a
+    /// 3e-6 s step, which is 6 s in release and minutes in the debug profile CI uses for the main
+    /// suite. It runs in the release `--ignored` lane instead.
+    #[test]
+    #[ignore = "settles to rest at dt = 3e-6; run in the release --ignored lane"]
+    fn near_incompressible_bending_locks_mildly() {
+        // settled tip deflection of a cantilever under self-weight; dt is per-nu because the stable
+        // step falls with the dilatational wave speed
+        let settled = |nu: f64, dt: f64| -> f64 {
+            let (mu, m) = (6.0e6f64, 0.4f64);
+            let (nx, ny, nz, h) = (12usize, 2usize, 2usize, 0.05f64);
+            let lambda = 2.0 * mu * nu / (1.0 - 2.0 * nu);
+            let nv = (nx + 1) * (ny + 1) * (nz + 1);
+            let mut s = FemSim::box_grid(nx, ny, nz, h, m / nv as f64, mu, lambda, dt);
+            s.damping_rate = 100.0; // near-critical, so 0.4 s reaches rest
+            s.floor = None;
+            s.gravity = Vector3::new(0.0, 0.0, -9.81);
+            for i in 0..s.x.len() {
+                if s.x[i].x < 1e-9 {
+                    s.pinned[i] = true;
+                }
+            }
+            let l = nx as f64 * h;
+            let tips: Vec<usize> = (0..s.x.len()).filter(|&i| (s.x[i].x - l).abs() < 1e-9).collect();
+            let z0: f64 = tips.iter().map(|&i| s.x[i].z).sum::<f64>() / tips.len() as f64;
+            for _ in 0..(0.4 / dt).round() as usize {
+                s.step();
+            }
+            let ke: f64 = s.v.iter().map(|v| 0.5 * s.mass * v.norm_squared()).sum();
+            assert!(ke < 1e-18, "nu = {nu} had not reached rest, residual KE = {ke:e}");
+            let z: f64 = tips.iter().map(|&i| s.x[i].z).sum::<f64>() / tips.len() as f64;
+            z0 - z
+        };
+        let base = settled(0.30, 3.0e-5);
+        let tight = settled(0.499, 3.0e-6);
+        let ratio = tight / base;
+        // physics allows 0.867; measured 0.636
+        assert!(
+            (0.60..=0.68).contains(&ratio),
+            "near-incompressible bending ratio moved: {ratio:.4} (was 0.636, physically allowed 0.867). \
+             Worse is a regression; better means the element improved and this bound needs updating."
+        );
+    }
+
 }

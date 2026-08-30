@@ -375,7 +375,7 @@ impl CoupledLab {
         let dem = DemSim::new(grains, 4.0e4, 70.0, 0.5, 2e-4);
         let mut sim = ferromotion_coupled::CoupledFemDem::new(fem, dem, 0.08, 4.0e4);
         sim.floor = Some(0.0);
-        sim.fem.damping_rate = 154.639_175_257_732_0; // old per-step 0.03 at dt = 2e-4
+        sim.fem.damping_rate = 154.639_175_257_732; // old per-step 0.03 at dt = 2e-4
         // pin the slab's base so it acts as a compliant mat the grains land on
         let zmin = sim.fem.x.iter().map(|p| p.z).fold(f64::INFINITY, f64::min);
         for i in 0..sim.fem.n_verts() {
