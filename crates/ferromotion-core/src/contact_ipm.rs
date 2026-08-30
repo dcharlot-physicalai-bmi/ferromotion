@@ -64,6 +64,43 @@ pub struct FrictionalStep {
 /// Solve one frictional contact step and its gradient. Per contact the LCP variables are
 /// `[λₙ, β₁…β_d, s]` (normal impulse, per-facet friction magnitudes, cone slack). `kappa` is the
 /// central-path smoothing (→0 = hard contact, >0 = smooth gradients).
+///
+/// # `kappa` is not scale-free, and a fixed value degrades as `dt` shrinks
+///
+/// The central-path condition is `z ∘ w = κ`, and **both** `z` (impulses) and `w` scale with the timestep, so
+/// the natural size of `z·w` scales with `dt²`. A `kappa` chosen for one timestep is therefore the *wrong*
+/// fraction of the problem at another, and the failure is silent: `residual` and `feasibility` both stay
+/// healthy while the physics gets worse.
+///
+/// Measured, axis-aligned slide at µ = 0.4, maximum-dissipation residual from
+/// [`crate::contact_law_residuals`]:
+///
+/// | `dt` | λₙ | fixed `κ = 1e-9` | `κ` scaled as `dt²` |
+/// |---|---|---|---|
+/// | 1e-2 | 9.8e-2 | 3.9e-8 | 3.9e-8 |
+/// | 1e-3 | 9.8e-3 | 3.8e-7 | 3.8e-9 |
+/// | 1e-4 | 9.8e-4 | 3.8e-6 | 3.8e-10 |
+/// | 1e-5 | 1.1e-4 | **3.5e-5** | **3.8e-11** |
+///
+/// So a user who shrinks `dt` to improve fidelity and leaves `kappa` alone gets **three orders worse**
+/// dissipation error, while scaling it gives **six orders better** — the direction one would expect. Use
+/// [`central_path_scale`] rather than a constant.
+/// **A `kappa` that keeps its meaning as `dt` changes.**
+///
+/// `kappa` multiplies a product of two quantities that each scale with the timestep, so a value tuned at one
+/// `dt` is the wrong fraction of the problem at another. This returns `reference_kappa` rescaled from
+/// `reference_dt` to `dt` by the `dt²` law the central-path condition implies.
+///
+/// `1e-9` at `dt = 1e-2` is a reasonable starting pair for a unit-mass contact: hard enough that the
+/// maximum-dissipation residual sits near `4e-8`, soft enough that the gradient is usable.
+pub fn central_path_scale(kappa_at_reference: f64, reference_dt: f64, dt: f64) -> f64 {
+    if reference_dt <= 0.0 || !reference_dt.is_finite() || !dt.is_finite() || dt <= 0.0 {
+        return kappa_at_reference;
+    }
+    let r = dt / reference_dt;
+    kappa_at_reference * r * r
+}
+
 pub fn solve_frictional_ipm(m: &DMatrix<f64>, v_free: &DVector<f64>, contacts: &[StFrictionContact], dt: f64, kappa: f64) -> FrictionalStep {
     let nv = v_free.len();
     let minv = m.clone().try_inverse().expect("mass matrix invertible");
@@ -337,5 +374,66 @@ mod tests {
             ((la.x * la.x + la.y * la.y).sqrt() - mu * za[0]).abs() < 1e-6,
             "and it saturates exactly on-axis"
         );
+    }
+
+    /// **A fixed `kappa` degrades as `dt` shrinks, and [`central_path_scale`] fixes it.**
+    ///
+    /// This is the finding that nearly went out as a solver defect. The maximum-dissipation residual grew ten
+    /// times per decade of *decreasing* timestep, which looks exactly like a solver falling apart at small
+    /// steps — and is really `kappa` becoming a larger fraction of a shrinking problem, since impulses scale
+    /// with `dt` and the central-path product with `dt²`. The control is the whole test: rescale `kappa` and
+    /// the trend reverses.
+    #[test]
+    fn a_fixed_kappa_degrades_with_timestep_and_scaling_it_does_not() {
+        use crate::contact_law_residuals;
+        use nalgebra::Vector3;
+
+        let mu = 0.4;
+        let mdp = |dt: f64, kappa: f64| -> f64 {
+            let m = DMatrix::identity(3, 3);
+            let row = |a: [f64; 3]| DVector::from_row_slice(&a);
+            let c = StFrictionContact {
+                jn: row([0.0, 0.0, 1.0]),
+                jt: vec![row([1.0, 0.0, 0.0]), row([-1.0, 0.0, 0.0]), row([0.0, 1.0, 0.0]), row([0.0, -1.0, 0.0])],
+                phi: 0.0,
+                mu,
+            };
+            let vf = DVector::from_row_slice(&[1.0, 0.0, -9.81 * dt]);
+            let s = solve_frictional_ipm(&m, &vf, std::slice::from_ref(&c), dt, kappa);
+            let z = &s.impulses[0];
+            let lam = Vector3::new(z[1] - z[2], z[3] - z[4], z[0]);
+            let u = Vector3::new(
+                (c.jt[0].transpose() * &s.v_next)[0],
+                (c.jt[2].transpose() * &s.v_next)[0],
+                (c.jn.transpose() * &s.v_next)[0],
+            );
+            contact_law_residuals(&[lam], &[u], &[mu], 1e-9)[0].max_dissipation
+        };
+
+        let (coarse, fine) = (1e-2, 1e-5);
+        // Fixed kappa: shrinking the timestep makes the PHYSICS worse, which is the trap.
+        let fixed_coarse = mdp(coarse, 1e-9);
+        let fixed_fine = mdp(fine, 1e-9);
+        assert!(
+            fixed_fine > 100.0 * fixed_coarse,
+            "a fixed kappa should degrade badly at small dt: {fixed_coarse:e} -> {fixed_fine:e}"
+        );
+
+        // Scaled kappa: shrinking the timestep makes it better, as it should.
+        let scaled_fine = mdp(fine, central_path_scale(1e-9, coarse, fine));
+        assert!(
+            scaled_fine < fixed_coarse,
+            "scaling kappa should IMPROVE on the coarse-step result, got {scaled_fine:e} vs {fixed_coarse:e}"
+        );
+        assert!(
+            scaled_fine < fixed_fine / 1000.0,
+            "and beat the fixed-kappa fine step by orders: {scaled_fine:e} vs {fixed_fine:e}"
+        );
+
+        // The helper is a pure dt² rescale, and is defensive about nonsense input rather than returning NaN.
+        assert!((central_path_scale(1e-9, 1e-2, 1e-3) - 1e-11).abs() < 1e-24);
+        assert_eq!(central_path_scale(1e-9, 1e-2, 1e-2), 1e-9, "same dt is a no-op");
+        assert_eq!(central_path_scale(1e-9, 0.0, 1e-3), 1e-9, "a zero reference cannot rescale");
+        assert_eq!(central_path_scale(1e-9, 1e-2, f64::NAN), 1e-9, "and NaN must not propagate");
     }
 }

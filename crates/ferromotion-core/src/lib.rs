@@ -182,7 +182,7 @@ pub use contact_gradient::{jacobian_error, jacobian_relative_error, BouncingMass
 pub use affine_contact::{AffineContact, ExactContact, SpringExit};
 pub use contacts_from_distance::{descend, CfdProfile, DescentResult, PushTask};
 pub use adaptive_contact::{converged_reference, decompose_gradient_error, AdaptiveError, AdaptiveOptions, AdaptivePenalty, AdaptiveStats, ErrorDecomposition};
-pub use contact_ipm::{solve_frictional_ipm, FrictionalStep, StFrictionContact};
+pub use contact_ipm::{central_path_scale, solve_frictional_ipm, FrictionalStep, StFrictionContact};
 pub use sampler_bounds::{consistency_error, flow_matching_w2, minimax_rate, score_to_tv, SamplerError};
 pub use transport_geometry::{cramer_distance, distributional_bellman, distributional_bellman_contraction, free_energy, gromov_cost, gromov_wasserstein, gromov_wasserstein_from, jko_step, kantorovich_dual, maximal_wasserstein_1, schrodinger_bridge, total_variation, GromovPlan};
 pub use contact_pgs::{solve_contacts_pgs, solve_contacts_pgs_with, PgsContact, PgsResult, PgsStabilization};
