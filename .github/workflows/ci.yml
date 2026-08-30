@@ -26,6 +26,10 @@ jobs:
       # release, minutes in the debug profile the main suite uses, so it lives here rather than there.
       - name: Near-incompressible FEM locking bound (release)
         run: cargo test -p ferromotion-fem --release -- --ignored
+      # Measures a surface influence function with a real 3D solve and validates the convolution gel
+      # against it. Two FEM relaxations, so release only.
+      - name: Elastic tactile gel vs a 3D solve (release)
+        run: cargo test -p ferromotion-tactile --release -- --ignored
       # An EXCLUSION, not an enumeration. The enumerated list had silently omitted seven crates that do
       # build for wasm32 — including ferromotion-learn and ferromotion-fem, whose own READMEs advertise
       # "native + wasm32". A list of what to include drifts as crates are added; a list of what to skip

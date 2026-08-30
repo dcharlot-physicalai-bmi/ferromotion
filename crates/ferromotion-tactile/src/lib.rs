@@ -48,10 +48,17 @@
 //! single mesh and thickness in a finite domain with free edges. The sign, the ordering with ν, and the
 //! structural impossibility of a negative `h` do not depend on any of that.
 //!
-//! Closing it needs an elastic surface response, either a layer Green's function or a direct coupling
-//! to the FEM crate. Neither is implemented here. [`shear`] is the part of this crate that *is* elastic:
-//! its Cattaneo-Mindlin partial-slip model is a real contact-mechanics solution.
+//! **[`elastic`] closes this**, and is the module to reach for when the surface matters
+//! quantitatively. It treats the gel as a linear elastic layer characterised by one measured influence
+//! function, *solves* the contact rather than assuming it, and produces a surface that is free to rise
+//! outside the patch. Validated end to end against a 3D solve of its own computed loads: about 1–2% rms
+//! through the press depths a real sensor works in. The geometric field here stays the default, because
+//! it is cheaper and is what the existing gradient-based inference is built on.
+//!
+//! [`shear`] is the other elastic part of this crate: its Cattaneo-Mindlin partial-slip model is a real
+//! contact-mechanics solution for the tangential direction.
 
+pub mod elastic;
 pub mod shear;
 
 use nalgebra::Vector3;
@@ -92,7 +99,7 @@ impl GelSim {
         -self.extent + 2.0 * self.extent * i as f64 / (self.n - 1) as f64
     }
 
-    fn cell(&self) -> f64 {
+    pub(crate) fn cell(&self) -> f64 {
         2.0 * self.extent / (self.n - 1) as f64
     }
 

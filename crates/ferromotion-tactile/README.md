@@ -33,8 +33,31 @@ not a material property. Measured against a 3D elastic solve of the same press
 
 No parameter choice reproduces the bulge: `h` is a softplus, so it can never be negative. Photometric
 stereo reads normals, so a ring whose true slope has the opposite sign renders shading this model never
-produces. Closing that needs an elastic surface response, which is not implemented here.
-[`shear`](src/shear.rs) is the part of the crate that *is* elastic, via Cattaneo-Mindlin partial slip.
+produces.
+
+## The elastic gel
+
+[`elastic`](src/elastic.rs) closes that. The gel becomes a linear elastic layer characterised by one
+**measured** influence function, and the contact is *solved*: the pressure comes out non-negative, the
+contact patch is an output rather than an assumption, and the surface is free to rise outside it.
+
+The kernel is data, not theory. Boussinesq and Hertz assume an infinite half-space while a gel is a
+thin bonded layer, and that difference is exactly what produces the bulge, so the influence function is
+measured on the geometry being modelled rather than derived.
+
+Validated against a direct 3D solve of the loads the module itself computes, on a gel of thickness 0.5:
+
+| press depth | % of thickness | rms error |
+|---|---|---|
+| 0.02 | 4% | 0.70% |
+| 0.04 | 8% | 1.04% |
+| 0.08 | 16% | 1.79% |
+| 0.12 | 24% | 2.53% |
+
+Roughly 1-2% through the range a real sensor works in. Superposition was checked at 0.38% rms and
+linearity within 1.1% out to 15.8% of thickness, which is where the table stops.
+
+[`shear`](src/shear.rs) is the other elastic part of the crate, via Cattaneo-Mindlin partial slip.
 
 ```rust
 use ferromotion_tactile::{GelSim, Indenter, default_lights};

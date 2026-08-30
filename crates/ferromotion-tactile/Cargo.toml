@@ -14,5 +14,11 @@ description = "Differentiable optical-tactile (GelSight/DIGIT) sensor simulation
 [dependencies]
 nalgebra.workspace = true
 
+# Test-only. The elastic module's influence function is DATA, and the validation measures it with a
+# real 3D solve rather than trusting a closed form. Runtime dependencies stay nalgebra-only, so the
+# crate is still WASM-clean.
+[dev-dependencies]
+ferromotion-fem = { path = "../ferromotion-fem", version = "0.67.0" }
+
 [lints]
 workspace = true
