@@ -138,6 +138,15 @@ pub struct FemSim {
     pub damping_rate: f64,
     /// Which volumetric integration the energy and forces use. See [`VolumetricModel`].
     pub volumetric: VolumetricModel,
+    /// Per-vertex external load in newtons, added to the elastic force in [`Self::step`].
+    ///
+    /// Zero-length means no external load, which is the default; otherwise it must have one entry per
+    /// vertex. Gravity is applied separately as an acceleration, so it is unaffected by this.
+    ///
+    /// It is deliberately **not** included in [`Self::forces`], which is contracted to return exactly
+    /// `−∇energy` and is verified against finite differences. An applied load is not part of the strain
+    /// energy, so folding it in there would quietly break that contract.
+    pub external: Vec<Vector3<f64>>,
     pub dt: f64,
     pub gravity: Vector3<f64>,
     /// Optional penalty floor at `z = floor`; vertices below it are pushed up by a spring–dashpot
@@ -174,6 +183,7 @@ impl FemSim {
             lambda,
             damping_rate: 0.0,
             volumetric: VolumetricModel::default(),
+            external: Vec::new(),
             dt,
             gravity: Vector3::new(0.0, 0.0, -9.81),
             floor: None,
@@ -521,13 +531,20 @@ impl FemSim {
                 }
             }
         }
+        assert!(
+            self.external.is_empty() || self.external.len() == self.x.len(),
+            "external load must be empty or one entry per vertex: {} vs {}",
+            self.external.len(),
+            self.x.len()
+        );
         let inv_m = 1.0 / self.mass;
         for i in 0..self.x.len() {
             if self.pinned[i] {
                 self.v[i] = Vector3::zeros();
                 continue;
             }
-            let a = forces[i] * inv_m + self.gravity;
+            let ext = if self.external.is_empty() { Vector3::zeros() } else { self.external[i] };
+            let a = (forces[i] + ext) * inv_m + self.gravity;
             self.v[i] = (self.v[i] + self.dt * a) / (1.0 + self.damping_rate * self.dt);
             self.x[i] += self.dt * self.v[i];
         }
@@ -1089,6 +1106,69 @@ mod verification {
         let scale = analytic.iter().map(|f| f.norm()).fold(0.0f64, f64::max);
         eprintln!("nodal-averaged force vs −∇energy: worst {worst:.3e} on a force scale of {scale:.3e}");
         assert!(worst < 1e-4 * scale.max(1.0), "nodal-averaged force does not match −∇energy: {worst:.3e} (scale {scale:.3e})");
+    }
+
+
+    /// An external load enters as a force, verified two ways that need no reference solution.
+    ///
+    /// First: a per-vertex load of exactly `−m·g` must cancel gravity and leave the body where it
+    /// started, to machine precision. That pins both the sign and the mass normalisation at once, which
+    /// is where a load API usually goes wrong.
+    ///
+    /// Second: in the small-load regime the deflection must be linear in the load, which is what says
+    /// it is being added to the elastic force rather than to a velocity or a position.
+    #[test]
+    fn an_external_load_enters_as_a_force() {
+        let build = |g: f64| -> FemSim {
+            let mut s = FemSim::box_grid(3, 3, 3, 0.1, 0.02, 3.0e4, 2.0e4, 2e-5);
+            s.floor = None;
+            s.gravity = Vector3::new(0.0, 0.0, g);
+            let top = s.x.iter().map(|p| p.z).fold(f64::NEG_INFINITY, f64::max);
+            for i in 0..s.x.len() {
+                if (s.x[i].z - top).abs() < 1e-9 {
+                    s.pinned[i] = true;
+                }
+            }
+            s
+        };
+
+        // 1. a load of exactly −m·g cancels gravity
+        let mut s = build(-9.81);
+        let start = s.x.clone();
+        s.external = vec![Vector3::new(0.0, 0.0, 9.81 * s.mass); s.x.len()];
+        for _ in 0..5000 {
+            s.step();
+        }
+        let worst = s.x.iter().zip(&start).map(|(a, b)| (a - b).norm()).fold(0.0f64, f64::max);
+        assert!(worst < 1e-12, "a load of -m*g must cancel gravity exactly, drifted {worst:e}");
+        // the fixture is not trivially static: the same body WITHOUT the load moves
+        let mut control = build(-9.81);
+        for _ in 0..5000 {
+            control.step();
+        }
+        let moved = control.x.iter().zip(&start).map(|(a, b)| (a - b).norm()).fold(0.0f64, f64::max);
+        assert!(moved > 1e-6, "control should sag under gravity, moved only {moved:e}");
+
+        // 2. deflection is linear in the load
+        let deflect = |scale: f64| -> f64 {
+            let mut s = build(0.0); // no gravity, so the load is the only thing acting
+            let tip = s.x.iter().enumerate().min_by(|a, b| a.1.z.partial_cmp(&b.1.z).unwrap()).map(|(i, _)| i).unwrap();
+            let z0 = s.x[tip].z;
+            s.external = vec![Vector3::zeros(); s.x.len()];
+            s.external[tip] = Vector3::new(0.0, 0.0, -scale);
+            s.damping_rate = 4000.0;
+            for _ in 0..40000 {
+                s.step();
+            }
+            (z0 - s.x[tip].z).abs()
+        };
+        let (d1, d2) = (deflect(1.0e-2), deflect(2.0e-2));
+        assert!(d1 > 1e-9, "a load should deflect something, got {d1:e}");
+        assert!(
+            (d2 / d1 - 2.0).abs() < 0.05,
+            "small-load deflection should be linear in the load: {d1:e} then {d2:e} (ratio {:.4})",
+            d2 / d1
+        );
     }
 
 }
