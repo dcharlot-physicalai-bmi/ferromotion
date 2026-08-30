@@ -23,6 +23,13 @@
 //! post-identification envelope from `max |b_hat - b_true|`, an error against the *hidden truth*, which is unavailable
 //! on hardware. A standard error is the quantity that replaces peeking.
 //!
+//! [`ActuatorFit::stderr`] does the same for the *actuator* terms, which had only a point estimate, a
+//! trajectory conditioning number and an RMS residual — none of which say how far the plant might be
+//! from the fit. Its coverage is verified rather than asserted, and so is the regime where it stops
+//! being a valid interval: differentiating an encoder to get rates puts the noise in the regressor
+//! instead of the response, and there the width is overconfident by one to two orders of magnitude
+//! while the ratio survives as an alarm. Both measurements are on the type.
+//!
 //! **Parameters that describe a real body** — [`identify_consistent`]. A link is physically consistent exactly when its
 //! pseudo-inertia `J(phi)` is positive definite ([`pseudo_inertia`](crate::pseudo_inertia)), and
 //! [`is_physically_consistent`](crate::is_physically_consistent) already tests it — but had no callers outside its own
@@ -687,6 +694,44 @@ pub struct ActuatorFit {
     /// Root-mean-square torque residual after the fit (N·m). Large means the actuator is doing something
     /// neither term describes — friction, backlash, a saturating drive.
     pub residual: f64,
+    /// **How wrong each fitted value might be**: one standard error for `(armature, damping, friction)`,
+    /// in each parameter's own units.
+    ///
+    /// `sqrt(diag(σ²(AᵀA)⁻¹))` with `σ² = SSR/(rows − 3)`, the textbook least-squares result, from the
+    /// same normal system the fit itself uses.
+    ///
+    /// **It is a valid interval only under the model least squares assumes**, which is noise in the
+    /// measured torque and not in `q̈` or `q̇`. Under that assumption it is correct: measured coverage of
+    /// a nominal 95% interval is 94.0–97.3% over 300 trials, and halving or quadrupling the variance
+    /// moves it to 67.7% or 100.0%, so the scale is pinned.
+    ///
+    /// **Reconstructing rates by differentiating an encoder breaks that assumption**, and the interval
+    /// then understates the error badly. Noise lands in the regressor rather than the response, which
+    /// biases the estimate, and a standard error cannot see a bias. Measured on the SO-101
+    /// (`so101_reach_rl --identify`), truth minus estimate in units of this standard error:
+    ///
+    /// | rate reconstruction | armature error | error / stderr |
+    /// |---|---|---|
+    /// | 12-bit, central difference | 88–217% | **100–289** |
+    /// | 16-bit, central difference | 2.9–48% | 9–30 |
+    /// | 12-bit, Savitzky-Golay (50 ms) | 1.5–2.7% | 6–41 |
+    ///
+    /// So the width is overconfident by one to two orders of magnitude there. What survives is the
+    /// **ratio as an alarm**: a value many standard errors from what the model predicts says the
+    /// residual is not independent torque noise, which is the signature of regressor noise or a term
+    /// the model does not have. Read it as "something is wrong", not as a width.
+    ///
+    /// That also bounds its use for domain randomisation. Sampling over `estimate ± k·stderr`
+    /// randomises over what the data supports **when the torque measurement dominates the error**. With
+    /// differentiated rates it would randomise over an interval far too narrow, and around a biased
+    /// centre, which is worse than an honestly wide guess.
+    ///
+    /// [`ActuatorFit::conditioning`] answers a different question again, and only one: whether the
+    /// trajectory can separate the three terms at all. It sits at `1.000` through every row above.
+    ///
+    /// `None` when the fit is unidentifiable, when `AᵀA` is singular, or when there are 3 or fewer
+    /// samples, since `σ²` then has no degrees of freedom to be estimated from.
+    pub stderr: Option<[f64; 3]>,
     /// Whether all three fitted values are non-negative. A negative rotor inertia, damping or friction is
     /// unphysical; it is **reported rather than clamped**, because a clamped value looks like a measurement.
     ///
@@ -805,6 +850,23 @@ pub fn identify_actuator(
                 resid_sq[i] += e * e;
             }
         }
+        // Standard errors from the same normal system: Cov = σ²(AᵀA)⁻¹, σ² = SSR/(rows − 3). The
+        // divisor is rows − 3 rather than rows, because three parameters were fitted from this data and
+        // the residual is correspondingly optimistic; `residual` above reports plain RMS and is a
+        // different quantity.
+        let stderr = if armature.is_finite() && count > 3 {
+            DMatrix::from_row_slice(3, 3, &ata[i]).try_inverse().and_then(|inv| {
+                let s2 = resid_sq[i] / (count - 3) as f64;
+                let e = [
+                    (s2 * inv[(0, 0)]).sqrt(),
+                    (s2 * inv[(1, 1)]).sqrt(),
+                    (s2 * inv[(2, 2)]).sqrt(),
+                ];
+                e.iter().all(|v| v.is_finite()).then_some(e)
+            })
+        } else {
+            None
+        };
         out.push(ActuatorFit {
             joint: i,
             armature,
@@ -816,6 +878,7 @@ pub fn identify_actuator(
             } else {
                 f64::NAN
             },
+            stderr,
             physical: {
                 let floor = -1e-9 * armature.abs().max(damping.abs()).max(friction.abs());
                 armature >= floor && damping >= floor && friction >= floor
@@ -1089,6 +1152,107 @@ mod tests {
             assert!((f.friction - true_f).abs() < 1e-9, "joint {i} friction: {} vs {true_f}", f.friction);
             assert!(f.residual < 1e-9, "joint {i} residual {} should be ~0 on noise-free data", f.residual);
         }
+    }
+
+    /// **The reported standard error must have the coverage it claims.**
+    ///
+    /// A number that is merely *returned* is worthless as an uncertainty. The test is frequentist
+    /// coverage: with Gaussian torque noise, repeat the identification many times on independent noise
+    /// draws and count how often the truth lands inside `estimate ± 1.96·stderr`. If the formula is
+    /// right that happens 95% of the time.
+    ///
+    /// **What it does and does not catch**, mutation-checked rather than assumed. Scaling the variance
+    /// by 1/4 drops coverage to 67.7% and by 4 raises it to 100.0%, so a factor error in either
+    /// direction fails, including the dangerous one where the reported uncertainty is too confident.
+    /// Replacing the `rows − 3` divisor with `rows` does **not** fail, and cannot: at 400 samples that is
+    /// a 0.4% change in `σ`, far inside the binomial scatter. The degrees-of-freedom correction earns
+    /// its place when samples are few, which is not the regime this fixture is in.
+    ///
+    /// Noise is added to the torque only, which is the model least squares assumes: error in the
+    /// response, not in the regressors. Real encoder differentiation puts noise in `q̈` as well, and
+    /// that case is exactly where [`ActuatorFit::conditioning`] reads 1.000 while the armature is
+    /// wildly out. This test is about the estimator being correct on its own assumptions.
+    #[test]
+    fn the_standard_error_covers_the_truth_at_the_rate_it_claims() {
+        let (robot, inertia) = geared_arm(0.0119, 0.64);
+        let g = Vector3::new(0.0, 0.0, -9.81);
+        let sigma = 0.02; // N·m of torque noise
+
+        // clean regressors and clean torques once; only the noise is redrawn per trial
+        let mut base = Vec::new();
+        for k in 0..400 {
+            let t = k as f64 * 0.002;
+            let q = vec![0.4 * (3.0 * t).sin(), -0.3 * (5.0 * t).cos()];
+            let qd = vec![1.2 * (3.0 * t).cos() + 0.5 * (11.0 * t).cos(), 1.5 * (5.0 * t).sin()];
+            let qdd = vec![-3.6 * (3.0 * t).sin() - 5.5 * (11.0 * t).sin(), 7.5 * (5.0 * t).cos()];
+            let tau = crate::inverse_dynamics(&robot, &inertia, &q, &qd, &qdd, g);
+            base.push(IdSample { q, qd, qdd, tau });
+        }
+
+        let mut seed = 0x51ED_5EEDu64;
+        let gauss = |seed: &mut u64| {
+            // Box-Muller from the module's own uniform generator
+            let u1 = ((lcg(seed) + 1.0) / 2.0).max(1e-12);
+            let u2 = (lcg(seed) + 1.0) / 2.0;
+            (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+        };
+
+        let trials = 300;
+        let mut inside = [[0usize; 3]; 2];
+        let mut got_stderr = [[0.0f64; 3]; 2];
+        for _ in 0..trials {
+            let noisy: Vec<IdSample> = base
+                .iter()
+                .map(|s| IdSample {
+                    q: s.q.clone(),
+                    qd: s.qd.clone(),
+                    qdd: s.qdd.clone(),
+                    tau: s.tau.iter().map(|t| t + sigma * gauss(&mut seed)).collect(),
+                })
+                .collect();
+            let fits = identify_actuator(&robot, &inertia, &noisy, g);
+            for (i, f) in fits.iter().enumerate() {
+                let se = f.stderr.expect("an identifiable fit with 400 samples must report a standard error");
+                let truth = [0.0119 + 0.003 * i as f64, 0.64 - 0.1 * i as f64, 0.08 + 0.02 * i as f64];
+                let est = [f.armature, f.damping, f.friction];
+                for k in 0..3 {
+                    got_stderr[i][k] += se[k] / trials as f64;
+                    if (est[k] - truth[k]).abs() <= 1.96 * se[k] {
+                        inside[i][k] += 1;
+                    }
+                }
+            }
+        }
+
+        let names = ["armature", "damping", "friction"];
+        for i in 0..2 {
+            for k in 0..3 {
+                let cov = inside[i][k] as f64 / trials as f64;
+                eprintln!("joint {i} {}: coverage {:.1}%, mean stderr {:.3e}", names[k], 100.0 * cov, got_stderr[i][k]);
+                // 95% nominal; the binomial standard deviation at n = 300 is 1.3%, so this is ~4 sigma
+                assert!(
+                    (0.90..=0.99).contains(&cov),
+                    "joint {i} {} coverage {:.1}% is not the 95% claimed",
+                    names[k],
+                    100.0 * cov
+                );
+            }
+        }
+
+        // and it must SCALE: doubling the noise doubles the standard error
+        let scaled: Vec<IdSample> = base
+            .iter()
+            .map(|s| IdSample {
+                q: s.q.clone(),
+                qd: s.qd.clone(),
+                qdd: s.qdd.clone(),
+                tau: s.tau.iter().map(|t| t + 2.0 * sigma * gauss(&mut seed)).collect(),
+            })
+            .collect();
+        let big = identify_actuator(&robot, &inertia, &scaled, g);
+        let se2 = big[0].stderr.expect("identifiable");
+        let ratio = se2[1] / got_stderr[0][1];
+        assert!((ratio - 2.0).abs() < 0.4, "doubling the torque noise should double the standard error, got {ratio:.3}x");
     }
 
     /// **Exponential motion cannot separate the terms, and the fit must say so.**

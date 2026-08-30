@@ -759,15 +759,22 @@ fn identify_mode() {
     let show = |label: &str, fits: &[ferromotion_core::ActuatorFit]| {
         println!("\n  {label}\n");
         println!(
-            "  {:>5} {:>13} {:>8} {:>11} {:>8} {:>11} {:>11} {:>10}",
-            "joint", "armature", "err", "damping", "err", "friction", "conditioning", "residual"
+            "  {:>5} {:>13} {:>8} {:>11} {:>8} {:>11} {:>11} {:>10} {:>11} {:>9}",
+            "joint", "armature", "err", "damping", "err", "friction", "conditioning", "residual", "se(arm)", "err/se"
         );
         for f in fits {
             // Friction is FITTED now, so it has to be shown. The SO-101 model states none, so the truth is
             // zero and a relative error is undefined — the absolute value is the honest column, and anything
             // far from zero here means the fit is absorbing something else into it.
+            // `se(arm)` is the fitted standard error and `err/se` is how many of them the truth is
+            // away. Under 2 means the error is consistent with the noise; far above means the fit is
+            // wrong AND says so, which is the thing `conditioning` cannot report.
+            let (se, z) = match f.stderr {
+                Some(e) => (e[0], (f.armature - truth_a).abs() / e[0]),
+                None => (f64::NAN, f64::NAN),
+            };
             println!(
-                "  {:>5} {:>13.6e} {:>7.1}% {:>11.4} {:>7.1}% {:>11.2e} {:>11.3e} {:>10.2e}",
+                "  {:>5} {:>13.6e} {:>7.1}% {:>11.4} {:>7.1}% {:>11.2e} {:>11.3e} {:>10.2e} {se:>11.2e} {z:>9.1}",
                 f.joint,
                 f.armature,
                 100.0 * (f.armature - truth_a).abs() / truth_a,
