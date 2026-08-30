@@ -16,7 +16,7 @@ const LIFT_V: f64 = 0.5;
 
 fn build() -> (GraspFemSim, Vec<[usize; 2]>, f64, f64) {
     let mut fem = FemSim::box_grid(3, 3, 3, H, 0.02, 1.0e4, 6.0e3, 2.0e-4);
-    fem.damping = 0.02;
+    fem.damping_rate = 102.040_816_326_530_6; // old per-step 0.02 at dt = 2.0e-4
     let xs: Vec<f64> = fem.x.iter().map(|p| p.x).collect();
     let (xmin, xmax) = (xs.iter().cloned().fold(f64::INFINITY, f64::min), xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
     let zmin = fem.x.iter().map(|p| p.z).fold(f64::INFINITY, f64::min);

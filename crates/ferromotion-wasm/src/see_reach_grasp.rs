@@ -72,7 +72,7 @@ impl SeeReachGrasp {
         // A soft cube (clean box-grid tets — stable under squeeze, unlike a coarse implicit mesh),
         // translated so its centroid sits at `center`.
         let mut fem = ferromotion_fem::FemSim::box_grid(3, 3, 3, 0.06, 0.02, 1.0e4, 6.0e3, 2.0e-4);
-        fem.damping = 0.02;
+        fem.damping_rate = 102.040_816_326_530_6; // old per-step 0.02 at dt = 2.0e-4
         let n = fem.n_verts() as f64;
         let c0: Vector3<f64> = fem.x.iter().sum::<Vector3<f64>>() / n;
         let off = center - c0;

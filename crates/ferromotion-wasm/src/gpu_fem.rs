@@ -31,7 +31,7 @@ impl GpuFemRef {
     #[wasm_bindgen(constructor)]
     pub fn new() -> GpuFemRef {
         let mut fem = FemSim::box_grid(3, 3, 3, 0.1, 0.02, 3.0e3, 1.5e3, 2.0e-4);
-        fem.damping = 0.01;
+        fem.damping_rate = 50.505_050_505_050_5; // old per-step 0.01 at dt = 2.0e-4
         fem.gravity = Vector3::new(0.0, 0.0, -9.81);
         fem.floor = None; // pinned-top hanging jelly, no ground contact — the GPU kernel and the CPU
                           // reference then step the exact same equations (elastic + gravity + pins)
@@ -106,7 +106,7 @@ impl GpuFemRef {
     /// Simulation parameters `[mass, dt, damping, mu, lambda, gx, gy, gz]`.
     pub fn params(&self) -> Vec<f32> {
         let g = self.fem0.gravity;
-        vec![self.fem0.mass as f32, self.fem0.dt as f32, self.fem0.damping as f32, self.fem0.mu as f32, self.fem0.lambda as f32, g.x as f32, g.y as f32, g.z as f32]
+        vec![self.fem0.mass as f32, self.fem0.dt as f32, self.fem0.damping_rate as f32, self.fem0.mu as f32, self.fem0.lambda as f32, g.x as f32, g.y as f32, g.z as f32]
     }
 
     /// The verified CPU render: step a fresh copy `n` times from the initial state; return the final

@@ -34,7 +34,27 @@ pub struct FemSim {
     pub mass: f64,
     pub mu: f64,
     pub lambda: f64,
-    pub damping: f64,
+    /// Viscous velocity damping as a **rate in 1/s**, applied implicitly:
+    /// `v ← v / (1 + damping_rate·dt)`.
+    ///
+    /// It is a rate, not a per-step fraction, so that the simulated **dynamics** do not depend on the
+    /// timestep. A per-step decay `v ← v·(1−d)` dissipates `−ln(1−d)/dt` per second, so halving `dt`
+    /// doubles the damping.
+    ///
+    /// What that did and did not break, measured on a cantilever settling under its own weight:
+    ///
+    /// - The **static equilibrium was never affected** — damping cannot move it. Held at 4.669374e-1 m
+    ///   to seven digits across every `dt` and both forms, once run to rest.
+    /// - The **transient was**. Refining `dt` 8× turned a 10 /s damping into 80 /s, and at t = 1.2 s the
+    ///   tip had reached 0.172 m instead of 0.468 m — 63% low, from changing nothing but the timestep.
+    ///   Under the rate form the same refinement agrees to 0.9%.
+    ///
+    /// So anything that reads the motion rather than the rest pose — contact transients, a grasp, a
+    /// trained policy — saw a different material when `dt` changed. And `dt` is not a free choice: the
+    /// stable step falls with the dilatational wave speed `sqrt((λ+2μ)/ρ)`, so pushing Poisson's ratio
+    /// towards the silicone range forces a smaller step, which under the old form silently over-damped
+    /// exactly the soft bodies the crate exists to simulate.
+    pub damping_rate: f64,
     pub dt: f64,
     pub gravity: Vector3<f64>,
     /// Optional penalty floor at `z = floor`; vertices below it are pushed up by a spring–dashpot
@@ -69,7 +89,7 @@ impl FemSim {
             mass,
             mu,
             lambda,
-            damping: 0.0,
+            damping_rate: 0.0,
             dt,
             gravity: Vector3::new(0.0, 0.0, -9.81),
             floor: None,
@@ -285,7 +305,7 @@ impl FemSim {
                 continue;
             }
             let a = forces[i] * inv_m + self.gravity;
-            self.v[i] = (self.v[i] + self.dt * a) * (1.0 - self.damping);
+            self.v[i] = (self.v[i] + self.dt * a) / (1.0 + self.damping_rate * self.dt);
             self.x[i] += self.dt * self.v[i];
         }
     }
@@ -417,7 +437,7 @@ mod verification {
         // which makes the test about the budget rather than about the force.
         let mut relaxing = sim.clone();
         relaxing.gravity = Vector3::zeros();
-        relaxing.damping = 0.5;
+        relaxing.damping_rate = 1000.0; // = 0.5/(0.5·1e-3): reproduces the old per-step 0.5 at single_tet's dt
         let mut j = j0;
         let mut ever_decreased = false;
         for _ in 0..200_000 {
@@ -577,7 +597,7 @@ mod verification {
     #[test]
     fn dropped_soft_body_lands_and_settles() {
         let mut sim = FemSim::box_grid(2, 2, 2, 0.3, 0.4, 4.0e3, 2.0e3, 3e-4);
-        sim.damping = 0.003;
+        sim.damping_rate = 10.030_090_270_812_437; // = 0.003/(0.997·3e-4): the old per-step 0.003 at this dt
         sim.floor = Some(0.0);
         sim.k_contact = 3.0e4;
         // lift it above the floor
@@ -593,6 +613,54 @@ mod verification {
         assert!(lowest > -0.02, "a vertex tunneled through the floor: {lowest}");
         assert!(lowest < 0.05, "the body never reached the floor: {lowest}");
         assert!(ke < 5e-3, "the body did not settle: KE {ke}"); // near-rest (small elastic jiggle is physical)
+    }
+
+    /// Damping must be a rate, so refining the timestep may not change the physics.
+    ///
+    /// This is the check the crate did not have. `damping` used to be a per-step fraction,
+    /// `v ← v·(1−d)`, which dissipates `−ln(1−d)/dt` per second: halving `dt` doubled the damping.
+    /// Nothing caught it because every test ran at a single `dt`, where a per-step decay and a rate
+    /// are indistinguishable. It is not a cosmetic difference — the stable `dt` is set by the
+    /// dilatational wave speed `sqrt((λ+2μ)/ρ)`, so raising Poisson's ratio towards the silicone
+    /// range forces a smaller step, and under the old form that silently stiffened the material.
+    ///
+    /// The equilibrium is *not* what moved — damping cannot shift it, and it agrees to seven digits
+    /// either way once run to rest. What moved is the approach: at t = 1.2 s an 8× finer `dt` put the
+    /// tip 63% low under the per-step form, and within 0.9% under the rate form. This test therefore
+    /// samples the transient deliberately, before the beam has settled.
+    #[test]
+    fn damping_is_a_rate_not_a_per_step_fraction() {
+        // one beam, one material, one physical duration; only dt changes
+        let settled = |dt: f64| -> f64 {
+            let (nx, ny, nz, h) = (12usize, 2usize, 2usize, 0.05f64);
+            let nv = (nx + 1) * (ny + 1) * (nz + 1);
+            let mut s = FemSim::box_grid(nx, ny, nz, h, 0.4 / nv as f64, 4.0e3, 3.0e3, dt);
+            s.damping_rate = 10.0;
+            s.floor = None;
+            s.gravity = Vector3::new(0.0, 0.0, -9.81);
+            for i in 0..s.x.len() {
+                if s.x[i].x < 1e-9 {
+                    s.pinned[i] = true;
+                }
+            }
+            let l = nx as f64 * h;
+            let tips: Vec<usize> = (0..s.x.len()).filter(|&i| (s.x[i].x - l).abs() < 1e-9).collect();
+            let z0: f64 = tips.iter().map(|&i| s.x[i].z).sum::<f64>() / tips.len() as f64;
+            for _ in 0..(1.2 / dt).round() as usize {
+                s.step();
+            }
+            let zf: f64 = tips.iter().map(|&i| s.x[i].z).sum::<f64>() / tips.len() as f64;
+            assert!(zf.is_finite(), "dt = {dt:e} went unstable");
+            z0 - zf
+        };
+        let coarse = settled(4.0e-4);
+        let fine = settled(4.0e-4 / 8.0);
+        let drift = (fine - coarse).abs() / coarse;
+        assert!(
+            drift < 0.05,
+            "refining dt 8x must not change the settled deflection: {coarse:.6e} -> {fine:.6e} ({:.1}%)",
+            100.0 * drift
+        );
     }
 
     /// A stretched box builds a static energy that grows monotonically with the stretch — sanity on

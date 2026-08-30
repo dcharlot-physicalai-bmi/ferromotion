@@ -65,7 +65,7 @@ fn integrate_kernel(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_wo
   let nV = u32(PRM[9]);
   if (v >= nV) { return; }
   if (PIN[v] == 1u) { V[v*3u] = 0.0; V[v*3u+1u] = 0.0; V[v*3u+2u] = 0.0; return; }
-  let mass = PRM[0]; let dt = PRM[1]; let damping = PRM[2];
+  let mass = PRM[0]; let dt = PRM[1]; let damping_rate = PRM[2];
   let grav = vec3<f32>(PRM[5], PRM[6], PRM[7]);
   let xx0 = gx(v); let vv0 = gv(v);
   // gather the elastic force from every incident tet (atomic-free scatter)
@@ -85,7 +85,7 @@ fn integrate_kernel(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_wo
     }
   }
   let a = fsum * (1.0 / mass) + grav;
-  let vv = (vv0 + dt * a) * (1.0 - damping);
+  let vv = (vv0 + dt * a) / (1.0 + damping_rate * dt);   // rate in 1/s, matches FemSim::step
   let xx = xx0 + dt * vv;
   V[v*3u] = vv.x; V[v*3u+1u] = vv.y; V[v*3u+2u] = vv.z;
   X[v*3u] = xx.x; X[v*3u+1u] = xx.y; X[v*3u+2u] = xx.z;
@@ -147,7 +147,7 @@ impl FemGpu {
             None => (0.0, 0.0),
         };
         let prm: [f32; 14] = [
-            sim.mass as f32, sim.dt as f32, sim.damping as f32, sim.mu as f32, sim.lambda as f32,
+            sim.mass as f32, sim.dt as f32, sim.damping_rate as f32, sim.mu as f32, sim.lambda as f32,
             sim.gravity.x as f32, sim.gravity.y as f32, sim.gravity.z as f32,
             n_tets as f32, n_verts as f32,
             floor_z, gamma as f32, sim.k_contact as f32, has_floor,
@@ -316,7 +316,7 @@ mod verification {
     #[test]
     fn gpu_matches_cpu_pinned_cube() {
         let mut sim = FemSim::box_grid(3, 3, 3, 0.1, 0.02, 3.0e3, 1.5e3, 2.0e-4);
-        sim.damping = 0.01;
+        sim.damping_rate = 50.505_050_505_050_5; // old per-step 0.01 at dt = 2.0e-4
         sim.gravity = Vector3::new(0.0, 0.0, -9.81);
         sim.floor = None;
         let zmax = sim.x.iter().map(|p| p.z).fold(f64::NEG_INFINITY, f64::max);
@@ -350,7 +350,7 @@ mod verification {
     #[test]
     fn gpu_matches_cpu_dropped_cube_with_floor() {
         let mut sim = FemSim::box_grid(3, 3, 3, 0.08, 0.02, 2.0e3, 1.0e3, 1.5e-4);
-        sim.damping = 0.02;
+        sim.damping_rate = 136.054_421_768_707_5; // old per-step 0.02 at dt = 1.5e-4
         sim.gravity = Vector3::new(0.0, 0.0, -9.81);
         sim.floor = Some(0.0);
         sim.k_contact = 4.0e3;

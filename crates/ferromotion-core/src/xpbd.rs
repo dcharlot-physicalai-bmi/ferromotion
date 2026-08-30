@@ -45,11 +45,23 @@ pub struct XpbdSolver {
     pub constraints: Vec<DistanceConstraint>,
     pub gravity: Vector3<f64>,
     /// Substeps per [`Self::step`] call (more ⇒ stiffer-feeling, but XPBD keeps the *equilibrium* fixed).
+    ///
+    /// That claim covers the constraint compliance. It only covers the damping because
+    /// [`Self::damping_rate`] is a rate — while damping was a per-substep fraction, raising this from
+    /// 4 to 32 multiplied the dissipation by 8 and left a chain visibly short of its rest state.
     pub substeps: usize,
     /// Constraint-projection iterations per substep (more ⇒ closer to the exact compliant equilibrium).
     pub iters: usize,
-    /// Per-substep velocity damping in `[0,1)` (0 = none).
-    pub damping: f64,
+    /// Velocity damping as a **rate in 1/s**, applied each substep: `v ← v / (1 + damping_rate·h)`
+    /// for a substep `h = dt/substeps`.
+    ///
+    /// A rate, not a per-substep fraction, so that neither `dt` nor `substeps` changes the physics.
+    /// A per-substep decay `v ← v·(1−d)` dissipates `−ln(1−d)·substeps/dt` per second, so it scaled
+    /// with *both* knobs at once. Measured on a hanging chain with `damping = 0.02`, the effective
+    /// rate ranged over 40 /s to 808 /s across ordinary settings, and the damage outlasted the
+    /// transient: after 20 s of simulated time a 0.9 m chain that should hang straight down sat at
+    /// 0.245 m, still creeping, purely because `dt` had been refined for accuracy.
+    pub damping_rate: f64,
 }
 
 impl XpbdSolver {
@@ -92,7 +104,7 @@ impl XpbdSolver {
             // read velocities back from the position change, then damp (removes settling energy only)
             for p in &mut self.particles {
                 p.v = (p.x - p.prev) / h;
-                p.v *= 1.0 - self.damping;
+                p.v /= 1.0 + self.damping_rate * h;
             }
         }
     }
@@ -121,7 +133,7 @@ mod tests {
             gravity: v(0.0, -9.81, 0.0),
             substeps,
             iters: 20,
-            damping: 0.05,
+            damping_rate: 21.052_631_578_947_37, // old per-substep 0.05 at dt = 0.01, 4 substeps
         }
     }
 
@@ -174,11 +186,45 @@ mod tests {
             gravity: v(0.0, 0.0, 0.0),
             substeps: 4,
             iters: 4,
-            damping: 0.0,
+            damping_rate: 0.0,
         };
         let p0: Vector3<f64> = s.particles.iter().map(|p| p.v / p.inv_mass).sum();
         s.simulate(0.005, 200);
         let p1: Vector3<f64> = s.particles.iter().map(|p| p.v / p.inv_mass).sum();
         assert!((p1 - p0).norm() < 1e-9, "momentum drifted: {p0:?} → {p1:?}");
     }
+
+    /// Damping must be a rate, so neither `dt` nor `substeps` may change the motion.
+    ///
+    /// This is the check the solver did not have. `damping` was a per-substep fraction, so its
+    /// per-second strength was `-ln(1-d)*substeps/dt` and scaled with both knobs that are supposed to
+    /// buy accuracy. Every existing test ran one `(dt, substeps)` pair, or compared only the settled
+    /// equilibrium, which damping cannot move, so nothing saw it.
+    #[test]
+    fn damping_is_a_rate_not_a_per_substep_fraction() {
+        let tip = |dt: f64, substeps: usize| -> f64 {
+            let n = 10;
+            let particles: Vec<Particle> = (0..n)
+                .map(|i| Particle::new(v(i as f64 * 0.1, 0.0, 0.0), if i == 0 { 0.0 } else { 1.0 }))
+                .collect();
+            let constraints = (0..n - 1).map(|i| DistanceConstraint { i, j: i + 1, rest: 0.1, compliance: 1e-6 }).collect();
+            let mut s = XpbdSolver { particles, constraints, gravity: v(0.0, 0.0, -9.81), substeps, iters: 4, damping_rate: 20.0 };
+            for _ in 0..(0.5 / dt).round() as usize {
+                s.step(dt);
+            }
+            s.particles.last().unwrap().x.z
+        };
+        // sampled mid-transient, where damping strength actually shows
+        let reference = tip(2e-3, 4);
+        for (dt, substeps) in [(2e-3, 32usize), (2.5e-4, 4), (2.5e-4, 32)] {
+            let got = tip(dt, substeps);
+            let drift = (got - reference).abs() / reference.abs();
+            assert!(
+                drift < 0.05,
+                "dt = {dt:e}, substeps = {substeps} moved the mid-transient tip {reference:.6e} -> {got:.6e} ({:.1}%)",
+                100.0 * drift
+            );
+        }
+    }
+
 }

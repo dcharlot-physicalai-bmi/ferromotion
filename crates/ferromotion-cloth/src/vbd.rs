@@ -114,13 +114,22 @@ pub struct VbdSolver {
     /// Gauss-Seidel sweeps per step. One is enough to stay stable; more converges toward implicit Euler.
     pub iterations: usize,
     pub gravity: Vector3<f64>,
-    /// Velocity damping applied at the end of a step, in `[0, 1]`.
-    pub damping: f64,
+    /// Velocity damping as a **rate in 1/s**, applied at the end of a step:
+    /// `v ← v / (1 + damping_rate·dt)`.
+    ///
+    /// A rate, not a per-step fraction, so that `dt` stays an accuracy knob instead of a physical one.
+    /// A per-step decay `v ← v·(1−d)` dissipates `−ln(1−d)/dt` per second, so shortening the step
+    /// strengthens the damping in proportion. Measured on a hanging chain with `damping = 0.02`:
+    /// taking `dt` from 4e-3 to 1e-4 raised the effective rate from 5.1 /s to 202 /s, and moved the
+    /// tip at t = 0.5 s from -0.627 m to -0.024 m. The rest state is unaffected (damping cannot move
+    /// an equilibrium) but every transient is, and at the stiffest setting the chain had still not
+    /// reached its rest length after 20 s of simulated time.
+    pub damping_rate: f64,
 }
 
 impl VbdSolver {
     pub fn new(dt: f64, iterations: usize) -> Option<VbdSolver> {
-        (dt > 0.0 && iterations >= 1).then_some(VbdSolver { dt, iterations, gravity: Vector3::new(0.0, 0.0, -9.81), damping: 0.0 })
+        (dt > 0.0 && iterations >= 1).then_some(VbdSolver { dt, iterations, gravity: Vector3::new(0.0, 0.0, -9.81), damping_rate: 0.0 })
     }
 
     /// The inertial (predicted) positions `y_i`, which the variational objective pulls toward.
@@ -209,7 +218,7 @@ impl VbdSolver {
 
         for (i, v) in verts.iter_mut().enumerate() {
             if !v.pinned {
-                v.velocity = (x[i] - previous[i]) / self.dt * (1.0 - self.damping);
+                v.velocity = (x[i] - previous[i]) / self.dt / (1.0 + self.damping_rate * self.dt);
                 v.position = x[i];
             }
         }
@@ -347,7 +356,7 @@ impl AugmentedVbd {
 
         for (i, v) in verts.iter_mut().enumerate() {
             if !v.pinned {
-                v.velocity = (x[i] - previous[i]) / self.solver.dt * (1.0 - self.solver.damping);
+                v.velocity = (x[i] - previous[i]) / self.solver.dt / (1.0 + self.solver.damping_rate * self.solver.dt);
                 v.position = x[i];
             }
         }
@@ -408,7 +417,7 @@ mod tests {
         let settle = |avbd: bool, sweeps: usize| -> (f64, f64) {
             let (mut verts, springs) = hanging_chain(n, link, mass, k);
             let mut solver = VbdSolver::new(1.0 / 60.0, sweeps).unwrap();
-            solver.damping = 0.05;
+            solver.damping_rate = 3.157_894_736_842_105; // old per-step 0.05 at dt = 1/60
             let mut aug = AugmentedVbd::new(solver, 10, 1e4).expect("valid avbd");
             for _ in 0..2000 {
                 if avbd {
@@ -475,7 +484,7 @@ mod tests {
         eprintln!("    (with damping, so the chain settles instead of swinging):");
         for iters in [1usize, 4, 16, 64] {
             let mut sv = VbdSolver::new(dt, iters).unwrap();
-            sv.damping = 0.05;
+            sv.damping_rate = 1.578_947_368_421_052_6; // old per-step 0.05 at dt = 1/30
             let (mut vs, sp) = hanging_chain(12, 0.1, 0.05, k);
             for _ in 0..1200 {
                 sv.step(&mut vs, &sp);
@@ -485,7 +494,7 @@ mod tests {
             assert!(ext.is_finite(), "stable at every sweep count");
         }
         let mut sv = VbdSolver::new(dt, 64).unwrap();
-        sv.damping = 0.05;
+        sv.damping_rate = 1.578_947_368_421_052_6; // old per-step 0.05 at dt = 1/30
         let (mut vs, sp) = hanging_chain(12, 0.1, 0.05, k);
         for _ in 0..1200 {
             sv.step(&mut vs, &sp);
@@ -766,4 +775,37 @@ mod tests {
         );
         eprintln!("residual: healthy {clean:.4e} N, one NaN vertex -> {poisoned} (was 0.0 before the fix)");
     }
+
+    /// Damping must be a rate, so `dt` stays an accuracy knob rather than a physical one.
+    ///
+    /// This is the check the solver did not have. `damping` was a per-step fraction, dissipating
+    /// `-ln(1-d)/dt` per second, so a shorter step damped harder. Every existing test ran a single
+    /// `dt`, where a per-step decay and a rate are indistinguishable.
+    #[test]
+    fn damping_is_a_rate_not_a_per_step_fraction() {
+        let tip = |dt: f64| -> f64 {
+            let n = 10;
+            let mut verts: Vec<Vertex> = (0..n).map(|i| Vertex::new(Vector3::new(i as f64 * 0.1, 0.0, 0.0), 1.0)).collect();
+            verts[0] = Vertex::pinned_at(Vector3::zeros());
+            let springs: Vec<Spring> = (0..n - 1).map(|i| Spring { i, j: i + 1, rest: 0.1, stiffness: 5.0e3 }).collect();
+            let mut s = VbdSolver::new(dt, 8).expect("valid solver");
+            s.damping_rate = 20.0;
+            for _ in 0..(0.5 / dt).round() as usize {
+                s.step(&mut verts, &springs);
+            }
+            verts.last().expect("chain is non-empty").position.z
+        };
+        // sampled mid-transient, where damping strength actually shows
+        let reference = tip(2e-3);
+        for dt in [1e-3f64, 5e-4, 1e-4] {
+            let got = tip(dt);
+            let drift = (got - reference).abs() / reference.abs();
+            assert!(
+                drift < 0.05,
+                "dt = {dt:e} moved the mid-transient tip {reference:.6e} -> {got:.6e} ({:.1}%)",
+                100.0 * drift
+            );
+        }
+    }
+
 }

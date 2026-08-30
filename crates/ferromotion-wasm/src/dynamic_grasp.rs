@@ -73,7 +73,7 @@ impl DynamicGrasp {
 
         // a soft cube, translated to the start, given a constant horizontal glide
         let mut fem = ferromotion_fem::FemSim::box_grid(3, 3, 3, 0.06, 0.02, 1.0e4, 6.0e3, 2.0e-4);
-        fem.damping = 0.04;
+        fem.damping_rate = 208.333_333_333_333_3; // old per-step 0.04 at dt = 2.0e-4
         let n = fem.n_verts() as f64;
         let c0: Vector3<f64> = fem.x.iter().sum::<Vector3<f64>>() / n;
         let off = Vector3::new(start_x, y0, rest_z) - c0;

@@ -127,13 +127,13 @@ impl GraspFemSim {
 
         // integrate (semi-implicit Euler), pins held
         let inv_m = 1.0 / self.fem.mass;
-        let fdamp = self.fem.damping;
+        let fdamp = self.fem.damping_rate;
         for i in 0..nv {
             if self.fem.pinned[i] {
                 self.fem.v[i] = Vector3::zeros();
                 continue;
             }
-            self.fem.v[i] = (self.fem.v[i] + dt * f[i] * inv_m) * (1.0 - fdamp);
+            self.fem.v[i] = (self.fem.v[i] + dt * f[i] * inv_m) / (1.0 + fdamp * dt);
             self.fem.x[i] += dt * self.fem.v[i];
         }
     }
@@ -149,7 +149,7 @@ mod tests {
         // A firm, light little block: stiff enough to stay compact under its own weight while the
         // jaws squeeze it (so the centroid tracks the grip), still visibly deformable.
         let mut fem = FemSim::box_grid(3, 3, 3, 0.07, 0.02, 1.0e4, 6.0e3, 2.0e-4);
-        fem.damping = 0.02; // the soft body dissipates its own vibration
+        fem.damping_rate = 102.040_816_326_530_6; // old per-step 0.02 at dt = 2.0e-4; the soft body dissipates its own vibration
         let g = grip.normalize();
         let n = fem.n_verts() as f64;
         let centroid: Vector3<f64> = fem.x.iter().sum::<Vector3<f64>>() / n;

@@ -99,13 +99,13 @@ impl CoupledFemDem {
 
         // ---- integrate (semi-implicit Euler), pins held ----
         let inv_m = 1.0 / self.fem.mass;
-        let fdamp = self.fem.damping;
+        let fdamp = self.fem.damping_rate;
         for i in 0..nv {
             if self.fem.pinned[i] {
                 self.fem.v[i] = Vector3::zeros();
                 continue;
             }
-            self.fem.v[i] = (self.fem.v[i] + dt * ff[i] * inv_m) * (1.0 - fdamp);
+            self.fem.v[i] = (self.fem.v[i] + dt * ff[i] * inv_m) / (1.0 + fdamp * dt);
             self.fem.x[i] += dt * self.fem.v[i];
         }
         for i in 0..ng {
@@ -191,7 +191,7 @@ mod verification {
         let dem = DemSim::new(grains, 4.0e4, 80.0, 0.5, 2e-4);
         let mut sim = CoupledFemDem::new(fem, dem, 0.08, 4.0e4);
         sim.floor = Some(0.0);
-        sim.fem.damping = 0.03; // the slab dissipates its own elastic vibration
+        sim.fem.damping_rate = 154.639_175_257_732_0; // old per-step 0.03 at dt = 2e-4; the slab dissipates its own elastic vibration
         // pin the slab's base so it acts as a compliant mat
         let zmin = sim.fem.x.iter().map(|p| p.z).fold(f64::INFINITY, f64::min);
         for i in 0..sim.fem.n_verts() {

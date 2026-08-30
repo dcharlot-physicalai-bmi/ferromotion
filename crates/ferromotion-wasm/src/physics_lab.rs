@@ -25,7 +25,7 @@ impl FemLab {
     #[wasm_bindgen(constructor)]
     pub fn new() -> FemLab {
         let mut sim = FemSim::box_grid(3, 3, 3, 0.28, 0.5, 3.0e3, 1.5e3, 2e-4);
-        sim.damping = 0.004;
+        sim.damping_rate = 20.080_321_285_140_6; // old per-step 0.004 at dt = 2e-4
         sim.gravity = Vector3::new(0.0, 0.0, -9.81);
         sim.floor = Some(0.0);
         sim.k_contact = 3.0e4;
@@ -375,7 +375,7 @@ impl CoupledLab {
         let dem = DemSim::new(grains, 4.0e4, 70.0, 0.5, 2e-4);
         let mut sim = ferromotion_coupled::CoupledFemDem::new(fem, dem, 0.08, 4.0e4);
         sim.floor = Some(0.0);
-        sim.fem.damping = 0.03;
+        sim.fem.damping_rate = 154.639_175_257_732_0; // old per-step 0.03 at dt = 2e-4
         // pin the slab's base so it acts as a compliant mat the grains land on
         let zmin = sim.fem.x.iter().map(|p| p.z).fold(f64::INFINITY, f64::min);
         for i in 0..sim.fem.n_verts() {

@@ -61,7 +61,7 @@ impl Bimanual {
     pub fn new() -> Self {
         // a soft beam, wide in x, translated so its centroid sits at the work height
         let mut fem = FemSim::box_grid(6, 2, 2, 0.06, 0.02, 1.0e4, 6.0e3, 2.0e-4);
-        fem.damping = 0.04;
+        fem.damping_rate = 208.333_333_333_333_3; // old per-step 0.04 at dt = 2.0e-4
         let center = Vector3::new(0.45, 0.0, 0.42);
         let n = fem.n_verts() as f64;
         let c0: Vector3<f64> = fem.x.iter().sum::<Vector3<f64>>() / n;
@@ -200,7 +200,7 @@ impl Bimanual {
         };
 
         let inv_m = 1.0 / self.fem.mass;
-        let fdamp = self.fem.damping;
+        let fdamp = self.fem.damping_rate;
         let grav = Vector3::new(0.0, 0.0, -9.81);
         let gamma = 0.5 * (self.k_contact * self.fem.mass).sqrt();
         for k in 0..self.sub {
@@ -225,7 +225,7 @@ impl Bimanual {
                 if self.fem.pinned[i] {
                     continue;
                 }
-                self.fem.v[i] = (self.fem.v[i] + dt * f[i] * inv_m) * (1.0 - fdamp);
+                self.fem.v[i] = (self.fem.v[i] + dt * f[i] * inv_m) / (1.0 + fdamp * dt);
                 self.fem.x[i] += dt * self.fem.v[i];
             }
         }
