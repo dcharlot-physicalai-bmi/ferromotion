@@ -65,6 +65,30 @@ pub struct FrictionalStep {
 /// `[λₙ, β₁…β_d, s]` (normal impulse, per-facet friction magnitudes, cone slack). `kappa` is the
 /// central-path smoothing (→0 = hard contact, >0 = smooth gradients).
 ///
+/// # `kappa` has an interior optimum that `residual` cannot find
+///
+/// Too large and the contact **creeps**: it starts moving long before Coulomb allows. Too small and it
+/// **over-holds**: it stays stuck well past the break-away force, which looks like interior-point degradation
+/// at a tiny barrier. Measured on the drag benchmark (a 1 kg cube, `µ = 0.4`, tangential force ramped 0→20 N,
+/// which Coulomb says breaks away at `µmg = 3.924 N`), at `dt = 1e-3`:
+///
+/// | `κ` | break-away | error | `residual` |
+/// |---|---|---|---|
+/// | 1e-8 | 0.02 N | −99.5% | 5.1e-7 |
+/// | 1e-10 | 1.30 N | −66.9% | 8.1e-9 |
+/// | **1e-12** | **3.90 N** | **−0.6%** | 8.5e-11 |
+/// | 1e-14 | 5.32 N | +35.6% | 5.3e-13 |
+/// | 1e-15 | 5.32 N | +35.6% | 2.6e-13 |
+///
+/// **The accuracy is non-monotone and `residual` is monotone.** A caller tuning `kappa` by watching the solver
+/// converge will drive it to `1e-15`, see the best residual in the table, and land 36% wrong. `feasibility`
+/// stays around `−4e-2` throughout and does not discriminate either. Tune against the physics —
+/// [`crate::contact_law_residuals`], or a known break-away force — never against convergence.
+///
+/// For reference, [`crate::solve_contacts_pgs`] breaks away at 3.98 N on the same benchmark (1.4% error) with
+/// its law residuals at exactly zero, and has no such parameter. The smoothing buys the gradient; this is
+/// its price.
+///
 /// # `kappa` is not scale-free, and a fixed value degrades as `dt` shrinks
 ///
 /// The central-path condition is `z ∘ w = κ`, and **both** `z` (impulses) and `w` scale with the timestep, so
@@ -91,8 +115,20 @@ pub struct FrictionalStep {
 /// `dt` is the wrong fraction of the problem at another. This returns `reference_kappa` rescaled from
 /// `reference_dt` to `dt` by the `dt²` law the central-path condition implies.
 ///
-/// `1e-9` at `dt = 1e-2` is a reasonable starting pair for a unit-mass contact: hard enough that the
-/// maximum-dissipation residual sits near `4e-8`, soft enough that the gradient is usable.
+/// **Use `1e-10` at `dt = 1e-2`** for a unit-mass contact. An earlier version of this note said `1e-9`, which
+/// a stick-slip measurement then showed to be a decade too soft.
+///
+/// The `dt²` rescale is right between `dt = 1e-2` and `1e-3` and drifts at finer steps. Measured optimum for
+/// the break-away force on the drag benchmark below:
+///
+/// | `dt` | measured best `κ` | what `dt²` predicts |
+/// |---|---|---|
+/// | 1e-2 | 1e-10 | 1e-10 ✓ |
+/// | 1e-3 | 1e-12 | 1e-12 ✓ |
+/// | 1e-4 | 1e-13 | 1e-14 ✗ |
+///
+/// So the true exponent is somewhere between 1 and 2 at fine timesteps, and a one-decade scan cannot resolve
+/// it. Treat this helper as a starting point to be checked against the physics, not a law.
 pub fn central_path_scale(kappa_at_reference: f64, reference_dt: f64, dt: f64) -> f64 {
     if reference_dt <= 0.0 || !reference_dt.is_finite() || !dt.is_finite() || dt <= 0.0 {
         return kappa_at_reference;
@@ -435,5 +471,71 @@ mod tests {
         assert_eq!(central_path_scale(1e-9, 1e-2, 1e-2), 1e-9, "same dt is a no-op");
         assert_eq!(central_path_scale(1e-9, 0.0, 1e-3), 1e-9, "a zero reference cannot rescale");
         assert_eq!(central_path_scale(1e-9, 1e-2, f64::NAN), 1e-9, "and NaN must not propagate");
+    }
+
+    /// **`kappa`'s optimum is interior, and the solver's own residual points the wrong way.**
+    ///
+    /// The drag benchmark from Le Lidec et al.: a 1 kg cube, `µ = 0.4`, tangential force ramped 0→20 N. Coulomb
+    /// says it breaks away at `µmg = 3.924 N`. Too large a `kappa` creeps early, too small over-holds, and the
+    /// best value sits between — while `residual` improves monotonically across the whole range, so tuning by
+    /// convergence lands on the worst end.
+    #[test]
+    fn kappa_has_an_interior_optimum_that_convergence_cannot_find() {
+        const MU: f64 = 0.4;
+        const DT: f64 = 1e-3;
+        let predicted = MU * 9.81;
+
+        // Break-away force and the worst solver residual over the ramp, for a given kappa.
+        let run = |kappa: f64| -> (f64, f64) {
+            let row = |a: [f64; 3]| DVector::from_row_slice(&a);
+            let (mut vx, mut brk, mut worst) = (0.0f64, f64::NAN, 0.0f64);
+            for k in 0..1000 {
+                let f = 20.0 * (k as f64 * DT);
+                let m = DMatrix::identity(3, 3);
+                let c = StFrictionContact {
+                    jn: row([0.0, 0.0, 1.0]),
+                    jt: vec![
+                        row([1.0, 0.0, 0.0]),
+                        row([-1.0, 0.0, 0.0]),
+                        row([0.0, 1.0, 0.0]),
+                        row([0.0, -1.0, 0.0]),
+                    ],
+                    phi: 0.0,
+                    mu: MU,
+                };
+                let vf = DVector::from_row_slice(&[vx + f * DT, 0.0, -9.81 * DT]);
+                let s = solve_frictional_ipm(&m, &vf, std::slice::from_ref(&c), DT, kappa);
+                vx = s.v_next[0];
+                if s.residual.is_finite() {
+                    worst = worst.max(s.residual);
+                }
+                if brk.is_nan() && vx > 1e-7 {
+                    brk = f;
+                }
+            }
+            (brk, worst)
+        };
+
+        let (soft, soft_res) = run(1e-8);
+        let (good, good_res) = run(1e-12);
+        let (hard, hard_res) = run(1e-15);
+
+        // Too soft: creeps far too early.
+        assert!(soft < 0.5 * predicted, "kappa=1e-8 should creep early, broke at {soft:.3} N");
+        // The optimum: within a few percent of Coulomb.
+        assert!(
+            (good - predicted).abs() / predicted < 0.05,
+            "kappa=1e-12 should be near {predicted:.3} N, got {good:.3}"
+        );
+        // Too hard: over-holds well past break-away.
+        assert!(hard > 1.25 * predicted, "kappa=1e-15 should over-hold, broke at {hard:.3} N");
+
+        // THE POINT: residual is monotone across all three while accuracy is not. A caller minimising it walks
+        // from the soft end, through the optimum, to the 36%-wrong end, seeing improvement the whole way.
+        assert!(
+            soft_res > good_res && good_res > hard_res,
+            "residual must be monotone in kappa ({soft_res:e} > {good_res:e} > {hard_res:e}) — that is exactly \
+             why it cannot be used to tune it"
+        );
     }
 }
