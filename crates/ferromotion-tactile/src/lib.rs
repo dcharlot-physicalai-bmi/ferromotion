@@ -12,6 +12,45 @@
 //! the height field's derivative w.r.t. the press depth is exact (`∂h/∂depth = σ(·)`), verified
 //! against finite differences — enabling gradient-based tactile inference (estimate contact
 //! depth/pose from an image). Pure `nalgebra` → WASM-clean.
+//!
+//! # What the height field is, and is not
+//!
+//! `h(x, y)` here is **geometric**: the gel surface is taken to conform to the indenter, softplus-
+//! smoothed, and set to exactly zero outside the indenter's footprint. It is not an elastic solution,
+//! and `beta` is a smoothing length, not a material property. That is enough for the differentiable
+//! inference this crate is built for, and it is not enough to stand in for a real gel. The difference
+//! was measured rather than guessed, by pressing the same sphere (radius 0.3, depth 0.15) into a slab
+//! solved by [`ferromotion-fem`](../ferromotion_fem), bonded to a rigid backing as a GelSight gel is:
+//!
+//! - **Just outside the contact edge** (ρ/a ≈ 1.03) the geometric field is **3.3× too small**.
+//! - **Beyond the footprint** it is exactly zero, while the elastic surface carries roughly a fifth to
+//!   a quarter of the total displacement out there.
+//! - **The elastic surface BULGES UP** in a ring around the contact, because the material under the
+//!   indenter has to go somewhere and the backing will not let it go down. Measured as a fraction of
+//!   the press depth, against Poisson's ratio, everything else held fixed:
+//!
+//! | ν | 0.20 | 0.30 | 0.40 | 0.45 | 0.49 |
+//! |---|---|---|---|---|---|
+//! | upward bulge | 0.17% | 0.51% | 1.57% | 2.87% | **6.56%** |
+//!
+//! The 39× growth toward the incompressible limit is what identifies it as displaced volume rather
+//! than a numerical artifact, and silicone gel sits at the right-hand end of that table. At ρ = 0.5 the
+//! surface height **changes sign** across the row, from +2.50e-3 at ν = 0.20 to −3.91e-3 at ν = 0.49.
+//!
+//! **No choice of parameters can reproduce that**, which is the part worth being precise about. `h` is
+//! a softplus, so it is strictly positive inside the footprint and set to zero outside; it cannot be
+//! negative anywhere. The bulge is not badly fitted here, it is unrepresentable. Photometric stereo
+//! reads *normals*, so a ring whose true slope has the opposite sign renders shading that a model
+//! trained on this forward pass never sees. That is a sim-to-real gap, not a resolution question.
+//!
+//! Two caveats on the numbers, since they came from one experiment: the contact set was prescribed
+//! from the undeformed sphere rather than solved as a free-boundary contact problem, and the slab was a
+//! single mesh and thickness in a finite domain with free edges. The sign, the ordering with ν, and the
+//! structural impossibility of a negative `h` do not depend on any of that.
+//!
+//! Closing it needs an elastic surface response, either a layer Green's function or a direct coupling
+//! to the FEM crate. Neither is implemented here. [`shear`] is the part of this crate that *is* elastic:
+//! its Cattaneo-Mindlin partial-slip model is a real contact-mechanics solution.
 
 pub mod shear;
 
@@ -39,7 +78,11 @@ pub struct Light {
 pub struct GelSim {
     pub n: usize,
     pub extent: f64,
-    /// Softplus temperature for the smooth contact (gel compliance).
+    /// Softplus smoothing length for the contact edge, in the same units as `extent`.
+    ///
+    /// **Not a material property**, despite reading like one. It sets how sharply `h` rolls off at the
+    /// contact boundary and nothing else; it carries no modulus, no Poisson ratio, and no thickness.
+    /// See the crate documentation for what the geometric height field does and does not represent.
     pub beta: f64,
 }
 
@@ -141,8 +184,15 @@ mod tests {
         GelSim { n: 81, extent: 1.0, beta: 0.02 }
     }
 
+    /// The far background is flat. **This is a property of the model, not of a gel.**
+    ///
+    /// Named `no_contact_region_is_flat` before, which read as a physical claim. A real elastomer
+    /// bonded to a backing is *not* flat outside the contact: it bulges upward in a ring, by 6.56% of
+    /// the press depth at ν = 0.49, measured against a 3D elastic solve. See the crate docs. What this
+    /// test actually pins is that the geometric field has bounded support and does not leak numerical
+    /// noise into the background, which is worth keeping and is all it ever showed.
     #[test]
-    fn no_contact_region_is_flat() {
+    fn the_geometric_field_has_bounded_support() {
         let g = gel();
         let ind = Indenter { cx: 0.0, cy: 0.0, radius: 0.3, depth: 0.15 };
         let (h, _) = g.deformation(&ind);
@@ -151,6 +201,35 @@ mod tests {
         let corner = normals[10 * g.n + 10];
         assert!((corner - Vector3::z()).norm() < 1e-6, "background not flat: {corner:?}");
         assert!(h[10 * g.n + 10].abs() < 1e-6, "background deformed");
+    }
+
+    /// The height field can never go negative, so the elastic bulge is unrepresentable here.
+    ///
+    /// This is a structural limit, not a fitting error, and it is worth a test because it is the one
+    /// thing no choice of `beta`, `radius` or `depth` can work around: `h` is a softplus inside the
+    /// footprint and exactly zero outside, and a softplus is strictly positive. A real gel's surface
+    /// rises in a ring around the contact, and photometric stereo reads normals, so that ring renders
+    /// shading this forward model never produces.
+    ///
+    /// If someone gives the crate an elastic surface response, this test SHOULD fail, and its failure
+    /// is the signal that the crate docs' sim-to-real section needs rewriting.
+    #[test]
+    fn the_surface_can_never_bulge_upward() {
+        let g = gel();
+        for &(r, d) in &[(0.3f64, 0.15f64), (0.4, 0.05), (0.2, 0.19), (0.45, 0.3)] {
+            for &beta in &[0.002f64, 0.02, 0.2] {
+                let gb = GelSim { beta, ..g.clone() };
+                let (h, _) = gb.deformation(&Indenter { cx: 0.02, cy: -0.03, radius: r, depth: d });
+                let lowest = h.iter().cloned().fold(f64::INFINITY, f64::min);
+                assert!(
+                    lowest >= 0.0,
+                    "h must be non-negative everywhere by construction (r = {r}, depth = {d}, beta = {beta}): {lowest:e}"
+                );
+            }
+        }
+        // and the fixture is a real press, not a no-op
+        let (h, _) = g.deformation(&Indenter { cx: 0.0, cy: 0.0, radius: 0.3, depth: 0.15 });
+        assert!(h.iter().cloned().fold(0.0f64, f64::max) > 0.1, "fixture should actually indent");
     }
 
     #[test]
