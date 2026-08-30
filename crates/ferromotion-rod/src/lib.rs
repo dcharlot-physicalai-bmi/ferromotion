@@ -96,14 +96,22 @@ impl Rod {
     }
 
     /// One damped semi-implicit step (for dynamics / relaxation).
-    pub fn step(&mut self, dt: f64, damping: f64) {
+    ///
+    /// `damping_rate` is a viscous rate in **1/s**, applied implicitly as `v ← v / (1 + rate·dt)`.
+    /// It is a rate, not a per-step retention factor, so that `dt` stays an accuracy knob. A per-step
+    /// `v ← v·m` dissipates `−ln(m)/dt` per second, which makes a shorter step damp harder and hands
+    /// the caller a different material every time they refine for stability. The same unit error was
+    /// found and fixed in `ferromotion-fem`, `ferromotion-cloth::vbd` and `ferromotion_core::xpbd`;
+    /// it survived in all four because every test ran a single `dt`, where the two forms are
+    /// numerically identical. Pass `0.0` for no damping.
+    pub fn step(&mut self, dt: f64, damping_rate: f64) {
         let f = self.forces(&self.x);
         for (i, &fi) in f.iter().enumerate() {
             if self.clamped[i] {
                 continue;
             }
             self.v[i] += dt * fi / self.mass;
-            self.v[i] *= damping;
+            self.v[i] /= 1.0 + damping_rate * dt;
             self.x[i] += dt * self.v[i];
         }
     }
@@ -123,7 +131,10 @@ impl Rod {
     /// be used standalone and stays WASM-clean, and one reduction is not worth a crate edge.
     pub fn relax(&mut self, iters: usize, dt: f64) -> f64 {
         for _ in 0..iters {
-            self.step(dt, 0.9);
+            // Reproduces the previous 0.9 per-step retention at any `dt`. Tying the rate to `dt` is
+            // deliberate *here*: this is a relaxation, so the damping only sets how fast it converges,
+            // and the equilibrium it converges to does not depend on it.
+            self.step(dt, (1.0 / 0.9 - 1.0) / dt);
         }
         self.forces(&self.x)
             .iter()
@@ -310,7 +321,8 @@ pub fn rod_rod_contact_forces(xa: &[Vector3<f64>], xb: &[Vector3<f64>], radius: 
 impl Rod {
     /// One damped step with self-contact: elastic forces plus the self-contact repulsion (radius `r`,
     /// stiffness `k_contact`). The step that lets a rod be tied into a knot without passing through itself.
-    pub fn step_self_contact(&mut self, dt: f64, damping: f64, radius: f64, k_contact: f64) {
+    /// As [`Self::step`], with self-contact. `damping_rate` is a viscous rate in **1/s**.
+    pub fn step_self_contact(&mut self, dt: f64, damping_rate: f64, radius: f64, k_contact: f64) {
         let mut f = self.forces(&self.x);
         accumulate_self_contact_forces(&self.x, radius, k_contact, &mut f);
         for (i, &fi) in f.iter().enumerate() {
@@ -318,7 +330,7 @@ impl Rod {
                 continue;
             }
             self.v[i] += dt * fi / self.mass;
-            self.v[i] *= damping;
+            self.v[i] /= 1.0 + damping_rate * dt;
             self.x[i] += dt * self.v[i];
         }
     }
@@ -485,7 +497,7 @@ mod tests {
         };
         let start_min = min_dist(&rod.x);
         for _ in 0..6000 {
-            rod.step_self_contact(5e-4, 0.9, radius, k);
+            rod.step_self_contact(5e-4, 222.222_222_222_222_2, radius, k); // old per-step 0.9 at dt = 5e-4
         }
         let end_min = min_dist(&rod.x);
         eprintln!("self-contact resolve: start min-dist {:.4} (2r {:.4}), end min-dist {:.4}", start_min, two_r, end_min);
@@ -544,10 +556,38 @@ mod tests {
         let e0 = rod.energy(&rod.x) + rod.kinetic_energy();
         let (dt, mut worst) = (2e-4, 0.0f64);
         for _ in 0..3000 {
-            rod.step(dt, 1.0); // no damping
+            rod.step(dt, 0.0); // no damping
             let e = rod.energy(&rod.x) + rod.kinetic_energy();
             worst = worst.max((e - e0).abs() / e0.abs().max(1e-9));
         }
         assert!(worst < 5e-2, "energy not conserved: worst relative drift {worst}");
     }
+
+    /// Damping must be a rate, so refining the timestep may not change the motion.
+    ///
+    /// `step` took a per-step retention factor, `v <- v*m`, which dissipates `-ln(m)/dt` per second:
+    /// halving `dt` damped twice as hard. Nothing caught it because every test ran a single `dt`,
+    /// where a per-step factor and a per-second rate are numerically identical. Sampled mid-transient
+    /// on purpose: the settled equilibrium is invariant to damping, so it cannot see this bug.
+    #[test]
+    fn damping_is_a_rate_not_a_per_step_factor() {
+        let tip = |dt: f64| -> f64 {
+            let mut rod = Rod::straight(20, 1.0, 0.001, 200.0, 0.5, Vector3::new(0.0, 0.0, -9.81));
+            for _ in 0..(0.4 / dt).round() as usize {
+                rod.step(dt, 20.0);
+            }
+            rod.x.last().expect("rod has vertices").z
+        };
+        let reference = tip(1e-4);
+        for dt in [5e-5f64, 2e-5, 1e-5] {
+            let got = tip(dt);
+            let drift = (got - reference).abs() / reference.abs();
+            assert!(
+                drift < 0.05,
+                "dt = {dt:e} moved the mid-transient tip {reference:.6e} -> {got:.6e} ({:.1}%)",
+                100.0 * drift
+            );
+        }
+    }
+
 }
