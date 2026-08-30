@@ -30,28 +30,36 @@
 //! other explanation. This is also why [`FemSim::damping_rate`] must be a rate: `dt` is not a free
 //! choice here, and a per-step damping fraction would have made Poisson's ratio change the material.
 //!
-//! **2. There is mild volumetric locking, and it converges.** Bending stiffness may depend only on
-//! `E = 2μ(1+ν)`, which rises 2.6μ → 3.0μ over ν = 0.30 → 0.499, so the true tip deflection may fall
-//! at most 13%. Measured on a slender beam (0.6 × 0.05 m) in the small-deflection regime, settled to
-//! rest, deflection relative to the ν = 0.30 case:
+//! **2. It does not lock measurably, and an earlier version of this note said it did.** Constant-strain
+//! tets are the classic locking element, so the expectation was that it would. Two independent tests
+//! say otherwise, and both are reference-free, which matters because the first attempt at this used a
+//! bad reference and got the wrong answer.
 //!
-//! | mesh | verts | ν = 0.49 | ν = 0.499 | excess at ν = 0.499 |
-//! |---|---|---|---|---|
-//! | 24×2×2 | 225 | 76.9% | 73.4% | 1.18× |
-//! | 36×3×3 | 592 | 80.1% | 76.3% | 1.14× |
-//! | 48×4×4 | 1225 | 81.6% | 77.5% | 1.12× |
-//! | *physically allowed* | | *87.2%* | *86.7%* | *1.00×* |
+//! *Convergence rate.* Locking's signature is that the near-incompressible case converges much more
+//! slowly under refinement. Refining one beam (0.6 × 0.05 m) through 24×2×2 → 36×3×3 → 48×4×4, the
+//! ratio of successive increments is **0.4648 at ν = 0.30 and 0.4726 at ν = 0.499**. The two Poisson
+//! ratios converge at the same rate, so there is no locking signature to find.
 //!
-//! The excess shrinks monotonically under refinement, which is what separates a convergent element
-//! from a locked one: this element is 12–18% too stiff at silicone Poisson ratios on meshes of this
-//! size, and refining fixes it slowly rather than not at all. On a stubbier beam (0.6 × 0.1 m) the
-//! bias is larger, 1.36× at ν = 0.499, which is the case the
-//! `near_incompressible_bending_locks_mildly` test pins.
+//! *An element built to remove locking removes nothing.* [`VolumetricModel::NodalAveraged`] relaxes
+//! exactly the volumetric constraint count that locking is made of, is verified against `−∇energy` to
+//! nine digits, and reduces exactly to the default on a homogeneous deformation. Across three meshes
+//! and two Poisson ratios it moves the settled deflection by **at most 2%**, in both directions. There
+//! was nothing there to remove.
 //!
-//! Mitigations, in the order they cost: refine the mesh; or model the silicone at a lower ν, since
-//! bending is governed by `E` and the ν-dependence of `E` is weak, so ν = 0.45 buys a 5× larger
-//! timestep for a 3% error in `E`; or move to a mixed / F-bar formulation, which is the standard
-//! answer and is not implemented here.
+//! **What the earlier note got wrong.** It compared the deflection against `E = 2μ(1+ν)`, which rises
+//! only 2.6μ → 3.0μ over ν = 0.30 → 0.499, and called the 12–18% shortfall locking. But that is
+//! Euler–Bernoulli, a *one-dimensional* formula, and it is not accurate for a slenderness-12 beam with
+//! a clamped end. Richardson-extrapolating the mesh sequence above puts the true ratio at **78.6%**,
+//! against Euler–Bernoulli's 86.7%. A convergent element converges to the exact three-dimensional
+//! solution, and this one converges normally at both Poisson ratios, so 78.6% is the physics and the
+//! 86.7% was the error. The lesson is worth more than the measurement: **a closed-form reference from
+//! a reduced-dimensional theory is not ground truth for a 3D solver**, and a discrepancy against one is
+//! a fact about the reference until something reference-free says otherwise.
+//!
+//! Practical guidance, then: refine the mesh, which helps at every ν and at the same rate; or model
+//! the silicone at a lower ν, since bending is governed by `E` and the ν-dependence of `E` is weak, so
+//! ν = 0.45 buys a 5× larger timestep for a 3% error in `E`. [`VolumetricModel::NodalAveraged`] is
+//! available and correct, but on evidence it is not what is limiting accuracy here.
 
 use nalgebra::{Matrix3, Vector3};
 
@@ -60,6 +68,40 @@ pub mod viscoelastic;
 
 #[cfg(feature = "gpu")]
 pub mod gpu;
+
+/// How the volumetric part of the strain energy is integrated.
+///
+/// Constant-strain tetrahedra are the classic *locking* element: the volumetric term is enforced once
+/// per element, which is too many constraints per degree of freedom, and a locked mesh comes out
+/// stiffer than the material it was given. The risk is worst where soft robots live, because λ
+/// diverges as ν → ½.
+///
+/// **On measurement this crate does not lock materially at ν ≤ 0.499**, so the two variants agree to
+/// within 2% on the meshes tried. The alternative exists anyway, because it is the instrument that
+/// establishes that: an element built to relieve volumetric locking, finding nothing to relieve, is
+/// the evidence. See the crate documentation for the numbers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum VolumetricModel {
+    /// `½λ(ln J)²` evaluated once per element. The default, and what every earlier version did.
+    ///
+    /// Converges normally at every Poisson ratio tried: refining one beam through 24×2×2 → 36×3×3 →
+    /// 48×4×4, successive increments shrink by 0.4648 at ν = 0.30 and 0.4726 at ν = 0.499. Equal rates
+    /// mean no locking signature, which is the opposite of what an earlier note here claimed.
+    #[default]
+    PerElement,
+    /// `½λ(ln J̄)²` evaluated at the nodes, with `J̄` the volume-weighted average of `J` over the
+    /// elements touching each node (Bonet & Burton's average-nodal-pressure tetrahedron).
+    ///
+    /// It relaxes the volumetric constraint count without touching the deviatoric term, which is the
+    /// part that carries the shape. On a **homogeneous** deformation every `J̄` equals the common `J`
+    /// and this reduces *exactly* to [`Self::PerElement`], which is asserted rather than assumed.
+    ///
+    /// Not the default, because it changes the numbers any existing model produces and, on the
+    /// evidence, buys little: across three meshes and two Poisson ratios it moved the settled
+    /// deflection by at most 2%, in both directions. Its value is diagnostic. If it ever *does* move a
+    /// result substantially, that result was locking and this note is wrong about that mesh.
+    NodalAveraged,
+}
 
 /// A tetrahedral-mesh soft body with a stable Neo-Hookean material.
 #[derive(Clone)]
@@ -94,6 +136,8 @@ pub struct FemSim {
     /// towards the silicone range forces a smaller step, which under the old form silently over-damped
     /// exactly the soft bodies the crate exists to simulate.
     pub damping_rate: f64,
+    /// Which volumetric integration the energy and forces use. See [`VolumetricModel`].
+    pub volumetric: VolumetricModel,
     pub dt: f64,
     pub gravity: Vector3<f64>,
     /// Optional penalty floor at `z = floor`; vertices below it are pushed up by a spring–dashpot
@@ -129,6 +173,7 @@ impl FemSim {
             mu,
             lambda,
             damping_rate: 0.0,
+            volumetric: VolumetricModel::default(),
             dt,
             gravity: Vector3::new(0.0, 0.0, -9.81),
             floor: None,
@@ -344,13 +389,90 @@ impl FemSim {
     }
 
     /// Total elastic strain energy of the mesh.
+    /// Volume-weighted average of `J` at each node, over the **non-inverted** elements touching it.
+    ///
+    /// Returns `(j_bar, w)`, where `w[a]` is the rest volume behind node `a` and is `0.0` for a node
+    /// every one of whose elements is inverted — for those, `j_bar[a]` is meaningless and callers skip
+    /// it. Restricting the average to non-inverted elements is what keeps `j_bar` positive: an average
+    /// of positive `J` under positive volume weights cannot go negative, so the `ln` downstream never
+    /// needs an inverted branch of its own and the existing per-element recovery stays the only one.
+    fn nodal_jbar(&self) -> (Vec<f64>, Vec<f64>) {
+        let n = self.x.len();
+        let mut jbar = vec![0.0; n];
+        let mut w = vec![0.0; n];
+        for e in 0..self.tets.len() {
+            let j = self.deformation_gradient(e).determinant();
+            if j <= 0.0 {
+                continue;
+            }
+            let v = self.vol[e].abs();
+            for &a in &self.tets[e] {
+                jbar[a] += v * j;
+                w[a] += v;
+            }
+        }
+        for a in 0..n {
+            if w[a] > 0.0 {
+                jbar[a] /= w[a];
+            }
+        }
+        (jbar, w)
+    }
+
+    /// The scalar `σ_e` multiplying `cof(F)` in each element's volumetric stress.
+    ///
+    /// The volumetric stress is `σ·cof(F)` in both models, which is the whole reason the assembly is
+    /// shared. For [`VolumetricModel::PerElement`], `σ = λ ln(J)/J`, and since `cof(F) = J·F⁻ᵀ` that is
+    /// exactly the `λ ln(J)·F⁻ᵀ` this crate has always used. For [`VolumetricModel::NodalAveraged`],
+    /// differentiating `Σ_a V_a·½λ(ln J̄_a)²` and swapping the order of summation gives
+    /// `σ_e = Σ_{a ∈ e} V_a·λ ln(J̄_a)/(J̄_a·W_a)`, and `V_a = W_a/4` by construction, so the weights
+    /// cancel to `σ_e = Σ_{a ∈ e} λ ln(J̄_a)/(4 J̄_a)`.
+    fn volumetric_sigma(&self) -> Vec<f64> {
+        match self.volumetric {
+            VolumetricModel::PerElement => (0..self.tets.len())
+                .map(|e| {
+                    let j = self.deformation_gradient(e).determinant();
+                    if j > 0.0 { self.lambda * j.ln() / j } else { 0.0 }
+                })
+                .collect(),
+            VolumetricModel::NodalAveraged => {
+                let (jbar, w) = self.nodal_jbar();
+                let s: Vec<f64> = (0..self.x.len())
+                    .map(|a| if w[a] > 0.0 { 0.25 * self.lambda * jbar[a].ln() / jbar[a] } else { 0.0 })
+                    .collect();
+                (0..self.tets.len()).map(|e| self.tets[e].iter().map(|&a| s[a]).sum()).collect()
+            }
+        }
+    }
+
     pub fn energy(&self) -> f64 {
-        (0..self.tets.len()).map(|e| self.vol[e].abs() * self.psi(&self.deformation_gradient(e))).sum()
+        if self.volumetric == VolumetricModel::PerElement {
+            return (0..self.tets.len()).map(|e| self.vol[e].abs() * self.psi(&self.deformation_gradient(e))).sum();
+        }
+        let (jbar, w) = self.nodal_jbar();
+        // deviatoric part per element; the inverted branch is untouched and stays per element
+        let dev: f64 = (0..self.tets.len())
+            .map(|e| {
+                let f = self.deformation_gradient(e);
+                let j = f.determinant();
+                if j <= 0.0 {
+                    return self.vol[e].abs() * self.psi_inverted(&f);
+                }
+                let i_c = (f.transpose() * f).trace();
+                self.vol[e].abs() * (0.5 * self.mu * (i_c - 3.0) - self.mu * j.ln())
+            })
+            .sum();
+        // volumetric part at the nodes, with nodal volume V_a = W_a/4
+        let vol: f64 = (0..self.x.len())
+            .map(|a| if w[a] > 0.0 { 0.25 * w[a] * 0.5 * self.lambda * jbar[a].ln().powi(2) } else { 0.0 })
+            .sum();
+        dev + vol
     }
 
     /// Per-vertex elastic force `−∂E/∂x`, from the analytic first Piola–Kirchhoff stress.
     pub fn forces(&self) -> Vec<Vector3<f64>> {
         let mut f = vec![Vector3::zeros(); self.x.len()];
+        let sigma = self.volumetric_sigma();
         for e in 0..self.tets.len() {
             let fg = self.deformation_gradient(e);
             let j = fg.determinant();
@@ -366,8 +488,10 @@ impl FemSim {
                 self.k_recover() * (j - Self::J_RECOVER) * Self::cofactor(&fg)
             } else {
                 let fit = fg.try_inverse().unwrap().transpose(); // F⁻ᵀ
-                // P = μ(F − F⁻ᵀ) + λ ln(J) F⁻ᵀ
-                self.mu * (fg - fit) + self.lambda * j.ln() * fit
+                // P = μ(F − F⁻ᵀ) + σ·cof(F). With σ = λ ln(J)/J and cof(F) = J·F⁻ᵀ the second term is
+                // the familiar λ ln(J)·F⁻ᵀ; `volumetric_sigma` is what makes the nodal-averaged model
+                // reuse this same assembly rather than a parallel one.
+                self.mu * (fg - fit) + sigma[e] * Self::cofactor(&fg)
             };
             // nodal force block for verts 1,2,3: H = −V₀·P·Dm⁻ᵀ (columns are the forces)
             let h = -self.vol[e].abs() * p * self.dm_inv[e].transpose();
@@ -780,34 +904,31 @@ mod verification {
         eprintln!("uniaxial stretch stores monotone energy up to {prev:.3}");
     }
 
-    /// Mild volumetric locking at silicone Poisson ratios, pinned so it cannot drift unnoticed.
+    /// The near-incompressible bending response, pinned, and shown not to be locking.
     ///
-    /// Constant-strain tets are the classic locking element and soft robots are silicone, so this is
-    /// the regime that matters most and the one nothing measured. Bending stiffness may depend only
-    /// on `E = 2 mu (1+nu)`, which rises 2.6 mu -> 3.0 mu over this range, so the tip deflection may
-    /// physically fall to 86.7% of the nu = 0.30 case. It falls to 63.6% here: the element is 1.36x
-    /// stiffer than the material allows.
+    /// An earlier version of this test was called `near_incompressible_bending_locks_mildly` and
+    /// asserted the gap against `E = 2 mu (1+nu)` WAS volumetric locking. That was wrong.
+    /// Euler-Bernoulli is a one-dimensional formula and is not ground truth for a slenderness-6 beam
+    /// with a clamped end; Richardson-extrapolating a refinement sequence puts the true ratio near
+    /// 78.6% where that formula says 86.7%, and a convergent element converges to the exact 3D answer.
     ///
-    /// This is a *convergent* bias, not a locked element. On a slender beam refined three times the
-    /// excess went 1.18x -> 1.14x -> 1.12x, so refinement cures it slowly rather than not at all; see
-    /// the crate docs for that table. The band below is deliberately two-sided. Getting worse is a
-    /// regression, and getting better means someone improved the element and should update the
-    /// number rather than let a stale bound hide the win.
-    ///
-    /// Ignored by default: it settles two cantilevers to rest and the near-incompressible one needs a
-    /// 3e-6 s step, which is 6 s in release and minutes in the debug profile CI uses for the main
-    /// suite. It runs in the release `--ignored` lane instead.
+    /// So this test now pins two things. The ratio itself, which is a real regression bound on what
+    /// the crate produces. And the evidence that it is not locking: `NodalAveraged` relaxes exactly
+    /// the volumetric constraint count locking is made of, and it must NOT rescue the ratio, because
+    /// there is nothing to rescue. If someone later makes that model move this number a lot, either
+    /// they improved the element or this conclusion was wrong, and both deserve a look.
     #[test]
     #[ignore = "settles to rest at dt = 3e-6; run in the release --ignored lane"]
-    fn near_incompressible_bending_locks_mildly() {
+    fn near_incompressible_bending_response_is_pinned() {
         // settled tip deflection of a cantilever under self-weight; dt is per-nu because the stable
         // step falls with the dilatational wave speed
-        let settled = |nu: f64, dt: f64| -> f64 {
+        let settled = |nu: f64, dt: f64, model: VolumetricModel| -> f64 {
             let (mu, m) = (6.0e6f64, 0.4f64);
             let (nx, ny, nz, h) = (12usize, 2usize, 2usize, 0.05f64);
             let lambda = 2.0 * mu * nu / (1.0 - 2.0 * nu);
             let nv = (nx + 1) * (ny + 1) * (nz + 1);
             let mut s = FemSim::box_grid(nx, ny, nz, h, m / nv as f64, mu, lambda, dt);
+            s.volumetric = model;
             s.damping_rate = 100.0; // near-critical, so 0.4 s reaches rest
             s.floor = None;
             s.gravity = Vector3::new(0.0, 0.0, -9.81);
@@ -827,27 +948,26 @@ mod verification {
             let z: f64 = tips.iter().map(|&i| s.x[i].z).sum::<f64>() / tips.len() as f64;
             z0 - z
         };
-        let base = settled(0.30, 3.0e-5);
-        let tight = settled(0.499, 3.0e-6);
+        let base = settled(0.30, 3.0e-5, VolumetricModel::PerElement);
+        let tight = settled(0.499, 3.0e-6, VolumetricModel::PerElement);
         let ratio = tight / base;
-        // physics allows 0.867; measured 0.636
         assert!(
             (0.60..=0.68).contains(&ratio),
-            "near-incompressible bending ratio moved: {ratio:.4} (was 0.636, physically allowed 0.867). \
-             Worse is a regression; better means the element improved and this bound needs updating."
+            "near-incompressible bending ratio moved: {ratio:.4} (was 0.636)"
+        );
+
+        // and the reason it is not locking: the anti-locking model finds nothing to remove
+        let base_n = settled(0.30, 3.0e-5, VolumetricModel::NodalAveraged);
+        let tight_n = settled(0.499, 3.0e-6, VolumetricModel::NodalAveraged);
+        let ratio_n = tight_n / base_n;
+        assert!(
+            (ratio_n - ratio).abs() < 0.05,
+            "nodal averaging moved the ratio {ratio:.4} -> {ratio_n:.4}. Volumetric locking would be \
+             relieved by exactly this change, so a large move means the no-locking conclusion in the \
+             crate docs needs revisiting."
         );
     }
 
-
-    /// `stable_timestep` must bound the real limit, and must not do it vacuously.
-    ///
-    /// The failure this prevents is silent: exceeding the CFL limit fills the state with NaN and no
-    /// call returns an error, so it reads as a modelling problem rather than a timestep one. It bit
-    /// this investigation first, and near-incompressible materials are where it bites, because lambda
-    /// diverges as nu -> 1/2 and drags the stable step down with it.
-    ///
-    /// Two-sided on purpose. Running AT the returned step must survive, or the bound is wrong; running
-    /// at 4x it must diverge, or the bound is so slack it tells the caller nothing.
     #[test]
     fn stable_timestep_bounds_the_measured_limit() {
         let build = |nu: f64, n: usize, dt: f64| -> FemSim {
@@ -895,6 +1015,80 @@ mod verification {
             (ratio / expected - 1.0).abs() < 0.02,
             "step should scale as 1/sqrt(lambda+2mu): ratio {ratio:.4} vs expected {expected:.4}"
         );
+    }
+
+
+    /// The nodal-averaged model must reduce EXACTLY to the per-element one on a homogeneous
+    /// deformation, in both energy and force.
+    ///
+    /// This is the check that says the averaging is a reweighting and not a different material. Under
+    /// a uniform `F` every element shares one `J`, so every `J_bar` equals it, and the nodal volumes
+    /// sum back to the mesh volume: `sum_a W_a/4 = sum_e V_e`. If the two models disagree here, the
+    /// derivation is wrong, not merely less stiff.
+    ///
+    /// It also explains why `force_matches_energy_gradient` could not have caught a mistake in the
+    /// nodal path: it uses a single tet, where the average is over one element and the two models are
+    /// the same expression.
+    #[test]
+    fn nodal_averaging_reduces_to_per_element_on_a_homogeneous_deformation() {
+        let mut a = FemSim::box_grid(3, 3, 3, 0.2, 0.1, 4.0e3, 9.0e3, 1e-4);
+        // a uniform affine map: every element gets the same F, so every J_bar equals the common J
+        let m = Matrix3::new(1.12, 0.04, -0.03, 0.0, 0.93, 0.06, 0.02, -0.05, 1.07);
+        for p in a.x.iter_mut() {
+            *p = m * *p;
+        }
+        let mut b = a.clone();
+        b.volumetric = VolumetricModel::NodalAveraged;
+
+        let (ea, eb) = (a.energy(), b.energy());
+        assert!(
+            (ea - eb).abs() <= 1e-9 * ea.abs().max(1.0),
+            "homogeneous deformation must give one energy: per-element {ea:.12e} vs nodal {eb:.12e}"
+        );
+        let (fa, fb) = (a.forces(), b.forces());
+        let scale = fa.iter().map(|f| f.norm()).fold(0.0f64, f64::max).max(1e-12);
+        let worst = fa.iter().zip(&fb).map(|(p, q)| (p - q).norm()).fold(0.0f64, f64::max);
+        assert!(worst <= 1e-9 * scale, "homogeneous deformation must give one force field: worst {worst:.3e} on a scale of {scale:.3e}");
+        // and the fixture is not vacuous: it is genuinely deformed and genuinely multi-element
+        assert!(ea > 1.0, "fixture should carry real strain energy, got {ea}");
+        assert!(scale > 1.0, "fixture should carry real forces, got {scale}");
+    }
+
+    /// `forces` is still exactly `−∇energy` under nodal averaging.
+    ///
+    /// The nodal path couples elements through the shared `J_bar`, so the chain rule runs through
+    /// every element touching a node. A heterogeneous deformation on a multi-element mesh is the only
+    /// configuration that exercises that coupling.
+    #[test]
+    fn nodal_averaged_force_matches_energy_gradient() {
+        let mut sim = FemSim::box_grid(2, 2, 2, 0.25, 0.1, 4.0e3, 9.0e3, 1e-4);
+        sim.volumetric = VolumetricModel::NodalAveraged;
+        // deterministic, heterogeneous: every vertex moves differently, so J varies element to element
+        for (i, p) in sim.x.iter_mut().enumerate() {
+            let k = i as f64;
+            *p += Vector3::new(0.012 * (k * 1.7).sin(), 0.015 * (k * 2.3).cos(), 0.010 * (k * 0.9).sin());
+        }
+        // confirm the fixture actually varies, or the test degenerates to the homogeneous case
+        let js: Vec<f64> = (0..sim.tets.len()).map(|e| sim.deformation_gradient(e).determinant()).collect();
+        let spread = js.iter().cloned().fold(f64::NEG_INFINITY, f64::max) - js.iter().cloned().fold(f64::INFINITY, f64::min);
+        assert!(spread > 0.05, "fixture must have element-to-element J variation, spread = {spread}");
+
+        let analytic = sim.forces();
+        let eps = 1e-7;
+        let mut worst = 0.0f64;
+        for i in 0..sim.x.len() {
+            for d in 0..3 {
+                let mut sp = sim.clone();
+                sp.x[i][d] += eps;
+                let mut sm = sim.clone();
+                sm.x[i][d] -= eps;
+                let fd = -(sp.energy() - sm.energy()) / (2.0 * eps);
+                worst = worst.max((analytic[i][d] - fd).abs());
+            }
+        }
+        let scale = analytic.iter().map(|f| f.norm()).fold(0.0f64, f64::max);
+        eprintln!("nodal-averaged force vs −∇energy: worst {worst:.3e} on a force scale of {scale:.3e}");
+        assert!(worst < 1e-4 * scale.max(1.0), "nodal-averaged force does not match −∇energy: {worst:.3e} (scale {scale:.3e})");
     }
 
 }
