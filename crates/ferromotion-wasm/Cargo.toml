@@ -15,17 +15,17 @@ description = "Universal WebAssembly bindings for ferromotion — robot IK/kinem
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-ferromotion-core = { path = "../ferromotion-core", version = "0.67.0" }
-ferromotion-control = { path = "../ferromotion-control", version = "0.67.0" }
-ferromotion-learn = { path = "../ferromotion-learn", version = "0.67.0" }
-ferromotion-fluid = { path = "../ferromotion-fluid", version = "0.67.0" }
-ferromotion-fem = { path = "../ferromotion-fem", version = "0.67.0" }
-ferromotion-dem = { path = "../ferromotion-dem", version = "0.67.0" }
-ferromotion-coupled = { path = "../ferromotion-coupled", version = "0.67.0" }
-ferromotion-circuit = { path = "../ferromotion-circuit", version = "0.67.0" }
-ferromotion-tactile = { path = "../ferromotion-tactile", version = "0.67.0" }
-ferromotion-policy = { path = "../ferromotion-policy", version = "0.67.0" }
-ferromotion-bench = { path = "../ferromotion-bench", version = "0.67.0" }
+ferromotion-core = { path = "../ferromotion-core", version = "0.68.0" }
+ferromotion-control = { path = "../ferromotion-control", version = "0.68.0" }
+ferromotion-learn = { path = "../ferromotion-learn", version = "0.68.0" }
+ferromotion-fluid = { path = "../ferromotion-fluid", version = "0.68.0" }
+ferromotion-fem = { path = "../ferromotion-fem", version = "0.68.0" }
+ferromotion-dem = { path = "../ferromotion-dem", version = "0.68.0" }
+ferromotion-coupled = { path = "../ferromotion-coupled", version = "0.68.0" }
+ferromotion-circuit = { path = "../ferromotion-circuit", version = "0.68.0" }
+ferromotion-tactile = { path = "../ferromotion-tactile", version = "0.68.0" }
+ferromotion-policy = { path = "../ferromotion-policy", version = "0.68.0" }
+ferromotion-bench = { path = "../ferromotion-bench", version = "0.68.0" }
 wasm-bindgen = "0.2"
 nalgebra.workspace = true
 
