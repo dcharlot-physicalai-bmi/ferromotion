@@ -2,7 +2,7 @@
 //! simulate thousands of environment instances in parallel). [`CartpoleGpu`] rolls a whole batch of
 //! candidate action sequences through the cartpole dynamics in one WGSL dispatch: one GPU thread per
 //! candidate future, each an independent lane (no cross-lane dependence), reproducing
-//! [`batch_rollout`] — the verified CPU reference — on native Metal/Vulkan/DX12 (and WebGPU). The
+//! [`crate::batch_rollout`] — the verified CPU reference — on native Metal/Vulkan/DX12 (and WebGPU). The
 //! batched primitive behind gradient-free policy search (random shooting / MPPI). Feature `gpu`.
 
 use crate::Cartpole;
@@ -32,7 +32,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 }
 "#;
 
-/// A batched cartpole rollout on the GPU — the same scheme as [`batch_rollout`], one thread per
+/// A batched cartpole rollout on the GPU — the same scheme as [`crate::batch_rollout`], one thread per
 /// candidate. Sized for exactly `b` candidates rolled out `horizon` steps.
 pub struct CartpoleGpu {
     cp: Cartpole,
@@ -125,7 +125,7 @@ impl CartpoleGpu {
     }
 
     /// Roll every candidate out from `state` under its constant force `acts[i]` for `horizon` steps;
-    /// return the packed final states `[x,ẋ,θ,θ̇, …]` (`4·b`). Matches [`batch_rollout`].
+    /// return the packed final states `[x,ẋ,θ,θ̇, …]` (`4·b`). Matches [`crate::batch_rollout`].
     pub fn rollout(&self, state: [f64; 4], acts: &[f64]) -> Vec<f64> {
         assert_eq!(acts.len(), self.b, "action batch size mismatch");
         let acts32: Vec<f32> = acts.iter().map(|&v| v as f32).collect();

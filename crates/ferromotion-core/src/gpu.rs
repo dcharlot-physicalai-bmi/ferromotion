@@ -1,7 +1,7 @@
 //! **The wgpu GPU path for batch collision-checking** — the parallel hot loop of sampling-based
 //! planning. An RRT tree is sequential, but its inner question — does a candidate joint configuration
 //! drive the arm through an obstacle? — is asked over thousands of candidates and is embarrassingly
-//! parallel. [`ClearanceGpu`] evaluates [`arm_clearance`] for a whole batch of configurations in one
+//! parallel. [`ClearanceGpu`] evaluates [`crate::arm_clearance`] for a whole batch of configurations in one
 //! WGSL dispatch: one GPU thread per config runs forward kinematics, places the arm's swept collision
 //! spheres, and min-reduces their signed distance to the [`SdfScene`] — exactly the CPU reference,
 //! which is the oracle it is verified against. wgpu-portable (Metal/Vulkan/DX12 + WebGPU). Feature `gpu`.
@@ -88,7 +88,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 "#;
 
 /// A batched arm-vs-scene clearance checker on the GPU — the same swept-sphere test as
-/// [`arm_clearance`], over a whole batch of configurations at once.
+/// [`crate::arm_clearance`], over a whole batch of configurations at once.
 pub struct ClearanceGpu {
     dof: usize,
     n_configs: usize,
@@ -113,7 +113,7 @@ fn prim_floats(s: &Sdf) -> [f32; 8] {
 
 impl ClearanceGpu {
     /// Build a checker for `robot` against `scene`, sized for batches of exactly `n_configs`
-    /// configurations. `link_r` and `per_link` mirror [`arm_clearance`]. `None` when there is no GPU.
+    /// configurations. `link_r` and `per_link` mirror [`crate::arm_clearance`]. `None` when there is no GPU.
     pub fn new(robot: &Robot, scene: &SdfScene, link_r: f64, per_link: usize, n_configs: usize) -> Option<Self> {
         let dof = robot.dof();
 
@@ -221,7 +221,7 @@ impl ClearanceGpu {
     }
 
     /// Minimum clearance of the arm to the scene for each of `n_configs` configurations (packed
-    /// `[q0…q_{dof-1}, …]`, length `n_configs·dof`). Negative = in collision. Matches [`arm_clearance`].
+    /// `[q0…q_{dof-1}, …]`, length `n_configs·dof`). Negative = in collision. Matches [`crate::arm_clearance`].
     pub fn clearances(&self, configs: &[f64]) -> Vec<f64> {
         assert_eq!(configs.len(), self.n_configs * self.dof, "config batch size mismatch");
         let cfg32: Vec<f32> = configs.iter().map(|&v| v as f32).collect();
@@ -316,7 +316,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
 "#;
 
 /// A signed-distance depth + segmentation renderer on the GPU — the same sphere-tracer as
-/// [`DepthCamera::render`], one GPU thread per pixel, over the full [`SdfScene`].
+/// [`crate::DepthCamera::render`], one GPU thread per pixel, over the full [`SdfScene`].
 pub struct SensorGpu {
     width: usize,
     height: usize,
@@ -490,7 +490,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
 "#;
 
 /// A scanning-lidar point cloud on the GPU — the same azimuth×elevation sphere-trace as
-/// [`Lidar::scan`], one GPU thread per ray, over the full [`SdfScene`].
+/// [`crate::Lidar::scan`], one GPU thread per ray, over the full [`SdfScene`].
 pub struct LidarGpu {
     n_az: usize,
     n_el: usize,
@@ -603,7 +603,7 @@ impl LidarGpu {
         (range, seg, pts)
     }
 
-    /// The compacted hit point cloud — only rays that hit, in the same order as [`Lidar::scan`].
+    /// The compacted hit point cloud — only rays that hit, in the same order as [`crate::Lidar::scan`].
     pub fn scan(&self) -> crate::LidarScan {
         use nalgebra::Vector3;
         let (range, seg, pts) = self.dense();
@@ -2712,7 +2712,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 /// Batched hard frictional contact — one GPU thread per environment solving the differentiable
-/// Stewart-Trinkle LCP of [`solve_frictional_ipm`] on the central path. The contact STRUCTURE (normal
+/// Stewart-Trinkle LCP of [`crate::solve_frictional_ipm`] on the central path. The contact STRUCTURE (normal
 /// + friction-facet directions, `mu`) is fixed at construction; the mass matrix `M`, free velocity
 /// `v_free`, and signed gaps `phi` vary per environment. Feature `gpu`. Verified against the CPU
 /// oracle. HONEST SCOPE: per-thread private arrays scale as `nv²+nz²`, so this is for small–moderate
@@ -2802,7 +2802,7 @@ impl FrictionalContactGpu {
 
     /// Post-contact velocity `v⁺` for each of `n_envs` environments. `m` is the flattened per-env mass
     /// matrices (`n_envs·nv·nv`, row-major), `v_free` the free velocities (`n_envs·nv`), `phi` the
-    /// signed gaps (`n_envs·nc`). Matches [`solve_frictional_ipm`]`(…).v_next` at the same `kappa`.
+    /// signed gaps (`n_envs·nc`). Matches [`crate::solve_frictional_ipm`]`(…).v_next` at the same `kappa`.
     pub fn solve(&self, m: &[f64], v_free: &[f64], phi: &[f64]) -> Vec<f64> {
         assert_eq!(m.len(), self.n_envs * self.nv * self.nv, "mass-matrix batch size mismatch");
         assert_eq!(v_free.len(), self.n_envs * self.nv, "v_free batch size mismatch");
