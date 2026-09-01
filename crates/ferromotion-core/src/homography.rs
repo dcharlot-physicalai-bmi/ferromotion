@@ -117,7 +117,7 @@ mod tests {
         use crate::ransac::ransac;
         let h_true = Matrix3::new(1.1, 0.08, 0.4, -0.06, 1.05, -0.25, 0.002, -0.001, 1.0);
         let mut seed = 7u64;
-        let ur = |s: &mut u64| { *s = s.wrapping_mul(6364136223846793005).wrapping_add(1); ((*s >> 33) as f64 / (1u64 << 31) as f64) - 1.0 };
+        let ur = |s: &mut u64| { *s = s.wrapping_mul(6364136223846793005).wrapping_add(1); ((*s >> 32) as f64 / (1u64 << 31) as f64) - 1.0 };
         let mut src = Vec::new();
         let mut dst = Vec::new();
         for _ in 0..30 {

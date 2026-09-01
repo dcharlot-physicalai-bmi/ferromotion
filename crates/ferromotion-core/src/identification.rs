@@ -911,11 +911,17 @@ mod tests {
     /// ⚠ Returns `[-1, 0)`, **not** `[-1, 1)`: `seed >> 33` is 31 bits, so dividing by `2^31` lands in
     /// `[0, 1)` and subtracting one shifts it entirely negative. Measured mean is `-0.5001`.
     ///
-    /// Left as it is because existing fixtures are calibrated against it, and as a one-sided *excitation*
-    /// that is harmless. It is not harmless as measurement noise: the DC bias drove interval coverage to
-    /// 21% instead of 95% once before, and running it through Box-Muller gives std 1.30 with a radius
-    /// bounded below, which is not a normal distribution. Use [`crate::Lcg`] for anything that has to be
-    /// zero-mean or Gaussian.
+    /// ⛔ **DO NOT "FIX" THIS.** `[-1, 0)` is its contract, and [`fixture`] depends on it: that function
+    /// recentres with `2·(lcg + 1) − 1`, which maps `[-1, 0)` onto `[-1, 1)` and would map a corrected
+    /// `[-1, 1)` onto `[-1, 3)`. Widening the helper therefore *introduces* a DC bias downstream instead
+    /// of removing one. Tried, measured: interval coverage went from 95% to **55.2%**, because the bias
+    /// inflates `sigma_hat` and the test reads the inflation as healthy width.
+    ///
+    /// As a one-sided *excitation* — the `q`/`qd`/`qdd` it is mostly used for — the range is harmless.
+    /// It is not harmless as measurement noise: the DC bias drove interval coverage to 21% instead of
+    /// 95% once before, and running it through Box-Muller gives std 1.30 with a radius bounded below,
+    /// which is not a normal distribution. For anything that must be zero-mean or Gaussian, use
+    /// [`crate::Lcg`], whose `uniform` is genuinely `[0, 1)`.
     fn lcg(seed: &mut u64) -> f64 {
         *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         ((*seed >> 33) as f64 / (1u64 << 31) as f64) - 1.0

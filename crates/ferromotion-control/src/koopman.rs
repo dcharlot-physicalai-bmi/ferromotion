@@ -133,38 +133,68 @@ mod tests {
         }
     }
 
+    /// **EDMDc recovers an exactly-representable lifted map — but only if the lift is excited.**
+    ///
+    /// With the lift `[x1, x2, x1²]`, the first two rows of this system are *exactly* linear in
+    /// `[lift, u]`, so a well-conditioned least squares must recover them to machine precision. The
+    /// third row is not (it carries `x1·u` and `u²`), which is why only the first two are checked.
+    ///
+    /// The excitation offset is load-bearing and used to be accidental. This fixture drew `u` from a
+    /// helper documented as `[-1, 1)` that in fact returned `[-1, 0)`, so every input was negative and
+    /// the mean of `-0.5` drove `x1` away from the origin — which is what lit up the `x1²` coordinate.
+    /// Correcting the generator to a genuine `[-1, 1)` dropped mean `x1²` from 2.82 to 0.161, a 17x loss
+    /// of excitation on that column, and the prediction degraded from machine-exact to ~1e-3. The offset
+    /// is now deliberate and stated, and the second half of this test pins the effect so it cannot go
+    /// back to being luck.
     #[test]
     fn edmdc_fits_a_controlled_lifted_model() {
-        // A controlled variant: ẋ1 = μx1 + u, ẋ2 = λ(x2 − x1²). Fit (A,B) and check one-step prediction.
         let dt = 0.02;
-        let mut rng: u64 = 0x1234_5678;
-        let mut rand = || {
-            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            ((rng >> 33) as f64) / (1u64 << 31) as f64 - 1.0
-        };
         let ctrl_step = |x: &[f64], u: f64| -> [f64; 2] {
             // Semi-implicit-ish explicit Euler on the controlled system.
             let x1 = x[0] + dt * (MU * x[0] + u);
             let x2 = x[1] + dt * (LAM * (x[1] - x[0] * x[0]));
             [x1, x2]
         };
-        let (mut px, mut us, mut py) = (Vec::new(), Vec::new(), Vec::new());
-        let mut x = [0.5, 0.2];
-        for _ in 0..400 {
-            let u = rand();
-            let xn = ctrl_step(&x, u);
-            px.push(lift(&x));
-            us.push(DVector::from_row_slice(&[u]));
-            py.push(lift(&xn));
-            x = xn;
-        }
-        let (a, b) = edmdc(&px, &us, &py);
-        let model = Koopman { a, b: Some(b) };
-        // Predict on a held-out step.
+        // `offset` biases the input so x1 leaves the origin and the x1^2 column carries signal.
+        let fit = |offset: f64| -> (Koopman, f64) {
+            let mut rng: u64 = 0x1234_5678;
+            let mut rand = || {
+                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                // 32 bits over 2^31 is [0,2), so this is genuinely [-1,1)
+                ((rng >> 32) as f64) / (1u64 << 31) as f64 - 1.0
+            };
+            let (mut px, mut us, mut py) = (Vec::new(), Vec::new(), Vec::new());
+            let mut x = [0.5, 0.2];
+            let mut sq = 0.0;
+            for _ in 0..400 {
+                let u = offset + rand();
+                let xn = ctrl_step(&x, u);
+                px.push(lift(&x));
+                us.push(DVector::from_row_slice(&[u]));
+                py.push(lift(&xn));
+                sq += x[0] * x[0] / 400.0;
+                x = xn;
+            }
+            let (a, b) = edmdc(&px, &us, &py);
+            (Koopman { a, b: Some(b) }, sq)
+        };
+
+        // Well excited: the two exactly-representable rows come back to machine precision.
+        let (model, sq_good) = fit(-0.5);
         let x0 = [0.3, -0.4];
         let u0 = 0.25;
         let pred = model.predict_u(&lift(&x0), &DVector::from_row_slice(&[u0]));
         let truth = ctrl_step(&x0, u0);
-        assert!((pred[0] - truth[0]).abs() < 1e-6 && (pred[1] - truth[1]).abs() < 1e-6, "EDMDc prediction off: {pred:?} vs {truth:?}");
+        let err = (pred[0] - truth[0]).abs().max((pred[1] - truth[1]).abs());
+        assert!(err < 1e-6, "EDMDc prediction off: {pred:?} vs {truth:?} (worst {err:e})");
+
+        // Under-excited: the same fit with a zero-mean input loses the x1^2 column and gets worse. This
+        // is the identifiability point, and asserting it is what keeps the offset above honest.
+        let (weak, sq_weak) = fit(0.0);
+        let wpred = weak.predict_u(&lift(&x0), &DVector::from_row_slice(&[u0]));
+        let werr = (wpred[0] - truth[0]).abs().max((wpred[1] - truth[1]).abs());
+        eprintln!("EDMDc: mean x1^2 {sq_good:.4} -> err {err:.2e};  zero-mean input {sq_weak:.4} -> err {werr:.2e}");
+        assert!(sq_good > 5.0 * sq_weak, "the offset should excite x1^2 far harder: {sq_good:.4} vs {sq_weak:.4}");
+        assert!(werr > 100.0 * err.max(1e-15), "an under-excited lift should fit measurably worse: {werr:e} vs {err:e}");
     }
 }
