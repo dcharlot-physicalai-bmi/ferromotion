@@ -702,8 +702,8 @@ pub struct ActuatorFit {
     ///
     /// **It is a valid interval only under the model least squares assumes**, which is noise in the
     /// measured torque and not in `q̈` or `q̇`. Under that assumption it is correct: measured coverage of
-    /// a nominal 95% interval is 94.0–97.3% over 300 trials, and halving or quadrupling the variance
-    /// moves it to 67.7% or 100.0%, so the scale is pinned.
+    /// a nominal 95% interval is 94.7–96.7% over 300 trials, and halving or quadrupling the variance
+    /// moves it to 72.7% or 100.0%, so the scale is pinned.
     ///
     /// **Reconstructing rates by differentiating an encoder breaks that assumption**, and the interval
     /// then understates the error badly. Noise lands in the regressor rather than the response, which
@@ -908,6 +908,14 @@ mod tests {
       <joint name="jt" type="fixed"><parent link="l3"/><child link="tool"/><origin xyz="0.3 0 0"/></joint>
     </robot>"#;
 
+    /// ⚠ Returns `[-1, 0)`, **not** `[-1, 1)`: `seed >> 33` is 31 bits, so dividing by `2^31` lands in
+    /// `[0, 1)` and subtracting one shifts it entirely negative. Measured mean is `-0.5001`.
+    ///
+    /// Left as it is because existing fixtures are calibrated against it, and as a one-sided *excitation*
+    /// that is harmless. It is not harmless as measurement noise: the DC bias drove interval coverage to
+    /// 21% instead of 95% once before, and running it through Box-Muller gives std 1.30 with a radius
+    /// bounded below, which is not a normal distribution. Use [`crate::Lcg`] for anything that has to be
+    /// zero-mean or Gaussian.
     fn lcg(seed: &mut u64) -> f64 {
         *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         ((*seed >> 33) as f64 / (1u64 << 31) as f64) - 1.0
@@ -1162,7 +1170,7 @@ mod tests {
     /// right that happens 95% of the time.
     ///
     /// **What it does and does not catch**, mutation-checked rather than assumed. Scaling the variance
-    /// by 1/4 drops coverage to 67.7% and by 4 raises it to 100.0%, so a factor error in either
+    /// by 1/4 drops coverage to 72.7% and by 4 raises it to 100.0%, so a factor error in either
     /// direction fails, including the dangerous one where the reported uncertainty is too confident.
     /// Replacing the `rows − 3` divisor with `rows` does **not** fail, and cannot: at 400 samples that is
     /// a 0.4% change in `σ`, far inside the binomial scatter. The degrees-of-freedom correction earns
@@ -1189,11 +1197,14 @@ mod tests {
             base.push(IdSample { q, qd, qdd, tau });
         }
 
-        let mut seed = 0x51ED_5EEDu64;
-        let gauss = |seed: &mut u64| {
-            // Box-Muller from the module's own uniform generator
-            let u1 = ((lcg(seed) + 1.0) / 2.0).max(1e-12);
-            let u2 = (lcg(seed) + 1.0) / 2.0;
+        // Box-Muller on `crate::Lcg`, whose `uniform` is genuinely [0,1). NOT the `lcg` helper in this
+        // module: it returns [-1,0) rather than [-1,1), and feeding that through Box-Muller gives a
+        // distribution with std 1.30 and a radius bounded below, which is not normal at all. Coverage is
+        // a statement about a normal error, so it has to actually be one.
+        let mut rng = crate::Lcg::new(0x51ED_5EED);
+        let gauss = |r: &mut crate::Lcg| {
+            let u1 = r.uniform().max(1e-12);
+            let u2 = r.uniform();
             (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
         };
 
@@ -1207,7 +1218,7 @@ mod tests {
                     q: s.q.clone(),
                     qd: s.qd.clone(),
                     qdd: s.qdd.clone(),
-                    tau: s.tau.iter().map(|t| t + sigma * gauss(&mut seed)).collect(),
+                    tau: s.tau.iter().map(|t| t + sigma * gauss(&mut rng)).collect(),
                 })
                 .collect();
             let fits = identify_actuator(&robot, &inertia, &noisy, g);
@@ -1246,7 +1257,7 @@ mod tests {
                 q: s.q.clone(),
                 qd: s.qd.clone(),
                 qdd: s.qdd.clone(),
-                tau: s.tau.iter().map(|t| t + 2.0 * sigma * gauss(&mut seed)).collect(),
+                tau: s.tau.iter().map(|t| t + 2.0 * sigma * gauss(&mut rng)).collect(),
             })
             .collect();
         let big = identify_actuator(&robot, &inertia, &scaled, g);

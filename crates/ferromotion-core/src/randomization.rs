@@ -43,7 +43,7 @@
 //!    an unknown payload. These are where real sim-to-real error lives, and no amount of staring at the regressor
 //!    reveals them, because the model does not contain them.
 
-use crate::IdentifiedParams;
+use crate::{ActuatorFit, IdentifiedParams};
 use nalgebra::DVector;
 
 /// A distribution over model parameters, shaped by whatever produced it.
@@ -89,6 +89,52 @@ impl ParameterDistribution {
             axes: id.identifiable.iter().map(|(v, se)| (v.clone(), sigmas * se)).collect(),
             scale: 1.0,
         })
+    }
+
+    /// **A distribution the ACTUATOR fit chose**, over `[J_a, b, f]` per joint, flattened.
+    ///
+    /// Each parameter gets a half-width of `sigmas` times its [`ActuatorFit::stderr`]. `torque_noise` is
+    /// the caller's own torque-measurement noise in N·m, and it is required rather than optional,
+    /// because without it this function cannot tell a usable support from a harmful one.
+    ///
+    /// **Why it can refuse.** A least-squares standard error is a valid width only when the error lives
+    /// in the measured torque. Reconstructing rates by differentiating an encoder puts the error in the
+    /// regressor instead, which biases the estimate, and a standard error cannot see a bias: measured on
+    /// the SO-101, the truth sat 100–289 standard errors away while `conditioning` read 1.000. A support
+    /// built from that is far too narrow *and* centred in the wrong place, which is worse than an
+    /// honestly wide guess, so this returns `None` rather than hand one back.
+    ///
+    /// The test is computable without knowing the truth, which is the point: if the model and the stated
+    /// noise are both right, [`ActuatorFit::residual`] should sit at about `torque_noise`. Much larger
+    /// means something the model does not contain is in the residual. See [`check_actuator_support`] for
+    /// the per-joint numbers and [`ACTUATOR_RESIDUAL_TOLERANCE`] for the factor allowed.
+    ///
+    /// Returns `None` if any fit is unidentifiable, lacks a standard error, fails that check, or if
+    /// `sigmas` or `torque_noise` is not positive and finite.
+    pub fn from_actuator_fits(fits: &[ActuatorFit], sigmas: f64, torque_noise: f64) -> Option<ParameterDistribution> {
+        // written out rather than negated comparisons so the NaN case is visible: a non-finite sigma
+        // or noise must refuse, not fall through
+        if fits.is_empty() || !sigmas.is_finite() || !torque_noise.is_finite() || sigmas <= 0.0 || torque_noise <= 0.0 {
+            return None;
+        }
+        if check_actuator_support(fits, torque_noise).iter().any(|c| !c.trustworthy) {
+            return None; // the standard errors do not describe this data
+        }
+        let n = fits.len();
+        let mut centre = DVector::zeros(3 * n);
+        let mut widths = vec![0.0; 3 * n];
+        for (j, f) in fits.iter().enumerate() {
+            let se = f.stderr?;
+            let v = [f.armature, f.damping, f.friction];
+            for k in 0..3 {
+                if !v[k].is_finite() || !se[k].is_finite() {
+                    return None;
+                }
+                centre[3 * j + k] = v[k];
+                widths[3 * j + k] = sigmas * se[k];
+            }
+        }
+        ParameterDistribution::from_box(centre, &widths)
     }
 
     /// **Add axes for effects the model does not contain** — joint friction, backlash, an unknown payload mass.
@@ -150,6 +196,53 @@ impl ParameterDistribution {
     pub fn with_scale(&self, scale: f64) -> ParameterDistribution {
         ParameterDistribution { scale: scale.max(0.0), ..self.clone() }
     }
+}
+
+/// How far [`ActuatorFit::residual`] may exceed the stated torque noise before its standard errors
+/// stop describing the data.
+///
+/// Measured rather than chosen. On a two-joint arm with 0.02 N·m of Gaussian torque noise the ratio
+/// lands at **0.99–1.04**, which is the theory: if the model is right and the noise is as stated, the
+/// residual *is* the noise. Reconstruct the rates from a 12-bit encoder instead and it goes to
+/// **1772–2082**, with the armature 5706% out. The two regimes are three orders of magnitude apart, so
+/// the exact bound matters little and **3.0** sits safely in the gap. The asymmetry is deliberate: the
+/// cost of refusing a usable support is a wider hand-picked box, and the cost of accepting a bad one is
+/// a randomisation range that is confidently wrong and centred in the wrong place.
+pub const ACTUATOR_RESIDUAL_TOLERANCE: f64 = 3.0;
+
+/// Whether one joint's fitted standard error can be trusted as a randomisation width.
+#[derive(Clone, Copy, Debug)]
+pub struct ActuatorSupportCheck {
+    pub joint: usize,
+    /// The fit's RMS torque residual (N·m).
+    pub residual: f64,
+    /// The torque-measurement noise the caller stated (N·m).
+    pub expected: f64,
+    /// `residual / expected`. About 1 when the model and the stated noise agree.
+    pub ratio: f64,
+    /// `ratio <= ACTUATOR_RESIDUAL_TOLERANCE`, and the fit has a standard error at all.
+    pub trustworthy: bool,
+}
+
+/// Per-joint verdict on whether [`ActuatorFit::stderr`] describes the data it came from.
+///
+/// The reasoning is one line: if the model is right and the torque noise is as stated, the fit's RMS
+/// residual should be about that noise. A residual far above it means the residual contains something
+/// the model does not, and then the standard errors are computed from the wrong `σ²` and are
+/// overconfident. This needs no access to the truth, which is what makes it usable on hardware.
+pub fn check_actuator_support(fits: &[ActuatorFit], torque_noise: f64) -> Vec<ActuatorSupportCheck> {
+    fits.iter()
+        .map(|f| {
+            let ratio = f.residual / torque_noise;
+            ActuatorSupportCheck {
+                joint: f.joint,
+                residual: f.residual,
+                expected: torque_noise,
+                ratio,
+                trustworthy: f.stderr.is_some() && ratio.is_finite() && ratio <= ACTUATOR_RESIDUAL_TOLERANCE,
+            }
+        })
+        .collect()
 }
 
 /// A small deterministic generator, so a randomisation run is reproducible and a test is not at the mercy of a global
@@ -242,6 +335,29 @@ mod tests {
         <axis xyz="0 1 0"/><limit lower="-3" upper="3" effort="10" velocity="3"/></joint>
       <joint name="jt" type="fixed"><parent link="l3"/><child link="tool"/><origin xyz="0.3 0 0"/></joint>
     </robot>"#;
+
+    /// A two-joint geared arm with all three actuator terms stated, so `identify_actuator` has a truth
+    /// to be checked against.
+    fn actuator_arm() -> (Robot, Vec<crate::LinkInertia>) {
+        const URDF: &str = r#"<robot name="two">
+          <link name="base"/>
+          <link name="l1"><inertial><origin xyz="0.3 0 0"/><mass value="1.5"/>
+            <inertia ixx="0.02" ixy="0" ixz="0" iyy="0.02" iyz="0" izz="0.02"/></inertial></link>
+          <link name="l2"><inertial><origin xyz="0.2 0 0"/><mass value="0.8"/>
+            <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/></inertial></link>
+          <link name="tool"/>
+          <joint name="j1" type="revolute"><parent link="base"/><child link="l1"/><origin xyz="0 0 0"/>
+            <axis xyz="0 1 0"/><limit lower="-3" upper="3" effort="8" velocity="4"/></joint>
+          <joint name="j2" type="revolute"><parent link="l1"/><child link="l2"/><origin xyz="0.6 0 0"/>
+            <axis xyz="0 1 0"/><limit lower="-3" upper="3" effort="5" velocity="4"/></joint>
+          <joint name="jt" type="fixed"><parent link="l2"/><child link="tool"/><origin xyz="0.4 0 0"/></joint>
+        </robot>"#;
+        let (mut robot, inertia) = from_urdf_full(URDF, "base", "tool").expect("fixture urdf");
+        for (i, j) in robot.joints.iter_mut().enumerate() {
+            *j = j.clone().with_armature(0.0119 + 0.003 * i as f64).with_damping(0.64 - 0.1 * i as f64).with_friction(0.08 + 0.02 * i as f64);
+        }
+        (robot, inertia)
+    }
 
     fn fixture(count: usize, seed: u64) -> (Robot, Vec<IdSample>, DVector<f64>, Vector3<f64>) {
         fixture_full(count, seed, 1.0, 0.0)
@@ -447,4 +563,106 @@ mod tests {
         assert!(point.contains(&DVector::from_element(3, 1.0), 1e-12));
         assert_eq!(point.log_volume(), 0.0, "no positive-width axes, so the log-volume is an empty sum");
     }
+
+    /// **The guard must fire on the data it exists for, and not on good data.**
+    ///
+    /// `from_actuator_fits` turns a fitted standard error into a randomisation width, and that is only
+    /// valid when the error lives in the measured torque. This reproduces both regimes on one arm:
+    ///
+    /// - torque noise, which is the model least squares assumes: the residual sits at the stated noise,
+    ///   the check passes, and the support is built.
+    /// - rates differentiated from a quantised encoder, which puts the error in the regressor: the
+    ///   armature comes out wildly wrong, the residual is far above the stated noise, and the support is
+    ///   REFUSED. A width built from those standard errors would be narrow and centred wrong.
+    ///
+    /// Both halves matter. A guard that only ever refuses is as useless as one that never does.
+    #[test]
+    fn the_actuator_support_guard_separates_torque_noise_from_regressor_noise() {
+        let (robot, inertia) = actuator_arm();
+        let g = Vector3::new(0.0, 0.0, -9.81);
+        let sigma = 0.02f64;
+        let truth_a = [0.0119, 0.0149];
+
+        // --- regime 1: clean regressors, noisy torques ---
+        // Box-Muller on the crate's own `Lcg`, whose `uniform` is genuinely [0,1)
+        let mut rng = Lcg::new(0xC0FF_EE11);
+        let gauss = |r: &mut Lcg| {
+            let u1 = r.uniform().max(1e-12);
+            let u2 = r.uniform();
+            (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+        };
+        let mut clean = Vec::new();
+        for k in 0..600 {
+            let t = k as f64 * 0.002;
+            let q = vec![0.4 * (3.0 * t).sin(), -0.3 * (5.0 * t).cos()];
+            let qd = vec![1.2 * (3.0 * t).cos() + 0.5 * (11.0 * t).cos(), 1.5 * (5.0 * t).sin()];
+            let qdd = vec![-3.6 * (3.0 * t).sin() - 5.5 * (11.0 * t).sin(), 7.5 * (5.0 * t).cos()];
+            let mut tau = crate::inverse_dynamics(&robot, &inertia, &q, &qd, &qdd, g);
+            for x in tau.iter_mut() {
+                *x += sigma * gauss(&mut rng);
+            }
+            clean.push(crate::IdSample { q, qd, qdd, tau });
+        }
+        let good = crate::identify_actuator(&robot, &inertia, &clean, g);
+        for (j, f) in good.iter().enumerate() {
+            let err = (f.armature - truth_a[j]).abs() / truth_a[j];
+            assert!(err < 0.15, "joint {j} armature should be close under torque noise, off by {:.1}%", 100.0 * err);
+        }
+        let checks = check_actuator_support(&good, sigma);
+        for c in &checks {
+            eprintln!("torque noise    joint {} residual {:.4e} ratio {:.2} trustworthy {}", c.joint, c.residual, c.ratio, c.trustworthy);
+            assert!(c.trustworthy, "joint {} should pass: ratio {:.2}", c.joint, c.ratio);
+            assert!((c.ratio - 1.0).abs() < 0.5, "ratio should sit near 1 when the model is right, got {:.2}", c.ratio);
+        }
+        let dist = ParameterDistribution::from_actuator_fits(&good, 2.0, sigma).expect("a trustworthy fit yields a support");
+        assert_eq!(dist.centre.len(), 6, "three parameters per joint, flattened");
+        assert_eq!(dist.axes.len(), 6);
+        assert!(dist.axes.iter().all(|(_, h)| *h > 0.0), "every width should be positive under real noise");
+        // and it is centred on the fit, so a zero-scale sample returns it
+        let mut rng = Lcg::new(7);
+        let z = dist.with_scale(0.0).sample(&mut rng);
+        assert!((z - dist.centre).norm() < 1e-15);
+
+        // --- regime 2: quantised encoder, rates by central difference ---
+        let step = std::f64::consts::TAU / (1u32 << 12) as f64;
+        let quant = |v: f64| (v / step).round() * step;
+        let dt = 0.002;
+        let pos: Vec<Vec<f64>> = (0..602)
+            .map(|k| {
+                let t = k as f64 * dt;
+                vec![quant(0.4 * (3.0 * t).sin()), quant(-0.3 * (5.0 * t).cos())]
+            })
+            .collect();
+        let mut dirty = Vec::new();
+        for k in 1..pos.len() - 1 {
+            let q = pos[k].clone();
+            let qd: Vec<f64> = (0..2).map(|i| (pos[k + 1][i] - pos[k - 1][i]) / (2.0 * dt)).collect();
+            let qdd: Vec<f64> = (0..2).map(|i| (pos[k + 1][i] - 2.0 * pos[k][i] + pos[k - 1][i]) / (dt * dt)).collect();
+            // torques from the TRUE smooth motion, so only the regressors are corrupted
+            let t = k as f64 * dt;
+            let q_true = vec![0.4 * (3.0 * t).sin(), -0.3 * (5.0 * t).cos()];
+            let qd_true = vec![1.2 * (3.0 * t).cos(), 1.5 * (5.0 * t).sin()];
+            let qdd_true = vec![-3.6 * (3.0 * t).sin(), 7.5 * (5.0 * t).cos()];
+            let tau = crate::inverse_dynamics(&robot, &inertia, &q_true, &qd_true, &qdd_true, g);
+            dirty.push(crate::IdSample { q, qd, qdd, tau });
+        }
+        let bad = crate::identify_actuator(&robot, &inertia, &dirty, g);
+        let worst = bad
+            .iter()
+            .enumerate()
+            .map(|(j, f)| (f.armature - truth_a[j]).abs() / truth_a[j])
+            .fold(0.0f64, f64::max);
+        let bad_checks = check_actuator_support(&bad, sigma);
+        for c in &bad_checks {
+            eprintln!("regressor noise joint {} residual {:.4e} ratio {:.2} trustworthy {}", c.joint, c.residual, c.ratio, c.trustworthy);
+        }
+        eprintln!("worst armature error under regressor noise: {:.1}%", 100.0 * worst);
+        assert!(worst > 0.5, "the fixture should actually corrupt the fit, worst error only {:.1}%", 100.0 * worst);
+        assert!(bad_checks.iter().any(|c| !c.trustworthy), "the guard must flag regressor noise, ratios {:?}", bad_checks.iter().map(|c| c.ratio).collect::<Vec<_>>());
+        assert!(
+            ParameterDistribution::from_actuator_fits(&bad, 2.0, sigma).is_none(),
+            "a support must be REFUSED when the standard errors do not describe the data"
+        );
+    }
+
 }

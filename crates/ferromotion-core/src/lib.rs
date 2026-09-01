@@ -255,7 +255,7 @@ pub use running_stats::RunningStats;
 pub use translation_avg::{translation_averaging, TransEdge};
 pub use trilateration::trilaterate;
 pub use radar_velocity::{ego_velocity_ls, ego_velocity_ransac};
-pub use randomization::{AdrSchedule, Lcg, ParameterDistribution};
+pub use randomization::{check_actuator_support, ActuatorSupportCheck, AdrSchedule, Lcg, ParameterDistribution, ACTUATOR_RESIDUAL_TOLERANCE};
 pub use ransac::{ransac, RansacResult};
 pub use savgol::SavGol;
 pub use lgvi::LgviBody;
