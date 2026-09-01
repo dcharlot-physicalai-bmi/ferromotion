@@ -18,10 +18,10 @@ all-features = true
 
 [dependencies]
 faer = { version = "0.24", default-features = false, features = ["std"] }
-ferromotion-core = { path = "../ferromotion-core", version = "0.68.0" }
+ferromotion-core = { path = "../ferromotion-core", version = "0.69.0" }
 
 [dev-dependencies]
-ferromotion-learn = { path = "../ferromotion-learn", version = "0.68.0" }
+ferromotion-learn = { path = "../ferromotion-learn", version = "0.69.0" }
 pollster = "0.4"
 
 [features]
