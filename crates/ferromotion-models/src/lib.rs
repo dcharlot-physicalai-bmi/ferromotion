@@ -16,3 +16,12 @@
 //! rather than inventing one. Pure `nalgebra` → WASM-clean.
 
 pub use ferromotion_core::{DhConvention, DhRow, Robot};
+
+pub mod ur;
+pub mod classic;
+pub mod franka;
+pub mod kuka;
+pub mod kinova;
+pub mod abb;
+pub mod rethink;
+pub mod others;
