@@ -828,4 +828,18 @@ mod tests {
         }
         assert!(replans > 4000 && cost_changes > 1000 && unreachable > 100 && eight > 1000 && eight < 3000, "non-vacuous: {replans} replans, {cost_changes} cost changes, {unreachable} unreachable, {eight} eight-connected trials");
     }
+
+    /// The only gap in the wall is an unobserved cell: reachable under `UnknownCells::Free`, not under
+    /// `Blocked`, with no change to the planner because the policy lives on the map.
+    #[test]
+    fn from_grid_inherits_the_maps_unknown_cell_policy() {
+        use crate::{OccupancyGrid, UnknownCells};
+        let rows = ["..#..", "..?..", "..#.."];
+        let free = OccupancyGrid::from_rows(&rows, 1.0, 0.0, 0.0).unwrap();
+        let mut d = DStarLite::from_grid(&free, Connectivity::Four, (0, 1), (4, 1)).unwrap();
+        let (c, p) = d.plan().expect("the unknown cell is a door under Free");
+        assert!((c - 4.0).abs() < 1e-12 && p.contains(&(2, 1)), "straight through the '?' cell: {c} {p:?}");
+        let blocked = OccupancyGrid::from_rows(&rows, 1.0, 0.0, 0.0).unwrap().with_unknown(UnknownCells::Blocked);
+        assert!(DStarLite::from_grid(&blocked, Connectivity::Four, (0, 1), (4, 1)).unwrap().plan().is_none(), "the same drawing is walled off under Blocked");
+    }
 }

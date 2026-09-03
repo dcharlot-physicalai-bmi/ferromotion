@@ -11,6 +11,23 @@
 //! hit) beam frees the endpoint too; and repeated beams drive the log-odds toward (clamped) certainty. Pure
 //! Rust → WASM-clean.
 
+/// What a planner should make of a cell nobody has observed (log-odds exactly zero).
+///
+/// The policy lives on the map so every planner that reads it through [`OccupancyGrid::blocked`]
+/// (`DStarLite::from_grid`, `lattice_astar`, `LatticeDStarLite`) and every closure written as
+/// `|i, j| !grid.blocked(i, j)` (the distance transform, Bug2, `astar_grid_conn`) gives the same
+/// answer for the same map. Exploration wants [`UnknownCells::Free`], so the frontier is reachable;
+/// navigation in a mapped space wants [`UnknownCells::Blocked`], so a plan never depends on a cell
+/// the map has no evidence for. The default is `Free`, the behaviour before this policy existed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum UnknownCells {
+    /// Treat unobserved cells as traversable.
+    #[default]
+    Free,
+    /// Treat unobserved cells as obstacles.
+    Blocked,
+}
+
 /// A 2-D occupancy grid over `[origin, origin + size·resolution)` storing per-cell log-odds.
 #[derive(Clone, Debug)]
 pub struct OccupancyGrid {
@@ -23,13 +40,14 @@ pub struct OccupancyGrid {
     l_occ: f64,
     l_free: f64,
     clamp: f64,
+    unknown: UnknownCells,
 }
 
 impl OccupancyGrid {
     /// A grid of `width × height` cells of size `resolution`, with lower-left corner at `(origin_x,
     /// origin_y)` and every cell unknown (log-odds 0).
     pub fn new(width: usize, height: usize, resolution: f64, origin_x: f64, origin_y: f64) -> Self {
-        OccupancyGrid { width, height, resolution, origin_x, origin_y, log_odds: vec![0.0; width * height], l_occ: 0.85, l_free: -0.4, clamp: 8.0 }
+        OccupancyGrid { width, height, resolution, origin_x, origin_y, log_odds: vec![0.0; width * height], l_occ: 0.85, l_free: -0.4, clamp: 8.0, unknown: UnknownCells::Free }
     }
 
     /// Build a grid from a drawing: `'#'` occupied, `'.'` free, anything else unknown.
@@ -68,11 +86,31 @@ impl OccupancyGrid {
     ///
     /// [`Self::log_odds`] returns `0.0` (unknown) for a cell outside the grid, so a planner that tests
     /// `probability < 0.5` treats the whole outside world as free and happily plans through the wall of
-    /// the map. Grid planners should ask this instead. A cell with log-odds exactly zero is unknown and
-    /// is reported as free here; a caller that wants unknown cells blocked should test [`Self::log_odds`]
-    /// itself.
+    /// the map. Grid planners should ask this instead: outside is always blocked, a positive log-odds is
+    /// blocked, and a cell with log-odds exactly zero (never observed) is blocked or free according to
+    /// the map's [`UnknownCells`] policy, `Free` by default.
     pub fn blocked(&self, i: i64, j: i64) -> bool {
-        !self.in_bounds(i, j) || self.log_odds(i, j) > 0.0
+        if !self.in_bounds(i, j) {
+            return true;
+        }
+        let lo = self.log_odds(i, j);
+        lo > 0.0 || (self.unknown == UnknownCells::Blocked && lo == 0.0)
+    }
+
+    /// The same map with a different [`UnknownCells`] policy; nothing else changes.
+    pub fn with_unknown(mut self, policy: UnknownCells) -> Self {
+        self.unknown = policy;
+        self
+    }
+
+    /// Set the [`UnknownCells`] policy in place.
+    pub fn set_unknown(&mut self, policy: UnknownCells) {
+        self.unknown = policy;
+    }
+
+    /// The [`UnknownCells`] policy [`Self::blocked`] applies.
+    pub fn unknown_policy(&self) -> UnknownCells {
+        self.unknown
     }
 
     /// World coordinates → integer cell `(i, j)` (may be outside the grid).
@@ -197,4 +235,16 @@ mod tests {
         assert!(u.log_odds(0, 0) == 0.0 && !u.blocked(0, 0), "unknown is left at zero and reported free by `blocked`");
     }
 
+    #[test]
+    fn unknown_policy_decides_only_unobserved_cells() {
+        let g = OccupancyGrid::from_rows(&["#.?"], 1.0, 0.0, 0.0).unwrap();
+        assert_eq!(g.unknown_policy(), UnknownCells::Free, "default is the pre-policy behaviour");
+        assert!(g.blocked(0, 0) && !g.blocked(1, 0) && !g.blocked(2, 0), "Free: '?' reads free");
+        let b = g.with_unknown(UnknownCells::Blocked);
+        assert!(b.blocked(0, 0) && !b.blocked(1, 0) && b.blocked(2, 0), "Blocked: '?' reads blocked, '#' and '.' unchanged");
+        assert!(b.blocked(-1, 0) && b.blocked(3, 0), "outside stays blocked under both");
+        let mut m = b;
+        m.set_unknown(UnknownCells::Free);
+        assert!(!m.blocked(2, 0), "set_unknown switches back in place");
+    }
 }

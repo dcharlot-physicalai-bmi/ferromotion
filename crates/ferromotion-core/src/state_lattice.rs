@@ -1930,4 +1930,18 @@ mod tests {
             first.unwrap_or_default()
         );
     }
+
+    /// Same map, same lattice, same start and goal: the unobserved door cell decides reachability
+    /// through the map's `UnknownCells` policy alone.
+    #[test]
+    fn lattice_astar_inherits_the_maps_unknown_cell_policy() {
+        use crate::UnknownCells;
+        let rows = ["...#...", "...?...", "...#..."];
+        let lat = Lattice::four_heading(1.0, 1, false, true).unwrap();
+        let free = OccupancyGrid::from_rows(&rows, 1.0, 0.0, 0.0).unwrap();
+        let p = lattice_astar(&free, &lat, (0, 1, 0), (6, 1, 0), LatticeWeights::default()).expect("door open under Free");
+        assert!(p.nodes.iter().any(|n| (n.0, n.1) == (3, 1)), "the path goes through the '?' cell: {:?}", p.nodes);
+        let blocked = OccupancyGrid::from_rows(&rows, 1.0, 0.0, 0.0).unwrap().with_unknown(UnknownCells::Blocked);
+        assert!(lattice_astar(&blocked, &lat, (0, 1, 0), (6, 1, 0), LatticeWeights::default()).is_none(), "walled off under Blocked");
+    }
 }

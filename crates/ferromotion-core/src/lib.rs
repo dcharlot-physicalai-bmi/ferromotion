@@ -232,7 +232,7 @@ pub use ipm::{solve_lcp, solve_lcp_diff, solve_lcp_smoothed};
 pub use kdl::resolved_rate;
 pub use kiss_icp::KissIcp;
 pub use kmeans::{kmeans, KMeans};
-pub use occupancy::OccupancyGrid;
+pub use occupancy::{OccupancyGrid, UnknownCells};
 pub use ode::{dopri5_step, integrate, OdeSolution};
 pub use orb::{
     brief_descriptor, brief_pattern, detect_and_describe, fast_corners, match_descriptors, nms, orient,
