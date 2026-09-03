@@ -1,0 +1,20 @@
+[package]
+name = "ferromotion-models"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Robot arm models built from their published Denavit-Hartenberg tables, each citing its primary source and verified against a known pose. WASM-clean."
+
+[dependencies]
+# Path dependencies need a version to be publishable, and this is what the release bump targets.
+ferromotion-core = { path = "../ferromotion-core", version = "0.69.0" }
+nalgebra.workspace = true
+
+[lints]
+workspace = true

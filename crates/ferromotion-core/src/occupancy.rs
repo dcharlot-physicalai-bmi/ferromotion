@@ -32,6 +32,49 @@ impl OccupancyGrid {
         OccupancyGrid { width, height, resolution, origin_x, origin_y, log_odds: vec![0.0; width * height], l_occ: 0.85, l_free: -0.4, clamp: 8.0 }
     }
 
+    /// Build a grid from a drawing: `'#'` occupied, `'.'` free, anything else unknown.
+    ///
+    /// `rows[0]` is the **top** row, so the slice reads like a picture, and because the grid's origin is
+    /// its lower-left corner that row lands at `j = height − 1`. Every row must have the same width and
+    /// the drawing must be non-empty, else `None`. Occupied and free cells are set to `±clamp`, i.e. to
+    /// certainty, which is what a planner fixture means by them.
+    ///
+    /// This exists because until now the only way to populate a grid was to integrate beams, so every
+    /// planner test would have had to build its obstacles by simulating a lidar.
+    pub fn from_rows(rows: &[&str], resolution: f64, origin_x: f64, origin_y: f64) -> Option<Self> {
+        let height = rows.len();
+        let width = rows.first()?.chars().count();
+        // written out rather than `!(resolution > 0.0)` so the NaN case is visible: a non-finite
+        // resolution must refuse, not build a grid whose every world coordinate is NaN
+        if height == 0 || width == 0 || rows.iter().any(|r| r.chars().count() != width) || !resolution.is_finite() || resolution <= 0.0 {
+            return None;
+        }
+        let mut g = OccupancyGrid::new(width, height, resolution, origin_x, origin_y);
+        for (r, row) in rows.iter().enumerate() {
+            let j = height - 1 - r; // top row of the drawing is the highest j
+            for (i, c) in row.chars().enumerate() {
+                let v = match c {
+                    '#' => g.clamp,
+                    '.' => -g.clamp,
+                    _ => 0.0,
+                };
+                g.log_odds[j * g.width + i] = v;
+            }
+        }
+        Some(g)
+    }
+
+    /// Whether a cell is not traversable: **out of bounds counts as blocked.**
+    ///
+    /// [`Self::log_odds`] returns `0.0` (unknown) for a cell outside the grid, so a planner that tests
+    /// `probability < 0.5` treats the whole outside world as free and happily plans through the wall of
+    /// the map. Grid planners should ask this instead. A cell with log-odds exactly zero is unknown and
+    /// is reported as free here; a caller that wants unknown cells blocked should test [`Self::log_odds`]
+    /// itself.
+    pub fn blocked(&self, i: i64, j: i64) -> bool {
+        !self.in_bounds(i, j) || self.log_odds(i, j) > 0.0
+    }
+
     /// World coordinates → integer cell `(i, j)` (may be outside the grid).
     pub fn world_to_cell(&self, x: f64, y: f64) -> (i64, i64) {
         (((x - self.origin_x) / self.resolution).floor() as i64, ((y - self.origin_y) / self.resolution).floor() as i64)
@@ -137,4 +180,21 @@ mod tests {
         g.integrate_beam(0.5, 0.5, 5.5, 5.5, true);
         assert!(g.probability(0, 0) < 0.5 && g.probability(5, 5) > 0.5, "diagonal ray free, endpoint occupied");
     }
+
+    #[test]
+    fn a_drawing_builds_the_grid_it_shows_and_the_outside_is_blocked() {
+        // 4 wide, 3 tall; the top row of the drawing must be the highest j
+        let g = OccupancyGrid::from_rows(&["#..#", "....", ".#.."], 1.0, 0.0, 0.0).expect("rectangular drawing");
+        assert_eq!((g.width, g.height), (4, 3));
+        assert!(g.blocked(0, 2) && g.blocked(3, 2), "top-row hashes land at j = 2");
+        assert!(g.blocked(1, 0), "bottom-row hash lands at j = 0");
+        assert!(!g.blocked(1, 2) && !g.blocked(0, 1) && !g.blocked(2, 0), "dots are free");
+        assert!(g.blocked(-1, 0) && g.blocked(4, 0) && g.blocked(0, 3), "outside the map is blocked, not free");
+        assert!(g.log_odds(-1, 0) == 0.0, "the raw accessor still reads outside as unknown, which is the trap `blocked` closes");
+        assert!(OccupancyGrid::from_rows(&["..", "..."], 1.0, 0.0, 0.0).is_none(), "ragged rows are refused");
+        assert!(OccupancyGrid::from_rows(&[], 1.0, 0.0, 0.0).is_none(), "an empty drawing is not a grid");
+        let u = OccupancyGrid::from_rows(&["?."], 1.0, 0.0, 0.0).unwrap();
+        assert!(u.log_odds(0, 0) == 0.0 && !u.blocked(0, 0), "unknown is left at zero and reported free by `blocked`");
+    }
+
 }

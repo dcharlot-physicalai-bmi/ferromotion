@@ -1268,6 +1268,7 @@ dependencies = [
  "ferromotion-fem",
  "ferromotion-fluid",
  "ferromotion-learn",
+ "ferromotion-models",
  "ferromotion-mpm",
  "ferromotion-policy",
  "ferromotion-rod",
@@ -1369,6 +1370,14 @@ version = "0.69.0"
 dependencies = [
  "ferromotion-core",
  "ferromotion-policy",
+ "nalgebra",
+]
+
+[[package]]
+name = "ferromotion-models"
+version = "0.69.0"
+dependencies = [
+ "ferromotion-core",
  "nalgebra",
 ]
 

@@ -17,6 +17,8 @@
 //! - [`mpm`] — differentiable 2D Material Point Method for soft/elastic/granular material.
 //! - [`cloth`] — differentiable FEM thin-shell cloth (StVK membrane + bending).
 //! - [`tactile`] — differentiable optical-tactile (GelSight/DIGIT) sensor simulation.
+//! - [`models`] — robot arms built from their published Denavit–Hartenberg tables, each citing its
+//!   primary source and verified at a known pose.
 //! - [`rod`] — differentiable Discrete Elastic Rods for cables, tendons, and continuum robots.
 //! - [`circuit`] — electrical-network dynamics (Modified Nodal Analysis): R/L/C, independent and
 //!   controlled sources, trapezoidally integrated and energy-conserving. The electrical domain.
@@ -38,3 +40,4 @@ pub use ferromotion_ruckig as ruckig;
 pub use ferromotion_rod as rod;
 pub use ferromotion_circuit as circuit;
 pub use ferromotion_tactile as tactile;
+pub use ferromotion_models as models;

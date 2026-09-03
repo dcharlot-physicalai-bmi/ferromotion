@@ -26,6 +26,7 @@ ferromotion-coupled = { path = "../ferromotion-coupled", version = "0.69.0" }
 ferromotion-tactile = { path = "../ferromotion-tactile", version = "0.69.0" }
 ferromotion-rod = { path = "../ferromotion-rod", version = "0.69.0" }
 ferromotion-circuit = { path = "../ferromotion-circuit", version = "0.69.0" }
+ferromotion-models = { path = "../ferromotion-models", version = "0.69.0" }
 
 [lints]
 workspace = true
