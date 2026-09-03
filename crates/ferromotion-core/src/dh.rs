@@ -52,22 +52,39 @@ pub struct DhRow {
     pub alpha: f64,
     /// Optional `(lower, upper)` joint limit, in radians or metres.
     pub limits: Option<(f64, f64)>,
+    /// Optional actuator effort the source states, N·m or N. Left `None` when the source gives none,
+    /// rather than guessed; a model that needs one must then be handed it explicitly.
+    pub effort: Option<f64>,
+    /// Optional joint-rate limit the source states, rad/s or m/s. Same rule as `effort`.
+    pub max_velocity: Option<f64>,
 }
 
 impl DhRow {
     /// A revolute row with `theta` as its offset.
     pub fn revolute(theta: f64, d: f64, a: f64, alpha: f64) -> DhRow {
-        DhRow { kind: JointKind::Revolute, theta, d, a, alpha, limits: None }
+        DhRow { kind: JointKind::Revolute, theta, d, a, alpha, limits: None, effort: None, max_velocity: None }
     }
 
     /// A prismatic row with `d` as its offset.
     pub fn prismatic(theta: f64, d: f64, a: f64, alpha: f64) -> DhRow {
-        DhRow { kind: JointKind::Prismatic, theta, d, a, alpha, limits: None }
+        DhRow { kind: JointKind::Prismatic, theta, d, a, alpha, limits: None, effort: None, max_velocity: None }
     }
 
     /// Attach a `(lower, upper)` limit.
     pub fn with_limits(mut self, lower: f64, upper: f64) -> DhRow {
         self.limits = Some((lower, upper));
+        self
+    }
+
+    /// Attach the effort the source states (N·m or N); non-positive or non-finite is treated as unstated.
+    pub fn with_effort(mut self, effort: f64) -> DhRow {
+        self.effort = (effort.is_finite() && effort > 0.0).then_some(effort);
+        self
+    }
+
+    /// Attach the rate limit the source states (rad/s or m/s); non-positive or non-finite is unstated.
+    pub fn with_max_velocity(mut self, v: f64) -> DhRow {
+        self.max_velocity = (v.is_finite() && v > 0.0).then_some(v);
         self
     }
 }
@@ -121,10 +138,29 @@ impl Robot {
             if let Some((lo, hi)) = row.limits {
                 j = j.with_limits(lo, hi);
             }
+            if let Some(e) = row.effort {
+                j = j.with_effort(e);
+            }
+            if let Some(v) = row.max_velocity {
+                j = j.with_max_velocity(v);
+            }
             joints.push(j);
             carry = after;
         }
         Some(Robot { joints, ee_offset: carry * tool })
+    }
+
+    /// [`Self::from_dh`] with a fixed `base` transform ahead of the first row.
+    ///
+    /// Published tables often begin with a transform that carries no joint: a Kinova Gen3 table opens
+    /// with a fixed `α = π` row, Baxter's arm frame sits on a shoulder rise and a 45° yaw, Universal
+    /// Robots relate their DH base to the controller's `Base` by a half turn. A DH row cannot express
+    /// that and a model would otherwise fold it into the first joint's origin by hand. This is the one
+    /// place to put it: `fk = base · (chain) · tool`, verified as exactly that.
+    pub fn from_dh_based(base: Iso, rows: &[DhRow], convention: DhConvention, tool: Iso) -> Option<Robot> {
+        let mut r = Robot::from_dh(rows, convention, tool)?;
+        r.joints[0].origin = base * r.joints[0].origin;
+        Some(r)
     }
 }
 
@@ -282,6 +318,41 @@ mod tests {
         // and the base yaw carries the whole thing round
         let p3 = r.fk(&[FRAC_PI_2, 0.0]).translation.vector;
         assert!(close(&p3, &Vector3::new(0.0, a1, d1 + a2), 1e-12), "yawed: {p3:?}");
+    }
+
+    /// A base transform composes on the left of the whole chain and nowhere else.
+    #[test]
+    fn a_base_transform_prepends_to_the_chain() {
+        let rows = [DhRow::revolute(0.0, 0.3, 0.0, FRAC_PI_2), DhRow::revolute(0.0, 0.0, 0.5, 0.0)];
+        let base = Iso::from_parts(Translation3::new(0.1, -0.2, 0.05), UnitQuaternion::from_axis_angle(&Vector3::z_axis(), 0.7));
+        let plain = Robot::from_dh(&rows, DhConvention::Standard, tx(0.1)).unwrap();
+        let based = Robot::from_dh_based(base, &rows, DhConvention::Standard, tx(0.1)).unwrap();
+        for q in [[0.0, 0.0], [0.4, -0.9], [-1.3, 2.1]] {
+            let want = base * plain.fk(&q);
+            let got = based.fk(&q);
+            assert!((want.translation.vector - got.translation.vector).norm() < 1e-12, "at {q:?}: {got:?} vs {want:?}");
+            assert!(want.rotation.angle_to(&got.rotation) < 1e-12);
+        }
+        // and it is not a no-op: the base actually moves the arm
+        assert!((based.fk(&[0.0, 0.0]).translation.vector - plain.fk(&[0.0, 0.0]).translation.vector).norm() > 0.1);
+    }
+
+    /// Effort and velocity ride the row into the joint, and an unstated one stays unstated.
+    #[test]
+    fn effort_and_velocity_carry_into_the_joint_or_stay_none() {
+        let r = Robot::from_dh(
+            &[DhRow::revolute(0.0, 0.0, 0.4, 0.0).with_effort(87.0).with_max_velocity(2.175), DhRow::revolute(0.0, 0.0, 0.3, 0.0)],
+            DhConvention::Standard,
+            Iso::identity(),
+        )
+        .unwrap();
+        assert_eq!(r.joints[0].effort, Some(87.0));
+        assert_eq!(r.joints[0].max_velocity, Some(2.175));
+        assert_eq!(r.joints[1].effort, None, "a source that states no effort must leave it None, not invent one");
+        assert_eq!(r.joints[1].max_velocity, None);
+        // a zero or NaN effort is "unstated", the URDF convention, not a limit of nothing
+        let z = DhRow::revolute(0.0, 0.0, 0.4, 0.0).with_effort(0.0).with_max_velocity(f64::NAN);
+        assert_eq!((z.effort, z.max_velocity), (None, None));
     }
 
     #[test]
