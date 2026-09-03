@@ -62,11 +62,9 @@ const DEG_210_PER_S: f64 = 7.0 * PI / 6.0;
 /// Every table here is six finite revolute rows, which is the only thing [`Robot::from_dh`] can refuse, so the
 /// `expect` cannot fire on the constants in this module.
 fn build(rows: &[DhRow; 6], speeds: [f64; 6]) -> Robot {
-    let mut robot = Robot::from_dh(rows, DhConvention::Standard, Iso::identity()).expect("six finite DH rows");
-    for (joint, v) in robot.joints.iter_mut().zip(speeds) {
-        joint.max_velocity = Some(v);
-    }
-    robot
+    // speeds ride the rows through `DhRow::with_max_velocity`, the one path every model in this crate uses
+    let rows: Vec<DhRow> = rows.iter().zip(speeds).map(|(r, v)| r.with_max_velocity(v)).collect();
+    Robot::from_dh(&rows, DhConvention::Standard, Iso::identity()).expect("six finite DH rows")
 }
 
 // ----------------------------------------------------------------------------------------------------------

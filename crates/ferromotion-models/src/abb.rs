@@ -131,7 +131,7 @@ fn irb1600_rows() -> [DhRow; 6] {
 /// Primary source: N. A. Theissen, A. Mohammed, A. Archenti, 'Articulated industrial robots: An
 /// approach to thermal compensation based on joint power consumption', euspen Laser Metrology and
 /// Machine Performance XIII (LAMDAMAP 2019), Table 1 'Nominal DH parameters of the ABB IRB 1600 for
-/// joint 1-4' (a=[0,150,700,0] mm, alpha=[0,-pi/2,0,-pi/2], theta2-pi/2, d=[486.5,0,0,600] mm);
+/// joint 1-4' (a=`[0,150,700,0]` mm, alpha=[0,-pi/2,0,-pi/2], theta2-pi/2, d=[486.5,0,0,600] mm);
 /// joints 5-6, flange, ranges and speeds from ABB 'Product specification IRB 1600/1660'
 /// 3HAC023604-001 Rev. AR (Dimensions IRB 1600-X/1.2 (1.45) p.16; Range of movement; Velocity).
 /// <https://www.euspen.eu/knowledge-base/LAM19117.pdf>

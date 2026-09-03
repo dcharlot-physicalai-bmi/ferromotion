@@ -9,7 +9,7 @@ homepage.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "Robot arm models built from their published Denavit-Hartenberg tables, each citing its primary source and verified against a known pose. WASM-clean."
+description = "Robot arm models built from their published Denavit-Hartenberg tables, each citing its source and verified at a source-stated or hand-computed pose. WASM-clean."
 
 [dependencies]
 # Path dependencies need a version to be publishable, and this is what the release bump targets.

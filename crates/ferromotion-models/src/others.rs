@@ -27,11 +27,9 @@ use std::f64::consts::{FRAC_PI_2, PI};
 /// Build the robot and stamp each joint's `max_velocity` (rad/s) from the datasheet. `from_dh`
 /// returns `None` only for an empty or non-finite table, which a constant table in this file cannot be.
 fn build(name: &str, rows: &[DhRow], convention: DhConvention, velocities_rad_s: &[f64]) -> Robot {
-    let mut robot = Robot::from_dh(rows, convention, Iso::identity()).unwrap_or_else(|| panic!("{name}: the DH table is constant, finite and non-empty"));
-    for (joint, &v) in robot.joints.iter_mut().zip(velocities_rad_s) {
-        joint.max_velocity = Some(v);
-    }
-    robot
+    // speeds ride the rows through `DhRow::with_max_velocity`, the one path every model in this crate uses
+    let rows: Vec<DhRow> = rows.iter().zip(velocities_rad_s).map(|(r, &v)| r.with_max_velocity(v)).collect();
+    Robot::from_dh(&rows, convention, Iso::identity()).unwrap_or_else(|| panic!("{name}: the DH table is constant, finite and non-empty"))
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -80,7 +78,7 @@ fn xarm_a2() -> f64 {
 /// 351.158796 mm, θ3 = atan(284.5/53.5) + atan(0.3425/0.0775) = 2.7331843 rad; a4 = 76, α4 = -π/2,
 /// θ4 = -atan(342.5/77.5) = -1.3482664 rad; d5 = 97`. The `θ` column is the manual's `Tx_offset`,
 /// "the offset joint angle from the mathematical zero position to the mechanical zero position", so
-/// `q = 0` is the arm as drawn. See [`xarm_a2`] for the 2 µm discrepancy in the manual's printed `a2`.
+/// `q = 0` is the arm as drawn. See `xarm_a2` for the 2 µm discrepancy in the manual's printed `a2`.
 ///
 /// **Limits (Table 1.1 p.9, degrees → radians):** J1 ±360°, J2 -118°…120°, J3 -225°…11°, J4 -97°…180°,
 /// J5 ±360°. **Speed:** 180°/s on every joint → π rad/s. **Effort:** not published; left `None`.
@@ -116,7 +114,7 @@ fn xarm5_rows() -> [DhRow; 5] {
 ///
 /// **Table (manual p.201, mm and rad → m and rad):** `d1 = 267, α1 = -π/2; a2 = √(284.5²+53.5²),
 /// θ2 = -atan(284.5/53.5); a3 = 77.5, α3 = -π/2, θ3 = -θ2; d4 = 342.5, α4 = π/2; a5 = 76, α5 = -π/2;
-/// d6 = 97`. See [`xarm_a2`] for the 2 µm discrepancy in the manual's printed `a2`.
+/// d6 = 97`. See `xarm_a2` for the 2 µm discrepancy in the manual's printed `a2`.
 ///
 /// **Limits (Table 1.1 p.9, degrees → radians):** J1 ±360°, J2 -118°…120°, J3 -225°…11°, J4 ±360°,
 /// J5 -97°…180°, J6 ±360°. **Speed:** 180°/s every joint → π rad/s. **Effort:** not published; `None`.
@@ -232,7 +230,8 @@ fn lite6_rows() -> [DhRow; 6] {
 /// 716.8` mm against the data sheet's 717 mm.
 ///
 /// **Limits (data sheet, degrees → radians):** J1 ±170° and J2 -100°…145° read from the drawing;
-/// J4 ±190°, J5 ±125°, J6 ±360° assume the data sheet's totals (380, 250, 720) are symmetric; **J3 is
+/// J4, J5 and J6 are left **unlimited**: the data sheet gives only their totals (380, 250, 720 deg) and a
+/// symmetric split would be an assumption, which this crate does not ship as a number
 /// left unset** because the data sheet gives only a 420° total and the split was not resolved.
 /// **Speed (data sheet deg/s → rad/s):** 450, 380, 520, 550, 545, 1000. **Effort:** the data sheet's
 /// J4-J6 figures are allowable wrist *moments*, not actuator torques, so `effort` is `None`.
@@ -251,9 +250,9 @@ fn fanuc_lr_mate_200id_rows() -> [DhRow; 6] {
         DhRow::revolute(0.0, 0.33, 0.05, -FRAC_PI_2).with_limits(-170f64.to_radians(), 170f64.to_radians()),
         DhRow::revolute(-FRAC_PI_2, 0.0, 0.33, 0.0).with_limits(-100f64.to_radians(), 145f64.to_radians()),
         DhRow::revolute(0.0, 0.0, 0.035, -FRAC_PI_2), // J3 total 420°, split unresolved: no limit
-        DhRow::revolute(0.0, 0.335, 0.0, FRAC_PI_2).with_limits(-190f64.to_radians(), 190f64.to_radians()),
-        DhRow::revolute(0.0, 0.0, 0.0, -FRAC_PI_2).with_limits(-125f64.to_radians(), 125f64.to_radians()),
-        DhRow::revolute(0.0, 0.08, 0.0, 0.0).with_limits(-360f64.to_radians(), 360f64.to_radians()),
+        DhRow::revolute(0.0, 0.335, 0.0, FRAC_PI_2), // J4 total 380 deg; the symmetric split is an assumption, so no limit
+        DhRow::revolute(0.0, 0.0, 0.0, -FRAC_PI_2), // J5 total 250 deg; split assumed, so no limit
+        DhRow::revolute(0.0, 0.08, 0.0, 0.0), // J6 total 720 deg; split assumed, so no limit
     ]
 }
 
@@ -325,11 +324,15 @@ mod tests {
 
     /// Limits and speeds carried through: every row with a limit has `lower < upper` on its joint,
     /// every joint has a speed, and no joint has an effort (none is published in this module).
-    fn assert_limits_and_speeds(name: &str, r: &Robot, rows: &[DhRow], dof: usize) {
+    ///
+    /// `unlimited` is how many joints the model legitimately leaves without a range, stated per model,
+    /// so a table that silently drops a published limit still fails here while a model whose sheet
+    /// gives only totals (the FANUC's J3 to J6) is not forced to invent one.
+    fn assert_limits_and_speeds(name: &str, r: &Robot, rows: &[DhRow], dof: usize, unlimited: usize) {
         assert_eq!(r.dof(), dof, "{name}: dof");
         assert_eq!(rows.len(), dof, "{name}: rows");
-        let with_limits = rows.iter().filter(|row| row.limits.is_some()).count();
-        assert!(with_limits >= dof - 1, "{name}: at most one joint may be without a limit, {with_limits} have one");
+        let without = rows.iter().filter(|row| row.limits.is_none()).count();
+        assert_eq!(without, unlimited, "{name}: {without} joints without a limit, the model states {unlimited}");
         for (i, (joint, row)) in r.joints.iter().zip(rows).enumerate() {
             assert_eq!(joint.limits, row.limits, "{name}: joint {i} limits");
             if let Some((lo, hi)) = joint.limits {
@@ -392,7 +395,7 @@ mod tests {
 
     #[test]
     fn xarm5_has_five_dof_with_the_manual_limits_and_speeds() {
-        assert_limits_and_speeds("xArm 5", &xarm5(), &xarm5_rows(), 5);
+        assert_limits_and_speeds("xArm 5", &xarm5(), &xarm5_rows(), 5, 0);
     }
 
     #[test]
@@ -415,7 +418,7 @@ mod tests {
 
     #[test]
     fn xarm6_has_six_dof_with_the_manual_limits_and_speeds() {
-        assert_limits_and_speeds("xArm 6", &xarm6(), &xarm6_rows(), 6);
+        assert_limits_and_speeds("xArm 6", &xarm6(), &xarm6_rows(), 6, 0);
     }
 
     #[test]
@@ -438,7 +441,7 @@ mod tests {
 
     #[test]
     fn xarm7_has_seven_dof_with_the_manual_limits_and_speeds() {
-        assert_limits_and_speeds("xArm 7", &xarm7(), &xarm7_rows(), 7);
+        assert_limits_and_speeds("xArm 7", &xarm7(), &xarm7_rows(), 7, 0);
     }
 
     #[test]
@@ -461,7 +464,7 @@ mod tests {
 
     #[test]
     fn lite6_has_six_dof_with_the_manual_limits_and_speeds() {
-        assert_limits_and_speeds("Lite 6", &lite6(), &lite6_rows(), 6);
+        assert_limits_and_speeds("Lite 6", &lite6(), &lite6_rows(), 6, 0);
     }
 
     #[test]
@@ -492,12 +495,18 @@ mod tests {
         assert!((reach - 0.717).abs() < 1e-3, "reach {reach} m vs data sheet 0.717 m");
     }
 
+    /// J1 and J2 carry the data sheet's stated ranges. J3 through J6 are **unset**: the sheet gives only
+    /// their totals (420, 380, 250, 720 deg), and a symmetric split would be an assumption. An earlier
+    /// version shipped J4-J6 as assumed symmetric values and asserted J6 was set; that is the failure
+    /// mode the house rule forbids, and this test now pins the opposite.
     #[test]
-    fn fanuc_lr_mate_200id_has_six_dof_with_j3_unlimited() {
+    fn fanuc_lr_mate_200id_has_six_dof_with_j3_to_j6_unlimited() {
         let r = fanuc_lr_mate_200id();
-        assert_limits_and_speeds("FANUC LR Mate 200iD", &r, &fanuc_lr_mate_200id_rows(), 6);
-        assert!(r.joints[2].limits.is_none(), "J3's 420° total has no published split, so it must stay unset");
-        assert!(r.joints[0].limits.is_some() && r.joints[5].limits.is_some());
+        assert_limits_and_speeds("FANUC LR Mate 200iD", &r, &fanuc_lr_mate_200id_rows(), 6, 4);
+        assert!(r.joints[0].limits.is_some() && r.joints[1].limits.is_some(), "J1 and J2 ranges are stated by the sheet");
+        for j in 2..6 {
+            assert!(r.joints[j].limits.is_none(), "J{}'s range is only given as a total, so it must stay unset rather than assumed", j + 1);
+        }
     }
 
     #[test]
@@ -520,7 +529,7 @@ mod tests {
 
     #[test]
     fn denso_vs6556_has_six_dof_with_the_specification_limits_and_speeds() {
-        assert_limits_and_speeds("DENSO VS-6556", &denso_vs6556(), &denso_vs6556_rows(), 6);
+        assert_limits_and_speeds("DENSO VS-6556", &denso_vs6556(), &denso_vs6556_rows(), 6, 0);
     }
 
     #[test]

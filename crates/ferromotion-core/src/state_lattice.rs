@@ -36,7 +36,7 @@
 //! corridor forcing `S,S,L,S,S` at `4 + π/2`, the no-fit corridor returning `None`, and the reverse-only
 //! corridor at `2·w_rev`. Against [`crate::astar_grid_conn`] under [`crate::Connectivity::Four`]: a
 //! lattice of unit straights plus zero-cost point turns reproduces the 4-connected grid distance on an
-//! open grid and around a wall. Every returned sample lies in a free cell. [`DStarLite`] repairs a
+//! open grid and around a wall. Every returned sample lies in a free cell. [`LatticeDStarLite`] repairs a
 //! plan on the same lattice when cells change (Koenig & Likhachev, AAAI-02, Figure 3): its first search
 //! returns A\*'s cost, and each repair is checked against a fresh [`lattice_astar`]. Pure Rust →
 //! WASM-clean.
@@ -401,13 +401,13 @@ fn assemble_path(grid: &OccupancyGrid, lattice: &Lattice, start: LatticeNode, pr
 /// lazy deletion, so `Remove(u)` is a version bump. The heuristic is the Euclidean distance between
 /// node centres, which is consistent for arc-length costs as the paper requires.
 ///
-/// Verified: the first [`DStarLite::compute_shortest_path`] gives the same cost as [`lattice_astar`]
+/// Verified: the first [`LatticeDStarLite::compute_shortest_path`] gives the same cost as [`lattice_astar`]
 /// on the open-grid fixture (`3π/2`, `L,R,L`); blocking cell `(1,2)` afterwards repairs the plan to
 /// `S,S,L,S,S` at `4 + π/2` while expanding fewer than all 64 states; blocking `(2,0)` in a corridor
 /// leaves `g(start) = ∞`; and after the robot advances and a cell on its remaining path is blocked
 /// (so `k_m > 0`), the repaired cost equals a fresh `lattice_astar` from the new start.
 #[derive(Clone, Debug)]
-pub struct DStarLite<'a> {
+pub struct LatticeDStarLite<'a> {
     lattice: &'a Lattice,
     weights: LatticeWeights,
     width: usize,
@@ -425,7 +425,7 @@ pub struct DStarLite<'a> {
     expansions: usize,
 }
 
-impl<'a> DStarLite<'a> {
+impl<'a> LatticeDStarLite<'a> {
     /// Set up for `grid`'s dimensions with the robot at `start` and a fixed `goal`, then run the first
     /// search (`initialize` + `ComputeShortestPath`, lines {21'}–{24'}). `None` if either node is off the
     /// map, the heading table is empty, or `lattice.dl` differs from `grid.resolution`.
@@ -435,7 +435,7 @@ impl<'a> DStarLite<'a> {
             return None;
         }
         let n = grid.width * grid.height * n_h;
-        let mut d = DStarLite { lattice, weights, width: grid.width, height: grid.height, g: vec![f64::INFINITY; n], rhs: vec![f64::INFINITY; n], queue: BinaryHeap::new(), version: vec![0; n], next_version: 1, km: 0.0, start, last: start, goal, expansions: 0 };
+        let mut d = LatticeDStarLite { lattice, weights, width: grid.width, height: grid.height, g: vec![f64::INFINITY; n], rhs: vec![f64::INFINITY; n], queue: BinaryHeap::new(), version: vec![0; n], next_version: 1, km: 0.0, start, last: start, goal, expansions: 0 };
         if !d.in_bounds(start) || !d.in_bounds(goal) {
             return None;
         }
@@ -529,8 +529,7 @@ impl<'a> DStarLite<'a> {
     /// (`g(start) < ∞`).
     pub fn compute_shortest_path(&mut self, grid: &OccupancyGrid) -> bool {
         let si = self.idx(self.start);
-        loop {
-            let Some(k_old) = self.top_key() else { break };
+        while let Some(k_old) = self.top_key() {
             if !(k_old < self.key(si) || self.rhs[si] != self.g[si]) {
                 break;
             }
@@ -1063,7 +1062,7 @@ mod tests {
     fn dstar_lite_first_search_equals_astar() {
         let grid = OccupancyGrid::from_rows(&["....", "....", "....", "...."], 1.0, 0.0, 0.0).unwrap();
         let lat = slr();
-        let d = DStarLite::new(&grid, &lat, (0, 0, 0), (3, 3, 1), LatticeWeights::default()).unwrap();
+        let d = LatticeDStarLite::new(&grid, &lat, (0, 0, 0), (3, 3, 1), LatticeWeights::default()).unwrap();
         let a = lattice_astar(&grid, &lat, (0, 0, 0), (3, 3, 1), LatticeWeights::default()).unwrap();
         assert_eq!(d.cost_to_goal(), a.cost, "bitwise: the same edge costs summed");
         assert_eq!(d.cost_to_goal(), 3.0 * FRAC_PI_2);
@@ -1078,7 +1077,7 @@ mod tests {
         let mut costs = BTreeSet::new();
         for (i, j, h) in [(6, 4, 0), (6, 0, 2), (2, 0, 1), (0, 4, 3), (3, 1, 0), (5, 2, 1)] {
             let want = lattice_astar(&walled, &turns, (0, 0, 0), (i, j, h), w).map(|p| p.cost);
-            let got = DStarLite::new(&walled, &turns, (0, 0, 0), (i, j, h), w).unwrap();
+            let got = LatticeDStarLite::new(&walled, &turns, (0, 0, 0), (i, j, h), w).unwrap();
             match want {
                 Some(c) => {
                     assert!(close(got.cost_to_goal(), c, 1e-9), "goal ({i},{j},{h}): {} vs A* {c}", got.cost_to_goal());
@@ -1105,7 +1104,7 @@ mod tests {
         let after = OccupancyGrid::from_rows(&["....", ".#..", "....", "...."], 1.0, 0.0, 0.0).unwrap();
         assert!(after.blocked(1, 2) && !open.blocked(1, 2), "the drawing blocks (1,2)");
         let lat = slr();
-        let mut d = DStarLite::new(&open, &lat, (0, 0, 0), (3, 3, 1), LatticeWeights::default()).unwrap();
+        let mut d = LatticeDStarLite::new(&open, &lat, (0, 0, 0), (3, 3, 1), LatticeWeights::default()).unwrap();
         assert!(close(d.cost_to_goal(), 3.0 * FRAC_PI_2, 1e-12));
         let before = d.expansions();
         assert!(d.cells_changed(&after, &[(1, 2)]), "a repaired path exists");
@@ -1126,14 +1125,14 @@ mod tests {
 
     /// **No known path after a change (D\* Lite fixture 3).** A width-1 corridor, `S,S,S` at cost 3;
     /// blocking `(2,0)` makes every edge into `(3,0,E)` cost `∞` (arcs need rows `±1`, off the map),
-    /// `rhs(2,0,E)` becomes `∞`, the queue drains, and `g(start) = ∞`: [`DStarLite::advance`] refuses to
+    /// `rhs(2,0,E)` becomes `∞`, the queue drains, and `g(start) = ∞`: [`LatticeDStarLite::advance`] refuses to
     /// drive (line {25'}). Non-vacuous: before the change the robot could advance.
     #[test]
     fn dstar_lite_reports_no_known_path_after_the_corridor_closes() {
         let open = OccupancyGrid::from_rows(&["...."], 1.0, 0.0, 0.0).unwrap();
         let closed = OccupancyGrid::from_rows(&["..#."], 1.0, 0.0, 0.0).unwrap();
         let lat = slr();
-        let mut d = DStarLite::new(&open, &lat, (0, 0, 0), (3, 0, 0), LatticeWeights::default()).unwrap();
+        let mut d = LatticeDStarLite::new(&open, &lat, (0, 0, 0), (3, 0, 0), LatticeWeights::default()).unwrap();
         assert!(close(d.cost_to_goal(), 3.0, 1e-12) && letters(&lat, &d.path(&open).unwrap()) == "SSS");
         let mut probe = d.clone();
         assert!(probe.advance(&open).is_some(), "before the change the robot can drive");
@@ -1156,7 +1155,7 @@ mod tests {
         assert!(after.blocked(2, 2));
         let lat = slr();
         let w = LatticeWeights::default();
-        let mut d = DStarLite::new(&open, &lat, (0, 0, 0), (5, 5, 1), w).unwrap();
+        let mut d = LatticeDStarLite::new(&open, &lat, (0, 0, 0), (5, 5, 1), w).unwrap();
         assert!(close(d.cost_to_goal(), 5.0 * FRAC_PI_2, 1e-12) && letters(&lat, &d.path(&open).unwrap()) == "LRLRL");
         let (pid, at) = d.advance(&open).unwrap();
         assert_eq!(at, (1, 1, 1));

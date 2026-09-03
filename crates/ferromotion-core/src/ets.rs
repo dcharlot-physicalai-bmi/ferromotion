@@ -323,7 +323,7 @@ fn parse_et(token: &str) -> Option<Et> {
 /// instead (from `r21 = sin b`, `r22 = cos b cos c`, `r23 = −cos b sin c`, `r11 = cos b cos a`,
 /// `r31 = −cos b sin a`), whose own singularity `|r21| = 1` cannot occur there since
 /// `r21² + r31² ≤ 1`. Both branches therefore see `cos b ≥ 0.43` and the recomposition holds to
-/// rounding; the tests measure `2.3e-16` over 400 rotations including exact `Ry(±π/2)`. One of many
+/// rounding; the tests measure `6.7e-16` over 400 rotations including exact `Ry(±π/2)`. One of many
 /// valid decompositions (see [`Ets::from_robot`]).
 fn constant_factors(t: &Iso, out: &mut Vec<Et>) {
     let p = t.translation.vector;
@@ -417,12 +417,13 @@ impl Ets {
 
     /// Write a [`Robot`] as an ETS. **The result is one of many**: each `origin` is decomposed as
     /// `Tx Ty Tz Rz Ry Rx` (translation, then Z-Y-X Euler angles; `Ry Rz Rx` near that order's
-    /// singularity — see [`constant_factors`] — with exact zeros dropped), which
+    /// singularity — see `constant_factors` — with exact zeros dropped), which
     /// round-trips through [`Ets::to_robot`] to the same forward kinematics but will not in general
     /// reproduce a hand-written string. The Panda of Part 1 prints back with its tool as
-    /// `Tx(0.088) Ty(-1.3e-17) Tz(-0.107) Rx(pi) Rz(q7)`: the same map (`Rx(π)·Tz(0.107) =
-    /// Tz(−0.107)·Rx(π)`), and a rounding residue of the origin product printed as-is, because only
-    /// exact zeros are dropped and the notation makes no tolerance decision on the caller's behalf. A joint whose axis is exactly `±x`, `±y` or `±z` becomes one variable
+    /// `Tx(0.088) Ty(-0.0000000000000000131…) Tz(-0.107) Rx(pi) Rz(q7)`: the same map
+    /// (`Rx(π)·Tz(0.107) = Tz(−0.107)·Rx(π)`), and a `1.3e-17` rounding residue of the origin product
+    /// printed as-is (in `f64`'s positional `Display` form), because only exact zeros are dropped and
+    /// the notation makes no tolerance decision on the caller's behalf. A joint whose axis is exactly `±x`, `±y` or `±z` becomes one variable
     /// factor (negative-sense when the sign is negative); any other axis `a` is expressed by the
     /// constant conjugation `R · Rz(q) · Rᵀ` with `R` a rotation taking `z` to `a`, which adds two
     /// constant runs around the variable. Limits, efforts and dynamics fields are not carried.

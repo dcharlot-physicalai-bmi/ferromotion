@@ -78,9 +78,12 @@ const PUMA_EFFORT_NM: [f64; 6] = [97.6, 186.4, 89.4, 24.2, 20.1, 21.3];
 
 /// **PUMA 560 joint velocity limits, rad/s at the joint**, DERIVED (not a manufacturer figure): Corke 1996
 /// Table 2.18 measured motor-referenced back-EMF/voltage-saturation limits (120, 163, 129, 406, 366, 440
-/// rad/s) divided by the Table 2.9 gear ratios (62.6111, 107.815, 53.7063, 76.03636, 71.923, 76.686).
-/// Cross-check: Corke's own Table 2.21 "load referenced θ̇" column prints 1.92, 1.51, 2.40, 5.34, 5.09,
-/// 5.74 rad/s (read from the author-hosted PDF), which are these values rounded to two decimals.
+/// rad/s) divided by the magnitudes of the Table 2.9 gear ratios (62.6111, 107.815, 53.7063, 76.03636,
+/// 71.923, 76.686; Corke prints `G₁` and `G₃` with a negative sign, which encodes joint direction and
+/// does not belong in a rate limit). Cross-check: Corke's own Table 2.21 "load referenced θ̇" column
+/// prints 1.92, 1.51, 2.40, 5.34, 5.09, 5.74 rad/s (Tables 2.1, 2.9, 2.18 and 2.21 were each re-read
+/// from the author-hosted PDF text while verifying this module), which are these values rounded to two
+/// decimals.
 const PUMA_VELOCITY_RAD_S: [f64; 6] = [1.917, 1.512, 2.402, 5.340, 5.089, 5.738];
 
 /// **Unimation PUMA 560, standard Denavit–Hartenberg** (Paul & Zhang frame assignments, consensus lengths).
@@ -140,7 +143,7 @@ fn puma560_modified_rows() -> [DhRow; 6] {
 /// **Source** — "J. J. Craig, Introduction to Robotics: Mechanics and Control, 3rd ed., Pearson Prentice
 /// Hall, 2005, Section 3.7 'The PUMA 560', Figs. 3.18-3.21 (pp. 78-80) and Exercise 4.5 (p. 129); numeric
 /// lengths from Corke 1996 Table 2.1 (see previous entry)",
-/// <https://marsuniversity.github.io/ece387/Introduction-to-Robotics-Craig.pdf>. Confidence: **derived
+/// J. J. Craig, *Introduction to Robotics: Mechanics and Control*, 3rd ed., Pearson Prentice Hall, 2005 (ISBN 0-13-123629-6). Confidence: **derived
 /// from published geometry** — Craig's Fig. 3.21 gives `a₂, a₃, d₃, d₄` as symbols; the numbers are the
 /// Corke 1996 consensus values ([`puma560`]).
 ///
@@ -241,7 +244,7 @@ fn two_link_planar_rows() -> [DhRow; 2] {
 ///
 /// **Source** — "J. J. Craig, Introduction to Robotics: Mechanics and Control, 3rd ed., Pearson Prentice
 /// Hall, 2005, Example 5.3, Figs. 5.8-5.9 and link transforms (5.49) (pp. 146-147)",
-/// <https://marsuniversity.github.io/ece387/Introduction-to-Robotics-Craig.pdf>. Confidence: **derived
+/// J. J. Craig, *Introduction to Robotics: Mechanics and Control*, 3rd ed., Pearson Prentice Hall, 2005 (ISBN 0-13-123629-6). Confidence: **derived
 /// from published geometry**.
 ///
 /// **The metre values are a library choice, not sourced.** Craig gives the link lengths only as the symbols
@@ -272,7 +275,7 @@ fn three_link_planar_rows() -> [DhRow; 3] {
 ///
 /// **Source** — "J. J. Craig, Introduction to Robotics: Mechanics and Control, 3rd ed., Pearson Prentice
 /// Hall, 2005, Example 3.3, Figs. 3.6-3.8 'Link parameters of the three-link planar manipulator' (pp.
-/// 69-71)", <https://marsuniversity.github.io/ece387/Introduction-to-Robotics-Craig.pdf>. Confidence:
+/// 69-71)", J. J. Craig, *Introduction to Robotics: Mechanics and Control*, 3rd ed., Pearson Prentice Hall, 2005 (ISBN 0-13-123629-6). Confidence:
 /// **derived from published geometry**.
 ///
 /// **The metre values are a library choice, not sourced.** Craig's Fig. 3.8 gives the lengths as the

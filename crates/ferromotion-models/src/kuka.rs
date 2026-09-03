@@ -66,7 +66,7 @@ const IIWA_14_R820_SPEEDS_DEG: [f64; 7] = [85.0, 85.0, 100.0, 75.0, 130.0, 135.0
 /// F. Beck, M. N. Vu, C. Hartl-Nesic, A. Kugi, 'Singularity Avoidance with Application to Online
 /// Trajectory Optimization for Serial Manipulators', arXiv:2211.02516v5 (accepted IFAC World Congress
 /// 2023), Table 1(b).
-/// <https://web.archive.org/web/20190819075249id_/http://www.oir.caltech.edu/twiki_oir/pub/Palomar/ZTF/KUKARoboticArmMaterial/Spez_LBR_iiwa_en.pdf>
+/// KUKA Roboter GmbH, *LBR iiwa 7 R800 / LBR iiwa 14 R820 Specification* (Spez LBR iiwa, V5); read from an archived copy, <https://web.archive.org/web/20190819075249id_/http://www.oir.caltech.edu/twiki_oir/pub/Palomar/ZTF/KUKARoboticArmMaterial/Spez_LBR_iiwa_en.pdf>
 ///
 /// KUKA publishes no DH table for this arm. The table here is **derived from published geometry**:
 /// the drawing it is derived from is **KUKA Fig. 4-1, Working envelope LBR iiwa 7 R800**, which in the
@@ -105,7 +105,7 @@ pub fn kuka_lbr_iiwa_7_r800() -> Robot {
 /// F. Beck, M. N. Vu, C. Hartl-Nesic, A. Kugi, 'Singularity Avoidance with Application to Online
 /// Trajectory Optimization for Serial Manipulators', arXiv:2211.02516v5 (accepted IFAC World Congress
 /// 2023), Table 1(b) 'KUKA LBR iiwa 14 R820'.
-/// <https://web.archive.org/web/20190819075249id_/http://www.oir.caltech.edu/twiki_oir/pub/Palomar/ZTF/KUKARoboticArmMaterial/Spez_LBR_iiwa_en.pdf>
+/// KUKA Roboter GmbH, *LBR iiwa 7 R800 / LBR iiwa 14 R820 Specification* (Spez LBR iiwa, V5); read from an archived copy, <https://web.archive.org/web/20190819075249id_/http://www.oir.caltech.edu/twiki_oir/pub/Palomar/ZTF/KUKARoboticArmMaterial/Spez_LBR_iiwa_en.pdf>
 ///
 /// KUKA publishes no DH table for this arm. The table is **derived from published geometry**: the
 /// drawing it is derived from is **KUKA Fig. 4-4, Working envelope LBR iiwa 14 R820**, which in the

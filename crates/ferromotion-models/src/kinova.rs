@@ -1,5 +1,5 @@
 //! **Kinova arms from their published Denavit–Hartenberg tables**: Gen3 7 DoF, Gen3 6 DoF, Gen3 lite
-//! and the original JACO (Gen1).
+//! and no JACO: see below.
 //!
 //! Every table here is the manufacturer's own, read in the **standard** (classical) convention the
 //! documents state, `T_i = Rz(θ_i)·Tz(d_i)·Tx(a_i)·Rx(α_i)`. The Gen3 user guide prints link lengths
@@ -20,6 +20,12 @@
 //! **What none of the sources state**: the JACO document gives no joint limits in DH units, no
 //! efforts and no rates, so that model carries none. The Gen3 7 DoF and 6 DoF guides mark joints
 //! 1, 3, 5, 7 (7 DoF) and 1, 4, 6 (6 DoF) as continuous; those joints carry no limits here.
+
+//! **JACO (Gen1) is deliberately not shipped.** The only DH table located for it is a PDF stamped
+//! "Confidential & Proprietary ... property of Kinova", obtained from a third-party repository. Numbers
+//! from a document that says it may not be reproduced are not a source this crate can cite, whatever
+//! their accuracy, so the constructor was removed before the first release rather than shipped with a
+//! caveat. It returns if Kinova publishes the table.
 
 use crate::{DhConvention, DhRow, Robot};
 use ferromotion_core::Iso;
@@ -192,64 +198,6 @@ pub fn gen3_lite() -> Robot {
 }
 
 // ---------------------------------------------------------------------------------------------
-// JACO (Gen1)
-// ---------------------------------------------------------------------------------------------
-
-/// Twice the document's wrist half-angle `aa = 11π/72` (27.5°): the classic table's twist on rows 4
-/// and 5 is `2·aa = 11π/36 = 0.9599311` rad, the value the specification carries.
-const JACO_2AA: f64 = 11.0 * PI / 36.0;
-
-/// The JACO classic table, joints 1–6, in DH units. Limits are not encoded: the document states them
-/// only in its physical-angle units (see [`jaco`]).
-fn jaco_rows() -> [DhRow; 6] {
-    [
-        DhRow::revolute(0.0, 0.2755, 0.0, FRAC_PI_2),
-        DhRow::revolute(0.0, 0.0, 0.41, PI),
-        DhRow::revolute(0.0, -0.0098, 0.0, FRAC_PI_2),
-        DhRow::revolute(0.0, -0.2491822, 0.0, JACO_2AA),
-        DhRow::revolute(0.0, -0.0837645, 0.0, JACO_2AA),
-        DhRow::revolute(0.0, -0.2105822, 0.0, PI),
-    ]
-}
-
-fn jaco_in(convention: DhConvention) -> Robot {
-    build(Iso::identity(), &jaco_rows(), convention)
-}
-
-/// **Kinova JACO (Gen1, 6 DoF)**, from the manufacturer's classic DH table.
-///
-/// **Source** (verbatim from the specification): *Kinova R&D, 'DH Parameters of Jaco', document 'DH
-/// Parameters - Kinova - 1.1.6' (version 1.1.5/1.1.6, 2013): robot length values D1..D6, e2,
-/// aa = 11\*pi/72; Section 1.1.1 Classic DH parameters, 1.1.2 Modified DH parameters (Craig), 1.3
-/// inertial (mass) parameters, 1.4 joint limits, 1.5 zero position* —
-/// <https://github.com/JenniferBuehler/jaco-arm-pkgs/blob/master/jaco_arm/jaco_description/doc/DH%20Parameters%20-%20Kinova%20-%201.1.6.pdf>.
-/// Convention: standard DH. Confidence: **published primary source**. The specification cautions that
-/// the document is stamped confidential by Kinova although publicly redistributed; only its numbers
-/// are used here, and the PDF is not vendored.
-///
-/// **Table** (θ offset rad, d m, a m, α rad): `(0, 0.2755, 0, π/2)`, `(0, 0, 0.41, π)`,
-/// `(0, −0.0098, 0, π/2)`, `(0, −0.2491822, 0, 2aa)`, `(0, −0.0837645, 0, 2aa)`, `(0, −0.2105822, 0, π)`,
-/// with `aa = 11π/72` (so `2aa = 11π/36 = 0.9599311` rad, the specification's value) and the three wrist
-/// lengths as the specification derives them from the document's `D3..D6`:
-/// `d4b = D3 + (sin aa / sin 2aa)·D4`, `d5b = (sin aa / sin 2aa)·(D4 + D5)`,
-/// `d6b = (sin aa / sin 2aa)·D5 + D6`. **Units**: metres and radians as given by the specification; no
-/// conversion applied beyond the exact `π`, `π/2` and `11π/36` constants.
-///
-/// **Not encoded, because the source does not state them in DH units**: joint limits (the document
-/// gives them as physical angles — joint 2 `47..313°`, joint 3 `19..341°`, the rest unlimited — under
-/// the mapping `Q₁ = −q₁, Q₂ = q₂ + 90°, Q₃ = q₃ − 90°, Q₄ = q₄, Q₅ = q₅ + 180°, Q₆ = q₆ − 100°`), efforts,
-/// and rates; all are `None`. The document gives link masses only, no centre of mass or inertia.
-///
-/// **Known answers** (computed by hand from the table; the document prints no end-effector
-/// position): at DH `q = 0` the tip is at `(0.41, 0.256698, 0.050296)` m. The specification also
-/// reports a consistency check between the document's classic and modified (Craig) tables, each
-/// combined with its own printed physical-angle mapping: the document's reset pose, physical
-/// `[180, 180, 180, 180, 180, 180]°`, gives `(0, 0.276298, 0.910704)` m from both tables. Both poses
-/// are verified here to `1e-6` m, the precision the specification states them to (measured residual
-/// `4.4e-7` m at both poses; the specification's six-decimal values are rounded).
-pub fn jaco() -> Robot {
-    jaco_in(DhConvention::Standard)
-}
 
 #[cfg(test)]
 mod tests {
@@ -414,42 +362,18 @@ mod tests {
         assert!(moved > 1.0, "measured 1.27 m; got {moved}");
     }
 
-    // ---- JACO ---------------------------------------------------------------------------------
 
-    /// Hand-computed from the classic table at DH `q = 0` (the document prints no EE position):
-    /// `(0.41, 0.256698, 0.050296)` m, stated to six decimals, hence the `1e-6` tolerance.
+
+    /// **Orientation at q = 0 is the identity, by hand.** The six constant rotations of the Gen3 lite
+    /// table, `Rz(θ₀)·Rx(α)` per row with θ₀ ∈ {0, π/2, π/2, π/2, π, π/2} and α ∈ {π/2, π, π/2, π/2, π/2, 0},
+    /// multiply to `I`, computed independently of this crate. Every other kinova test pins position only,
+    /// and a wrong twist on the LAST row moves no position at all: it only rotates the tool frame. This is
+    /// the pin that sees it.
     #[test]
-    fn jaco_matches_the_known_answer_computed_by_hand_from_the_table() {
-        known_answer("jaco", &jaco(), &Q6, Vector3::new(0.41, 0.256698, 0.050296), 1e-6);
+    fn gen3_lite_home_orientation_is_the_identity_computed_by_hand() {
+        let r = gen3_lite().fk(&[0.0; 6]).rotation.to_rotation_matrix();
+        let worst = (0..3).flat_map(|i| (0..3).map(move |j| (i, j))).map(|(i, j)| (r[(i, j)] - if i == j { 1.0 } else { 0.0 }).abs()).fold(0.0f64, f64::max);
+        assert!(worst < 1e-9, "home rotation should be I, worst entry error {worst:e}: {r}");
     }
 
-    /// The specification's own cross-check: the document's reset pose, physical `[180°; 6]`, mapped to
-    /// DH angles by the document's `Q₁ = −q₁, Q₂ = q₂ + 90, Q₃ = q₃ − 90, Q₄ = q₄, Q₅ = q₅ + 180,
-    /// Q₆ = q₆ − 100` (deg), lands at `(0, 0.276298, 0.910704)` m from both the classic and the modified
-    /// table. A second pose, away from `q = 0`, so the θ offsets and the wrist twist are exercised.
-    #[test]
-    fn jaco_reset_pose_matches_the_specifications_cross_check_between_both_tables() {
-        let physical = [180.0f64; 6];
-        let q: Vec<f64> = [-physical[0], physical[1] - 90.0, physical[2] + 90.0, physical[3], physical[4] - 180.0, physical[5] + 100.0].iter().map(|d| d.to_radians()).collect();
-        known_answer("jaco reset", &jaco(), &q, Vector3::new(0.0, 0.276298, 0.910704), 1e-6);
-    }
-
-    #[test]
-    fn jaco_has_six_joints_and_no_limits_efforts_or_rates_because_the_document_states_none_in_dh_units() {
-        let r = jaco();
-        assert_eq!(r.dof(), 6);
-        assert!(r.joints.iter().all(|j| j.limits.is_none() && j.effort.is_none() && j.max_velocity.is_none()));
-    }
-
-    #[test]
-    fn jaco_passes_the_hessian_finite_difference_check() {
-        hessian_check("jaco", &jaco(), &[0.3, -0.5, 0.12, 0.7, -0.4, 0.9]);
-    }
-
-    /// Measured move under the swap: 0.51 m.
-    #[test]
-    fn jaco_read_as_modified_dh_is_a_different_arm() {
-        let moved = convention_swap("jaco", &jaco(), &jaco_in(DhConvention::Modified), &Q6);
-        assert!(moved > 0.4, "measured 0.51 m; got {moved}");
-    }
 }

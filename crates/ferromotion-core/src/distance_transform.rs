@@ -22,11 +22,14 @@
 //! **Verified** (`tests` below): on the five specification fixtures DT1-4, DT1-8, DT2, DT3-4 and DT3-8 the
 //! planned cost matches the hand-computed value (8, `4+2√2`, unreachable, 12, `4+4√2`) to `1e-9`, and the
 //! oracle is [`crate::astar_grid_conn`] on the same fixture: the descent path's length equals the A\*
-//! path's length, and on DT1-8 the field at **every** free cell equals the A\* cost from that cell. Two
+//! path's length, and on DT1-8 the field at **every** free cell equals the A\* cost from that cell. Three
 //! further hand-computed fixtures pin what the specification's fixtures turned out not to (measured, see
 //! their tests): a 3×5 grid where a FIFO wavefront under eight-connectivity reads `3+2√2` for a cell whose
-//! cost is 5, and a 5×6 grid where descending by the field value alone would take a `2+3√2` path for a
-//! cell whose cost is 6. A blocked or out-of-bounds goal yields an all-`INFINITY` field; a blocked start
+//! cost is 5; a 3×6 grid where a heap sweep that keeps the first value pushed instead of relaxing on
+//! `dv < d[v]` reads `2+3√2` for a cell whose cost is 6 (measured: that mutation passes all five
+//! specification fixtures and the whole-field DT1-8 oracle, and fails only the 5×6 and 3×6 fixtures); and
+//! a 5×6 grid where descending by the field value alone would take a `2+3√2` path for a cell whose cost is
+//! 6. A blocked or out-of-bounds goal yields an all-`INFINITY` field; a blocked start
 //! yields `None`; a field from a different map or connectivity is detected by the Bellman consistency
 //! check and refused.
 
@@ -42,8 +45,11 @@ use crate::grid_astar::{Connectivity, OrdF, can_step};
 ///
 /// `is_free(i, j)` need not carry the bounds; they are applied here. Under [`Connectivity::Four`] this is
 /// a FIFO wavefront (exact for unit costs); under [`Connectivity::Eight`] it is a heap sweep (Dijkstra),
-/// because a FIFO wavefront under `√2` diagonals is wrong by up to `2-√2` per diagonal, and the DT1-8
-/// fixture pins that.
+/// because a FIFO wavefront under `√2` diagonals is wrong by up to `2-√2` per diagonal. The 3×5 fixture in
+/// `a_fifo_wavefront_would_be_wrong_here_and_the_heap_is_not` pins that (DT1-8 does not: measured, see the
+/// module doc). The heap branch relaxes on `dv < d[v]`, not on first push: the 3×6 fixture in
+/// `a_first_push_wins_heap_would_be_wrong_here` pins that (the five specification fixtures do not:
+/// measured, see the module doc).
 pub fn distance_transform(width: usize, height: usize, conn: Connectivity, is_free: impl Fn(i32, i32) -> bool, goal: (i32, i32)) -> Vec<f64> {
     let n = width * height;
     let mut d = vec![f64::INFINITY; n];
@@ -371,6 +377,39 @@ mod tests {
         assert!((cost - 5.0).abs() < 1e-9 && (path_length(&path) - 5.0).abs() < 1e-9);
         let oracle = astar_grid_conn(3, 5, Connectivity::Eight, &free, (0, 0), (1, 4)).unwrap();
         assert!((path_length(&oracle) - 5.0).abs() < 1e-9, "A* agrees: {}", path_length(&oracle));
+    }
+
+    /// A heap sweep must relax on `dv < d[v]`, not keep the first value pushed, hand computation. With a
+    /// heap the first push of a cell comes from its neighbour of smallest field value, and when that
+    /// neighbour is diagonal a later-popped orthogonal neighbour can still be cheaper: `d[u] = 2√2` from
+    /// `u` diagonally gives `3√2 ≈ 4.243`, `d[u'] = 3` from `u'` orthogonally gives 4. The five specification
+    /// fixtures do not exercise this (measured: the first-push rule passes all of them and the whole-field
+    /// DT1-8 oracle); the search in the scratchpad script found this 3-wide, 6-high grid as the smallest
+    /// with two obstacles where it fails. Goal `(0,5)`, obstacles `(0,0)` and `(1,2)`. The column
+    /// `(0,5)→(0,1)` costs 4, `(1,1)` reads 5 from `(0,1)` (its diagonal from `(0,2)` is refused by the
+    /// corner `(1,2)`), and `(1,0)` reads 6 from `(1,1)` (its diagonal from `(0,1)` is refused by the corner
+    /// `(0,0)`). The other route `(0,5)→(1,4)→(2,3)→(2,2)→(2,1)` costs `2+2√2 ≈ 4.828`, so `(2,1)` pops
+    /// before `(1,1)` and pushes `(1,0)` first at `2+3√2 ≈ 6.243`; only the later relaxation from `(1,1)`
+    /// brings it to 6. Non-vacuity: `dt[(2,1)] < dt[(1,1)]` and the `0.243` excess are asserted before the
+    /// field value is checked.
+    #[test]
+    fn a_first_push_wins_heap_would_be_wrong_here() {
+        let g = OccupancyGrid::from_rows(&["...", "...", "...", ".#.", "...", "#.."], 1.0, 0.0, 0.0).unwrap();
+        assert!(g.blocked(0, 0) && g.blocked(1, 2) && !g.blocked(0, 5), "the drawing's hashes are at (0,0) and (1,2)");
+        let free = free_of(&g);
+        let (start, goal) = ((1, 0), (0, 5));
+        let dt = distance_transform(3, 6, Connectivity::Eight, &free, goal);
+        let (d_orth, d_diag) = (dt[gidx(&g, (1, 1))], dt[gidx(&g, (2, 1))]);
+        assert!((d_orth - 5.0).abs() < 1e-9 && (d_diag - (2.0 + 2.0 * SQRT2)).abs() < 1e-9, "field {d_orth} {d_diag}");
+        assert!(d_diag < d_orth, "the diagonal neighbour pops first");
+        let first_push = d_diag + SQRT2;
+        assert!(first_push - 6.0 > 0.2, "and its push is not the cheapest: excess {}", first_push - 6.0);
+        assert!((dt[gidx(&g, start)] - 6.0).abs() < 1e-9, "(1,0) should read 6, the relaxed value; got {}", dt[gidx(&g, start)]);
+        let (cost, path) = plan(3, 6, Connectivity::Eight, &free, start, goal).unwrap();
+        assert!((cost - 6.0).abs() < 1e-9 && (path_length(&path) - 6.0).abs() < 1e-9, "cost {cost} path {}", path_length(&path));
+        assert_eq!(path[1], (1, 1), "the first step is the orthogonal one: {path:?}");
+        let oracle = astar_grid_conn(3, 6, Connectivity::Eight, &free, start, goal).unwrap();
+        assert!((path_length(&oracle) - 6.0).abs() < 1e-9, "A* agrees: {}", path_length(&oracle));
     }
 
     /// Descending by `dt[v]` alone is wrong, hand computation. On the five specification fixtures the

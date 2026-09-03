@@ -56,7 +56,7 @@ const BAXTER_TOOL_Z_M: f64 = 0.3683;
 /// Table 4 joint limits, Table 5 link lengths L0-L6; cross-checked with arXiv:2409.00867 'Kinematics &
 /// Dynamics Library for Baxter Arm' Table I (standard DH, same lengths)",
 /// <https://sites.ohio.edu/williams/html/PDF/BaxterKinematics.pdf>.
-/// **Confidence: published primary source.**
+/// **Confidence: derived from a teaching document** (R. L. Williams II's Baxter kinematics notes), not a manufacturer table or a peer-reviewed paper.
 ///
 /// **Table** (Williams' Table 2 with Table 5 lengths; lengths in metres, angles in radians):
 ///
