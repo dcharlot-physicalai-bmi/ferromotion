@@ -52,7 +52,7 @@ fn main() {
 
     // do-nothing baseline
     let zero = vec![0.0f64; pop * dim];
-    let base_reward = gp.rollout_rewards(&zero, &init, 0.0, effort_w, taumax, steps)[0];
+    let base_reward = gp.rollout_rewards(&zero, &init, effort_w, taumax, steps)[0];
 
     let mut seed = 0x1234_5678u64;
     let mut rng = || {
@@ -72,7 +72,7 @@ fn main() {
                 batch[p * dim + d] = mean[d] + sigma[d] * rng();
             }
         }
-        let rewards = gp.rollout_rewards(&batch, &init, 0.0, effort_w, taumax, steps);
+        let rewards = gp.rollout_rewards(&batch, &init, effort_w, taumax, steps);
         let mut idx: Vec<usize> = (0..pop).collect();
         idx.sort_by(|&a, &b| rewards[b].partial_cmp(&rewards[a]).unwrap());
         let elite = (pop as f64 * 0.15) as usize;
@@ -98,7 +98,7 @@ fn main() {
     let total_rollouts = (pop * gens) as f64;
     let total_steps = total_rollouts * steps as f64;
 
-    let final_reward = gp.rollout_rewards(&(0..pop).flat_map(|_| mean.clone()).collect::<Vec<_>>(), &init, 0.0, effort_w, taumax, steps)[0];
+    let final_reward = gp.rollout_rewards(&(0..pop).flat_map(|_| mean.clone()).collect::<Vec<_>>(), &init, effort_w, taumax, steps)[0];
     println!("\nlearned {final_reward:.2}  vs  do-nothing {base_reward:.2}  ({:.0}% higher)", 100.0 * (final_reward - base_reward) / base_reward.abs());
     println!(
         "throughput: {:.0} floating-base rollouts/s, {:.1}M sim-steps/s, over {elapsed:.2} s on the GPU",

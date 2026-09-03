@@ -135,7 +135,7 @@ impl ClearanceGpu {
         let t = robot.ee_offset.translation.vector;
         ee.extend_from_slice(&[t.x as f32, t.y as f32, t.z as f32]);
 
-        let prims: Vec<f32> = scene.prims.iter().flat_map(|s| prim_floats(s)).collect();
+        let prims: Vec<f32> = scene.prims.iter().flat_map(prim_floats).collect();
         let n_prims = scene.prims.len();
         let prm = [dof as f32, per_link as f32, link_r as f32, n_configs as f32, n_prims as f32];
 
@@ -372,9 +372,9 @@ impl SensorGpu {
         let ro = |binding| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None };
         let mut rw = ro(0);
         rw.ty = wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None };
-        let mut rw2 = rw.clone();
+        let mut rw2 = rw;
         rw2.binding = 3;
-        let mut rw_range = rw.clone();
+        let mut rw_range = rw;
         rw_range.binding = 2;
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("sensor-bgl"), entries: &[ro(0), ro(1), rw_range, rw2] });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("sensor-layout"), bind_group_layouts: &[Some(&bgl)], immediate_size: 0 });
@@ -1485,7 +1485,7 @@ const N: u32 = {N}u;
 @group(0) @binding(7) var<storage, read> INIT: array<f32>;           // 12+6+2N: shared rollout start (R0,p0,v0,q0,qd0)
 @group(0) @binding(8) var<storage, read> POLICY: array<f32>;         // per policy: W(N×in_dim) then b(N)
 @group(0) @binding(9) var<storage, read_write> REWARD: array<f32>;   // per policy: rollout return
-// PRM tail (rollout): [23] target_z [24] effort_w [25] taumax [26] rollout_steps [27] in_dim [28] n_policies
+// PRM tail (rollout): [23] reserved (never read by the reward) [24] effort_w [25] taumax [26] rollout_steps [27] in_dim [28] n_policies
 
 struct SV { t: vec3<f32>, b: vec3<f32> }
 struct SM { tl: mat3x3<f32>, tr: mat3x3<f32>, bl: mat3x3<f32>, br: mat3x3<f32> }
@@ -1652,7 +1652,7 @@ fn policy_tau(st: GState, pol: u32) -> array<f32,N> {
 fn gait_rollout(@builtin(global_invocation_id) g: vec3<u32>) {
   let pol = g.x; let n_policies = u32(PRM[28]);
   if (pol >= n_policies) { return; }
-  let target_z = PRM[23]; let effort_w = PRM[24]; let steps = u32(PRM[26]);
+  let effort_w = PRM[24]; let steps = u32(PRM[26]);
   // shared initial state from INIT
   var st: GState;
   st.R0 = mat3x3<f32>(vec3<f32>(INIT[0],INIT[1],INIT[2]), vec3<f32>(INIT[3],INIT[4],INIT[5]), vec3<f32>(INIT[6],INIT[7],INIT[8]));
@@ -1664,7 +1664,7 @@ fn gait_rollout(@builtin(global_invocation_id) g: vec3<u32>) {
     let tau = policy_tau(st, pol);
     st = gait_advance(st, tau);
     // reward: keep the base HIGH (extend the leg against gravity), minus a small effort cost, gated
-    // by staying upright so it can't "win" by toppling. target_z is unused here.
+    // by staying upright so it can't "win" by toppling. No target height enters the reward (PRM[23] is reserved).
     var eff = 0.0; for (var j=0u;j<N;j=j+1u){ eff = eff + tau[j]*tau[j]; }
     reward = reward + st.p0.z * max(st.R0[2][2], 0.0) - effort_w*eff;
   }
@@ -1788,16 +1788,16 @@ impl FloatingGaitGpu {
     /// linear policies (`W(n×in_dim), b(n)` each, `in_dim = 3 + 2n`); all roll out `steps` contact
     /// steps from the shared initial state `init = [R0(9,col-major), p0(3), v0(6), q(n), qd(n)]` under
     /// the policy `τ = clamp(W·[base_z, up-alignment, vertical-vel, q, qd] + b, ±taumax)`. Returns the
-    /// per-policy return `−Σ((z−z*)² + 0.3(1−up) + w‖τ‖²)`. One GPU thread per policy.
-    #[allow(clippy::too_many_arguments)]
-    pub fn rollout_rewards(&self, policies: &[f64], init: &[f64], target_z: f64, effort_w: f64, taumax: f64, steps: usize) -> Vec<f64> {
+    /// per-policy return `Σ_t (z_t · max(up_t, 0) − w‖τ_t‖²)`: base height gated by uprightness, minus
+    /// effort. No target height enters the reward. One GPU thread per policy.
+    pub fn rollout_rewards(&self, policies: &[f64], init: &[f64], effort_w: f64, taumax: f64, steps: usize) -> Vec<f64> {
         let n_policies = policies.len() / self.policy_dim;
         assert_eq!(init.len(), 18 + 2 * self.n, "init state size mismatch");
         let f = |s: &[f64]| -> Vec<f32> { s.iter().map(|&v| v as f32).collect() };
         self.queue.write_buffer(&self.policy_buf, 0, bytemuck::cast_slice(&f(policies)));
         self.queue.write_buffer(&self.init_buf, 0, bytemuck::cast_slice(&f(init)));
         let mut prm = self.base_prm.clone();
-        prm[23] = target_z as f32; prm[24] = effort_w as f32; prm[25] = taumax as f32; prm[26] = steps as f32; prm[28] = n_policies as f32;
+        prm[24] = effort_w as f32; prm[25] = taumax as f32; prm[26] = steps as f32; prm[28] = n_policies as f32;
         self.queue.write_buffer(&self.prm_buf, 0, bytemuck::cast_slice(&prm));
 
         let mut enc = self.device.create_command_encoder(&Default::default());
@@ -2712,8 +2712,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 /// Batched hard frictional contact — one GPU thread per environment solving the differentiable
-/// Stewart-Trinkle LCP of [`crate::solve_frictional_ipm`] on the central path. The contact STRUCTURE (normal
-/// + friction-facet directions, `mu`) is fixed at construction; the mass matrix `M`, free velocity
+/// Stewart-Trinkle LCP of [`crate::solve_frictional_ipm`] on the central path. The contact STRUCTURE (normal +
+/// friction-facet directions, `mu`) is fixed at construction; the mass matrix `M`, free velocity
 /// `v_free`, and signed gaps `phi` vary per environment. Feature `gpu`. Verified against the CPU
 /// oracle. HONEST SCOPE: per-thread private arrays scale as `nv²+nz²`, so this is for small–moderate
 /// contact sets (a handful of contacts); at large `nv`/`nz` register/occupancy pressure dominates.
@@ -3503,7 +3503,7 @@ mod verification {
         let mut qd = init[18 + n..18 + 2 * n].to_vec();
         let mut reward = 0.0;
         for t in 0..steps {
-            let clock = 6.2831853 * freq * t as f64 * dt;
+            let clock = std::f64::consts::TAU * freq * t as f64 * dt;
             let r0 = *base.rotation.to_rotation_matrix().matrix();
             let up = r0[(2, 2)];
             let vfwd = (r0 * v0.fixed_rows::<3>(3).into_owned()).x;
@@ -3690,7 +3690,7 @@ mod verification {
             (((z ^ (z >> 31)) as f64) / (u64::MAX as f64)) * 2.0 - 1.0
         };
         let mut base_pose = vec![0.0f64; n_envs * 12];
-        let mut v0 = vec![0.0f64; n_envs * 6];
+        let v0 = vec![0.0f64; n_envs * 6];
         let mut q = vec![0.0f64; n_envs * n];
         let mut qd = vec![0.0f64; n_envs * n];
         let mut tau = vec![0.0f64; n_envs * n];
@@ -3744,7 +3744,7 @@ mod verification {
     /// The CPU rollout reward — mirrors the GPU `gait_rollout` exactly (same features, policy, reward)
     /// — used to check the port and inside the CEM baseline.
     #[allow(clippy::too_many_arguments)]
-    fn cpu_gait_reward(robot: &crate::Robot, inertia: &[LinkInertia], base_inertia: &LinkInertia, contacts: &[crate::FootContact], floor: f64, kn: f64, kd: f64, dt: f64, g: Vector3<f64>, init: &[f64], policy: &[f64], target_z: f64, effort_w: f64, taumax: f64, steps: usize, n: usize) -> f64 {
+    fn cpu_gait_reward(robot: &crate::Robot, inertia: &[LinkInertia], base_inertia: &LinkInertia, contacts: &[crate::FootContact], floor: f64, kn: f64, kd: f64, dt: f64, g: Vector3<f64>, init: &[f64], policy: &[f64], effort_w: f64, taumax: f64, steps: usize, n: usize) -> f64 {
         use nalgebra::Rotation3;
         let in_dim = 3 + 2 * n;
         let rmat = Matrix3::from_column_slice(&init[0..9]);
@@ -3784,7 +3784,7 @@ mod verification {
         let g = Vector3::new(0.0, 0.0, -9.81);
         let (floor, kn, kd, dt) = (0.0, 6.0e3, 80.0, 1e-3);
         let contacts: Vec<crate::FootContact> = vec![(n, Vector3::zeros(), 0.9)];
-        let (target_z, effort_w, taumax, steps) = (0.0, 2e-5, 40.0, 250);
+        let (effort_w, taumax, steps) = (2e-5, 40.0, 250);
 
         // shared init: a deeply FOLDED leg (a crouch) with the foot planted — do-nothing stays crouched
         // (low base), so the policy must push the leg to stand the base up. Big headroom to improve.
@@ -3816,7 +3816,7 @@ mod verification {
         for giter in 0..gens {
             let mut batch = vec![0.0f64; pop * dim];
             for p in 0..pop { for d in 0..dim { batch[p * dim + d] = mean[d] + sigma[d] * rng(); } }
-            let rewards = gp.rollout_rewards(&batch, &init, target_z, effort_w, taumax, steps);
+            let rewards = gp.rollout_rewards(&batch, &init, effort_w, taumax, steps);
             let mut idx: Vec<usize> = (0..pop).collect();
             idx.sort_by(|&a, &b| rewards[b].partial_cmp(&rewards[a]).unwrap());
             let best = rewards[idx[0]];
@@ -3835,11 +3835,11 @@ mod verification {
 
         // do-nothing baseline (leg buckles, base collapses) and the learned policy's CPU reward
         let zero = vec![0.0f64; dim];
-        let base_reward = cpu_gait_reward(&robot, &inertia, &base_inertia, &contacts, floor, kn, kd, dt, g, &init, &zero, target_z, effort_w, taumax, steps, n);
-        let learned_cpu = cpu_gait_reward(&robot, &inertia, &base_inertia, &contacts, floor, kn, kd, dt, g, &init, &best_policy, target_z, effort_w, taumax, steps, n);
+        let base_reward = cpu_gait_reward(&robot, &inertia, &base_inertia, &contacts, floor, kn, kd, dt, g, &init, &zero, effort_w, taumax, steps, n);
+        let learned_cpu = cpu_gait_reward(&robot, &inertia, &base_inertia, &contacts, floor, kn, kd, dt, g, &init, &best_policy, effort_w, taumax, steps, n);
         // GPU reward for the learned policy (fill the batch) — the port check
         let filled: Vec<f64> = (0..pop).flat_map(|_| best_policy.clone()).collect();
-        let grew = gp.rollout_rewards(&filled, &init, target_z, effort_w, taumax, steps)[0];
+        let grew = gp.rollout_rewards(&filled, &init, effort_w, taumax, steps)[0];
         let port_rel = ((grew - learned_cpu) / learned_cpu.abs().max(1.0)).abs();
 
         eprintln!("CEM floating-base support ({pop} policies × {gens} gens): best reward {first_best:.3} → {last_best:.3}; learned {learned_cpu:.3} vs do-nothing {base_reward:.3}; GPU vs CPU reward rel {port_rel:.2e}");
