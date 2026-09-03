@@ -507,7 +507,13 @@ impl Robot {
     }
 
     /// End-effector pose for configuration `q`.
+    ///
+    /// `q.len()` must equal [`Self::dof`]. The chain is composed by zipping joints with `q`, so a short
+    /// `q` used to be truncated silently: a 7-joint arm evaluated with six values reported a pose with
+    /// the last joint frozen and no error anywhere. That is checked in debug builds now, which is where
+    /// tests run; release builds keep the zip so a hot path pays nothing.
     pub fn fk(&self, q: &[f64]) -> Iso {
+        debug_assert_eq!(q.len(), self.dof(), "fk: q has {} entries for a {}-joint chain; a short q silently freezes the tail of the arm", q.len(), self.dof());
         let mut t = Iso::identity();
         for (j, &qi) in self.joints.iter().zip(q) {
             t *= j.transform(qi);
@@ -518,6 +524,7 @@ impl Robot {
     /// 6×N world-frame geometric Jacobian: dq → [linear; angular] end-effector velocity.
     pub fn jacobian(&self, q: &[f64]) -> DMatrix<f64> {
         let n = self.dof();
+        debug_assert_eq!(q.len(), n, "jacobian: q has {} entries for a {}-joint chain", q.len(), n);
         let mut jac = DMatrix::zeros(6, n);
         let p_ee = self.fk(q).translation.vector;
         let mut t = Iso::identity();
