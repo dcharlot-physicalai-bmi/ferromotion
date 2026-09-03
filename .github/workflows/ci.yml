@@ -42,12 +42,12 @@ jobs:
 
       # Both of these were local-only discipline until 2026-08-15 and therefore enforced only by memory.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       # The doc build catches a class nothing else does: intra-doc links to private or non-existent items,
       # which ship as broken links on docs.rs. Its first run found 22, one of which was a `pub fn` in a
       # private module that no external caller could reach at all.
       - name: Docs (broken intra-doc links are errors)
-        run: cargo doc --no-deps --workspace
+        run: cargo doc --all-features --no-deps --workspace
         env:
           RUSTDOCFLAGS: -D warnings
