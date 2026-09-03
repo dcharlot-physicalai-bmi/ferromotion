@@ -382,4 +382,35 @@ mod tests {
         assert!(spec_plan(&grid, Connectivity::Eight, (0, 0), (0, -1)).is_none(), "a goal below the drawing must be None");
         assert!(spec_plan(&grid, Connectivity::Eight, (0, 5), (0, 0)).is_none(), "a start above the drawing must be None");
     }
+
+    /// **Manhattan under 8-connectivity is inadmissible, and here it costs a real path.**
+    ///
+    /// The six spec fixtures all pass with Manhattan under Eight because on those grids its greedy
+    /// preference for diagonals lands on the optimum anyway; the first implementer reported that as a
+    /// documented non-failure. This grid was found by search so that it is not: A* with Manhattan under
+    /// Eight terminates on a path of true length 10.828427125 where the optimum is 10.242640687.
+    /// Drawn top row first; start bottom-left, goal top-right.
+    #[test]
+    fn manhattan_under_eight_is_caught_on_a_grid_where_it_matters() {
+        let g = crate::OccupancyGrid::from_rows(&[".......", "...#.#.", "#.#.#..", "..#....", ".......", "..#.###", "...##.#"], 1.0, 0.0, 0.0).expect("rectangular drawing");
+        let free = |i: i32, j: i32| !g.blocked(i as i64, j as i64);
+        let p = astar_grid_conn(7, 7, Connectivity::Eight, free, (0, 0), (6, 6)).expect("reachable");
+        assert!((path_length(&p) - 10.242640687119).abs() < 1e-9, "optimal cost {}", path_length(&p));
+    }
+
+    /// **The diagonal edge cost inside the search is load-bearing here.**
+    ///
+    /// On the spec fixtures every step-minimal path has the same diagonal count, so a search that
+    /// priced diagonals at 1.0 still returned a path whose `path_length` (which prices them at sqrt2
+    /// independently) was the optimum; the first implementer reported that non-failure too. On this grid a
+    /// search believing diagonals cost 1.0 chooses a diagonal-heavy path of true length 11.242640687
+    /// against an optimum of 10.414213562, so the assertion sees it.
+    #[test]
+    fn the_diagonal_step_cost_is_pinned_on_a_grid_where_it_changes_the_path() {
+        let g = crate::OccupancyGrid::from_rows(&["#....", "..#..", "....#", ".#...", "..#.#", "...#.", ".....", ".#.#."], 1.0, 0.0, 0.0).expect("rectangular drawing");
+        let free = |i: i32, j: i32| !g.blocked(i as i64, j as i64);
+        let p = astar_grid_conn(5, 8, Connectivity::Eight, free, (0, 0), (4, 7)).expect("reachable");
+        assert!((path_length(&p) - 10.414213562373).abs() < 1e-9, "optimal cost {}", path_length(&p));
+    }
+
 }
