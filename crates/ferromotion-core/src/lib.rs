@@ -127,6 +127,7 @@ mod robot_plan;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 mod robust;
+mod dh;
 mod prm;
 mod rrt;
 mod cspace_sdf;
@@ -265,6 +266,7 @@ pub use mjcf::{from_mjcf_constrained, from_mjcf_full, from_mjcf_str, to_mjcf};
 pub use usda::{axis_token, parse_usda, robot_from_usda, usda_from_robot, ParseError, Prim, UsdaStage, Value};
 pub use urdf::from_urdf_full;
 pub use robust::solve_ik_robust;
+pub use dh::{DhConvention, DhRow};
 pub use prm::{PrmStar, Roadmap};
 pub use rrt::{RrtResult, RrtStar};
 pub use robot_plan::{arm_clearance, arm_spheres, plan_arm_reach, ReachPlanOptions};
