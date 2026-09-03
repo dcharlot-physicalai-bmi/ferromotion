@@ -41,9 +41,10 @@
 //! returns A\*'s cost, and each repair is checked against a fresh [`lattice_astar`]. Pure Rust →
 //! WASM-clean.
 
+use crate::dstar_lite::key_cmp;
 use crate::grid_astar::OrdF;
 use crate::OccupancyGrid;
-use std::cmp::Reverse;
+use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeSet, BinaryHeap};
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
@@ -102,7 +103,10 @@ pub struct LatticeWeights {
 impl Default for LatticeWeights {
     /// Unit weights: cost is path length, and a point turn costs its angle in radians.
     fn default() -> Self {
-        LatticeWeights { w_rev: 1.0, w_turn: 1.0 }
+        LatticeWeights {
+            w_rev: 1.0,
+            w_turn: 1.0,
+        }
     }
 }
 
@@ -146,7 +150,10 @@ pub fn arc_endpoint(theta0: f64, kappa: f64, s_signed: f64) -> (f64, f64, f64) {
 fn point_swath(samples: &[(f64, f64, f64)], dl: f64) -> Vec<(i32, i32)> {
     let mut cells = BTreeSet::new();
     for &(x, y, _) in samples {
-        cells.insert((((x + 0.5 * dl) / dl).floor() as i32, ((y + 0.5 * dl) / dl).floor() as i32));
+        cells.insert((
+            ((x + 0.5 * dl) / dl).floor() as i32,
+            ((y + 0.5 * dl) / dl).floor() as i32,
+        ));
     }
     cells.into_iter().collect()
 }
@@ -170,13 +177,25 @@ impl Lattice {
     /// An empty lattice over `headings` (wrapped to `[0, 2π)`) with cell size `dl`.
     pub fn new(dl: f64, headings: Vec<f64>) -> Lattice {
         let n = headings.len();
-        Lattice { dl, headings: headings.into_iter().map(|h| h.rem_euclid(TAU)).collect(), prims: Vec::new(), out: vec![Vec::new(); n], inp: vec![Vec::new(); n] }
+        Lattice {
+            dl,
+            headings: headings.into_iter().map(|h| h.rem_euclid(TAU)).collect(),
+            prims: Vec::new(),
+            out: vec![Vec::new(); n],
+            inp: vec![Vec::new(); n],
+        }
     }
 
     /// Add a primitive to the control set and return its id. Panics if a heading index is out of range,
     /// since a primitive that names a heading the table does not have cannot be an edge of this graph.
     pub fn push(&mut self, p: Primitive) -> usize {
-        assert!(p.h_from < self.headings.len() && p.h_to < self.headings.len(), "primitive headings ({}, {}) exceed the {}-entry table", p.h_from, p.h_to, self.headings.len());
+        assert!(
+            p.h_from < self.headings.len() && p.h_to < self.headings.len(),
+            "primitive headings ({}, {}) exceed the {}-entry table",
+            p.h_from,
+            p.h_to,
+            self.headings.len()
+        );
         let id = self.prims.len();
         self.out[p.h_from].push(id);
         self.inp[p.h_to].push(id);
@@ -193,9 +212,21 @@ impl Lattice {
     /// `(0, 0, headings[h_from])`, the last is snapped to the exact node, and the swath is the point-robot
     /// cell set along them. Verified: every primitive of [`Lattice::four_heading`] passes; a quarter arc
     /// of radius `1.5·dl`, a 45° arc, and a straight of `1.5·dl` are refused.
-    pub fn unicycle_primitive(&self, h_from: usize, kappa: f64, dir: i8, length: f64) -> Option<Primitive> {
+    pub fn unicycle_primitive(
+        &self,
+        h_from: usize,
+        kappa: f64,
+        dir: i8,
+        length: f64,
+    ) -> Option<Primitive> {
         let theta0 = *self.headings.get(h_from)?;
-        if !length.is_finite() || length <= 0.0 || !kappa.is_finite() || dir == 0 || !self.dl.is_finite() || self.dl <= 0.0 {
+        if !length.is_finite()
+            || length <= 0.0
+            || !kappa.is_finite()
+            || dir == 0
+            || !self.dl.is_finite()
+            || self.dl <= 0.0
+        {
             return None;
         }
         let dir = dir.signum();
@@ -206,7 +237,10 @@ impl Lattice {
         if (xe - di * self.dl).abs() > tol || (ye - dj * self.dl).abs() > tol {
             return None;
         }
-        let h_to = self.headings.iter().position(|&h| wrap(te - h).abs() <= 1e-9)?;
+        let h_to = self
+            .headings
+            .iter()
+            .position(|&h| wrap(te - h).abs() <= 1e-9)?;
         let n = (length / (self.dl / 10.0)).ceil().max(1.0) as usize;
         let mut samples: Vec<(f64, f64, f64)> = (0..=n)
             .map(|k| {
@@ -215,10 +249,26 @@ impl Lattice {
             })
             .collect();
         samples[0] = (0.0, 0.0, theta0);
-        *samples.last_mut().expect("n >= 1 samples") = (di * self.dl, dj * self.dl, self.headings[h_to]);
+        *samples.last_mut().expect("n >= 1 samples") =
+            (di * self.dl, dj * self.dl, self.headings[h_to]);
         let swath = point_swath(&samples, self.dl);
-        let kind = if kappa.abs() < 1e-12 { PrimitiveKind::Straight } else { PrimitiveKind::Arc { kappa } };
-        Some(Primitive { h_from, h_to, di: di as i32, dj: dj as i32, length, dir, kind, dtheta: kappa * s_end, samples, swath })
+        let kind = if kappa.abs() < 1e-12 {
+            PrimitiveKind::Straight
+        } else {
+            PrimitiveKind::Arc { kappa }
+        };
+        Some(Primitive {
+            h_from,
+            h_to,
+            di: di as i32,
+            dj: dj as i32,
+            length,
+            dir,
+            kind,
+            dtheta: kappa * s_end,
+            samples,
+            swath,
+        })
     }
 
     /// A rotation in place from heading `h_from` to `h_to` (shortest signed angle), swath `{(0, 0)}`.
@@ -229,7 +279,18 @@ impl Lattice {
         }
         let (a, b) = (*self.headings.get(h_from)?, *self.headings.get(h_to)?);
         let dtheta = wrap(b - a);
-        Some(Primitive { h_from, h_to, di: 0, dj: 0, length: 0.0, dir: 1, kind: PrimitiveKind::PointTurn, dtheta, samples: vec![(0.0, 0.0, a), (0.0, 0.0, b)], swath: vec![(0, 0)] })
+        Some(Primitive {
+            h_from,
+            h_to,
+            di: 0,
+            dj: 0,
+            length: 0.0,
+            dir: 1,
+            kind: PrimitiveKind::PointTurn,
+            dtheta,
+            samples: vec![(0.0, 0.0, a), (0.0, 0.0, b)],
+            swath: vec![(0, 0)],
+        })
     }
 
     /// The exact four-heading control set (TR-07-15 Fig. 3's "carefully chosen length" Reeds–Shepp
@@ -268,7 +329,9 @@ impl Lattice {
 /// Whether primitive `prim` driven from `node` is collision-free: no swath cell is
 /// [`OccupancyGrid::blocked`] (which counts out-of-bounds as blocked).
 pub fn edge_free(grid: &OccupancyGrid, node: LatticeNode, prim: &Primitive) -> bool {
-    prim.swath.iter().all(|&(di, dj)| !grid.blocked(i64::from(node.0 + di), i64::from(node.1 + dj)))
+    prim.swath
+        .iter()
+        .all(|&(di, dj)| !grid.blocked(i64::from(node.0 + di), i64::from(node.1 + dj)))
 }
 
 /// A plan on the lattice.
@@ -286,7 +349,11 @@ pub struct LatticePath {
 
 /// World-frame pose of a node's centre.
 fn node_pose(grid: &OccupancyGrid, lattice: &Lattice, n: LatticeNode) -> (f64, f64, f64) {
-    (grid.origin_x + (f64::from(n.0) + 0.5) * lattice.dl, grid.origin_y + (f64::from(n.1) + 0.5) * lattice.dl, lattice.headings[n.2])
+    (
+        grid.origin_x + (f64::from(n.0) + 0.5) * lattice.dl,
+        grid.origin_y + (f64::from(n.1) + 0.5) * lattice.dl,
+        lattice.headings[n.2],
+    )
 }
 
 /// A\* over the lattice from `start` to `goal` (both integer nodes). Returns the cost-optimal primitive
@@ -297,24 +364,42 @@ fn node_pose(grid: &OccupancyGrid, lattice: &Lattice, n: LatticeNode) -> (f64, f
 /// Heuristic: Euclidean distance between node centres, admissible (every primitive is at least its
 /// chord) and consistent, so a node is closed once. Ties on `f` prefer the larger `g`. Duplicate heap
 /// entries stand in for decrease-key and are skipped on pop when the node is already closed.
-pub fn lattice_astar(grid: &OccupancyGrid, lattice: &Lattice, start: LatticeNode, goal: LatticeNode, weights: LatticeWeights) -> Option<LatticePath> {
+pub fn lattice_astar(
+    grid: &OccupancyGrid,
+    lattice: &Lattice,
+    start: LatticeNode,
+    goal: LatticeNode,
+    weights: LatticeWeights,
+) -> Option<LatticePath> {
     let (w, hgt, n_h) = (grid.width, grid.height, lattice.headings.len());
     if n_h == 0 || (lattice.dl - grid.resolution).abs() > 1e-12 * grid.resolution.abs() {
         return None;
     }
-    let in_bounds = |n: LatticeNode| n.0 >= 0 && n.1 >= 0 && (n.0 as usize) < w && (n.1 as usize) < hgt && n.2 < n_h;
-    if !in_bounds(start) || !in_bounds(goal) || grid.blocked(i64::from(start.0), i64::from(start.1)) || grid.blocked(i64::from(goal.0), i64::from(goal.1)) {
+    let in_bounds = |n: LatticeNode| {
+        n.0 >= 0 && n.1 >= 0 && (n.0 as usize) < w && (n.1 as usize) < hgt && n.2 < n_h
+    };
+    if !in_bounds(start)
+        || !in_bounds(goal)
+        || grid.blocked(i64::from(start.0), i64::from(start.1))
+        || grid.blocked(i64::from(goal.0), i64::from(goal.1))
+    {
         return None;
     }
     if start == goal {
-        return Some(LatticePath { cost: 0.0, nodes: vec![start], primitives: Vec::new(), samples: vec![node_pose(grid, lattice, start)] });
+        return Some(LatticePath {
+            cost: 0.0,
+            nodes: vec![start],
+            primitives: Vec::new(),
+            samples: vec![node_pose(grid, lattice, start)],
+        });
     }
     let idx = |n: LatticeNode| (n.1 as usize * w + n.0 as usize) * n_h + n.2;
     let node_of = |k: usize| -> LatticeNode {
         let c = k / n_h;
         ((c % w) as i32, (c / w) as i32, k % n_h)
     };
-    let heuristic = |n: LatticeNode| lattice.dl * f64::from(goal.0 - n.0).hypot(f64::from(goal.1 - n.1));
+    let heuristic =
+        |n: LatticeNode| lattice.dl * f64::from(goal.0 - n.0).hypot(f64::from(goal.1 - n.1));
 
     let n_states = w * hgt * n_h;
     let mut g = vec![f64::INFINITY; n_states];
@@ -369,7 +454,13 @@ pub fn lattice_astar(grid: &OccupancyGrid, lattice: &Lattice, start: LatticeNode
 
 /// Replay a primitive sequence from `start` into nodes and world-frame samples. Shared by the A\* and
 /// D\* Lite paths so the two cannot disagree on where a sample lands.
-fn assemble_path(grid: &OccupancyGrid, lattice: &Lattice, start: LatticeNode, primitives: Vec<usize>, cost: f64) -> LatticePath {
+fn assemble_path(
+    grid: &OccupancyGrid,
+    lattice: &Lattice,
+    start: LatticeNode,
+    primitives: Vec<usize>,
+    cost: f64,
+) -> LatticePath {
     let mut nodes = vec![start];
     let mut samples = Vec::new();
     for (k, &pid) in primitives.iter().enumerate() {
@@ -382,12 +473,52 @@ fn assemble_path(grid: &OccupancyGrid, lattice: &Lattice, start: LatticeNode, pr
         }
         nodes.push((u.0 + p.di, u.1 + p.dj, p.h_to));
     }
-    LatticePath { cost, nodes, primitives, samples }
+    LatticePath {
+        cost,
+        nodes,
+        primitives,
+        samples,
+    }
 }
 
 // ------------------------------------------------------------------------------------------------
 // D* Lite on the same lattice
 // ------------------------------------------------------------------------------------------------
+
+/// One priority-queue entry of [`LatticeDStarLite`], ordered by the SAME tolerant key order as the
+/// grid planner (`dstar_lite::key_cmp`, components closer than `KEY_EPS` compare equal), then by
+/// insertion version and node index so the heap order is total.
+///
+/// Why tolerant: with cell size `0.7` the node straight ahead of the start has a key that ties the
+/// start's key in real arithmetic (`3 × 0.7` on one side, `0.7 + 0.7 + 0.7` on the other) and the
+/// two round differently. Exact comparison then breaks the tie the wrong way, the main loop stops
+/// before that node is expanded, and the start keeps a stale cost. Measured before this change on
+/// the randomized differential test below: 67 divergences in 6383 comparisons at `dl = 0.7`, 44 with
+/// cell flips alone, and none at `dl ∈ {0.5, 1, 2}`, the cell sizes whose sums are exact in binary.
+#[derive(Clone, Copy, Debug)]
+struct QueueEntry {
+    key: (OrdF, OrdF),
+    ver: u64,
+    k: usize,
+}
+impl PartialEq for QueueEntry {
+    fn eq(&self, o: &Self) -> bool {
+        self.cmp(o) == Ordering::Equal
+    }
+}
+impl Eq for QueueEntry {}
+impl PartialOrd for QueueEntry {
+    fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
+        Some(self.cmp(o))
+    }
+}
+impl Ord for QueueEntry {
+    fn cmp(&self, o: &Self) -> Ordering {
+        key_cmp(self.key, o.key)
+            .then(self.ver.cmp(&o.ver))
+            .then(self.k.cmp(&o.k))
+    }
+}
 
 /// Incremental replanning over the lattice: Koenig & Likhachev, *D\* Lite*, AAAI-02 pp. 476–483,
 /// Figure 3, lines {01'}–{35'}, with the lattice's primitives as edges. The search runs **backward**
@@ -415,7 +546,7 @@ pub struct LatticeDStarLite<'a> {
     g: Vec<f64>,
     rhs: Vec<f64>,
     /// `(k1, k2, version, node)`; an entry whose version is not the node's current one is stale.
-    queue: BinaryHeap<Reverse<(OrdF, OrdF, u64, usize)>>,
+    queue: BinaryHeap<Reverse<QueueEntry>>,
     version: Vec<u64>,
     next_version: u64,
     km: f64,
@@ -429,13 +560,34 @@ impl<'a> LatticeDStarLite<'a> {
     /// Set up for `grid`'s dimensions with the robot at `start` and a fixed `goal`, then run the first
     /// search (`initialize` + `ComputeShortestPath`, lines {21'}–{24'}). `None` if either node is off the
     /// map, the heading table is empty, or `lattice.dl` differs from `grid.resolution`.
-    pub fn new(grid: &OccupancyGrid, lattice: &'a Lattice, start: LatticeNode, goal: LatticeNode, weights: LatticeWeights) -> Option<Self> {
+    pub fn new(
+        grid: &OccupancyGrid,
+        lattice: &'a Lattice,
+        start: LatticeNode,
+        goal: LatticeNode,
+        weights: LatticeWeights,
+    ) -> Option<Self> {
         let n_h = lattice.headings.len();
         if n_h == 0 || (lattice.dl - grid.resolution).abs() > 1e-12 * grid.resolution.abs() {
             return None;
         }
         let n = grid.width * grid.height * n_h;
-        let mut d = LatticeDStarLite { lattice, weights, width: grid.width, height: grid.height, g: vec![f64::INFINITY; n], rhs: vec![f64::INFINITY; n], queue: BinaryHeap::new(), version: vec![0; n], next_version: 1, km: 0.0, start, last: start, goal, expansions: 0 };
+        let mut d = LatticeDStarLite {
+            lattice,
+            weights,
+            width: grid.width,
+            height: grid.height,
+            g: vec![f64::INFINITY; n],
+            rhs: vec![f64::INFINITY; n],
+            queue: BinaryHeap::new(),
+            version: vec![0; n],
+            next_version: 1,
+            km: 0.0,
+            start,
+            last: start,
+            goal,
+            expansions: 0,
+        };
         if !d.in_bounds(start) || !d.in_bounds(goal) {
             return None;
         }
@@ -447,7 +599,11 @@ impl<'a> LatticeDStarLite<'a> {
     }
 
     fn in_bounds(&self, n: LatticeNode) -> bool {
-        n.0 >= 0 && n.1 >= 0 && (n.0 as usize) < self.width && (n.1 as usize) < self.height && n.2 < self.lattice.headings.len()
+        n.0 >= 0
+            && n.1 >= 0
+            && (n.0 as usize) < self.width
+            && (n.1 as usize) < self.height
+            && n.2 < self.lattice.headings.len()
     }
 
     fn idx(&self, n: LatticeNode) -> usize {
@@ -467,7 +623,10 @@ impl<'a> LatticeDStarLite<'a> {
     /// `CalculateKey(s)`, line {01'}: `(min(g, rhs) + h(start, s) + k_m, min(g, rhs))`.
     fn key(&self, k: usize) -> (OrdF, OrdF) {
         let m = self.g[k].min(self.rhs[k]);
-        (OrdF(m + self.heuristic(self.start, self.node_of(k)) + self.km), OrdF(m))
+        (
+            OrdF(m + self.heuristic(self.start, self.node_of(k)) + self.km),
+            OrdF(m),
+        )
     }
 
     fn insert(&mut self, k: usize) {
@@ -475,18 +634,26 @@ impl<'a> LatticeDStarLite<'a> {
         self.next_version += 1;
         self.version[k] = v;
         let key = self.key(k);
-        self.queue.push(Reverse((key.0, key.1, v, k)));
+        self.queue.push(Reverse(QueueEntry { key, ver: v, k }));
     }
 
     /// Cost of the edge that drives primitive `pid` from `v`: `∞` if `v` is off the map or the swath
     /// is blocked, else the primitive's weighted cost.
     fn edge_cost(&self, grid: &OccupancyGrid, v: LatticeNode, pid: usize) -> f64 {
         let p = &self.lattice.prims[pid];
-        if !self.in_bounds(v) || !edge_free(grid, v, p) { f64::INFINITY } else { p.cost(&self.weights) }
+        if !self.in_bounds(v) || !edge_free(grid, v, p) {
+            f64::INFINITY
+        } else {
+            p.cost(&self.weights)
+        }
     }
 
     /// The successor of `u` with the least `c(u, s') + g(s')`, as `(cost, primitive id, s')`.
-    fn best_successor(&self, grid: &OccupancyGrid, u: LatticeNode) -> Option<(f64, usize, LatticeNode)> {
+    fn best_successor(
+        &self,
+        grid: &OccupancyGrid,
+        u: LatticeNode,
+    ) -> Option<(f64, usize, LatticeNode)> {
         let mut best: Option<(f64, usize, LatticeNode)> = None;
         for &pid in &self.lattice.out[u.2] {
             let p = &self.lattice.prims[pid];
@@ -516,9 +683,9 @@ impl<'a> LatticeDStarLite<'a> {
 
     /// Drop stale heap entries and return the top key, or `None` for an empty queue.
     fn top_key(&mut self) -> Option<(OrdF, OrdF)> {
-        while let Some(Reverse((k1, k2, v, k))) = self.queue.peek().copied() {
-            if self.version[k] == v {
-                return Some((k1, k2));
+        while let Some(Reverse(e)) = self.queue.peek().copied() {
+            if self.version[e.k] == e.ver {
+                return Some(e.key);
             }
             self.queue.pop();
         }
@@ -530,14 +697,15 @@ impl<'a> LatticeDStarLite<'a> {
     pub fn compute_shortest_path(&mut self, grid: &OccupancyGrid) -> bool {
         let si = self.idx(self.start);
         while let Some(k_old) = self.top_key() {
-            if !(k_old < self.key(si) || self.rhs[si] != self.g[si]) {
+            if !(key_cmp(k_old, self.key(si)) == Ordering::Less || self.rhs[si] != self.g[si]) {
                 break;
             }
-            let Reverse((_, _, _, k)) = self.queue.pop().expect("top_key found a live entry");
+            let Reverse(QueueEntry { k, .. }) =
+                self.queue.pop().expect("top_key found a live entry");
             self.version[k] = 0;
             self.expansions += 1;
             let k_new = self.key(k);
-            if k_old < k_new {
+            if key_cmp(k_old, k_new) == Ordering::Less {
                 self.insert(k); // {13'}–{14'}: the key went stale as k_m grew
                 continue;
             }
@@ -643,7 +811,13 @@ impl<'a> LatticeDStarLite<'a> {
             primitives.push(pid);
             cur = s;
         }
-        Some(assemble_path(grid, self.lattice, self.start, primitives, cost))
+        Some(assemble_path(
+            grid,
+            self.lattice,
+            self.start,
+            primitives,
+            cost,
+        ))
     }
 }
 
@@ -696,7 +870,11 @@ mod tests {
                     PrimitiveKind::Arc { .. } => 'R',
                     PrimitiveKind::PointTurn => 'T',
                 };
-                if p.dir < 0 { c.to_ascii_lowercase() } else { c }
+                if p.dir < 0 {
+                    c.to_ascii_lowercase()
+                } else {
+                    c
+                }
             })
             .collect()
     }
@@ -717,11 +895,17 @@ mod tests {
             ((q, 0.5, PI), (-2.0, 2.0, PI)), // radius 2, quarter turn left from north
         ];
         // non-vacuous: the four quarter-turn cases land on four distinct corners
-        let ends: BTreeSet<(i32, i32)> = cases[..4].iter().map(|c| ((c.1).0 as i32, (c.1).1 as i32)).collect();
+        let ends: BTreeSet<(i32, i32)> = cases[..4]
+            .iter()
+            .map(|c| ((c.1).0 as i32, (c.1).1 as i32))
+            .collect();
         assert_eq!(ends.len(), 4);
         for ((th0, kappa, s), (x, y, th)) in cases {
             let (ex, ey, eth) = arc_endpoint(th0, kappa, s);
-            assert!(close(ex, x, 1e-12) && close(ey, y, 1e-12) && close(wrap(eth - th), 0.0, 1e-12), "arc_endpoint({th0}, {kappa}, {s}) = ({ex}, {ey}, {eth}), want ({x}, {y}, {th})");
+            assert!(
+                close(ex, x, 1e-12) && close(ey, y, 1e-12) && close(wrap(eth - th), 0.0, 1e-12),
+                "arc_endpoint({th0}, {kappa}, {s}) = ({ex}, {ey}, {eth}), want ({x}, {y}, {th})"
+            );
         }
     }
 
@@ -733,15 +917,47 @@ mod tests {
     #[test]
     fn point_robot_swaths_match_the_hand_computation() {
         let lat = Lattice::four_heading(1.0, 1, true, false).unwrap();
-        let find = |kappa: f64, dir: i8| lat.prims.iter().find(|p| p.h_from == 0 && p.dir == dir && close(kappa, match p.kind { PrimitiveKind::Arc { kappa } => kappa, _ => 0.0 }, 1e-12)).expect("primitive exists");
+        let find = |kappa: f64, dir: i8| {
+            lat.prims
+                .iter()
+                .find(|p| {
+                    p.h_from == 0
+                        && p.dir == dir
+                        && close(
+                            kappa,
+                            match p.kind {
+                                PrimitiveKind::Arc { kappa } => kappa,
+                                _ => 0.0,
+                            },
+                            1e-12,
+                        )
+                })
+                .expect("primitive exists")
+        };
         assert_eq!(find(0.0, 1).swath, vec![(0, 0), (1, 0)], "S");
         assert_eq!(find(1.0, 1).swath, vec![(0, 0), (1, 0), (1, 1)], "L");
         assert_eq!(find(-1.0, 1).swath, vec![(0, 0), (1, -1), (1, 0)], "R");
         assert_eq!(find(0.0, -1).swath, vec![(-1, 0), (0, 0)], "reverse S");
-        assert_eq!(find(1.0, -1).swath, vec![(-1, 0), (-1, 1), (0, 0)], "reverse L");
-        assert_eq!(find(-1.0, -1).swath, vec![(-1, -1), (-1, 0), (0, 0)], "reverse R");
+        assert_eq!(
+            find(1.0, -1).swath,
+            vec![(-1, 0), (-1, 1), (0, 0)],
+            "reverse L"
+        );
+        assert_eq!(
+            find(-1.0, -1).swath,
+            vec![(-1, -1), (-1, 0), (0, 0)],
+            "reverse R"
+        );
         // the rotated copy from north: L goes to (−1, 1) via cells (0,0),(0,1),(−1,1)
-        let l_north = lat.prims.iter().find(|p| p.h_from == 1 && p.dir == 1 && matches!(p.kind, PrimitiveKind::Arc { kappa } if kappa > 0.0)).unwrap();
+        let l_north = lat
+            .prims
+            .iter()
+            .find(|p| {
+                p.h_from == 1
+                    && p.dir == 1
+                    && matches!(p.kind, PrimitiveKind::Arc { kappa } if kappa > 0.0)
+            })
+            .unwrap();
         assert_eq!((l_north.di, l_north.dj, l_north.h_to), (-1, 1, 2));
         assert_eq!(l_north.swath, vec![(-1, 1), (0, 0), (0, 1)]);
     }
@@ -763,18 +979,37 @@ mod tests {
                 seen[id] += 1;
             }
         }
-        assert!(seen.iter().all(|&c| c == 2), "each primitive appears once in out and once in inp");
+        assert!(
+            seen.iter().all(|&c| c == 2),
+            "each primitive appears once in out and once in inp"
+        );
         // non-vacuous: arcs reach (±2, ±2) cells, so the endpoints are not all trivially at the origin
         assert!(lat.prims.iter().any(|p| p.di.abs() == 2 && p.dj.abs() == 2));
         for p in &lat.prims {
             let last = *p.samples.last().unwrap();
-            assert_eq!(last, (f64::from(p.di) * dl, f64::from(p.dj) * dl, lat.headings[p.h_to]), "snapped endpoint of {p:?}");
+            assert_eq!(
+                last,
+                (
+                    f64::from(p.di) * dl,
+                    f64::from(p.dj) * dl,
+                    lat.headings[p.h_to]
+                ),
+                "snapped endpoint of {p:?}"
+            );
             assert_eq!(p.samples[0], (0.0, 0.0, lat.headings[p.h_from]));
             for w in p.samples.windows(2) {
                 let d = (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1);
-                assert!(d <= dl / 10.0 + 1e-12, "sample spacing {d} exceeds dl/10 = {}", dl / 10.0);
+                assert!(
+                    d <= dl / 10.0 + 1e-12,
+                    "sample spacing {d} exceeds dl/10 = {}",
+                    dl / 10.0
+                );
             }
-            assert!(p.swath.contains(&(0, 0)) && p.swath.contains(&(p.di, p.dj)), "swath {:?} must cover both end cells of {p:?}", p.swath);
+            assert!(
+                p.swath.contains(&(0, 0)) && p.swath.contains(&(p.di, p.dj)),
+                "swath {:?} must cover both end cells of {p:?}",
+                p.swath
+            );
             let expect_len = match p.kind {
                 PrimitiveKind::Straight => dl,
                 PrimitiveKind::Arc { .. } => FRAC_PI_2 * 2.0 * dl,
@@ -791,14 +1026,38 @@ mod tests {
     #[test]
     fn the_generator_refuses_a_primitive_that_misses_the_lattice() {
         let lat = slr();
-        assert!(lat.unicycle_primitive(0, 1.0, 1, FRAC_PI_2).is_some(), "the exact arc is accepted");
-        assert!(lat.unicycle_primitive(0, 1.0 / 1.5, 1, FRAC_PI_2 * 1.5).is_none(), "radius 1.5 lands mid-cell");
-        assert!(lat.unicycle_primitive(0, 1.0, 1, FRAC_PI_2 / 2.0).is_none(), "a 45 degree arc endpoint is irrational");
-        assert!(lat.unicycle_primitive(0, 0.0, 1, 1.5).is_none(), "a 1.5-cell straight lands mid-cell");
-        assert!(lat.unicycle_primitive(0, 0.0, 1, 0.0).is_none() && lat.unicycle_primitive(0, 0.0, 0, 1.0).is_none() && lat.unicycle_primitive(7, 0.0, 1, 1.0).is_none(), "degenerate inputs");
+        assert!(
+            lat.unicycle_primitive(0, 1.0, 1, FRAC_PI_2).is_some(),
+            "the exact arc is accepted"
+        );
+        assert!(
+            lat.unicycle_primitive(0, 1.0 / 1.5, 1, FRAC_PI_2 * 1.5)
+                .is_none(),
+            "radius 1.5 lands mid-cell"
+        );
+        assert!(
+            lat.unicycle_primitive(0, 1.0, 1, FRAC_PI_2 / 2.0).is_none(),
+            "a 45 degree arc endpoint is irrational"
+        );
+        assert!(
+            lat.unicycle_primitive(0, 0.0, 1, 1.5).is_none(),
+            "a 1.5-cell straight lands mid-cell"
+        );
+        assert!(
+            lat.unicycle_primitive(0, 0.0, 1, 0.0).is_none()
+                && lat.unicycle_primitive(0, 0.0, 0, 1.0).is_none()
+                && lat.unicycle_primitive(7, 0.0, 1, 1.0).is_none(),
+            "degenerate inputs"
+        );
         let two = Lattice::new(1.0, vec![0.0, PI]);
-        assert!(two.unicycle_primitive(0, 1.0, 1, FRAC_PI_2).is_none(), "no heading at pi/2 in the table");
-        assert!(two.unicycle_primitive(0, 1.0, 1, PI).is_some(), "a half turn of radius 1 ends at (0, 2, pi), which the table has");
+        assert!(
+            two.unicycle_primitive(0, 1.0, 1, FRAC_PI_2).is_none(),
+            "no heading at pi/2 in the table"
+        );
+        assert!(
+            two.unicycle_primitive(0, 1.0, 1, PI).is_some(),
+            "a half turn of radius 1 ends at (0, 2, pi), which the table has"
+        );
     }
 
     /// **Fixture 1: open grid, by hand.** From east `S` adds `(1,0)`, `L` adds `(1,1)` turning to north;
@@ -808,30 +1067,65 @@ mod tests {
     /// `(0,0),(1,0),(1,1),(1,2),(2,2),(3,2),(3,3)`.
     #[test]
     fn open_grid_optimum_is_l_r_l_at_three_half_pi() {
-        let grid = OccupancyGrid::from_rows(&["....", "....", "....", "...."], 1.0, 0.0, 0.0).unwrap();
+        let grid =
+            OccupancyGrid::from_rows(&["....", "....", "....", "...."], 1.0, 0.0, 0.0).unwrap();
         let lat = slr();
-        let path = lattice_astar(&grid, &lat, (0, 0, 0), (3, 3, 1), LatticeWeights::default()).expect("reachable");
+        let path = lattice_astar(&grid, &lat, (0, 0, 0), (3, 3, 1), LatticeWeights::default())
+            .expect("reachable");
         // non-vacuous: the runner-up S,S,L,S,S is itself feasible on this grid and costs strictly more,
         // so the optimum is a choice between two real candidates
         let mut node = (0, 0, 0);
         let mut runner_up = 0.0;
         for want in "SSLSS".chars() {
-            let pid = lat.out[node.2].iter().copied().find(|&pid| letters(&lat, &LatticePath { cost: 0.0, nodes: vec![], primitives: vec![pid], samples: vec![] }) == want.to_string()).unwrap();
+            let pid = lat.out[node.2]
+                .iter()
+                .copied()
+                .find(|&pid| {
+                    letters(
+                        &lat,
+                        &LatticePath {
+                            cost: 0.0,
+                            nodes: vec![],
+                            primitives: vec![pid],
+                            samples: vec![],
+                        },
+                    ) == want.to_string()
+                })
+                .unwrap();
             let p = &lat.prims[pid];
             assert!(edge_free(&grid, node, p));
             runner_up += p.cost(&LatticeWeights::default());
             node = (node.0 + p.di, node.1 + p.dj, p.h_to);
         }
         assert_eq!(node, (3, 3, 1));
-        assert!(close(runner_up, 4.0 + FRAC_PI_2, 1e-12) && runner_up > path.cost, "runner-up {runner_up} vs optimum {}", path.cost);
-        assert!(close(path.cost, 3.0 * FRAC_PI_2, 1e-9), "cost {}", path.cost);
+        assert!(
+            close(runner_up, 4.0 + FRAC_PI_2, 1e-12) && runner_up > path.cost,
+            "runner-up {runner_up} vs optimum {}",
+            path.cost
+        );
+        assert!(
+            close(path.cost, 3.0 * FRAC_PI_2, 1e-9),
+            "cost {}",
+            path.cost
+        );
         assert_eq!(letters(&lat, &path), "LRL");
         assert_eq!(path.nodes, vec![(0, 0, 0), (1, 1, 1), (2, 2, 0), (3, 3, 1)]);
-        let swath: BTreeSet<(i64, i64)> = path.samples.iter().map(|&(x, y, _)| grid.world_to_cell(x, y)).collect();
-        assert_eq!(swath.into_iter().collect::<Vec<_>>(), vec![(0, 0), (1, 0), (1, 1), (1, 2), (2, 2), (3, 2), (3, 3)]);
+        let swath: BTreeSet<(i64, i64)> = path
+            .samples
+            .iter()
+            .map(|&(x, y, _)| grid.world_to_cell(x, y))
+            .collect();
+        assert_eq!(
+            swath.into_iter().collect::<Vec<_>>(),
+            vec![(0, 0), (1, 0), (1, 1), (1, 2), (2, 2), (3, 2), (3, 3)]
+        );
         assert!(samples_in_free_cells(&grid, &path));
         // the cost is the sum of the chosen primitives' costs
-        let sum: f64 = path.primitives.iter().map(|&p| lat.prims[p].cost(&LatticeWeights::default())).sum();
+        let sum: f64 = path
+            .primitives
+            .iter()
+            .map(|&p| lat.prims[p].cost(&LatticeWeights::default()))
+            .sum();
         assert!(close(sum, path.cost, 1e-12));
     }
 
@@ -842,16 +1136,42 @@ mod tests {
     /// also pins the node-at-cell-centre convention: nodes on corners give the arc a different swath.
     #[test]
     fn a_corridor_forces_the_one_primitive_sequence_that_fits() {
-        let grid = OccupancyGrid::from_rows(&["###.", "###.", "###.", "...."], 1.0, 0.0, 0.0).unwrap();
+        let grid =
+            OccupancyGrid::from_rows(&["###.", "###.", "###.", "...."], 1.0, 0.0, 0.0).unwrap();
         let lat = slr();
-        let open = OccupancyGrid::from_rows(&["....", "....", "....", "...."], 1.0, 0.0, 0.0).unwrap();
-        let free = lattice_astar(&open, &lat, (0, 0, 0), (3, 3, 1), LatticeWeights::default()).unwrap();
-        let path = lattice_astar(&grid, &lat, (0, 0, 0), (3, 3, 1), LatticeWeights::default()).expect("reachable");
-        assert!(free.cost < path.cost, "the corridor must cost more than the open grid: {} vs {}", free.cost, path.cost);
-        assert!(close(path.cost, 4.0 + FRAC_PI_2, 1e-9), "cost {}", path.cost);
+        let open =
+            OccupancyGrid::from_rows(&["....", "....", "....", "...."], 1.0, 0.0, 0.0).unwrap();
+        let free =
+            lattice_astar(&open, &lat, (0, 0, 0), (3, 3, 1), LatticeWeights::default()).unwrap();
+        let path = lattice_astar(&grid, &lat, (0, 0, 0), (3, 3, 1), LatticeWeights::default())
+            .expect("reachable");
+        assert!(
+            free.cost < path.cost,
+            "the corridor must cost more than the open grid: {} vs {}",
+            free.cost,
+            path.cost
+        );
+        assert!(
+            close(path.cost, 4.0 + FRAC_PI_2, 1e-9),
+            "cost {}",
+            path.cost
+        );
         assert_eq!(letters(&lat, &path), "SSLSS");
-        assert_eq!(path.nodes, vec![(0, 0, 0), (1, 0, 0), (2, 0, 0), (3, 1, 1), (3, 2, 1), (3, 3, 1)]);
-        assert!(samples_in_free_cells(&grid, &path), "a sample entered a wall cell");
+        assert_eq!(
+            path.nodes,
+            vec![
+                (0, 0, 0),
+                (1, 0, 0),
+                (2, 0, 0),
+                (3, 1, 1),
+                (3, 2, 1),
+                (3, 3, 1)
+            ]
+        );
+        assert!(
+            samples_in_free_cells(&grid, &path),
+            "a sample entered a wall cell"
+        );
     }
 
     /// **Fixture 3: no primitive sequence fits, by hand.** A width-1 corridor, goal heading north. The
@@ -863,14 +1183,32 @@ mod tests {
     fn a_goal_heading_no_primitive_can_produce_returns_none() {
         let grid = OccupancyGrid::from_rows(&["...."], 1.0, 0.0, 0.0).unwrap();
         let lat = slr();
-        let east = lattice_astar(&grid, &lat, (0, 0, 0), (3, 0, 0), LatticeWeights::default()).expect("east goal reachable");
+        let east = lattice_astar(&grid, &lat, (0, 0, 0), (3, 0, 0), LatticeWeights::default())
+            .expect("east goal reachable");
         assert!(close(east.cost, 3.0, 1e-12) && letters(&lat, &east) == "SSS");
-        assert!(lattice_astar(&grid, &lat, (0, 0, 0), (3, 0, 1), LatticeWeights::default()).is_none(), "north goal has no predecessor");
+        assert!(
+            lattice_astar(&grid, &lat, (0, 0, 0), (3, 0, 1), LatticeWeights::default()).is_none(),
+            "north goal has no predecessor"
+        );
         let turning = Lattice::four_heading(1.0, 1, false, true).unwrap();
-        let w = LatticeWeights { w_rev: 1.0, w_turn: 2.0 };
-        let path = lattice_astar(&grid, &turning, (0, 0, 0), (3, 0, 1), w).expect("point turns make it reachable");
-        assert!(close(path.cost, 3.0 + 2.0 * FRAC_PI_2, 1e-12), "cost {}", path.cost);
-        assert_eq!(letters(&turning, &path).chars().filter(|&c| c == 'T').count(), 1);
+        let w = LatticeWeights {
+            w_rev: 1.0,
+            w_turn: 2.0,
+        };
+        let path = lattice_astar(&grid, &turning, (0, 0, 0), (3, 0, 1), w)
+            .expect("point turns make it reachable");
+        assert!(
+            close(path.cost, 3.0 + 2.0 * FRAC_PI_2, 1e-12),
+            "cost {}",
+            path.cost
+        );
+        assert_eq!(
+            letters(&turning, &path)
+                .chars()
+                .filter(|&c| c == 'T')
+                .count(),
+            1
+        );
         assert_eq!(path.nodes.last(), Some(&(3, 0, 1)));
         assert!(samples_in_free_cells(&grid, &path));
     }
@@ -883,14 +1221,37 @@ mod tests {
     fn reverse_straights_carry_the_reverse_weight() {
         let grid = OccupancyGrid::from_rows(&["..."], 1.0, 0.0, 0.0).unwrap();
         let lat = Lattice::four_heading(1.0, 1, true, false).unwrap();
-        let heavy = lattice_astar(&grid, &lat, (2, 0, 0), (0, 0, 0), LatticeWeights { w_rev: 2.0, w_turn: 1.0 }).expect("reachable in reverse");
-        let unit = lattice_astar(&grid, &lat, (2, 0, 0), (0, 0, 0), LatticeWeights::default()).unwrap();
-        assert!(close(heavy.cost, 4.0, 1e-12) && close(unit.cost, 2.0, 1e-12), "costs {} / {}", heavy.cost, unit.cost);
+        let heavy = lattice_astar(
+            &grid,
+            &lat,
+            (2, 0, 0),
+            (0, 0, 0),
+            LatticeWeights {
+                w_rev: 2.0,
+                w_turn: 1.0,
+            },
+        )
+        .expect("reachable in reverse");
+        let unit =
+            lattice_astar(&grid, &lat, (2, 0, 0), (0, 0, 0), LatticeWeights::default()).unwrap();
+        assert!(
+            close(heavy.cost, 4.0, 1e-12) && close(unit.cost, 2.0, 1e-12),
+            "costs {} / {}",
+            heavy.cost,
+            unit.cost
+        );
         assert_eq!(letters(&lat, &heavy), "ss");
         assert_eq!(heavy.nodes, vec![(2, 0, 0), (1, 0, 0), (0, 0, 0)]);
         assert!(samples_in_free_cells(&grid, &heavy));
         // without reverse primitives the same query has no solution
-        assert!(lattice_astar(&grid, &slr(), (2, 0, 0), (0, 0, 0), LatticeWeights::default()).is_none());
+        assert!(lattice_astar(
+            &grid,
+            &slr(),
+            (2, 0, 0),
+            (0, 0, 0),
+            LatticeWeights::default()
+        )
+        .is_none());
     }
 
     /// **THE ORACLE: unit straights plus free point turns are the 4-connected grid.** With `w_turn = 0`
@@ -903,10 +1264,25 @@ mod tests {
     /// distance and it cannot leave the row.
     #[test]
     fn straights_with_free_turns_reproduce_four_connected_grid_astar() {
-        let open = OccupancyGrid::from_rows(&[".......", ".......", ".......", ".......", "......."], 1.0, 0.0, 0.0).unwrap();
-        let walled = OccupancyGrid::from_rows(&["...#...", "...#...", "...#...", ".......", "...#..."], 1.0, 0.0, 0.0).unwrap();
+        let open = OccupancyGrid::from_rows(
+            &[".......", ".......", ".......", ".......", "......."],
+            1.0,
+            0.0,
+            0.0,
+        )
+        .unwrap();
+        let walled = OccupancyGrid::from_rows(
+            &["...#...", "...#...", "...#...", ".......", "...#..."],
+            1.0,
+            0.0,
+            0.0,
+        )
+        .unwrap();
         let lat = straights_and_turns();
-        let w = LatticeWeights { w_rev: 1.0, w_turn: 0.0 };
+        let w = LatticeWeights {
+            w_rev: 1.0,
+            w_turn: 0.0,
+        };
         for grid in [&open, &walled] {
             let free = |i: i32, j: i32| !grid.blocked(i64::from(i), i64::from(j));
             let mut costs = Vec::new();
@@ -916,14 +1292,18 @@ mod tests {
                     if !free(i, j) {
                         continue;
                     }
-                    let want = astar_grid_conn(7, 5, Connectivity::Four, free, (0, 0), (i, j)).map(|p| path_length(&p));
+                    let want = astar_grid_conn(7, 5, Connectivity::Four, free, (0, 0), (i, j))
+                        .map(|p| path_length(&p));
                     for h in 0..4 {
                         let got = lattice_astar(grid, &lat, (0, 0, 0), (i, j, h), w).map(|p| {
                             assert!(samples_in_free_cells(grid, &p));
                             p.cost
                         });
                         match (want, got) {
-                            (Some(a), Some(b)) => assert!(close(a, b, 1e-9), "goal ({i},{j},{h}): grid {a} vs lattice {b}"),
+                            (Some(a), Some(b)) => assert!(
+                                close(a, b, 1e-9),
+                                "goal ({i},{j},{h}): grid {a} vs lattice {b}"
+                            ),
                             (None, None) => {}
                             _ => panic!("goal ({i},{j},{h}): grid {want:?} vs lattice {got:?}"),
                         }
@@ -949,11 +1329,30 @@ mod tests {
             let p = straight.unicycle_primitive(h, 0.0, 1, 1.0).unwrap();
             straight.push(p);
         }
-        assert!(lat.prims.len() == 12 && straight.prims.len() == 4, "the oracle lattices carry no arcs");
-        let want = astar_grid_conn(7, 5, Connectivity::Four, |i, j| !open.blocked(i64::from(i), i64::from(j)), (1, 2), (6, 2)).map(|p| path_length(&p)).unwrap();
+        assert!(
+            lat.prims.len() == 12 && straight.prims.len() == 4,
+            "the oracle lattices carry no arcs"
+        );
+        let want = astar_grid_conn(
+            7,
+            5,
+            Connectivity::Four,
+            |i, j| !open.blocked(i64::from(i), i64::from(j)),
+            (1, 2),
+            (6, 2),
+        )
+        .map(|p| path_length(&p))
+        .unwrap();
         let got = lattice_astar(&open, &straight, (1, 2, 0), (6, 2, 0), w).unwrap();
-        assert!(close(want, 5.0, 1e-12) && close(got.cost, want, 1e-12), "straight-only along a row: {} vs {want}", got.cost);
-        assert!(lattice_astar(&open, &straight, (1, 2, 0), (6, 3, 0), w).is_none(), "straight-only cannot change row");
+        assert!(
+            close(want, 5.0, 1e-12) && close(got.cost, want, 1e-12),
+            "straight-only along a row: {} vs {want}",
+            got.cost
+        );
+        assert!(
+            lattice_astar(&open, &straight, (1, 2, 0), (6, 3, 0), w).is_none(),
+            "straight-only cannot change row"
+        );
     }
 
     /// **A trap for an inadmissible heuristic, by hand.** Start `(0,0)`, goal `(6,0)`, walls at
@@ -967,9 +1366,14 @@ mod tests {
     /// through the lattice and are feasible.
     #[test]
     fn a_pocket_nearer_the_goal_does_not_lure_the_search_off_the_optimum() {
-        let grid = OccupancyGrid::from_rows(&[".......", ".......", "...#.#.", ".#...#."], 1.0, 0.0, 0.0).unwrap();
+        let grid =
+            OccupancyGrid::from_rows(&[".......", ".......", "...#.#.", ".#...#."], 1.0, 0.0, 0.0)
+                .unwrap();
         let lat = straights_and_turns();
-        let w = LatticeWeights { w_rev: 1.0, w_turn: 0.0 };
+        let w = LatticeWeights {
+            w_rev: 1.0,
+            w_turn: 0.0,
+        };
         let walk = |cells: &[(i32, i32)]| -> f64 {
             // drive the cell path with straights and free turns, asserting each edge is free
             let mut cost = 0.0;
@@ -984,29 +1388,92 @@ mod tests {
                     _ => panic!("not a unit step"),
                 };
                 if node.2 != h {
-                    let pid = lat.out[node.2].iter().copied().find(|&pid| lat.prims[pid].h_to == h && lat.prims[pid].kind == PrimitiveKind::PointTurn).unwrap_or_else(|| {
-                        // a 180 degree turn is two quarter turns; both cost zero here
-                        let mid = (node.2 + 1) % 4;
-                        node.2 = mid;
-                        lat.out[mid].iter().copied().find(|&pid| lat.prims[pid].h_to == h && lat.prims[pid].kind == PrimitiveKind::PointTurn).unwrap()
-                    });
+                    let pid = lat.out[node.2]
+                        .iter()
+                        .copied()
+                        .find(|&pid| {
+                            lat.prims[pid].h_to == h
+                                && lat.prims[pid].kind == PrimitiveKind::PointTurn
+                        })
+                        .unwrap_or_else(|| {
+                            // a 180 degree turn is two quarter turns; both cost zero here
+                            let mid = (node.2 + 1) % 4;
+                            node.2 = mid;
+                            lat.out[mid]
+                                .iter()
+                                .copied()
+                                .find(|&pid| {
+                                    lat.prims[pid].h_to == h
+                                        && lat.prims[pid].kind == PrimitiveKind::PointTurn
+                                })
+                                .unwrap()
+                        });
                     node.2 = lat.prims[pid].h_to;
                 }
-                let pid = lat.out[node.2].iter().copied().find(|&pid| lat.prims[pid].kind == PrimitiveKind::Straight).unwrap();
-                assert!(edge_free(&grid, node, &lat.prims[pid]), "step {pair:?} is not free");
+                let pid = lat.out[node.2]
+                    .iter()
+                    .copied()
+                    .find(|&pid| lat.prims[pid].kind == PrimitiveKind::Straight)
+                    .unwrap();
+                assert!(
+                    edge_free(&grid, node, &lat.prims[pid]),
+                    "step {pair:?} is not free"
+                );
                 cost += lat.prims[pid].cost(&w);
                 node = (pair[1].0, pair[1].1, node.2);
             }
             cost
         };
-        let over = walk(&[(0, 0), (0, 1), (1, 1), (2, 1), (2, 2), (3, 2), (4, 2), (5, 2), (6, 2), (6, 1), (6, 0)]);
-        let pocket = walk(&[(0, 0), (0, 1), (1, 1), (2, 1), (2, 0), (3, 0), (4, 0), (4, 1), (4, 2), (5, 2), (6, 2), (6, 1), (6, 0)]);
-        assert!(close(over, 10.0, 1e-12) && close(pocket, 12.0, 1e-12), "hand routes: {over} / {pocket}");
-        let grid_cost = astar_grid_conn(7, 4, Connectivity::Four, |i, j| !grid.blocked(i64::from(i), i64::from(j)), (0, 0), (6, 0)).map(|p| path_length(&p)).unwrap();
+        let over = walk(&[
+            (0, 0),
+            (0, 1),
+            (1, 1),
+            (2, 1),
+            (2, 2),
+            (3, 2),
+            (4, 2),
+            (5, 2),
+            (6, 2),
+            (6, 1),
+            (6, 0),
+        ]);
+        let pocket = walk(&[
+            (0, 0),
+            (0, 1),
+            (1, 1),
+            (2, 1),
+            (2, 0),
+            (3, 0),
+            (4, 0),
+            (4, 1),
+            (4, 2),
+            (5, 2),
+            (6, 2),
+            (6, 1),
+            (6, 0),
+        ]);
+        assert!(
+            close(over, 10.0, 1e-12) && close(pocket, 12.0, 1e-12),
+            "hand routes: {over} / {pocket}"
+        );
+        let grid_cost = astar_grid_conn(
+            7,
+            4,
+            Connectivity::Four,
+            |i, j| !grid.blocked(i64::from(i), i64::from(j)),
+            (0, 0),
+            (6, 0),
+        )
+        .map(|p| path_length(&p))
+        .unwrap();
         assert!(close(grid_cost, 10.0, 1e-12));
         for h in 0..4 {
             let path = lattice_astar(&grid, &lat, (0, 0, 0), (6, 0, h), w).expect("reachable");
-            assert!(close(path.cost, 10.0, 1e-9), "goal heading {h}: cost {} (the pocket route costs 12)", path.cost);
+            assert!(
+                close(path.cost, 10.0, 1e-9),
+                "goal heading {h}: cost {} (the pocket route costs 12)",
+                path.cost
+            );
             assert!(samples_in_free_cells(&grid, &path));
         }
     }
@@ -1017,17 +1484,35 @@ mod tests {
     /// origin so the world transform is exercised, on the `L,R,L` open-grid path.
     #[test]
     fn samples_form_a_continuous_trajectory_between_the_node_centres() {
-        let grid = OccupancyGrid::from_rows(&["....", "....", "....", "...."], 0.5, -3.0, 2.0).unwrap();
+        let grid =
+            OccupancyGrid::from_rows(&["....", "....", "....", "...."], 0.5, -3.0, 2.0).unwrap();
         let lat = Lattice::four_heading(0.5, 1, false, false).unwrap();
-        let path = lattice_astar(&grid, &lat, (0, 0, 0), (3, 3, 1), LatticeWeights::default()).unwrap();
-        assert!(close(path.cost, 0.5 * 3.0 * FRAC_PI_2, 1e-12), "cost scales with dl: {}", path.cost);
-        assert!(path.samples.len() > 40, "three arcs at dl/10 spacing give more than 40 samples: {}", path.samples.len());
+        let path =
+            lattice_astar(&grid, &lat, (0, 0, 0), (3, 3, 1), LatticeWeights::default()).unwrap();
+        assert!(
+            close(path.cost, 0.5 * 3.0 * FRAC_PI_2, 1e-12),
+            "cost scales with dl: {}",
+            path.cost
+        );
+        assert!(
+            path.samples.len() > 40,
+            "three arcs at dl/10 spacing give more than 40 samples: {}",
+            path.samples.len()
+        );
         assert_eq!(path.samples[0], (-3.0 + 0.25, 2.0 + 0.25, 0.0));
-        assert_eq!(*path.samples.last().unwrap(), (-3.0 + 1.75, 2.0 + 1.75, FRAC_PI_2));
+        assert_eq!(
+            *path.samples.last().unwrap(),
+            (-3.0 + 1.75, 2.0 + 1.75, FRAC_PI_2)
+        );
         for w in path.samples.windows(2) {
             let d = (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1);
             let dth = wrap(w[1].2 - w[0].2).abs();
-            assert!(d <= 0.05 + 1e-12 && dth <= 0.1 + 1e-9, "step ({d}, {dth}) between {:?} and {:?}", w[0], w[1]);
+            assert!(
+                d <= 0.05 + 1e-12 && dth <= 0.1 + 1e-9,
+                "step ({d}, {dth}) between {:?} and {:?}",
+                w[0],
+                w[1]
+            );
         }
         // a junction pose appears once: 3 primitives x 16 arc samples + 1
         assert_eq!(path.samples.len(), 3 * 16 + 1);
@@ -1040,17 +1525,63 @@ mod tests {
     fn degenerate_queries_return_as_documented() {
         let grid = OccupancyGrid::from_rows(&["..#", "...", "..."], 1.0, 0.0, 0.0).unwrap();
         let lat = slr();
-        let same = lattice_astar(&grid, &lat, (1, 1, 2), (1, 1, 2), LatticeWeights::default()).unwrap();
-        assert_eq!(same, LatticePath { cost: 0.0, nodes: vec![(1, 1, 2)], primitives: vec![], samples: vec![(1.5, 1.5, PI)] });
-        assert!(lattice_astar(&grid, &lat, (0, 0, 0), (2, 2, 0), LatticeWeights::default()).is_none(), "goal cell is a wall");
-        assert!(lattice_astar(&grid, &lat, (2, 2, 0), (0, 0, 0), LatticeWeights::default()).is_none(), "start cell is a wall");
-        assert!(lattice_astar(&grid, &lat, (0, 0, 0), (3, 0, 0), LatticeWeights::default()).is_none(), "goal off the map");
-        assert!(lattice_astar(&grid, &lat, (0, 0, 4), (1, 0, 0), LatticeWeights::default()).is_none(), "heading index off the table");
-        assert!(lattice_astar(&grid, &Lattice::four_heading(0.5, 1, false, false).unwrap(), (0, 0, 0), (1, 0, 0), LatticeWeights::default()).is_none(), "dl must match the grid resolution");
-        assert!(lattice_astar(&grid, &Lattice::new(1.0, vec![]), (0, 0, 0), (1, 0, 0), LatticeWeights::default()).is_none(), "no headings");
-        assert!(Lattice::four_heading(1.0, 0, false, false).is_none() && Lattice::four_heading(0.0, 1, false, false).is_none());
+        let same =
+            lattice_astar(&grid, &lat, (1, 1, 2), (1, 1, 2), LatticeWeights::default()).unwrap();
+        assert_eq!(
+            same,
+            LatticePath {
+                cost: 0.0,
+                nodes: vec![(1, 1, 2)],
+                primitives: vec![],
+                samples: vec![(1.5, 1.5, PI)]
+            }
+        );
+        assert!(
+            lattice_astar(&grid, &lat, (0, 0, 0), (2, 2, 0), LatticeWeights::default()).is_none(),
+            "goal cell is a wall"
+        );
+        assert!(
+            lattice_astar(&grid, &lat, (2, 2, 0), (0, 0, 0), LatticeWeights::default()).is_none(),
+            "start cell is a wall"
+        );
+        assert!(
+            lattice_astar(&grid, &lat, (0, 0, 0), (3, 0, 0), LatticeWeights::default()).is_none(),
+            "goal off the map"
+        );
+        assert!(
+            lattice_astar(&grid, &lat, (0, 0, 4), (1, 0, 0), LatticeWeights::default()).is_none(),
+            "heading index off the table"
+        );
+        assert!(
+            lattice_astar(
+                &grid,
+                &Lattice::four_heading(0.5, 1, false, false).unwrap(),
+                (0, 0, 0),
+                (1, 0, 0),
+                LatticeWeights::default()
+            )
+            .is_none(),
+            "dl must match the grid resolution"
+        );
+        assert!(
+            lattice_astar(
+                &grid,
+                &Lattice::new(1.0, vec![]),
+                (0, 0, 0),
+                (1, 0, 0),
+                LatticeWeights::default()
+            )
+            .is_none(),
+            "no headings"
+        );
+        assert!(
+            Lattice::four_heading(1.0, 0, false, false).is_none()
+                && Lattice::four_heading(0.0, 1, false, false).is_none()
+        );
         // and a valid query on the same grid still succeeds, so the refusals above are not a dead planner
-        assert!(lattice_astar(&grid, &lat, (0, 0, 0), (1, 0, 0), LatticeWeights::default()).is_some());
+        assert!(
+            lattice_astar(&grid, &lat, (0, 0, 0), (1, 0, 0), LatticeWeights::default()).is_some()
+        );
     }
 
     /// **D\* Lite's first search equals A\*.** Koenig & Likhachev, Theorem 4 (via LPA\*): the first
@@ -1060,32 +1591,66 @@ mod tests {
     /// costs differ between goals.
     #[test]
     fn dstar_lite_first_search_equals_astar() {
-        let grid = OccupancyGrid::from_rows(&["....", "....", "....", "...."], 1.0, 0.0, 0.0).unwrap();
+        let grid =
+            OccupancyGrid::from_rows(&["....", "....", "....", "...."], 1.0, 0.0, 0.0).unwrap();
         let lat = slr();
-        let d = LatticeDStarLite::new(&grid, &lat, (0, 0, 0), (3, 3, 1), LatticeWeights::default()).unwrap();
-        let a = lattice_astar(&grid, &lat, (0, 0, 0), (3, 3, 1), LatticeWeights::default()).unwrap();
-        assert_eq!(d.cost_to_goal(), a.cost, "bitwise: the same edge costs summed");
+        let d = LatticeDStarLite::new(&grid, &lat, (0, 0, 0), (3, 3, 1), LatticeWeights::default())
+            .unwrap();
+        let a =
+            lattice_astar(&grid, &lat, (0, 0, 0), (3, 3, 1), LatticeWeights::default()).unwrap();
+        assert_eq!(
+            d.cost_to_goal(),
+            a.cost,
+            "bitwise: the same edge costs summed"
+        );
         assert_eq!(d.cost_to_goal(), 3.0 * FRAC_PI_2);
         let p = d.path(&grid).unwrap();
         assert_eq!(letters(&lat, &p), "LRL");
         assert_eq!((p.nodes, p.samples, p.cost), (a.nodes, a.samples, a.cost));
-        assert!(d.expansions() > 0 && d.expansions() <= 64, "expansions {}", d.expansions());
+        assert!(
+            d.expansions() > 0 && d.expansions() <= 64,
+            "expansions {}",
+            d.expansions()
+        );
 
-        let walled = OccupancyGrid::from_rows(&["...#...", "...#...", "...#...", ".......", "...#..."], 1.0, 0.0, 0.0).unwrap();
+        let walled = OccupancyGrid::from_rows(
+            &["...#...", "...#...", "...#...", ".......", "...#..."],
+            1.0,
+            0.0,
+            0.0,
+        )
+        .unwrap();
         let turns = straights_and_turns();
-        let w = LatticeWeights { w_rev: 1.0, w_turn: 0.0 };
+        let w = LatticeWeights {
+            w_rev: 1.0,
+            w_turn: 0.0,
+        };
         let mut costs = BTreeSet::new();
-        for (i, j, h) in [(6, 4, 0), (6, 0, 2), (2, 0, 1), (0, 4, 3), (3, 1, 0), (5, 2, 1)] {
+        for (i, j, h) in [
+            (6, 4, 0),
+            (6, 0, 2),
+            (2, 0, 1),
+            (0, 4, 3),
+            (3, 1, 0),
+            (5, 2, 1),
+        ] {
             let want = lattice_astar(&walled, &turns, (0, 0, 0), (i, j, h), w).map(|p| p.cost);
             let got = LatticeDStarLite::new(&walled, &turns, (0, 0, 0), (i, j, h), w).unwrap();
             match want {
                 Some(c) => {
-                    assert!(close(got.cost_to_goal(), c, 1e-9), "goal ({i},{j},{h}): {} vs A* {c}", got.cost_to_goal());
+                    assert!(
+                        close(got.cost_to_goal(), c, 1e-9),
+                        "goal ({i},{j},{h}): {} vs A* {c}",
+                        got.cost_to_goal()
+                    );
                     let p = got.path(&walled).unwrap();
                     assert!(close(p.cost, c, 1e-9) && samples_in_free_cells(&walled, &p));
                     costs.insert(c as i64);
                 }
-                None => assert!(!got.cost_to_goal().is_finite() && got.path(&walled).is_none(), "goal ({i},{j},{h}) is unreachable for A*"),
+                None => assert!(
+                    !got.cost_to_goal().is_finite() && got.path(&walled).is_none(),
+                    "goal ({i},{j},{h}) is unreachable for A*"
+                ),
             }
         }
         assert!(costs.len() >= 3, "costs must vary: {costs:?}");
@@ -1100,23 +1665,44 @@ mod tests {
     /// rotated copies would leave the old plan in place. Fewer than all 64 states are re-expanded.
     #[test]
     fn dstar_lite_repairs_the_plan_when_a_cell_on_it_becomes_blocked() {
-        let open = OccupancyGrid::from_rows(&["....", "....", "....", "...."], 1.0, 0.0, 0.0).unwrap();
-        let after = OccupancyGrid::from_rows(&["....", ".#..", "....", "...."], 1.0, 0.0, 0.0).unwrap();
-        assert!(after.blocked(1, 2) && !open.blocked(1, 2), "the drawing blocks (1,2)");
+        let open =
+            OccupancyGrid::from_rows(&["....", "....", "....", "...."], 1.0, 0.0, 0.0).unwrap();
+        let after =
+            OccupancyGrid::from_rows(&["....", ".#..", "....", "...."], 1.0, 0.0, 0.0).unwrap();
+        assert!(
+            after.blocked(1, 2) && !open.blocked(1, 2),
+            "the drawing blocks (1,2)"
+        );
         let lat = slr();
-        let mut d = LatticeDStarLite::new(&open, &lat, (0, 0, 0), (3, 3, 1), LatticeWeights::default()).unwrap();
+        let mut d =
+            LatticeDStarLite::new(&open, &lat, (0, 0, 0), (3, 3, 1), LatticeWeights::default())
+                .unwrap();
         assert!(close(d.cost_to_goal(), 3.0 * FRAC_PI_2, 1e-12));
         let before = d.expansions();
         assert!(d.cells_changed(&after, &[(1, 2)]), "a repaired path exists");
         let repaired = d.expansions() - before;
-        assert!(repaired > 0 && repaired < 64, "re-expansions {repaired} must be some but not all 64 states");
-        assert!(close(d.cost_to_goal(), 4.0 + FRAC_PI_2, 1e-9), "repaired cost {}", d.cost_to_goal());
+        assert!(
+            repaired > 0 && repaired < 64,
+            "re-expansions {repaired} must be some but not all 64 states"
+        );
+        assert!(
+            close(d.cost_to_goal(), 4.0 + FRAC_PI_2, 1e-9),
+            "repaired cost {}",
+            d.cost_to_goal()
+        );
         assert_eq!(d.km(), 0.0);
         let p = d.path(&after).unwrap();
         assert_eq!(letters(&lat, &p), "SSLSS");
         assert!(samples_in_free_cells(&after, &p));
         // oracle: a fresh A* on the changed grid agrees
-        let a = lattice_astar(&after, &lat, (0, 0, 0), (3, 3, 1), LatticeWeights::default()).unwrap();
+        let a = lattice_astar(
+            &after,
+            &lat,
+            (0, 0, 0),
+            (3, 3, 1),
+            LatticeWeights::default(),
+        )
+        .unwrap();
         assert!(close(a.cost, d.cost_to_goal(), 1e-9) && a.nodes == p.nodes);
         // and a change that touches no swath on the plan leaves the cost alone
         assert!(d.cells_changed(&after, &[(0, 3)]));
@@ -1132,12 +1718,26 @@ mod tests {
         let open = OccupancyGrid::from_rows(&["...."], 1.0, 0.0, 0.0).unwrap();
         let closed = OccupancyGrid::from_rows(&["..#."], 1.0, 0.0, 0.0).unwrap();
         let lat = slr();
-        let mut d = LatticeDStarLite::new(&open, &lat, (0, 0, 0), (3, 0, 0), LatticeWeights::default()).unwrap();
-        assert!(close(d.cost_to_goal(), 3.0, 1e-12) && letters(&lat, &d.path(&open).unwrap()) == "SSS");
+        let mut d =
+            LatticeDStarLite::new(&open, &lat, (0, 0, 0), (3, 0, 0), LatticeWeights::default())
+                .unwrap();
+        assert!(
+            close(d.cost_to_goal(), 3.0, 1e-12) && letters(&lat, &d.path(&open).unwrap()) == "SSS"
+        );
         let mut probe = d.clone();
-        assert!(probe.advance(&open).is_some(), "before the change the robot can drive");
-        assert!(!d.cells_changed(&closed, &[(2, 0)]), "no path after the corridor closes");
-        assert!(!d.cost_to_goal().is_finite() && d.path(&closed).is_none() && d.advance(&closed).is_none());
+        assert!(
+            probe.advance(&open).is_some(),
+            "before the change the robot can drive"
+        );
+        assert!(
+            !d.cells_changed(&closed, &[(2, 0)]),
+            "no path after the corridor closes"
+        );
+        assert!(
+            !d.cost_to_goal().is_finite()
+                && d.path(&closed).is_none()
+                && d.advance(&closed).is_none()
+        );
     }
 
     /// **The robot moves, then the map changes (`k_m > 0`).** On an open 6×6 grid the plan from
@@ -1151,25 +1751,54 @@ mod tests {
     fn dstar_lite_replans_with_a_moving_start() {
         let rows = ["......"; 6];
         let open = OccupancyGrid::from_rows(&rows, 1.0, 0.0, 0.0).unwrap();
-        let after = OccupancyGrid::from_rows(&["......", "......", "......", "..#...", "......", "......"], 1.0, 0.0, 0.0).unwrap();
+        let after = OccupancyGrid::from_rows(
+            &["......", "......", "......", "..#...", "......", "......"],
+            1.0,
+            0.0,
+            0.0,
+        )
+        .unwrap();
         assert!(after.blocked(2, 2));
         let lat = slr();
         let w = LatticeWeights::default();
         let mut d = LatticeDStarLite::new(&open, &lat, (0, 0, 0), (5, 5, 1), w).unwrap();
-        assert!(close(d.cost_to_goal(), 5.0 * FRAC_PI_2, 1e-12) && letters(&lat, &d.path(&open).unwrap()) == "LRLRL");
+        assert!(
+            close(d.cost_to_goal(), 5.0 * FRAC_PI_2, 1e-12)
+                && letters(&lat, &d.path(&open).unwrap()) == "LRLRL"
+        );
         let (pid, at) = d.advance(&open).unwrap();
         assert_eq!(at, (1, 1, 1));
         assert!(close(lat.prims[pid].cost(&w), FRAC_PI_2, 1e-15));
         let remaining_before = d.cost_to_goal();
         assert!(close(remaining_before, 2.0 * PI, 1e-12));
         assert!(d.cells_changed(&after, &[(2, 2)]), "a repair exists");
-        assert!(close(d.km(), std::f64::consts::SQRT_2, 1e-12), "k_m = h(last, start): {}", d.km());
+        assert!(
+            close(d.km(), std::f64::consts::SQRT_2, 1e-12),
+            "k_m = h(last, start): {}",
+            d.km()
+        );
         let fresh = lattice_astar(&after, &lat, (1, 1, 1), (5, 5, 1), w).unwrap();
-        assert!(close(fresh.cost, 4.0 + PI, 1e-9), "hand value for the repair: {}", fresh.cost);
-        assert!(close(d.cost_to_goal(), fresh.cost, 1e-9), "repaired {} vs fresh A* {}", d.cost_to_goal(), fresh.cost);
-        assert!(d.cost_to_goal() > remaining_before, "the block must make the rest dearer");
+        assert!(
+            close(fresh.cost, 4.0 + PI, 1e-9),
+            "hand value for the repair: {}",
+            fresh.cost
+        );
+        assert!(
+            close(d.cost_to_goal(), fresh.cost, 1e-9),
+            "repaired {} vs fresh A* {}",
+            d.cost_to_goal(),
+            fresh.cost
+        );
+        assert!(
+            d.cost_to_goal() > remaining_before,
+            "the block must make the rest dearer"
+        );
         let p = d.path(&after).unwrap();
-        assert!(samples_in_free_cells(&after, &p) && p.nodes.first() == Some(&(1, 1, 1)) && p.nodes.last() == Some(&(5, 5, 1)));
+        assert!(
+            samples_in_free_cells(&after, &p)
+                && p.nodes.first() == Some(&(1, 1, 1))
+                && p.nodes.last() == Some(&(5, 5, 1))
+        );
         // drive it home
         let mut spent = 0.0;
         let mut steps = 0;
@@ -1179,6 +1808,126 @@ mod tests {
             assert!(steps <= 12, "the drive must terminate");
         }
         assert_eq!(d.start(), (5, 5, 1));
-        assert!(close(spent, fresh.cost, 1e-9), "driven {spent} vs planned {}", fresh.cost);
+        assert!(
+            close(spent, fresh.cost, 1e-9),
+            "driven {spent} vs planned {}",
+            fresh.cost
+        );
+    }
+
+    /// **Replanning agrees with a fresh `lattice_astar` on random grids, random flips and a moving robot.**
+    ///
+    /// The grid D* Lite in `dstar_lite.rs` was found returning costs BELOW the A* optimum in 11 of 4000
+    /// random trials, because it compared priority keys exactly and a key that is the same real number
+    /// computed along two paths differs in the last bit. This lattice's costs mix `dl`, `π/2·dl`, the
+    /// turn weight and a Euclidean heuristic, so the same hazard exists here. This test measures it the
+    /// same way: many random grids, up to eight replans each with random cell flips and the robot
+    /// advancing along its own plan, and the replanned cost compared with a fresh search on the changed
+    /// grid. Divergences are COUNTED rather than panicked on so the number is reportable.
+    ///
+    /// Cell size `0.7` is deliberate: with exact key comparison this test found 67 divergences in 6383
+    /// comparisons at `0.7` and none at `0.5`, `1` or `2`, whose sums are exact in binary. With the
+    /// tolerant order it must find none. Setting `dstar_lite::KEY_EPS` to zero must make it fail again.
+    #[test]
+    fn replanning_agrees_with_lattice_astar_on_random_grids_flips_and_moves() {
+        let mut rng = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let lat = Lattice::four_heading(0.7, 1, true, true).expect("exact set"); // 0.7: its sums are NOT exact in binary, which is what breaks exact key ties
+        let w = LatticeWeights::default();
+        let mut divergences = 0usize;
+        let mut compared = 0usize;
+        let mut worst = 0.0f64;
+        let mut first = None;
+        for trial in 0..1500u32 {
+            let wd = 5 + (next() % 4) as usize;
+            let ht = 5 + (next() % 4) as usize;
+            let mut blocked: Vec<bool> = (0..wd * ht).map(|_| next() % 100 < 25).collect();
+            let start = (0i32, 0i32, (next() % 4) as usize);
+            let goal = (wd as i32 - 1, ht as i32 - 1, (next() % 4) as usize);
+            blocked[0] = false;
+            blocked[wd * ht - 1] = false;
+            let rows_of = |b: &Vec<bool>| -> Vec<String> {
+                (0..ht)
+                    .rev()
+                    .map(|j| {
+                        (0..wd)
+                            .map(|i| if b[j * wd + i] { '#' } else { '.' })
+                            .collect()
+                    })
+                    .collect()
+            };
+            let mk = |b: &Vec<bool>| {
+                let r = rows_of(b);
+                let rs: Vec<&str> = r.iter().map(|x| x.as_str()).collect();
+                OccupancyGrid::from_rows(&rs, 0.7, 0.0, 0.0).unwrap()
+            };
+            let mut grid = mk(&blocked);
+            let Some(mut d) = LatticeDStarLite::new(&grid, &lat, start, goal, w) else {
+                continue;
+            };
+            for _step in 0..8 {
+                let reach = d.compute_shortest_path(&grid);
+                let got = if reach { Some(d.cost_to_goal()) } else { None };
+                let oracle = lattice_astar(&grid, &lat, d.start(), goal, w).map(|p| p.cost);
+                compared += 1;
+                let same = match (got, oracle) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => {
+                        worst = worst.max((a - b).abs());
+                        (a - b).abs() < 1e-9
+                    }
+                    _ => false,
+                };
+                if !same {
+                    divergences += 1;
+                    if first.is_none() {
+                        first = Some(format!("trial {trial} {wd}x{ht} from {:?}: dstar {got:?} vs astar {oracle:?}\n{}", d.start(), rows_of(&blocked).join("\n")));
+                    }
+                    break;
+                }
+                if got.is_none() {
+                    break;
+                }
+                if next() % 2 == 0 && d.advance(&grid).is_none() {
+                    break;
+                }
+                let mut changed = vec![];
+                for _ in 0..(1 + next() % 3) {
+                    let i = (next() % wd as u64) as i32;
+                    let j = (next() % ht as u64) as i32;
+                    let s = d.start();
+                    if (i, j) == (s.0, s.1) || (i, j) == (goal.0, goal.1) {
+                        continue;
+                    }
+                    let ix = (j as usize) * wd + i as usize;
+                    blocked[ix] = !blocked[ix];
+                    changed.push((i, j));
+                }
+                if changed.is_empty() {
+                    continue;
+                }
+                grid = mk(&blocked);
+                d.cells_changed(&grid, &changed);
+            }
+        }
+        eprintln!("lattice D* Lite vs lattice_astar: {compared} comparisons, {divergences} divergences, worst |diff| among Some/Some pairs {worst:.3e}");
+        if let Some(f) = &first {
+            eprintln!("first divergence:\n{f}");
+        }
+        assert!(
+            compared > 2000,
+            "the fixture should produce thousands of comparisons, got {compared}"
+        );
+        assert_eq!(
+            divergences,
+            0,
+            "D* Lite must agree with a fresh search after every change; first: {}",
+            first.unwrap_or_default()
+        );
     }
 }

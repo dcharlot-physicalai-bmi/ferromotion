@@ -31,17 +31,17 @@ use crate::grid_astar::{can_step, Connectivity, OrdF};
 /// A priority-queue key `[k1; k2]`. Stale-entry detection compares keys bit-exactly (the same stored
 /// floats); ordering goes through [`key_cmp`]. The `rhs(s) == c + g_old` test in the raise branch is a
 /// separate, bit-exact comparison of the same expression that produced `rhs`.
-type Key = (OrdF, OrdF);
+pub(crate) type Key = (OrdF, OrdF);
 
 const INF: f64 = f64::INFINITY;
 const INF_KEY: Key = (OrdF(INF), OrdF(INF));
 
 /// Tolerance under which two key components are the same real number (see [`key_cmp`]).
-const KEY_EPS: f64 = 1e-6;
+pub(crate) const KEY_EPS: f64 = 1e-6;
 
 /// Order of one key component: equal when the two `f64`s are within [`KEY_EPS`] (or identical, which
 /// covers `INF`), otherwise the total order of [`OrdF`].
-fn comp_cmp(x: OrdF, y: OrdF) -> Ordering {
+pub(crate) fn comp_cmp(x: OrdF, y: OrdF) -> Ordering {
     if x == y || (x.0 - y.0).abs() <= KEY_EPS { Ordering::Equal } else { x.cmp(&y) }
 }
 
@@ -70,7 +70,7 @@ fn comp_cmp(x: OrdF, y: OrdF) -> Ordering {
 /// grids of up to `10⁴` cells (paths and `g` differences bounded by that) the comparison equals the
 /// real-number order and is therefore transitive, which is what [`BinaryHeap`] requires. Beyond that —
 /// paths over `10⁴` steps, or `k_m` beyond `10⁷` — the margin shrinks and the guarantee lapses.
-fn key_cmp(a: Key, b: Key) -> Ordering {
+pub(crate) fn key_cmp(a: Key, b: Key) -> Ordering {
     comp_cmp(a.0, b.0).then_with(|| comp_cmp(a.1, b.1))
 }
 
