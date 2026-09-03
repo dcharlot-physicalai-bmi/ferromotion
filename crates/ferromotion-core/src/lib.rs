@@ -259,7 +259,7 @@ pub use randomization::{check_actuator_support, ActuatorSupportCheck, AdrSchedul
 pub use ransac::{ransac, RansacResult};
 pub use savgol::SavGol;
 pub use lgvi::LgviBody;
-pub use manipulability::{condition_number, force_ellipsoid_axes, isotropy, manipulability_gradient, singular_values, yoshikawa};
+pub use manipulability::{condition_number, force_ellipsoid_axes, isotropy, manipulability_gradient, manipulability_gradient_analytic, singular_values, yoshikawa};
 pub use modal::{modal_analysis, ModalModel};
 pub use mjcf::{from_mjcf_constrained, from_mjcf_full, from_mjcf_str, to_mjcf};
 pub use usda::{axis_token, parse_usda, robot_from_usda, usda_from_robot, ParseError, Prim, UsdaStage, Value};
@@ -531,6 +531,87 @@ impl Robot {
             t = pre * j.motion(qi);
         }
         jac
+    }
+
+    /// The **kinematic Hessian** `∂J/∂q`: `dof` matrices, each `6 x dof`, where entry `j` is the
+    /// derivative of the geometric Jacobian with respect to `q[j]`.
+    ///
+    /// This is the second-order kinematics, and it is what [`Self::jacobian_dot`],
+    /// [`crate::manipulability_gradient_analytic`] and any Gauss-Newton or Newton IK need. Without it
+    /// those all fall back to differencing [`Self::jacobian`], which costs `2·dof` Jacobians per
+    /// gradient and loses roughly half the available digits.
+    ///
+    /// Derived from the same geometric construction the Jacobian uses. Moving `q[j]` transforms every
+    /// frame downstream of joint `j` and always moves the end effector, so with `z` the joint axes and
+    /// `p` the joint origins in world:
+    ///
+    /// - a **revolute** `j` gives `∂z_i = z_j × z_i` and `∂p_i = z_j × (p_i − p_j)` for `i > j`, zero
+    ///   otherwise, and `∂p_e = z_j × (p_e − p_j)` always;
+    /// - a **prismatic** `j` rotates nothing, so `∂z_i = 0`, with `∂p_i = z_j` for `i > j` and
+    ///   `∂p_e = z_j`.
+    ///
+    /// Those propagate through `J_v,i = z_i × (p_e − p_i)`, `J_ω,i = z_i` for a revolute column and
+    /// `J_v,i = z_i`, `J_ω,i = 0` for a prismatic one. Verified against central differences of
+    /// [`Self::jacobian`], which is the only reason to trust the algebra above.
+    pub fn kinematic_hessian(&self, q: &[f64]) -> Vec<DMatrix<f64>> {
+        let n = self.dof();
+        // one forward pass for the axes and origins, matching `jacobian`
+        let p_e = self.fk(q).translation.vector;
+        let mut z = Vec::with_capacity(n);
+        let mut p = Vec::with_capacity(n);
+        let mut t = Iso::identity();
+        for (j, &qi) in self.joints.iter().zip(q) {
+            let pre = t * j.origin;
+            z.push(pre.rotation * j.axis.into_inner());
+            p.push(pre.translation.vector);
+            t = pre * j.motion(qi);
+        }
+
+        let mut out = Vec::with_capacity(n);
+        for jj in 0..n {
+            let mut h = DMatrix::zeros(6, n);
+            let revolute_j = matches!(self.joints[jj].kind, JointKind::Revolute);
+            let dp_e = if revolute_j { z[jj].cross(&(p_e - p[jj])) } else { z[jj] };
+            for i in 0..n {
+                let downstream = i > jj;
+                let (dz_i, dp_i) = if !downstream {
+                    (Vector3::zeros(), Vector3::zeros())
+                } else if revolute_j {
+                    (z[jj].cross(&z[i]), z[jj].cross(&(p[i] - p[jj])))
+                } else {
+                    (Vector3::zeros(), z[jj])
+                };
+                match self.joints[i].kind {
+                    JointKind::Revolute => {
+                        let lin = dz_i.cross(&(p_e - p[i])) + z[i].cross(&(dp_e - dp_i));
+                        h.fixed_view_mut::<3, 1>(0, i).copy_from(&lin);
+                        h.fixed_view_mut::<3, 1>(3, i).copy_from(&dz_i);
+                    }
+                    JointKind::Prismatic => {
+                        h.fixed_view_mut::<3, 1>(0, i).copy_from(&dz_i);
+                    }
+                }
+            }
+            out.push(h);
+        }
+        out
+    }
+
+    /// `J̇ = Σ_j (∂J/∂q_j)·q̇_j`, the Jacobian rate along a joint velocity.
+    ///
+    /// The term operational-space control needs for its `J̇ q̇` bias, and second-order IK for its
+    /// feed-forward. Exact, from [`Self::kinematic_hessian`], rather than differenced over a timestep.
+    pub fn jacobian_dot(&self, q: &[f64], qd: &[f64]) -> Option<DMatrix<f64>> {
+        let n = self.dof();
+        if q.len() != n || qd.len() != n {
+            return None;
+        }
+        let h = self.kinematic_hessian(q);
+        let mut out = DMatrix::zeros(6, n);
+        for (j, hj) in h.iter().enumerate() {
+            out += hj * qd[j];
+        }
+        Some(out)
     }
 
     /// World pose of the frame after the first `upto` joints (`0..=dof`); `upto = dof` is the
