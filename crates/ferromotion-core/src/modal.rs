@@ -26,6 +26,10 @@ pub struct ModalModel {
 /// Modal analysis: the `r` lowest-frequency modes of `M ẍ + K x = 0` (`M` SPD, `K` symmetric PSD).
 pub fn modal_analysis(m: &DMatrix<f64>, k: &DMatrix<f64>, r: usize) -> ModalModel {
     let n = m.nrows();
+    if !m.iter().chain(k.iter()).all(|v| v.is_finite()) {
+        // Garbage in, NaN out. The alternative was a panic from the Cholesky of a NaN mass matrix.
+        return ModalModel { basis: DMatrix::from_element(n, r, f64::NAN), freq: DVector::from_element(r, f64::NAN), project: DMatrix::from_element(r, n, f64::NAN) };
+    }
     // Transform K φ = ω² M φ to a standard symmetric eigenproblem via M = L Lᵀ.
     let l = m.clone().cholesky().expect("M must be SPD").l();
     let linv = l.try_inverse().expect("L invertible");
@@ -35,7 +39,7 @@ pub fn modal_analysis(m: &DMatrix<f64>, k: &DMatrix<f64>, r: usize) -> ModalMode
 
     // Sort eigenpairs by ascending eigenvalue and keep the r smallest.
     let mut idx: Vec<usize> = (0..n).collect();
-    idx.sort_by(|&i, &j| eig.eigenvalues[i].partial_cmp(&eig.eigenvalues[j]).unwrap());
+    idx.sort_by(|&i, &j| eig.eigenvalues[i].total_cmp(&eig.eigenvalues[j]));
 
     let (mut basis, mut freq) = (DMatrix::zeros(n, r), DVector::zeros(r));
     for (c, &i) in idx.iter().take(r).enumerate() {

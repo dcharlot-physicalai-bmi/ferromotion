@@ -70,6 +70,9 @@ pub fn exp_so3(w: &Vector3<f64>) -> Matrix3<f64> {
 /// range. `cos θ < 0` (i.e. `θ > π/2`) is inside that flat region, so the switch costs nothing and lands
 /// far from both singularities. At `θ = π` the symmetric branch round-trips to `2.2e-16`.
 pub fn log_so3(r: &Matrix3<f64>) -> Vector3<f64> {
+    if !r.iter().all(|v| v.is_finite()) {
+        return Vector3::from_element(f64::NAN); // garbage in, NaN out: a matrix is not divisible
+    }
     let tr = r.trace();
     let cos = ((tr - 1.0) / 2.0).clamp(-1.0, 1.0);
     let theta = cos.acos();
@@ -83,7 +86,7 @@ pub fn log_so3(r: &Matrix3<f64>) -> Vector3<f64> {
     // θ > π/2: recover n̂ from the symmetric part, which is well conditioned exactly where the
     // antisymmetric part degenerates.
     let m = ((r + r.transpose()) * 0.5 - Matrix3::identity() * cos) / (1.0 - cos);
-    let i = (0..3).max_by(|&a, &b| m[(a, a)].partial_cmp(&m[(b, b)]).unwrap()).unwrap();
+    let i = (0..3).max_by(|&a, &b| m[(a, a)].total_cmp(&m[(b, b)])).expect("three diagonal entries");
     let mut n = m.column(i) / m[(i, i)].max(0.0).sqrt();
     let len = n.norm();
     if len > 0.0 {

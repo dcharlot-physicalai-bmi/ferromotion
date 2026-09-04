@@ -21,6 +21,13 @@ pub struct Pca {
 
 /// Compute the PCA of `points` (needs at least one point).
 pub fn pca(points: &[Vector3<f64>]) -> Pca {
+    // A point with a non-finite coordinate has no position, so it is dropped rather than allowed to
+    // turn the whole covariance into NaN. With nothing left there is no principal axis to report.
+    let kept: Vec<Vector3<f64>> = points.iter().copied().filter(|p| p.iter().all(|v| v.is_finite())).collect();
+    if kept.is_empty() {
+        return Pca { centroid: Vector3::from_element(f64::NAN), axes: Matrix3::from_element(f64::NAN), variances: Vector3::from_element(f64::NAN) };
+    }
+    let points = kept.as_slice();
     let n = points.len().max(1) as f64;
     let centroid = points.iter().sum::<Vector3<f64>>() / n;
     let mut cov = Matrix3::zeros();
@@ -32,7 +39,7 @@ pub fn pca(points: &[Vector3<f64>]) -> Pca {
     let eig = SymmetricEigen::new(cov);
     // order eigenpairs by descending eigenvalue
     let mut idx = [0usize, 1, 2];
-    idx.sort_by(|&a, &b| eig.eigenvalues[b].partial_cmp(&eig.eigenvalues[a]).unwrap());
+    idx.sort_by(|&a, &b| eig.eigenvalues[b].total_cmp(&eig.eigenvalues[a]));
     let mut axes = Matrix3::zeros();
     for (col, &src) in idx.iter().enumerate() {
         axes.set_column(col, &eig.eigenvectors.column(src).into_owned());

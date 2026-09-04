@@ -59,15 +59,18 @@ pub fn cross_correlation(a: &[f64], b: &[f64]) -> Vec<f64> {
 
 /// The integer time delay of `b` relative to `a` (the circular shift `s` with `b[n] ≈ a[n − s]`), as the
 /// lag maximizing the cross-correlation, mapped to the signed range `[−N/2, N/2)`.
-pub fn time_delay(a: &[f64], b: &[f64]) -> isize {
+///
+/// `None` for empty input or a non-finite sample. An `isize` has no value meaning "no answer", and
+/// returning a lag of zero for unusable input would be a silent wrong answer, so the signature carries
+/// the failure instead.
+pub fn time_delay(a: &[f64], b: &[f64]) -> Option<isize> {
+    if a.is_empty() || b.is_empty() || !a.iter().chain(b).all(|v| v.is_finite()) {
+        return None;
+    }
     let r = cross_correlation(a, b);
     let n = r.len();
-    let k = (0..n).max_by(|&i, &j| r[i].partial_cmp(&r[j]).unwrap()).unwrap();
-    if k > n / 2 {
-        k as isize - n as isize
-    } else {
-        k as isize
-    }
+    let k = (0..n).max_by(|&i, &j| r[i].total_cmp(&r[j]))?;
+    Some(if k > n / 2 { k as isize - n as isize } else { k as isize })
 }
 
 #[cfg(test)]
@@ -117,9 +120,9 @@ mod tests {
         let a: Vec<f64> = (0..n).map(|t| (t as f64 * 0.7).sin() + 0.5 * (t as f64 * 0.13).cos()).collect();
         let shift = 7usize;
         let b: Vec<f64> = (0..n).map(|t| a[(t + n - shift) % n]).collect(); // b[t] = a[t − shift]
-        assert_eq!(time_delay(&a, &b), shift as isize, "should recover the delay");
+        assert_eq!(time_delay(&a, &b), Some(shift as isize), "should recover the delay");
         // a negative delay too
         let c: Vec<f64> = (0..n).map(|t| a[(t + 5) % n]).collect(); // c[t] = a[t + 5] ⇒ delay −5
-        assert_eq!(time_delay(&a, &c), -5, "should recover a negative delay");
+        assert_eq!(time_delay(&a, &c), Some(-5), "should recover a negative delay");
     }
 }

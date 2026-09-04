@@ -18,9 +18,17 @@ pub fn yoshikawa(j: &DMatrix<f64>) -> f64 {
 }
 
 /// Singular values of `J`, largest first (the velocity-ellipsoid semi-axis lengths).
+///
+/// A non-finite entry yields all-`NaN` singular values. This is not defensive tidying: nalgebra's SVD
+/// iteration **never terminates** on a matrix holding a `NaN`, so without this guard every function in
+/// this module spins forever instead of returning, measured at 5 s with no result in
+/// `tests/nonfinite_public_api.rs`. A hang in a control loop is worse than a wrong number.
 pub fn singular_values(j: &DMatrix<f64>) -> Vec<f64> {
+    if !j.iter().all(|v| v.is_finite()) {
+        return vec![f64::NAN; j.nrows().min(j.ncols())];
+    }
     let mut s: Vec<f64> = j.clone().singular_values().iter().cloned().collect();
-    s.sort_by(|a, b| b.partial_cmp(a).unwrap());
+    s.sort_by(|a, b| b.total_cmp(a));
     s
 }
 

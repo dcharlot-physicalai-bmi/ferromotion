@@ -50,13 +50,13 @@ fn psd_sqrt(a: &DMatrix<f64>) -> Option<DMatrix<f64>> {
 /// line the optimal coupling is monotone, so sorting both samples and averaging the paired gaps is the
 /// answer — no solver needed. Samples must be the same length.
 pub fn w1_empirical_1d(a: &[f64], b: &[f64]) -> Option<f64> {
-    if a.len() != b.len() || a.is_empty() {
+    if a.len() != b.len() || a.is_empty() || !a.iter().chain(b).all(|v| v.is_finite()) {
         return None;
     }
     let mut x = a.to_vec();
     let mut y = b.to_vec();
-    x.sort_by(|p, q| p.partial_cmp(q).unwrap());
-    y.sort_by(|p, q| p.partial_cmp(q).unwrap());
+    x.sort_by(f64::total_cmp);
+    y.sort_by(f64::total_cmp);
     Some(x.iter().zip(&y).map(|(p, q)| (p - q).abs()).sum::<f64>() / x.len() as f64)
 }
 

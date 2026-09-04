@@ -34,12 +34,12 @@ use nalgebra::DMatrix;
 ///
 /// Returns `(value, potential_at_sorted_support)`. `None` if the samples differ in length or are empty.
 pub fn kantorovich_dual(a: &[f64], b: &[f64]) -> Option<(f64, Vec<f64>)> {
-    if a.len() != b.len() || a.is_empty() {
+    if a.len() != b.len() || a.is_empty() || !a.iter().chain(b).all(|v| v.is_finite()) {
         return None;
     }
     // Pool the support, then integrate sign(F_a − F_b) across it: that is the optimal 1-Lipschitz potential.
     let mut support: Vec<f64> = a.iter().chain(b.iter()).cloned().collect();
-    support.sort_by(|p, q| p.partial_cmp(q).unwrap());
+    support.sort_by(f64::total_cmp);
     support.dedup_by(|x, y| (*x - *y).abs() < 1e-15);
 
     let n = a.len() as f64;
@@ -83,11 +83,11 @@ fn interp(support: &[f64], f: &[f64], x: f64) -> f64 {
 /// unlike `W_p` its **sample gradients are unbiased**, so minimising a sampled estimate minimises the real
 /// thing. That is the property [`wasserstein_gradient_is_biased`](self) measures.
 pub fn cramer_distance(a: &[f64], b: &[f64]) -> Option<f64> {
-    if a.is_empty() || b.is_empty() {
+    if a.is_empty() || b.is_empty() || !a.iter().chain(b).all(|v| v.is_finite()) {
         return None;
     }
     let mut knots: Vec<f64> = a.iter().chain(b.iter()).cloned().collect();
-    knots.sort_by(|p, q| p.partial_cmp(q).unwrap());
+    knots.sort_by(f64::total_cmp);
     let cdf = |s: &[f64], t: f64| s.iter().filter(|v| **v <= t).count() as f64 / s.len() as f64;
     // The CDFs are piecewise constant, so the integral is an exact finite sum over the gaps between knots.
     let mut acc = 0.0;
@@ -140,7 +140,7 @@ pub fn distributional_bellman(z: &[Vec<f64>], reward: &[f64], gamma: f64, next: 
             }
             pooled.extend(z[sp].iter().map(|v| reward[s] + gamma * v));
         }
-        pooled.sort_by(|p, q| p.partial_cmp(q).unwrap());
+        pooled.sort_by(f64::total_cmp);
         // quantile projection back onto m equally-weighted atoms
         let atoms: Vec<f64> = (0..m).map(|i| pooled[((i as f64 + 0.5) / m as f64 * pooled.len() as f64) as usize % pooled.len()]).collect();
         out.push(atoms);
