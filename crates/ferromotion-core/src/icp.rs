@@ -27,7 +27,18 @@ pub struct IcpResult {
 
 /// **Umeyama / Arun** closed-form rigid alignment: the `(R, t)` minimizing `Σ‖(R·src_i + t) − dst_i‖²` for
 /// *given* correspondences, via the SVD of the cross-covariance (reflection-free).
-pub fn umeyama(src: &[Vector3<f64>], dst: &[Vector3<f64>]) -> (Matrix3<f64>, Vector3<f64>) {
+///
+/// `None` unless the correspondences are usable: equal non-zero lengths and every coordinate finite.
+/// This used to be unchecked, and the failure was silent rather than loud. The destination centroid was
+/// divided by the SOURCE count, so a `dst` one point longer returned a rigid transform whose rotation
+/// was bit-identical and whose translation was wrong by the extra point's contribution to the centroid
+/// (measured: 3.1177 for one extra point at `(9, 9, 9)` over five correspondences, exactly `9√3/5`).
+/// The rotation is provably immune because the source deviations sum to zero, so a centroid error
+/// cancels out of the cross-covariance entirely and lands wholly in the translation.
+pub fn umeyama(src: &[Vector3<f64>], dst: &[Vector3<f64>]) -> Option<(Matrix3<f64>, Vector3<f64>)> {
+    if src.is_empty() || src.len() != dst.len() || !src.iter().chain(dst).all(|p| p.iter().all(|v| v.is_finite())) {
+        return None;
+    }
     let n = src.len() as f64;
     let mu_s: Vector3<f64> = src.iter().sum::<Vector3<f64>>() / n;
     let mu_d: Vector3<f64> = dst.iter().sum::<Vector3<f64>>() / n;
@@ -43,7 +54,7 @@ pub fn umeyama(src: &[Vector3<f64>], dst: &[Vector3<f64>]) -> (Matrix3<f64>, Vec
     d[(2, 2)] = (u * vt).determinant().signum();
     let r = u * d * vt;
     let t = mu_d - r * mu_s;
-    (r, t)
+    Some((r, t))
 }
 
 /// A GICP-style per-point covariance from a surface normal: flattened along `n` (variance `epsilon`) and
@@ -54,14 +65,16 @@ pub fn covariance_from_normal(n: &Vector3<f64>, epsilon: f64) -> Matrix3<f64> {
     epsilon * nn + (Matrix3::identity() - nn)
 }
 
-/// Brute-force index of the nearest target point to `p`.
-fn nearest(p: &Vector3<f64>, target: &[Vector3<f64>]) -> usize {
+/// Brute-force index of the nearest target point to `p`, or `None` for an empty target.
+///
+/// The comparison is total so that a non-finite coordinate cannot fault the search; such a point simply
+/// sorts last and is never chosen while any real point remains.
+fn nearest(p: &Vector3<f64>, target: &[Vector3<f64>]) -> Option<usize> {
     target
         .iter()
         .enumerate()
-        .min_by(|a, b| (a.1 - p).norm_squared().partial_cmp(&(b.1 - p).norm_squared()).unwrap())
-        .unwrap()
-        .0
+        .min_by(|a, b| (a.1 - p).norm_squared().total_cmp(&(b.1 - p).norm_squared()))
+        .map(|(i, _)| i)
 }
 
 /// Registration settings.
@@ -87,8 +100,8 @@ impl Icp {
         for _ in 0..self.max_iters {
             iterations += 1;
             let moved: Vec<Vector3<f64>> = source.iter().map(|p| r * p + t).collect();
-            let matched: Vec<Vector3<f64>> = moved.iter().map(|p| target[nearest(p, target)]).collect();
-            let (dr, dt) = umeyama(&moved, &matched); // incremental correction on the moved cloud
+            let Some(matched) = moved.iter().map(|p| nearest(p, target).map(|j| target[j])).collect::<Option<Vec<Vector3<f64>>>>() else { break };
+            let Some((dr, dt)) = umeyama(&moved, &matched) else { break }; // incremental correction on the moved cloud
             r = dr * r;
             t = dr * t + dt;
             // incremental motion size
@@ -114,7 +127,7 @@ impl Icp {
             let mut b = DVector::<f64>::zeros(6);
             for p in source {
                 let pw = r * p + t;
-                let j = nearest(&pw, target);
+                let Some(j) = nearest(&pw, target) else { continue };
                 let (q, n) = (target[j], normals[j]);
                 // r_i = n·(pw − q) + (pw×n)·δθ + n·δt  → row = [(pw×n)ᵀ, nᵀ], rhs = −n·(pw−q)
                 let cross = pw.cross(&n);
@@ -156,7 +169,7 @@ impl Icp {
             let mut g = DVector::<f64>::zeros(6);
             for (i, p) in source.iter().enumerate() {
                 let pw = r * p + t;
-                let j = nearest(&pw, target);
+                let Some(j) = nearest(&pw, target) else { continue };
                 let d = target[j] - pw;
                 // Mahalanobis weight  M⁻¹ = (C_target + R C_source Rᵀ)⁻¹
                 let m = tgt_cov[j] + r * src_cov[i] * r.transpose();
@@ -192,7 +205,7 @@ fn rmse(source: &[Vector3<f64>], target: &[Vector3<f64>], r: &Matrix3<f64>, t: &
         .iter()
         .map(|p| {
             let pw = r * p + t;
-            (pw - target[nearest(&pw, target)]).norm_squared()
+            nearest(&pw, target).map_or(0.0, |j| (pw - target[j]).norm_squared())
         })
         .sum();
     (s / source.len() as f64).sqrt()
@@ -231,7 +244,7 @@ mod tests {
         let r_true = rot(Vector3::new(0.3, -0.5, 0.8), 0.4);
         let t_true = Vector3::new(0.7, -0.2, 0.5);
         let dst: Vec<Vector3<f64>> = src.iter().map(|p| r_true * p + t_true).collect();
-        let (r, t) = umeyama(&src, &dst);
+        let (r, t) = umeyama(&src, &dst).expect("well-posed correspondences");
         assert!((r - r_true).abs().max() < 1e-10, "rotation off: {}", (r - r_true).abs().max());
         assert!((t - t_true).norm() < 1e-10, "translation off: {}", (t - t_true).norm());
     }
@@ -299,5 +312,35 @@ mod tests {
         let res = Icp::default().point_to_point(&src, &src);
         assert!((res.rotation - Matrix3::identity()).abs().max() < 1e-9 && res.translation.norm() < 1e-9, "identity expected");
         assert!(res.rmse < 1e-12);
+    }
+
+    /// **A mismatched correspondence list is refused rather than answered wrongly.**
+    ///
+    /// Measured pre-fix: `umeyama` divided the destination centroid by the SOURCE count, so one extra
+    /// `dst` point returned a transform whose rotation was bit-identical and whose translation was off
+    /// by 3.1177, exactly the extra point's centroid contribution `9√3/5`.
+    #[test]
+    fn umeyama_refuses_correspondences_it_cannot_solve() {
+        use nalgebra::Rotation3;
+        let src = vec![
+            Vector3::new(0.0, 0.0, 0.0), Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0), Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(1.0, 1.0, 0.0),
+        ];
+        let rot = Rotation3::from_euler_angles(0.1, 0.2, 0.3);
+        let tr = Vector3::new(0.5, -0.2, 0.7);
+        let dst: Vec<Vector3<f64>> = src.iter().map(|p| rot * p + tr).collect();
+        let (r_ok, t_ok) = umeyama(&src, &dst).expect("control: well-posed");
+        assert!((r_ok - rot.matrix()).norm() < 1e-12 && (t_ok - tr).norm() < 1e-12, "control: exact on a well-posed problem");
+        assert!((r_ok - rot.matrix()).norm() < 1e-12, "control is exact");
+        let mut longer = dst.clone();
+        longer.push(Vector3::new(9.0, 9.0, 9.0)); // one extra destination point, no matching source
+        assert!(umeyama(&src, &longer).is_none(), "mismatched lengths must be refused, not answered wrongly");
+        assert!(umeyama(&src[..2], &dst).is_none(), "a shorter src too");
+        assert!(umeyama(&[], &[]).is_none(), "no correspondences at all");
+        let mut bad = dst.clone();
+        bad[2] = Vector3::new(f64::NAN, 0.0, 0.0);
+        assert!(umeyama(&src, &bad).is_none(), "a non-finite correspondence");
+        assert!(nearest(&Vector3::zeros(), &[]).is_none(), "an empty target has no nearest point");
     }
 }

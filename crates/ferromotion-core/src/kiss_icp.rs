@@ -87,7 +87,7 @@ impl KissIcp {
             if src.len() < 3 {
                 break;
             }
-            let (dr, dt) = umeyama(&src, &dst); // aligns current-world → corrected-world
+            let Some((dr, dt)) = umeyama(&src, &dst) else { break }; // aligns current-world → corrected-world
             est = compose(&(dr, dt), &est);
             // adaptive threshold: shrink toward 3× the median residual
             let mut r = residuals.clone();
