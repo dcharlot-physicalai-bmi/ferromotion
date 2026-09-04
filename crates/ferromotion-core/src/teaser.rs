@@ -51,7 +51,13 @@ fn tls_weight(r: f64, mu: f64, barc: f64) -> f64 {
 
 /// Register `src` onto `dst` (same length, index-aligned correspondences, some fraction outliers) robust to
 /// gross outliers. `noise_bound` is the expected inlier residual scale.
-pub fn register(src: &[Vector3<f64>], dst: &[Vector3<f64>], noise_bound: f64) -> Registration {
+///
+/// `None` when that contract is broken: unequal or zero lengths, or a non-finite coordinate. Both used
+/// to fault rather than report, one by indexing `dst` up to `src.len()` and one in the median sort.
+pub fn register(src: &[Vector3<f64>], dst: &[Vector3<f64>], noise_bound: f64) -> Option<Registration> {
+    if src.is_empty() || src.len() != dst.len() || !src.iter().chain(dst).all(|p| p.iter().all(|v| v.is_finite())) {
+        return None;
+    }
     // translation-invariant measurements: all correspondence differences
     let n = src.len();
     let mut u = Vec::new();
@@ -87,10 +93,10 @@ pub fn register(src: &[Vector3<f64>], dst: &[Vector3<f64>], noise_bound: f64) ->
     let mut res: Vec<Vector3<f64>> = src.iter().zip(dst).map(|(s, d)| d - r * s).collect();
     let mut t = Vector3::zeros();
     for axis in 0..3 {
-        res.sort_by(|a, b| a[axis].partial_cmp(&b[axis]).unwrap());
+        res.sort_by(|a, b| a[axis].total_cmp(&b[axis]));
         t[axis] = res[res.len() / 2][axis];
     }
-    Registration { rotation: r, translation: t }
+    Some(Registration { rotation: r, translation: t })
 }
 
 #[cfg(test)]
@@ -126,7 +132,7 @@ mod tests {
         for d in dst.iter_mut().take(12) {
             *d = Vector3::new(rand(&mut seed) * 8.0, rand(&mut seed) * 8.0, rand(&mut seed) * 8.0);
         }
-        let reg = register(&src, &dst, 0.01);
+        let reg = register(&src, &dst, 0.01).expect("well-posed");
         let rot_err = (reg.rotation - r_true).norm();
         let t_err = (reg.translation - t_true).norm();
         assert!(rot_err < 1e-3, "rotation error {rot_err}");
@@ -151,7 +157,29 @@ mod tests {
         let mut seed = 7u64;
         let src: Vec<Vector3<f64>> = (0..12).map(|_| Vector3::new(rand(&mut seed) * 3.0, rand(&mut seed) * 3.0, rand(&mut seed) * 3.0)).collect();
         let dst: Vec<Vector3<f64>> = src.iter().map(|s| r_true * s + t_true).collect();
-        let reg = register(&src, &dst, 0.001);
+        let reg = register(&src, &dst, 0.001).expect("well-posed");
         assert!((reg.rotation - r_true).norm() < 1e-6 && (reg.translation - t_true).norm() < 1e-6, "clean recovery");
+    }
+
+    /// **The documented contract is now enforced.**
+    ///
+    /// The doc says "same length, index-aligned correspondences" and nothing checked it: `dst[i]` was
+    /// indexed up to `src.len()`, so a shorter `dst` faulted on an index, and the robust-translation
+    /// median sorted with `partial_cmp().unwrap()`, so a non-finite coordinate faulted there.
+    #[test]
+    fn register_refuses_correspondences_that_break_its_contract() {
+        use nalgebra::Rotation3;
+        let src: Vec<Vector3<f64>> = (0..8).map(|i| { let a = i as f64 * 0.7; Vector3::new(a.cos(), a.sin(), 0.1 * a) }).collect();
+        let rot = Rotation3::from_euler_angles(0.05, -0.1, 0.2);
+        let tr = Vector3::new(0.3, 0.1, -0.2);
+        let dst: Vec<Vector3<f64>> = src.iter().map(|p| rot * p + tr).collect();
+        let reg = register(&src, &dst, 0.01).expect("control: a well-posed problem still registers");
+        assert!((reg.rotation - rot.matrix()).norm() < 1e-6 && (reg.translation - tr).norm() < 1e-6, "control must be accurate");
+        assert!(register(&src, &dst[..5], 0.01).is_none(), "a shorter dst is refused, not indexed past its end");
+        assert!(register(&src[..3], &dst, 0.01).is_none(), "a shorter src too");
+        assert!(register(&[], &[], 0.01).is_none(), "no correspondences at all");
+        let mut bad = dst.clone();
+        bad[4] = Vector3::new(f64::NAN, 0.0, 0.0);
+        assert!(register(&src, &bad, 0.01).is_none(), "a non-finite correspondence");
     }
 }
