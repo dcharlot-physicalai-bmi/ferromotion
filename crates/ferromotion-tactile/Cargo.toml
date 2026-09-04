@@ -18,7 +18,7 @@ nalgebra.workspace = true
 # real 3D solve rather than trusting a closed form. Runtime dependencies stay nalgebra-only, so the
 # crate is still WASM-clean.
 [dev-dependencies]
-ferromotion-fem = { path = "../ferromotion-fem", version = "0.69.0" }
+ferromotion-fem = { path = "../ferromotion-fem", version = "0.70.0" }
 
 [lints]
 workspace = true
