@@ -13,7 +13,7 @@ description = "Robot arm models built from their published Denavit-Hartenberg ta
 
 [dependencies]
 # Path dependencies need a version to be publishable, and this is what the release bump targets.
-ferromotion-core = { path = "../ferromotion-core", version = "0.70.0" }
+ferromotion-core = { path = "../ferromotion-core", version = "0.71.0" }
 nalgebra.workspace = true
 
 [lints]

@@ -23,7 +23,7 @@ type_complexity = "allow"
 should_implement_trait = "allow"
 
 [workspace.package]
-version = "0.70.0"
+version = "0.71.0"
 edition = "2024"
 # MEASURED, not guessed: `cargo +1.89.0 check --workspace --exclude ferromotion-viz` passes. 1.85 (the
 # edition-2024 floor) fails only because nalgebra 0.35.0 and wide 1.5.0 require 1.89 — the floor is set
