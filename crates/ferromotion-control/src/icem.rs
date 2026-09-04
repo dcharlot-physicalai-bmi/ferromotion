@@ -70,6 +70,22 @@ pub fn colored_noise(h: usize, beta: f64, rng: &mut Rng) -> Vec<f64> {
     out.iter().map(|v| (v - mean) / sd).collect()
 }
 
+/// A score the ranking can order: any non-finite cost becomes the worst finite cost.
+///
+/// A caller's cost goes non-finite whenever its simulator cannot integrate a sequence (a divergence,
+/// a `0/0`, a `log` of a negative). Ranking those with `partial_cmp().unwrap()` panics on the first
+/// NaN, and `total_cmp` alone is not enough either: it orders a NEGATIVE NaN and `-inf` BELOW every
+/// real cost, so a diverged sequence would rank BEST and be refit as an elite. Mapping every
+/// non-finite score to [`f64::MAX`] is the contract [`crate::Cem::rollout_cost`] already documents
+/// for its own rollouts, so the two planners now agree.
+fn finite_or_worst(c: f64) -> f64 {
+    if c.is_finite() {
+        c
+    } else {
+        f64::MAX
+    }
+}
+
 /// An iCEM planner over a control sequence of `horizon` steps, each `dim`-dimensional.
 #[derive(Clone, Debug)]
 pub struct Icem {
@@ -86,6 +102,10 @@ pub struct Icem {
 impl Icem {
     /// Plan by iterated colored-noise sampling with elite reuse. `cost(&sequence)` scores a control
     /// sequence (lower is better). Returns the optimized mean sequence (`horizon` × `dim` vectors).
+    ///
+    /// `cost` may return a non-finite score for a sequence its simulator cannot integrate; such a
+    /// sequence is ranked worst and never becomes an elite (non-finite scores are mapped to `f64::MAX`). The returned
+    /// plan is therefore finite whenever the caller's own sampling bounds are.
     pub fn plan(&self, cost: impl Fn(&[DVector<f64>]) -> f64, seed: u64) -> Vec<DVector<f64>> {
         let mut rng = Rng::new(seed);
         let n_elite = ((self.samples as f64 * self.elite_frac).ceil() as usize).max(1);
@@ -108,8 +128,8 @@ impl Icem {
                 pop.push(seq);
             }
             // rank, keep elites
-            let mut scored: Vec<(f64, usize)> = pop.iter().enumerate().map(|(i, s)| (cost(s), i)).collect();
-            scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            let mut scored: Vec<(f64, usize)> = pop.iter().enumerate().map(|(i, s)| (finite_or_worst(cost(s)), i)).collect();
+            scored.sort_by(|a, b| a.0.total_cmp(&b.0));
             let elites: Vec<Vec<DVector<f64>>> = scored[..n_elite].iter().map(|&(_, i)| pop[i].clone()).collect();
             // refit mean & std to the elites
             for t in 0..self.horizon {
@@ -203,5 +223,52 @@ mod tests {
         let plan = icem.plan(cost, 11);
         let final_cost = cost(&plan);
         assert!(final_cost < 0.1 * init_cost, "iCEM should slash the cost >10x: {init_cost} → {final_cost}");
+    }
+
+    /// **A cost that goes non-finite on part of the search space must be ranked worst, not panic.**
+    ///
+    /// The sibling CEM planner documents and enforces that a diverging rollout scores `f64::MAX`. This
+    /// planner takes the caller's cost, documents only "lower is better", and ranked with
+    /// `partial_cmp().unwrap()`, which panics the moment one NaN enters the ranking. A caller whose
+    /// simulator diverges on an aggressive control sequence hits exactly that, and the fixture below
+    /// asserts the non-finite region is really visited so the test cannot pass vacuously.
+    #[test]
+    fn a_non_finite_cost_is_ranked_worst_instead_of_panicking() {
+        let horizon = 10;
+        let star: Vec<DVector<f64>> = (0..horizon).map(|t| DVector::from_element(2, 0.3 * (t as f64 * 0.5).cos())).collect();
+        let calls = std::cell::Cell::new(0usize);
+        let nonfinite = std::cell::Cell::new(0usize);
+        let negative = std::cell::Cell::new(0usize);
+        let cost = |seq: &[DVector<f64>]| {
+            calls.set(calls.get() + 1);
+            if seq[0].iter().any(|u| u.abs() > 2.0) {
+                nonfinite.set(nonfinite.get() + 1);
+                return f64::NAN; // "the simulator diverged on this sequence"
+            }
+            if seq[1].iter().any(|u| u.abs() > 2.5) {
+                negative.set(negative.get() + 1);
+                return f64::NEG_INFINITY; // a non-finite score that `total_cmp` alone would rank BEST
+            }
+            seq.iter().zip(&star).map(|(u, s)| (u - s).norm_squared()).sum::<f64>()
+        };
+        let init: f64 = star.iter().map(|s| s.norm_squared()).sum();
+        let icem = Icem { horizon, dim: 2, samples: 128, elite_frac: 0.12, beta: 2.0, iters: 40, sigma0: 1.5 };
+        let plan = icem.plan(cost, 7);
+        assert!(nonfinite.get() > 0, "the fixture must actually reach the non-finite region: {} of {} calls", nonfinite.get(), calls.get());
+        assert!(negative.get() > 0, "the fixture must also reach the NEGATIVE non-finite region: {} of {} calls", negative.get(), calls.get());
+        assert!(plan.iter().all(|u| u.iter().all(|x| x.is_finite())), "the returned plan must be finite: {plan:?}");
+        let final_cost = cost(&plan);
+        assert!(final_cost.is_finite() && final_cost < 0.2 * init, "must still optimize despite the non-finite region: {init} -> {final_cost}");
+        eprintln!("iCEM with non-finite regions: {} NaN + {} -inf of {} cost calls; cost {init:.4} -> {final_cost:.4}", nonfinite.get(), negative.get(), calls.get());
+    }
+
+    /// The degenerate case: EVERY sequence scores non-finite. The elite set is then all-worst, and the
+    /// refit must still return finite numbers rather than propagating NaN into the mean.
+    #[test]
+    fn an_everywhere_non_finite_cost_still_returns_a_finite_plan() {
+        let icem = Icem { horizon: 6, dim: 2, samples: 64, elite_frac: 0.125, beta: 2.0, iters: 10, sigma0: 1.0 };
+        let plan = icem.plan(|_| f64::NAN, 3);
+        assert_eq!(plan.len(), 6);
+        assert!(plan.iter().all(|u| u.iter().all(|x| x.is_finite())), "plan must stay finite: {plan:?}");
     }
 }

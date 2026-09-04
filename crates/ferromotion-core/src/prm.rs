@@ -82,7 +82,14 @@ impl PrmStar {
 impl Roadmap {
     /// Answer a start→goal query by connecting each endpoint to the roadmap and running Dijkstra.
     /// Returns the collision-free waypoint path (including start and goal) or `None`.
+    ///
+    /// `None` also when an endpoint is malformed: a length other than the roadmap's dimension, or a
+    /// non-finite coordinate. Both used to fault inside the nearest-neighbour sort rather than being
+    /// reported, one by indexing past the slice and one by unwrapping a `NaN` comparison.
     pub fn query(&self, start: &[f64], goal: &[f64], edge_free: impl Fn(&[f64], &[f64]) -> bool) -> Option<Vec<Vec<f64>>> {
+        if start.len() != self.dim || goal.len() != self.dim || !start.iter().chain(goal).all(|x| x.is_finite()) {
+            return None;
+        }
         let n = self.nodes.len();
         // virtual start = index n, goal = index n+1
         let mut adj: Vec<Vec<(usize, f64)>> = self.adj.clone();
@@ -91,7 +98,7 @@ impl Roadmap {
         let (si, gi) = (n, n + 1);
         let mut connect = |from: usize, p: &[f64]| {
             let mut order: Vec<usize> = (0..n).collect();
-            order.sort_by(|&a, &b| dist(p, &self.nodes[a]).partial_cmp(&dist(p, &self.nodes[b])).unwrap());
+            order.sort_by(|&a, &b| dist(p, &self.nodes[a]).total_cmp(&dist(p, &self.nodes[b])));
             let k = ((std::f64::consts::E * (1.0 + 1.0 / self.dim as f64)) * (n.max(2) as f64).ln()).ceil() as usize;
             for &j in order.iter().take(k) {
                 if edge_free(p, &self.nodes[j]) {
@@ -221,5 +228,24 @@ mod verification {
             assert!(clears, "path has a colliding segment");
             assert!(mn > 0.02, "path grazes the obstacle: {mn}");
         }
+    }
+
+    /// **A malformed endpoint is refused, not a panic from inside the nearest-neighbour sort.**
+    ///
+    /// `query` sorts the roadmap by distance to the endpoint. A non-finite coordinate makes every
+    /// distance NaN, and the comparison used to be unwrapped, so the library panicked on the caller's
+    /// data; a wrong-length endpoint indexed past the end of the slice instead. Both are now `None`.
+    #[test]
+    fn query_refuses_a_non_finite_or_wrong_length_endpoint() {
+        let (_scene, point_free, edge_free) = env();
+        let prm = PrmStar { n_samples: 120, seed: 0x51, max_edge: 0.35 };
+        let roadmap = prm.build(&[0.0, 0.0], &[1.0, 1.0], &point_free, &edge_free);
+        assert!(roadmap.nodes.len() > 50, "fixture needs a usable roadmap: {}", roadmap.nodes.len());
+        let ok = roadmap.query(&[0.05, 0.05], &[0.95, 0.95], &edge_free);
+        assert!(ok.is_some(), "the control query must still succeed");
+        assert!(roadmap.query(&[f64::NAN, 0.05], &[0.95, 0.95], &edge_free).is_none(), "NaN start");
+        assert!(roadmap.query(&[0.05, 0.05], &[0.95, f64::INFINITY], &edge_free).is_none(), "infinite goal");
+        assert!(roadmap.query(&[0.05], &[0.95, 0.95], &edge_free).is_none(), "short start");
+        assert!(roadmap.query(&[0.05, 0.05], &[0.9, 0.9, 0.9], &edge_free).is_none(), "long goal");
     }
 }

@@ -193,7 +193,9 @@ impl<'a> Cem<'a> {
 
             // Keep the lowest-cost `n_elite`. Because the pool contains last iteration's `n_elite`
             // elites, the new elite total cost ≤ the old one ⇒ elite mean cost is non-increasing.
-            pool.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(core::cmp::Ordering::Equal));
+            // `rollout` returns `f64::MAX` for any non-finite cost, so no NaN can reach this ranking;
+            // `total_cmp` states that as a total order instead of silently calling a NaN "equal".
+            pool.sort_by(|a, b| a.0.total_cmp(&b.0));
             pool.truncate(n_elite);
 
             let mean_cost = pool.iter().map(|(c, _)| *c).sum::<f64>() / (n_elite as f64);

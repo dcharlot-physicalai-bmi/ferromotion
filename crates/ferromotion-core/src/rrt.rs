@@ -46,7 +46,17 @@ impl RrtStar {
     }
 
     /// Plan from `start` to `goal` within box bounds `[lo, hi]`, given an edge collision-free test.
+    ///
+    /// `None` also when an input is malformed: any of `start`, `goal`, `lo`, `hi` with a length other
+    /// than [`Self::dim`], or any non-finite coordinate. Both used to fault inside the nearest-node
+    /// search rather than being reported, one by indexing past the slice and one by unwrapping a `NaN`
+    /// comparison.
     pub fn plan(&self, start: &[f64], goal: &[f64], lo: &[f64], hi: &[f64], edge_free: impl Fn(&[f64], &[f64]) -> bool) -> Option<RrtResult> {
+        if [start, goal, lo, hi].iter().any(|s| s.len() != self.dim)
+            || !start.iter().chain(goal).chain(lo).chain(hi).all(|x| x.is_finite())
+        {
+            return None;
+        }
         // nodes: (config, parent, cost-from-root)
         let mut cfg: Vec<Vec<f64>> = vec![start.to_vec()];
         let mut parent: Vec<usize> = vec![usize::MAX];
@@ -69,7 +79,7 @@ impl RrtStar {
                 (0..self.dim).map(|i| lo[i] + (hi[i] - lo[i]) * u()).collect()
             };
             // Nearest node.
-            let nearest = (0..cfg.len()).min_by(|&a, &b| dist(&cfg[a], &x_rand).partial_cmp(&dist(&cfg[b], &x_rand)).unwrap()).unwrap();
+            let nearest = (0..cfg.len()).min_by(|&a, &b| dist(&cfg[a], &x_rand).total_cmp(&dist(&cfg[b], &x_rand)))?;
             let x_new = self.steer(&cfg[nearest], &x_rand);
             if !edge_free(&cfg[nearest], &x_new) {
                 continue;
@@ -177,5 +187,24 @@ mod tests {
         let (coarse, fine) = (plan_n(1200), plan_n(7000));
         assert!(fine <= coarse + 1e-9, "more samples should not worsen the path: {fine} vs {coarse}");
         assert!(fine < 2.0 * 1.05, "did not approach the straight-line optimum: {fine}");
+    }
+
+    /// **A malformed input is refused, not a panic from inside the nearest-node search.**
+    ///
+    /// `plan` picks the nearest node by distance to a sample. A non-finite coordinate in `start`,
+    /// `goal`, `lo` or `hi` makes every distance NaN and the unwrapped comparison panicked on the
+    /// caller's data; a wrong-length slice indexed past its end. Both are now `None`.
+    #[test]
+    fn plan_refuses_non_finite_or_wrong_length_inputs() {
+        let scene = SdfScene { prims: vec![Sdf::Sphere { center: Vector3::new(1.0, 0.0, 0.0), radius: 0.4 }] };
+        let ef = make_edge_free(scene, 0.1);
+        let planner = RrtStar { dim: 3, step: 0.25, goal_bias: 0.1, gamma: 3.0, max_iters: 400, seed: 7 };
+        let (lo, hi) = ([-0.5, -1.5, -1.5], [2.5, 1.5, 1.5]);
+        assert!(planner.plan(&[0.0, 0.0, 0.0], &[2.0, 0.0, 0.0], &lo, &hi, &ef).is_some(), "control must still plan");
+        assert!(planner.plan(&[f64::NAN, 0.0, 0.0], &[2.0, 0.0, 0.0], &lo, &hi, &ef).is_none(), "NaN start");
+        assert!(planner.plan(&[0.0, 0.0, 0.0], &[f64::INFINITY, 0.0, 0.0], &lo, &hi, &ef).is_none(), "infinite goal");
+        assert!(planner.plan(&[0.0, 0.0, 0.0], &[2.0, 0.0, 0.0], &[-0.5, f64::NAN, -1.5], &hi, &ef).is_none(), "NaN bound");
+        assert!(planner.plan(&[0.0, 0.0], &[2.0, 0.0, 0.0], &lo, &hi, &ef).is_none(), "short start");
+        assert!(planner.plan(&[0.0, 0.0, 0.0], &[2.0, 0.0, 0.0], &[-0.5, -1.5], &hi, &ef).is_none(), "short lo");
     }
 }
