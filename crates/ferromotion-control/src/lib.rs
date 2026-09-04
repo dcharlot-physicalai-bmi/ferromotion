@@ -298,6 +298,40 @@ impl CartesianImpedance {
         let g = gravity_vector(robot, inertia, q, gravity);
         (0..n).map(|i| tau_task[i] + g[i] - self.joint_damping * qd[i]).collect()
     }
+
+    /// **Zero-order-hold damping ratio `λ_max(M⁻¹D)·T` at posture `q` for control period `T`. Keep it
+    /// below 2, or the controller will not hold a posture it is already in.**
+    ///
+    /// A sampled controller holds its torque constant across a tick, and the damping it applies is
+    /// therefore stale by up to `T`. When the fastest damping time constant is short compared with the
+    /// tick, the closed loop stops being dissipative and a fixed point that is stationary on paper
+    /// becomes unstable: a nudge grows into a sustained oscillation and stays there forever. Measured
+    /// on the two-link fixture in this module's tests, from a 1e-6 rad nudge at rest:
+    ///
+    /// | `T` | ratio | outcome |
+    /// |---|---|---|
+    /// | 5 ms | 1.22 | stable, decays to 2e-10 |
+    /// | 10 ms | 2.43 | sustained 0.497 rad limit cycle at 35 rad/s |
+    /// | 20 ms | 4.87 | 1.0e4 rad/s |
+    /// | 50 ms | 12.17 | non-finite |
+    ///
+    /// **`D` is not `joint_damping`.** The task-space damper acts through the Jacobian too, so the
+    /// effective joint-space damping is `D = Jₚᵀ(Kd·I)Jₚ + Dⱼ·I`. On that fixture the parameter alone
+    /// gives 100 s⁻¹ while the effective value is 243 s⁻¹, a factor of 2.4 — reading the parameter
+    /// instead of the eigenvalue would put the apparent boundary near 1 and make this criterion look
+    /// wrong. `None` if `q` is the wrong length, any input is non-finite, or `M` is not invertible.
+    pub fn damping_zoh_ratio(&self, robot: &Robot, inertia: &[LinkInertia], q: &[f64], dt: f64) -> Option<f64> {
+        if q.len() != robot.dof() || !q.iter().all(|v| v.is_finite()) || !dt.is_finite() || dt <= 0.0 {
+            return None;
+        }
+        let n = robot.dof();
+        let tip = robot.fk(q).translation.vector;
+        let jp = robot.point_jacobian(q, n, &tip);
+        let d_eff = jp.transpose() * (self.kd * &jp) + nalgebra::DMatrix::identity(n, n) * self.joint_damping;
+        let minv_d = mass_matrix(robot, inertia, q).try_inverse()? * &d_eff;
+        let lambda = minv_d.complex_eigenvalues().iter().map(|z| z.re.abs()).fold(0.0f64, f64::max);
+        (lambda * dt).is_finite().then_some(lambda * dt)
+    }
 }
 
 #[cfg(test)]
@@ -371,6 +405,90 @@ mod tests {
         }
         let tip = robot.fk(&q).translation.vector;
         assert!((tip - x_des).norm() < 5e-3, "tool at {tip:?}, target {x_des:?}");
+        // Position alone cannot distinguish settled from cycling, so require it to be AT REST too.
+        assert!(qd.iter().all(|v| v.abs() < 1e-3), "reached the target but is still moving: qd = {qd:?}");
+        let ratio = ctrl.damping_zoh_ratio(&robot, &inertia, &q, dt).expect("ratio");
+        assert!(ratio < 2.0, "this test's own tick must satisfy the ZOH criterion, got {ratio:.3}");
+    }
+
+    /// **The plant must hold the posture it is already in, from rest — in VELOCITY, not just position.**
+    ///
+    /// A standing requirement: a steady-state number measured on a body that is actually limit-cycling
+    /// is that oscillation's amplitude, and a position-only convergence check cannot tell the two
+    /// apart. This test carries its own POSITIVE CONTROL: the same plant at a coarser control tick
+    /// must fail, or the probe proves nothing.
+    ///
+    /// Holding from the EXACT equilibrium is not the test. There the gravity term cancels bit-exactly,
+    /// nothing ever moves, and every tick from 1 ms to 50 ms "passes" — measured. The property that
+    /// matters is whether the fixed point is STABLE, so the posture is nudged by 1e-6 rad.
+    #[test]
+    fn the_arm_holds_its_own_posture_and_a_coarse_tick_proves_the_probe_can_fail() {
+        let (robot, inertia) = from_urdf_full(ARM2, "base", "tool").unwrap();
+        // In-plane gravity, so holding actually requires torque; along the joint axes it is trivial.
+        let g = Vector3::new(0.0, -9.81, 0.0);
+        let ctrl = CartesianImpedance::new(300.0, 40.0, 2.0);
+        let q0 = [0.3, -0.4];
+        let x_des = robot.fk(&q0).translation.vector;
+
+        // hold from a 1e-6 rad nudge at rest, physics fixed at h, control held across `t_ctrl`
+        let hold = |t_ctrl: f64| -> (f64, f64, bool) {
+            let h = 2e-4;
+            let (mut q, mut qd) = (vec![q0[0] + 1e-6, q0[1]], vec![0.0, 0.0]);
+            let per = (t_ctrl / h).round().max(1.0) as usize;
+            let steps = (3.0 / h) as usize;
+            let (mut max_dq, mut max_qd, mut blew_up) = (0.0f64, 0.0f64, false);
+            let mut tau = vec![0.0; 2];
+            for k in 0..steps {
+                if k % per == 0 {
+                    tau = ctrl.torque(&robot, &inertia, &q, &qd, x_des, g);
+                }
+                let qdd = forward_dynamics(&robot, &inertia, &q, &qd, &tau, g);
+                for i in 0..2 {
+                    qd[i] += qdd[i] * h;
+                    q[i] += qd[i] * h;
+                }
+                if !q.iter().chain(qd.iter()).all(|v| v.is_finite()) {
+                    blew_up = true;
+                    break; // `f64::max` DISCARDS a NaN, so a diverged run would otherwise report 0.000
+                }
+                if k > steps / 2 {
+                    max_dq = max_dq.max((q[0] - q0[0]).abs().max((q[1] - q0[1]).abs()));
+                    max_qd = max_qd.max(qd[0].abs().max(qd[1].abs()));
+                }
+            }
+            (max_dq, max_qd, blew_up)
+        };
+
+        let fine = 5e-3;
+        let coarse = 1e-2;
+        let r_fine = ctrl.damping_zoh_ratio(&robot, &inertia, &q0, fine).expect("ratio");
+        let r_coarse = ctrl.damping_zoh_ratio(&robot, &inertia, &q0, coarse).expect("ratio");
+        assert!(r_fine < 2.0, "5 ms must satisfy the criterion, got {r_fine:.3}");
+        assert!(r_coarse > 2.0, "10 ms must violate it, got {r_coarse:.3}");
+
+        let (dq, qd_max, blew) = hold(fine);
+        eprintln!("  5 ms  ratio {r_fine:.3}: max|q-q0| {dq:.3e}, max|qd| {qd_max:.3e}");
+        assert!(!blew && dq < 1e-6 && qd_max < 1e-6, "a certified tick must HOLD in velocity too: dq {dq:.3e}, qd {qd_max:.3e}");
+
+        let (dq_c, qd_c, blew_c) = hold(coarse);
+        eprintln!("  10 ms ratio {r_coarse:.3}: max|q-q0| {dq_c:.3e}, max|qd| {qd_c:.3e}, non-finite {blew_c}");
+        assert!(blew_c || qd_c > 1.0, "POSITIVE CONTROL: the coarse tick must visibly fail, else this probe certifies nothing (got qd {qd_c:.3e})");
+
+        // the parameter alone is not the criterion
+        let naive = ctrl.joint_damping * coarse / 0.01991;
+        assert!(r_coarse > 2.0 * naive, "the effective damping must exceed the parameter's estimate: {r_coarse:.3} vs {naive:.3}");
+    }
+
+    /// `damping_zoh_ratio` refuses inputs it cannot answer for.
+    #[test]
+    fn damping_zoh_ratio_refuses_unusable_input() {
+        let (robot, inertia) = from_urdf_full(ARM2, "base", "tool").unwrap();
+        let ctrl = CartesianImpedance::new(300.0, 40.0, 2.0);
+        assert!(ctrl.damping_zoh_ratio(&robot, &inertia, &[0.3, -0.4], 1e-3).is_some(), "control");
+        assert!(ctrl.damping_zoh_ratio(&robot, &inertia, &[0.3], 1e-3).is_none(), "wrong q length");
+        assert!(ctrl.damping_zoh_ratio(&robot, &inertia, &[f64::NAN, 0.0], 1e-3).is_none(), "non-finite q");
+        assert!(ctrl.damping_zoh_ratio(&robot, &inertia, &[0.3, -0.4], 0.0).is_none(), "non-positive dt");
+        assert!(ctrl.damping_zoh_ratio(&robot, &inertia, &[0.3, -0.4], f64::NAN).is_none(), "non-finite dt");
     }
 }
 
