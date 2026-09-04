@@ -29,7 +29,7 @@ fn build_rec(pts: &[Vector3<f64>], nodes: &mut Vec<Node>, idxs: &mut [usize], de
         return None;
     }
     let axis = depth % 3;
-    idxs.sort_by(|&a, &b| pts[a][axis].partial_cmp(&pts[b][axis]).unwrap());
+    idxs.sort_by(|&a, &b| pts[a][axis].total_cmp(&pts[b][axis]));
     let mid = idxs.len() / 2;
     let me = nodes.len();
     nodes.push(Node { idx: idxs[mid], axis, left: None, right: None });

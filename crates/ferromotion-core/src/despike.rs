@@ -13,7 +13,10 @@
 //! WASM-clean.
 
 fn median(vals: &mut [f64]) -> f64 {
-    vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    if vals.is_empty() {
+        return f64::NAN; // a window with nothing real in it has no median
+    }
+    vals.sort_by(f64::total_cmp);
     let n = vals.len();
     if n % 2 == 1 {
         vals[n / 2]
@@ -22,13 +25,19 @@ fn median(vals: &mut [f64]) -> f64 {
     }
 }
 
+/// The window centred on `i`, clipped at the ends, **with non-finite samples dropped**: a dropout has no
+/// value to contribute to a median, and it is the fault these filters exist to remove.
 fn window(signal: &[f64], i: usize, half: usize) -> Vec<f64> {
     let lo = i.saturating_sub(half);
     let hi = (i + half).min(signal.len() - 1);
-    signal[lo..=hi].to_vec()
+    signal[lo..=hi].iter().copied().filter(|v| v.is_finite()).collect()
 }
 
 /// Sliding-window **median filter** with half-window `half` (window size `2·half + 1`), edges shrinking.
+///
+/// Non-finite samples are treated as the dropouts they are: they are excluded from every window and so
+/// replaced by the local median of the real samples. A sample whose whole window is non-finite has
+/// nothing to be reconstructed from and comes back `NaN`.
 pub fn median_filter(signal: &[f64], half: usize) -> Vec<f64> {
     (0..signal.len())
         .map(|i| {
@@ -41,6 +50,9 @@ pub fn median_filter(signal: &[f64], half: usize) -> Vec<f64> {
 /// **Hampel filter**: replace a sample with its local median only when it exceeds `n_sigma` scaled MADs from
 /// it (MAD scaled by `1.4826` for consistency with the Gaussian σ). Clean samples pass through unchanged.
 /// Returns the filtered signal and a per-sample outlier mask.
+///
+/// A non-finite sample is flagged and replaced unconditionally: there is no value to measure against a
+/// MAD, and a dropout is exactly what the mask is meant to report.
 pub fn hampel_filter(signal: &[f64], half: usize, n_sigma: f64) -> (Vec<f64>, Vec<bool>) {
     let mut out = signal.to_vec();
     let mut flagged = vec![false; signal.len()];
@@ -51,7 +63,8 @@ pub fn hampel_filter(signal: &[f64], half: usize, n_sigma: f64) -> (Vec<f64>, Ve
         // scaled median absolute deviation
         let mut devs: Vec<f64> = w.iter().map(|v| (v - med).abs()).collect();
         let mad = 1.4826 * median(&mut devs);
-        if mad > 0.0 && (signal[i] - med).abs() > n_sigma * mad {
+        // A non-finite sample is an outlier by definition — there is no value to compare against a MAD.
+        if !signal[i].is_finite() || (mad > 0.0 && (signal[i] - med).abs() > n_sigma * mad) {
             out[i] = med;
             flagged[i] = true;
         }
@@ -108,5 +121,35 @@ mod tests {
         }
         // the corrected samples are close to the clean signal (within the local variation)
         assert!((out[10] - clean[10]).abs() < 0.5 && (out[22] - clean[22]).abs() < 0.5, "outliers corrected toward the trend");
+    }
+
+    /// **A non-finite sample is the sensor fault this filter exists to remove.**
+    ///
+    /// The module doc names LiDAR dropouts and single-sample sensor faults as the target, and a dropout
+    /// is reported as a non-finite value by every sensor stack that has one. Sorting the window with
+    /// `partial_cmp().unwrap()` panicked on it instead, so the filter could not survive its own purpose.
+    #[test]
+    fn a_non_finite_sample_is_despiked_like_any_other_fault() {
+        let mut sig = vec![1.0; 11];
+        sig[5] = f64::NAN; // a dropout
+        sig[8] = f64::INFINITY; // a saturated return
+        let f = median_filter(&sig, 2);
+        assert!(f.iter().all(|v| (v - 1.0).abs() < 1e-12), "both faults should be replaced by the local median: {f:?}");
+        let (h, flagged) = hampel_filter(&sig, 2, 3.0);
+        assert!(h.iter().all(|v| (v - 1.0).abs() < 1e-12), "Hampel must replace them too: {h:?}");
+        assert!(flagged[5] && flagged[8], "and flag them as outliers: {flagged:?}");
+        assert_eq!(flagged.iter().filter(|&&b| b).count(), 2, "nothing else may be flagged: {flagged:?}");
+        let all_bad = median_filter(&[f64::NAN; 5], 1);
+        assert!(all_bad.iter().all(|v| !v.is_finite()), "a window with nothing real yields nothing real: {all_bad:?}");
+
+        // ADJACENT dropouts, so a window is half or more invalid. A single dropout sorts to the end of an
+        // odd window and leaves a real median untouched, so only this case shows that EXCLUDING the
+        // non-finite samples matters rather than merely ordering them last.
+        let burst = [1.0, f64::NAN, f64::NAN, 1.0, 1.0, 1.0, 1.0];
+        let fb = median_filter(&burst, 1);
+        assert!(fb.iter().all(|v| (v - 1.0).abs() < 1e-12), "a burst of dropouts must still reconstruct: {fb:?}");
+        let (hb, fl) = hampel_filter(&burst, 1, 3.0);
+        assert!(hb.iter().all(|v| (v - 1.0).abs() < 1e-12), "Hampel must reconstruct the burst too: {hb:?}");
+        assert!(fl[1] && fl[2], "both dropouts flagged: {fl:?}");
     }
 }

@@ -52,7 +52,13 @@ impl KissIcp {
     }
 
     /// Register a new scan (points in the sensor frame) and return the estimated sensor pose (sensor→world).
+    /// Non-finite points in `scan` are dropped as invalid sensor returns before matching or mapping.
     pub fn register(&mut self, scan: &[Vector3<f64>]) -> Pose {
+        // Invalid returns, which a LiDAR reports as non-finite coordinates, are dropped before anything
+        // sees them. Unfiltered, the first frame inserted them into the map and the next frame faulted
+        // building the kd-tree over it.
+        let kept: Vec<Vector3<f64>> = scan.iter().copied().filter(|p| p.iter().all(|v| v.is_finite())).collect();
+        let scan = kept.as_slice();
         if self.map.is_empty() {
             self.pose = (Matrix3::identity(), Vector3::zeros());
             self.insert_scan(scan, &self.pose.clone());
@@ -85,7 +91,7 @@ impl KissIcp {
             est = compose(&(dr, dt), &est);
             // adaptive threshold: shrink toward 3× the median residual
             let mut r = residuals.clone();
-            r.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            r.sort_by(f64::total_cmp);
             let med = r[r.len() / 2];
             threshold = (3.0 * med).clamp(self.voxel_size, self.max_corr);
             if dt.norm() + (dr - Matrix3::identity()).norm() < 1e-9 {
@@ -175,5 +181,27 @@ mod tests {
         // the voxel-downsampled map has fewer points than 5 full scans
         assert!(odom.map.len() < 5 * world.len(), "map should be downsampled");
         assert!(odom.map.len() > 50, "map should have accumulated structure");
+    }
+
+    /// **An invalid LiDAR return must not enter the map or fault the kd-tree.**
+    ///
+    /// A real scan carries non-finite points wherever the sensor got no return. Unfiltered, the first
+    /// frame inserted them into the map, and the next frame panicked building the kd-tree over it.
+    #[test]
+    fn invalid_returns_are_dropped_instead_of_contaminating_the_map() {
+        let clean: Vec<Vector3<f64>> = (0..60).map(|i| { let t = i as f64 * 0.1; Vector3::new(t.cos(), t.sin(), 0.05 * t) }).collect();
+        let mut dirty = clean.clone();
+        dirty.insert(7, Vector3::new(f64::NAN, 0.0, 0.0));
+        dirty.push(Vector3::new(1.0, f64::INFINITY, 0.0));
+        let mut a = KissIcp::new(0.2, 1.0);
+        let mut b = KissIcp::new(0.2, 1.0);
+        for _ in 0..3 {
+            a.register(&clean);
+            b.register(&dirty);
+        }
+        let (ra, ta) = a.trajectory().last().copied().expect("a pose");
+        let (rb, tb) = b.trajectory().last().copied().expect("a pose");
+        assert!(tb.iter().all(|v| v.is_finite()) && rb.iter().all(|v| v.is_finite()), "pose must stay finite: {rb:?} {tb:?}");
+        assert!((ta - tb).norm() < 1e-9 && (ra - rb).norm() < 1e-9, "dropping the invalid returns must give the clean answer");
     }
 }
