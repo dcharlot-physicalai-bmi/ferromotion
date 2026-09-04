@@ -104,7 +104,7 @@ pub fn is_rank_deficient(generators: &[Vec<f64>], p: usize, tol: f64) -> bool {
     }
     let m = generators.len();
     let a = nalgebra::DMatrix::from_fn(p, m, |r, c| generators[c].get(r).copied().unwrap_or(0.0));
-    let sv = a.svd(false, false).singular_values;
+    let Some(sv) = crate::finite_singular_values(&a) else { return true };
     let s_max = sv.iter().fold(0.0f64, |acc, x| acc.max(*x));
     if s_max <= tol {
         return true;

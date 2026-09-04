@@ -147,7 +147,7 @@ fn stack(robot: &Robot, samples: &[IdSample], gravity: Vector3<f64>) -> Option<(
 pub fn identify_with_covariance(robot: &Robot, samples: &[IdSample], gravity: Vector3<f64>, tol: f64) -> Option<IdentifiedParams> {
     let (y, t) = stack(robot, samples, gravity)?;
     let (rows, cols) = (y.nrows(), y.ncols());
-    let svd = y.clone().svd(true, true);
+    let svd = crate::finite_svd(&y, true, true)?;
     let s_max = svd.singular_values.iter().fold(0.0f64, |a, b| a.max(*b));
     if s_max <= 0.0 {
         return None;
@@ -221,7 +221,7 @@ pub fn identify_consistent(robot: &Robot, samples: &[IdSample], gravity: Vector3
     let (y, t) = stack(robot, samples, gravity)?;
     let links = robot.dof();
     let rows = y.nrows();
-    let svd = y.clone().svd(true, true);
+    let svd = crate::finite_svd(&y, true, true)?;
     let s_max = svd.singular_values.iter().fold(0.0f64, |a, b| a.max(*b));
     if s_max <= 0.0 {
         return None;

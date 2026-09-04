@@ -73,6 +73,7 @@ fn homography_to_pose(h: &Matrix3<f64>) -> (Matrix3<f64>, Vector3<f64>) {
     let r3 = r1.cross(&r2);
     let r0 = Matrix3::from_columns(&[r1, r2, r3]);
     // nearest rotation (orthonormalize) via SVD
+    // FIXED-SIZE SVD: a Matrix3/Matrix4 SVD returns on a NaN (see ferromotion_core::numerics)
     let svd = r0.svd(true, true);
     let (u, vt) = (svd.u.unwrap(), svd.v_t.unwrap());
     let mut d = Matrix3::identity();

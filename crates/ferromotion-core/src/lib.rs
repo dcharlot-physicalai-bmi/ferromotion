@@ -89,6 +89,7 @@ mod mestimator;
 mod mesh3;
 mod modal;
 mod occupancy;
+mod numerics;
 mod ode;
 mod orb;
 mod chained_form;
@@ -265,6 +266,7 @@ pub use randomization::{check_actuator_support, ActuatorSupportCheck, AdrSchedul
 pub use ransac::{ransac, RansacResult};
 pub use savgol::SavGol;
 pub use lgvi::LgviBody;
+pub use numerics::{finite_singular_values, finite_svd};
 pub use manipulability::{condition_number, force_ellipsoid_axes, isotropy, manipulability_gradient, manipulability_gradient_analytic, singular_values, yoshikawa};
 pub use modal::{modal_analysis, ModalModel};
 pub use mjcf::{from_mjcf_constrained, from_mjcf_full, from_mjcf_str, to_mjcf};

@@ -24,12 +24,7 @@ pub fn yoshikawa(j: &DMatrix<f64>) -> f64 {
 /// this module spins forever instead of returning, measured at 5 s with no result in
 /// `tests/nonfinite_public_api.rs`. A hang in a control loop is worse than a wrong number.
 pub fn singular_values(j: &DMatrix<f64>) -> Vec<f64> {
-    if !j.iter().all(|v| v.is_finite()) {
-        return vec![f64::NAN; j.nrows().min(j.ncols())];
-    }
-    let mut s: Vec<f64> = j.clone().singular_values().iter().cloned().collect();
-    s.sort_by(|a, b| b.total_cmp(a));
-    s
+    crate::finite_singular_values(j).unwrap_or_else(|| vec![f64::NAN; j.nrows().min(j.ncols())])
 }
 
 /// Condition number `σ_max / σ_min` (≥ 1; → ∞ at a singularity). A round ellipsoid (isotropic) is 1.

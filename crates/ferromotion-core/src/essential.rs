@@ -29,11 +29,12 @@ pub fn eight_point(x1: &[Vector2<f64>], x2: &[Vector2<f64>]) -> Matrix3<f64> {
             a[(i, k)] = *r;
         }
     }
-    let svd = a.svd(false, true);
+    let Some(svd) = crate::finite_svd(&a, false, true) else { return Matrix3::from_element(f64::NAN) };
     let vt = svd.v_t.expect("SVD V^T");
     let e = vt.row(8); // null-space vector
     let e_raw = Matrix3::new(e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8]);
     // project onto the essential manifold: singular values (1, 1, 0)
+    // FIXED-SIZE SVD: a Matrix3/Matrix4 SVD returns on a NaN (see ferromotion_core::numerics)
     let esvd = e_raw.svd(true, true);
     let (u, vtr) = (esvd.u.unwrap(), esvd.v_t.unwrap());
     u * Matrix3::from_diagonal(&Vector3::new(1.0, 1.0, 0.0)) * vtr
@@ -42,6 +43,7 @@ pub fn eight_point(x1: &[Vector2<f64>], x2: &[Vector2<f64>]) -> Matrix3<f64> {
 /// The four candidate relative poses `(R, t)` from an essential matrix (Nistér's decomposition; `t` is unit
 /// length, sign/rotation ambiguity resolved later by cheirality).
 pub fn decompose_essential(e: &Matrix3<f64>) -> [(Matrix3<f64>, Vector3<f64>); 4] {
+    // FIXED-SIZE SVD: a Matrix3/Matrix4 SVD returns on a NaN (see ferromotion_core::numerics)
     let svd = e.svd(true, true);
     let (mut u, vt) = (svd.u.unwrap(), svd.v_t.unwrap());
     // ensure U, V are rotations (det +1)
@@ -78,6 +80,7 @@ fn triangulate_one(r: &Matrix3<f64>, t: &Vector3<f64>, x1: &Vector2<f64>, x2: &V
         a[(2, k)] = x2.x * p2r2[k] - p2r0[k];
         a[(3, k)] = x2.y * p2r2[k] - p2r1[k];
     }
+    // FIXED-SIZE SVD: a Matrix3/Matrix4 SVD returns on a NaN (see ferromotion_core::numerics)
     let svd = a.svd(false, true);
     let vt = svd.v_t.unwrap();
     let xh = vt.row(3);

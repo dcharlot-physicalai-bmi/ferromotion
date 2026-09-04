@@ -80,7 +80,7 @@ impl ModelBasedControl {
             a[(i, 3)] = 1.0;
             y[i] = self.true_accel(x, v, u);
         }
-        let sol = a.svd(true, true).solve(&y, 1e-12).unwrap_or_else(|_| DVector::zeros(4));
+        let sol = ferromotion_core::finite_svd(&a, true, true).and_then(|s| s.solve(&y, 1e-12).ok()).unwrap_or_else(|| DVector::zeros(4));
         self.learned = [sol[0], sol[1], sol[2], sol[3]];
         self.identified = true;
     }

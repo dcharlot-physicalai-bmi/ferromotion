@@ -264,7 +264,7 @@ fn orthonormal_complement(z: &DMatrix<f64>) -> Option<DMatrix<f64>> {
     // Project the identity off Z and pull an orthonormal basis out of the result by SVD, which handles the
     // rank drop cleanly rather than depending on which columns happen to be independent.
     let p = DMatrix::identity(n, n) - z * z.transpose();
-    let svd = p.svd(true, false);
+    let svd = ferromotion_core::finite_svd(&p, true, false)?;
     let u = svd.u?;
     Some(u.columns(0, n - k).into_owned())
 }

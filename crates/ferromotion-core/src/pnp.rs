@@ -54,7 +54,7 @@ pub fn pnp_dlt(x3d: &[Vector3<f64>], x2d: &[Vector2<f64>]) -> (Matrix3<f64>, Vec
             a[(2 * i + 1, 8 + k)] = xi.y * xt[k];
         }
     }
-    let svd = a.svd(false, true);
+    let Some(svd) = crate::finite_svd(&a, false, true) else { return (Matrix3::from_element(f64::NAN), Vector3::from_element(f64::NAN)) };
     let vt = svd.v_t.expect("SVD V^T");
     let p = vt.row(11); // null-space vector (smallest singular value)
     let m = Matrix3::from_columns(&[
@@ -71,6 +71,7 @@ pub fn pnp_dlt(x3d: &[Vector3<f64>], x2d: &[Vector2<f64>]) -> (Matrix3<f64>, Vec
     let mn = m * (sign / s);
     let t = tcol * (sign / s);
     // project the (scaled) rotation block to the nearest proper rotation
+    // FIXED-SIZE SVD: a Matrix3/Matrix4 SVD returns on a NaN (see ferromotion_core::numerics)
     let rsvd = mn.svd(true, true);
     let (u, vtr) = (rsvd.u.unwrap(), rsvd.v_t.unwrap());
     let mut r = u * vtr;

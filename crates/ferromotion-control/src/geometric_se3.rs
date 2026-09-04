@@ -98,6 +98,7 @@ impl GeometricSe3 {
         let omega = s.omega + omega_dot * dt;
         // rotation update on SO(3): R⁺ = R·exp(Ω̂ dt), re-orthonormalized
         let r_raw = s.r * (Matrix3::identity() + hat(&omega) * dt);
+        // FIXED-SIZE SVD: a Matrix3/Matrix4 SVD returns on a NaN (see ferromotion_core::numerics)
         let svd = r_raw.svd(true, true);
         let r = svd.u.unwrap() * svd.v_t.unwrap();
         QuadFullState { x, v, r, omega }

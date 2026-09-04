@@ -161,7 +161,7 @@ pub fn wrench_rank(contacts: &[GraspContact3], facets: usize) -> usize {
     if g.ncols() == 0 {
         return 0;
     }
-    let sv = g.svd(false, false).singular_values;
+    let Some(sv) = crate::finite_singular_values(&g) else { return 0 };
     let s_max = sv.iter().fold(0.0f64, |a, b| a.max(*b));
     if s_max <= 0.0 {
         return 0;
@@ -300,7 +300,7 @@ pub fn grasp_split(contacts: &[GraspContact3], facets: usize) -> GraspSplit {
     if k == 0 {
         return GraspSplit { rank: 0, internal_dim: 0, internal_basis: DMatrix::zeros(0, 0) };
     }
-    let svd = g.clone().svd(false, true);
+    let Some(svd) = crate::finite_svd(&g, false, true) else { return GraspSplit { rank: 0, internal_dim: 0, internal_basis: DMatrix::zeros(0, 0) } };
     let s_max = svd.singular_values.iter().fold(0.0f64, |a, b| a.max(*b));
     let cut = 1e-9 * s_max.max(1e-300);
     let rank = svd.singular_values.iter().filter(|s| **s > cut).count();

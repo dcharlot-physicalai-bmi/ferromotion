@@ -224,7 +224,7 @@ impl LqLoop {
         vm[(1, 0)] = v1.1 / n1;
         vm[(0, 1)] = v2.0 / n2;
         vm[(1, 1)] = v2.1 / n2;
-        let sv = vm.singular_values();
+        let sv = ferromotion_core::finite_singular_values(&vm)?;
         let (hi, lo) = (sv.iter().cloned().fold(0.0f64, f64::max), sv.iter().cloned().fold(f64::INFINITY, f64::min));
         Some(if lo > 1e-300 { hi / lo } else { f64::INFINITY })
     }

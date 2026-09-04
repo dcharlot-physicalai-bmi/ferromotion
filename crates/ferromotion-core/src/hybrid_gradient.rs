@@ -140,7 +140,7 @@ impl HybridLinearisation {
     /// The largest singular value: how much a perturbation is amplified at worst, which a spectral radius does not
     /// bound. A contracting map can still amplify tenfold on the way to decaying.
     pub fn worst_gain(&self) -> f64 {
-        self.jacobian.clone().svd(false, false).singular_values.max()
+        crate::finite_singular_values(&self.jacobian).and_then(|s| s.first().copied()).unwrap_or(f64::NAN)
     }
 }
 

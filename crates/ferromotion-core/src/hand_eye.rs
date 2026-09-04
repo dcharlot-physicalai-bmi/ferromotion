@@ -21,6 +21,7 @@ fn rotation_from_pairs(src: &[Vector3<f64>], dst: &[Vector3<f64>]) -> Matrix3<f6
     for (s, d) in src.iter().zip(dst) {
         h += d * s.transpose();
     }
+    // FIXED-SIZE SVD: a Matrix3/Matrix4 SVD returns on a NaN (see ferromotion_core::numerics)
     let svd = h.svd(true, true);
     let (u, vt) = (svd.u.unwrap(), svd.v_t.unwrap());
     let mut w = Matrix3::identity();

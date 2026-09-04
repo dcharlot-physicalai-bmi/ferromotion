@@ -121,7 +121,7 @@ pub fn calibrate(views: &[CalibrationView]) -> Option<PinholeCamera> {
             a[(2 * k + 1, c)] = d[c];
         }
     }
-    let svd = a.svd(false, true);
+    let svd = crate::finite_svd(&a, false, true)?;
     let vt = svd.v_t?;
     let mut b: Vec<f64> = (0..6).map(|c| vt[(5, c)]).collect();
     if b[0] < 0.0 {

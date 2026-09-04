@@ -46,6 +46,7 @@ pub fn umeyama(src: &[Vector3<f64>], dst: &[Vector3<f64>]) -> Option<(Matrix3<f6
     for (s, d) in src.iter().zip(dst) {
         h += (d - mu_d) * (s - mu_s).transpose();
     }
+    // FIXED-SIZE SVD: a Matrix3/Matrix4 SVD returns on a NaN (see ferromotion_core::numerics)
     let svd = h.svd(true, true);
     let u = svd.u.unwrap();
     let vt = svd.v_t.unwrap();

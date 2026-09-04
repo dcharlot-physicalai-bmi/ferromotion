@@ -60,7 +60,7 @@ fn eval_term(exps: &[usize], state: &[f64]) -> f64 {
 
 /// Least-squares solve `A ξ = b` via SVD (robust to rank deficiency).
 fn lstsq(a: &DMatrix<f64>, b: &DVector<f64>) -> DVector<f64> {
-    a.clone().svd(true, true).solve(b, 1e-12).unwrap_or_else(|_| DVector::zeros(a.ncols()))
+    ferromotion_core::finite_svd(a, true, true).and_then(|s| s.solve(b, 1e-12).ok()).unwrap_or_else(|| DVector::zeros(a.ncols()))
 }
 
 /// Sequentially thresholded least squares: sparse solution to `Θ ξ = d`.

@@ -276,7 +276,7 @@ pub fn worst_case_growth(modes: &[DMatrix<f64>], horizon: usize) -> (f64, Vec<us
             prod = &modes[i] * prod;
         }
         // per-step gain, so the number is comparable across horizons
-        let gain = prod.clone().svd(false, false).singular_values.max().powf(1.0 / horizon as f64);
+        let gain = ferromotion_core::finite_singular_values(&prod).and_then(|s| s.first().copied()).unwrap_or(f64::NAN).powf(1.0 / horizon as f64);
         if gain > best.0 {
             best = (gain, seq);
         }

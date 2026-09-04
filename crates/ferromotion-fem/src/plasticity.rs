@@ -70,6 +70,7 @@ pub fn radial_return(f_trial: &Matrix3<f64>, tau_y: f64, mu: f64) -> Option<Retu
     if f_trial.determinant() <= 0.0 {
         return None; // log strain undefined for an inverted or degenerate element
     }
+    // FIXED-SIZE SVD: a Matrix3/Matrix4 SVD returns on a NaN (see ferromotion_core::numerics)
     let svd = f_trial.svd(true, true);
     let (u, v_t) = (svd.u?, svd.v_t?);
     let s = svd.singular_values;

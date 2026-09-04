@@ -74,7 +74,7 @@ pub fn wrench_rank(contacts: &[GraspContact]) -> usize {
         return 0;
     }
     let g = nalgebra::DMatrix::from_fn(3, ws.len(), |r, c| ws[c][r]);
-    let sv = g.svd(false, false).singular_values;
+    let Some(sv) = crate::finite_singular_values(&g) else { return 0 };
     let s_max = sv.iter().fold(0.0f64, |a, b| a.max(*b));
     if s_max <= 0.0 {
         return 0;

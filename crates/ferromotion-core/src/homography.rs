@@ -32,7 +32,7 @@ pub fn homography_dlt(x1: &[Vector2<f64>], x2: &[Vector2<f64>]) -> Matrix3<f64> 
             a[(2 * i + 1, k)] = r1[k];
         }
     }
-    let svd = a.svd(false, true);
+    let Some(svd) = crate::finite_svd(&a, false, true) else { return Matrix3::from_element(f64::NAN) };
     let vt = svd.v_t.expect("SVD V^T");
     let h = vt.row(8); // null-space vector
     Matrix3::new(h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8])

@@ -28,6 +28,7 @@ fn weighted_rotation(u: &[Vector3<f64>], v: &[Vector3<f64>], w: &[f64]) -> Matri
     for ((uk, vk), &wk) in u.iter().zip(v).zip(w) {
         h += wk * vk * uk.transpose();
     }
+    // FIXED-SIZE SVD: a Matrix3/Matrix4 SVD returns on a NaN (see ferromotion_core::numerics)
     let svd = h.svd(true, true);
     let (um, vt) = (svd.u.unwrap(), svd.v_t.unwrap());
     let mut d = Matrix3::identity();
