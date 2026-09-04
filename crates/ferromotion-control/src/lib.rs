@@ -237,6 +237,23 @@ pub struct ComputedTorque {
 }
 
 impl ComputedTorque {
+    /// **Zero-order-hold damping ratio `kd·T` for control period `T`. Keep it below 2.**
+    ///
+    /// Same criterion as [`CartesianImpedance::damping_zoh_ratio`], but this controller cancels `M`, so
+    /// the closed loop is `ë + kd·ė + kp·e = 0` per joint and the damping RATE the tick holds is `kd`
+    /// itself — no mass matrix, no posture, no smallest eigenvalue. That is why this needs neither the
+    /// robot nor its inertias.
+    ///
+    /// **Cancelling `M` is what buys the tick budget.** Measured on the two-link fixture from a 1e-6 rad
+    /// nudge at rest: this controller holds its posture at a 40 ms tick (`kd·T` = 1.6) and diverges to
+    /// non-finite at 60 ms (2.4), where the impedance controller on the same arm already limit-cycles at
+    /// 10 ms. An eightfold coarser control rate, because feedback linearisation takes the small
+    /// eigenvalue of the mass matrix out of the damping rate. `None` for a non-finite or non-positive
+    /// `dt`.
+    pub fn damping_zoh_ratio(&self, dt: f64) -> Option<f64> {
+        (dt.is_finite() && dt > 0.0 && (self.kd * dt).is_finite()).then_some(self.kd * dt)
+    }
+
     pub fn new(kp: f64, kd: f64) -> Self {
         Self { kp, kd }
     }
@@ -479,6 +496,74 @@ mod tests {
         assert!(r_coarse > 2.0 * naive, "the effective damping must exceed the parameter's estimate: {r_coarse:.3} vs {naive:.3}");
     }
 
+
+    /// **The corollary of the standing rule: a fix in one plant is a hypothesis about the others.**
+    ///
+    /// Same certification as the impedance controller's, on the same arm, with its own positive
+    /// control. This controller cancels `M`, so the criterion is `kd·T` with no inertia in it, and the
+    /// measured boundary brackets 2 exactly as the other one does — two structurally different
+    /// controllers, one criterion.
+    #[test]
+    fn computed_torque_holds_its_posture_at_a_far_coarser_tick_than_impedance() {
+        let (robot, inertia) = from_urdf_full(ARM2, "base", "tool").unwrap();
+        let g = Vector3::new(0.0, -9.81, 0.0);
+        let ctrl = ComputedTorque::new(400.0, 40.0);
+        let q0 = [0.3, -0.4];
+
+        let hold = |t_ctrl: f64| -> (f64, bool) {
+            let h = 2e-4;
+            let (mut q, mut qd) = (vec![q0[0] + 1e-6, q0[1]], vec![0.0, 0.0]);
+            let per = (t_ctrl / h).round().max(1.0) as usize;
+            let steps = (3.0 / h) as usize;
+            let (mut mqd, mut blew) = (0.0f64, false);
+            let mut tau = vec![0.0; 2];
+            for k in 0..steps {
+                if k % per == 0 {
+                    tau = ctrl.torque(&robot, &inertia, &q, &qd, &q0, &[0.0, 0.0], &[0.0, 0.0], g);
+                }
+                let qdd = forward_dynamics(&robot, &inertia, &q, &qd, &tau, g);
+                for i in 0..2 {
+                    qd[i] += qdd[i] * h;
+                    q[i] += qd[i] * h;
+                }
+                if !q.iter().chain(qd.iter()).all(|v| v.is_finite()) {
+                    blew = true;
+                    break; // `f64::max` discards a NaN, so a diverged run would report 0.000 otherwise
+                }
+                if k > steps / 2 {
+                    mqd = mqd.max(qd[0].abs().max(qd[1].abs()));
+                }
+            }
+            (mqd, blew)
+        };
+
+        let (fine, coarse) = (4e-2, 6e-2);
+        let r_fine = ctrl.damping_zoh_ratio(fine).expect("ratio");
+        let r_coarse = ctrl.damping_zoh_ratio(coarse).expect("ratio");
+        assert!(r_fine < 2.0 && r_coarse > 2.0, "40 ms must satisfy and 60 ms must violate: {r_fine:.2}, {r_coarse:.2}");
+
+        let (qd_fine, blew_fine) = hold(fine);
+        eprintln!("  40 ms  kd*T {r_fine:.2}: max|qd| {qd_fine:.3e}");
+        assert!(!blew_fine && qd_fine < 1e-6, "a certified tick must hold in velocity: {qd_fine:.3e}");
+
+        let (qd_coarse, blew_coarse) = hold(coarse);
+        eprintln!("  60 ms  kd*T {r_coarse:.2}: max|qd| {qd_coarse:.3e}, non-finite {blew_coarse}");
+        assert!(blew_coarse || qd_coarse > 1.0, "POSITIVE CONTROL: the coarse tick must visibly fail (got {qd_coarse:.3e})");
+
+        // the engineering change, stated as a number: cancelling M buys an 8x coarser tick on this arm
+        let imp = CartesianImpedance::new(300.0, 40.0, 2.0);
+        let imp_limit = imp.damping_zoh_ratio(&robot, &inertia, &q0, fine).expect("ratio");
+        assert!(imp_limit > 2.0, "the impedance controller cannot hold this arm at 40 ms: ratio {imp_limit:.2}");
+        eprintln!("  same arm, same 40 ms tick, impedance control: ratio {imp_limit:.2} — cancelling M is what buys the budget");
+    }
+
+    /// `ComputedTorque::damping_zoh_ratio` refuses a dt it cannot answer for.
+    #[test]
+    fn computed_torque_ratio_refuses_unusable_dt() {
+        let c = ComputedTorque::new(400.0, 40.0);
+        assert_eq!(c.damping_zoh_ratio(1e-3), Some(0.04));
+        assert!(c.damping_zoh_ratio(0.0).is_none() && c.damping_zoh_ratio(-1e-3).is_none() && c.damping_zoh_ratio(f64::NAN).is_none());
+    }
     /// `damping_zoh_ratio` refuses inputs it cannot answer for.
     #[test]
     fn damping_zoh_ratio_refuses_unusable_input() {
