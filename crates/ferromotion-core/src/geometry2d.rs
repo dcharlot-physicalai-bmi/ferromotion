@@ -17,9 +17,14 @@ fn cross(o: &Vector2<f64>, a: &Vector2<f64>, b: &Vector2<f64>) -> f64 {
 
 /// The **convex hull** of a point set by Andrew's monotone chain, returned counter-clockwise without the
 /// duplicated closing vertex. Collinear boundary points are dropped.
+///
+/// **Points with a non-finite coordinate are dropped too**, so the hull is the hull of the points that
+/// have a position. This kit backs support-polygon stability margins, whose points come from contact
+/// state a diverging solver can turn non-finite: hulling such a point would put a garbage vertex on the
+/// boundary and make every later [`point_in_polygon`] verdict meaningless.
 pub fn convex_hull(points: &[Vector2<f64>]) -> Vec<Vector2<f64>> {
-    let mut pts = points.to_vec();
-    pts.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap().then(a.y.partial_cmp(&b.y).unwrap()));
+    let mut pts: Vec<Vector2<f64>> = points.iter().copied().filter(|p| p.x.is_finite() && p.y.is_finite()).collect();
+    pts.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
     pts.dedup_by(|a, b| (*a - *b).norm() < 1e-12);
     let n = pts.len();
     if n < 3 {
@@ -221,5 +226,27 @@ mod tests {
         assert!((c.radius - far).abs() < 1e-6, "radius should be tight against the farthest point");
         // for the unit square the MEC radius is the half-diagonal √2/2
         assert!((c.radius - std::f64::consts::SQRT_2 / 2.0).abs() < 1e-6, "unit-square MEC radius = √2/2, got {}", c.radius);
+    }
+
+    /// **A non-finite coordinate is dropped, not a panic from the hull's sort.**
+    ///
+    /// This kit backs support-polygon stability margins, so its points come from contact state that a
+    /// diverging solver can turn non-finite. The monotone-chain sort compared with
+    /// `partial_cmp().unwrap()`, which panics on the first NaN. Worse than the panic would be a hull
+    /// built AROUND a garbage vertex and then handed to [`point_in_polygon`], turning a stability
+    /// verdict wrong, so the non-finite points are dropped and the hull is the hull of what is real.
+    #[test]
+    fn convex_hull_drops_non_finite_points_instead_of_panicking() {
+        let square: Vec<Vector2<f64>> = vec![Vector2::new(0.0, 0.0), Vector2::new(1.0, 0.0), Vector2::new(1.0, 1.0), Vector2::new(0.0, 1.0)];
+        let clean = convex_hull(&square);
+        assert_eq!(clean.len(), 4, "control: the square's hull is its four corners");
+        let mut dirty = square.clone();
+        dirty.insert(2, Vector2::new(f64::NAN, 0.5));
+        dirty.push(Vector2::new(0.5, f64::INFINITY));
+        dirty.insert(1, Vector2::new(f64::NEG_INFINITY, f64::NAN));
+        let hull = convex_hull(&dirty);
+        assert_eq!(hull, clean, "the three non-finite points must not change the hull: {hull:?}");
+        assert!(hull.iter().all(|p| p.x.is_finite() && p.y.is_finite()), "no non-finite vertex may survive");
+        assert!(convex_hull(&[Vector2::new(f64::NAN, f64::NAN)]).is_empty(), "an all-garbage set hulls to nothing");
     }
 }

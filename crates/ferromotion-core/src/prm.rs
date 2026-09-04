@@ -34,13 +34,19 @@ fn dist(a: &[f64], b: &[f64]) -> f64 {
 impl PrmStar {
     /// Build the roadmap in the box `[lo, hi]`. `point_free(x)` is true for a collision-free
     /// configuration; `edge_free(a, b)` for a collision-free straight segment.
+    /// `None` when the bounds are malformed: different lengths, empty, or a non-finite coordinate.
+    /// Non-finite bounds used to produce non-finite samples and fault inside the nearest-neighbour
+    /// sort, the same way [`Roadmap::query`] did with a non-finite endpoint.
     pub fn build(
         &self,
         lo: &[f64],
         hi: &[f64],
         point_free: impl Fn(&[f64]) -> bool,
         edge_free: impl Fn(&[f64], &[f64]) -> bool,
-    ) -> Roadmap {
+    ) -> Option<Roadmap> {
+        if lo.is_empty() || lo.len() != hi.len() || !lo.iter().chain(hi).all(|x| x.is_finite()) {
+            return None;
+        }
         let dim = lo.len();
         let mut s = self.seed;
         let mut rand = || {
@@ -67,7 +73,7 @@ impl PrmStar {
         for i in 0..n {
             // k nearest neighbours by distance
             let mut order: Vec<usize> = (0..n).filter(|&j| j != i).collect();
-            order.sort_by(|&a, &b| dist(&nodes[i], &nodes[a]).partial_cmp(&dist(&nodes[i], &nodes[b])).unwrap());
+            order.sort_by(|&a, &b| dist(&nodes[i], &nodes[a]).total_cmp(&dist(&nodes[i], &nodes[b])));
             for &j in order.iter().take(k) {
                 let d = dist(&nodes[i], &nodes[j]);
                 if d <= self.max_edge && edge_free(&nodes[i], &nodes[j]) {
@@ -75,7 +81,7 @@ impl PrmStar {
                 }
             }
         }
-        Roadmap { nodes, adj, dim }
+        Some(Roadmap { nodes, adj, dim })
     }
 }
 
@@ -203,7 +209,7 @@ mod verification {
     fn prm_multi_query_finds_free_paths() {
         let (scene, point_free, edge_free) = env();
         let prm = PrmStar { n_samples: 500, seed: 0x51, max_edge: 0.35 };
-        let roadmap = prm.build(&[0.0, 0.0], &[1.0, 1.0], &point_free, &edge_free);
+        let roadmap = prm.build(&[0.0, 0.0], &[1.0, 1.0], &point_free, &edge_free).expect("valid bounds");
         assert!(roadmap.nodes.len() > 400, "too few free samples: {}", roadmap.nodes.len());
 
         // several queries against the SAME roadmap (the multi-query advantage)
@@ -239,7 +245,7 @@ mod verification {
     fn query_refuses_a_non_finite_or_wrong_length_endpoint() {
         let (_scene, point_free, edge_free) = env();
         let prm = PrmStar { n_samples: 120, seed: 0x51, max_edge: 0.35 };
-        let roadmap = prm.build(&[0.0, 0.0], &[1.0, 1.0], &point_free, &edge_free);
+        let roadmap = prm.build(&[0.0, 0.0], &[1.0, 1.0], &point_free, &edge_free).expect("valid bounds");
         assert!(roadmap.nodes.len() > 50, "fixture needs a usable roadmap: {}", roadmap.nodes.len());
         let ok = roadmap.query(&[0.05, 0.05], &[0.95, 0.95], &edge_free);
         assert!(ok.is_some(), "the control query must still succeed");
@@ -247,5 +253,18 @@ mod verification {
         assert!(roadmap.query(&[0.05, 0.05], &[0.95, f64::INFINITY], &edge_free).is_none(), "infinite goal");
         assert!(roadmap.query(&[0.05], &[0.95, 0.95], &edge_free).is_none(), "short start");
         assert!(roadmap.query(&[0.05, 0.05], &[0.9, 0.9, 0.9], &edge_free).is_none(), "long goal");
+    }
+
+    /// `build` takes the same caller bounds `query` validates, and faulted the same way: measured
+    /// pre-fix as a panic at the nearest-neighbour sort, `prm.rs:70`.
+    #[test]
+    fn build_refuses_malformed_bounds() {
+        let (_scene, point_free, edge_free) = env();
+        let prm = PrmStar { n_samples: 60, seed: 0x51, max_edge: 0.35 };
+        assert!(prm.build(&[0.0, 0.0], &[1.0, 1.0], &point_free, &edge_free).is_some(), "control: valid bounds still build");
+        assert!(prm.build(&[0.0, f64::NAN], &[1.0, 1.0], &point_free, &edge_free).is_none(), "non-finite lo");
+        assert!(prm.build(&[0.0, 0.0], &[1.0, f64::INFINITY], &point_free, &edge_free).is_none(), "non-finite hi");
+        assert!(prm.build(&[0.0, 0.0], &[1.0], &point_free, &edge_free).is_none(), "length mismatch");
+        assert!(prm.build(&[], &[], &point_free, &edge_free).is_none(), "empty bounds");
     }
 }
