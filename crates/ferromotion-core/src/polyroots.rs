@@ -55,8 +55,9 @@ pub fn roots(coeffs: &[f64]) -> Vec<Complex<f64>> {
 
 /// The real roots only (imaginary part within `tol`), sorted ascending.
 pub fn real_roots(coeffs: &[f64], tol: f64) -> Vec<f64> {
-    let mut r: Vec<f64> = roots(coeffs).into_iter().filter(|z| z.im.abs() < tol).map(|z| z.re).collect();
-    r.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    // A non-finite value is not a root, so it is dropped rather than ordered.
+    let mut r: Vec<f64> = roots(coeffs).into_iter().filter(|z| z.im.abs() < tol).map(|z| z.re).filter(|v| v.is_finite()).collect();
+    r.sort_by(f64::total_cmp);
     r
 }
 

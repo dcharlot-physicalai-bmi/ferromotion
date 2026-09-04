@@ -187,7 +187,9 @@ pub fn epa<A: Support, B: Support>(a: &A, b: &B) -> Option<Penetration> {
         faces.push(make_face(&verts, i, j, k)?);
     }
     for _ in 0..96 {
-        let ci = (0..faces.len()).min_by(|&x, &y| faces[x].dist.partial_cmp(&faces[y].dist).unwrap()).unwrap();
+        // A total order suffices here: distances are non-negative, so a NaN compares GREATEST and is
+        // never selected as the closest face.
+        let ci = (0..faces.len()).min_by(|&x, &y| faces[x].dist.total_cmp(&faces[y].dist))?;
         let normal = faces[ci].normal;
         let dist = faces[ci].dist;
         let p = support(a, b, &normal);

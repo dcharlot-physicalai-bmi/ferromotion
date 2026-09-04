@@ -39,9 +39,16 @@ impl Graph {
 
     /// **Algebraic connectivity** (Fiedler value) `λ₂` — the second-smallest Laplacian eigenvalue.
     /// Zero iff the graph is disconnected; otherwise it is the consensus rate.
+    /// `NaN` when the graph has fewer than two nodes (there is no second eigenvalue) or when any
+    /// eigenvalue is non-finite. Sorting alone is not enough for a positional pick: `ev[1]` only means
+    /// "second smallest" if every entry is a real number, and indexing it used to panic outright on a
+    /// single-node graph.
     pub fn fiedler_value(&self) -> f64 {
         let mut ev: Vec<f64> = self.laplacian().symmetric_eigen().eigenvalues.iter().cloned().collect();
-        ev.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        if ev.len() < 2 || !ev.iter().all(|v| v.is_finite()) {
+            return f64::NAN;
+        }
+        ev.sort_by(f64::total_cmp);
         ev[1]
     }
 
@@ -189,5 +196,19 @@ mod tests {
         // …centred on the conserved average — formation control never translates the group.
         assert!((x.sum() / 4.0 - cx0).abs() < 1e-9 && (y.sum() / 4.0 - cy0).abs() < 1e-9, "centroid moved");
     }
-}
 
+    /// **A positional pick needs every value to be real.** `fiedler_value` sorts the Laplacian spectrum
+    /// and returns `ev[1]`; that index only means "second smallest" if nothing is `NaN`, and it used to
+    /// index out of bounds outright on a single-node graph.
+    #[test]
+    fn fiedler_value_reports_nan_when_there_is_no_second_eigenvalue() {
+        let path = Graph { adj: DMatrix::from_row_slice(3, 3, &[0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0]) };
+        let lambda2 = path.fiedler_value();
+        assert!(lambda2.is_finite() && lambda2 > 1e-9, "control: a connected path has a positive Fiedler value, got {lambda2}");
+        let single = Graph { adj: DMatrix::from_row_slice(1, 1, &[0.0]) };
+        assert!(single.fiedler_value().is_nan(), "one node has no second eigenvalue");
+        assert!(!single.is_connected(), "and must not be called connected on the strength of a NaN");
+        let broken = Graph { adj: DMatrix::from_row_slice(2, 2, &[0.0, f64::NAN, f64::NAN, 0.0]) };
+        assert!(broken.fiedler_value().is_nan(), "a non-finite weight yields no connectivity number");
+    }
+}

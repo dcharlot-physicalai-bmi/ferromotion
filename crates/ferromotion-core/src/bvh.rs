@@ -62,10 +62,16 @@ pub struct Bvh {
 
 impl Bvh {
     /// Build the tree over `aabbs` (top-down, longest-axis centroid-median split).
+    /// A box with a non-finite bound is left **out of the tree**. Ordering it late is not enough: its
+    /// bounds `union` into every ancestor node, and nothing overlaps a `NaN`, so entire subtrees of
+    /// real geometry are pruned from every query. Measured before this guard, a query covering two
+    /// real boxes and one `NaN` box returned **one** of the two. Such a box keeps its index in
+    /// `aabbs` and is simply never reported as a hit, which is what an invalid box should do.
     pub fn build(aabbs: &[Aabb]) -> Bvh {
-        let mut idx: Vec<usize> = (0..aabbs.len()).collect();
+        let mut idx: Vec<usize> =
+            (0..aabbs.len()).filter(|&i| aabbs[i].min.iter().chain(aabbs[i].max.iter()).all(|v| v.is_finite())).collect();
         let mut nodes = Vec::new();
-        let root = if aabbs.is_empty() { usize::MAX } else { build_rec(aabbs, &mut idx, &mut nodes) };
+        let root = if idx.is_empty() { usize::MAX } else { build_rec(aabbs, &mut idx, &mut nodes) };
         Bvh { nodes, root, aabbs: aabbs.to_vec() }
     }
 
@@ -198,7 +204,9 @@ fn build_rec(aabbs: &[Aabb], idx: &mut [usize], nodes: &mut Vec<Node>) -> usize 
     } else {
         2
     };
-    idx.sort_by(|&a, &b| aabbs[a].center()[axis].partial_cmp(&aabbs[b].center()[axis]).unwrap());
+    // Ordering only: `Bvh::build` has already excluded non-finite boxes, so every centre here is real.
+    // A total order is used rather than an unwrapped comparison so this cannot panic if that ever slips.
+    idx.sort_by(|&a, &b| aabbs[a].center()[axis].total_cmp(&aabbs[b].center()[axis]));
     let mid = idx.len() / 2;
     let (l, r) = idx.split_at_mut(mid);
     let left = build_rec(aabbs, l, nodes);

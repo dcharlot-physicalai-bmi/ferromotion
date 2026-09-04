@@ -244,7 +244,10 @@ pub fn match_descriptors(a: &[Descriptor], b: &[Descriptor], ratio: f64) -> Vec<
 pub fn detect_and_describe(img: &GrayImage, threshold: f64, max_kps: usize) -> Vec<(Keypoint, Descriptor)> {
     let pattern = brief_pattern(15);
     let mut kps = nms(&fast_corners(img, threshold), 3);
-    kps.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+    // A non-finite score is dropped before ranking: it would sort to the FRONT of a descending total
+    // order and take one of the `max_kps` slots away from a real corner.
+    kps.retain(|k| k.score.is_finite());
+    kps.sort_by(|a, b| b.score.total_cmp(&a.score));
     kps.truncate(max_kps);
     kps.iter()
         .map(|k| {

@@ -409,7 +409,7 @@ impl Confounding {
     pub fn worst_pair(&self) -> (&'static str, &'static str) {
         let mut idx: Vec<usize> = (0..4).collect();
         idx.sort_by(|&a, &b| {
-            self.direction[b].abs().partial_cmp(&self.direction[a].abs()).unwrap_or(std::cmp::Ordering::Equal)
+            self.direction[b].abs().total_cmp(&self.direction[a].abs())
         });
         (ACTUATOR_PARAMETERS[idx[0]], ACTUATOR_PARAMETERS[idx[1]])
     }

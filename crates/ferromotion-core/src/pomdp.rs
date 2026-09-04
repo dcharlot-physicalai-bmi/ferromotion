@@ -126,7 +126,10 @@ pub fn best_sensing_action(b: &Belief, actions: &[Vec<Vec<f64>>]) -> Option<(usi
         .iter()
         .enumerate()
         .map(|(i, l)| (i, expected_information_gain(b, l)))
-        .max_by(|x, y| x.1.partial_cmp(&y.1).unwrap_or(std::cmp::Ordering::Equal))
+        // Non-finite gains are skipped rather than ordered: a NaN compares greatest under a total
+        // order, so an unusable action would be reported as the best one to take.
+        .filter(|(_, g)| g.is_finite())
+        .max_by(|x, y| x.1.total_cmp(&y.1))
 }
 
 #[cfg(test)]

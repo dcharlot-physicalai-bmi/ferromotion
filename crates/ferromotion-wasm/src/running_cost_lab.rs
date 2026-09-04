@@ -294,7 +294,7 @@ impl RunningCostLab {
 
     fn measurement(&self) -> Measurement {
         let mut s = self.samples();
-        s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+        s.sort_by(f64::total_cmp);
         Measurement {
             median: quantile(&s, 0.5),
             mad: median_absolute_deviation(&s),

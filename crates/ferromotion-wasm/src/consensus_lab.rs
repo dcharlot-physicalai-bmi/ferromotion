@@ -87,7 +87,7 @@ impl ConsensusLab {
     pub fn eigenvalues(&self) -> Vec<f64> {
         let mut ev: Vec<f64> =
             self.graph().laplacian().symmetric_eigen().eigenvalues.iter().cloned().collect();
-        ev.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        ev.sort_by(f64::total_cmp);
         ev
     }
 

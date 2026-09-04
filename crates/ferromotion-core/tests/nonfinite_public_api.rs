@@ -14,6 +14,11 @@ use ferromotion_core::*;
 use nalgebra::{DMatrix, DVector, Matrix3, Vector3};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
+/// `std::panic::set_hook` is process-wide, so the probe below silences the WHOLE binary while it runs.
+/// Both tests take this lock so they cannot overlap: without it the probe's silent hook swallowed the
+/// contract test's assertion message, and a real failure printed nothing but "FAILED".
+static PANIC_HOOK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 const NAN: f64 = f64::NAN;
 
 /// Run one probe on its own thread with a watchdog, print the verdict immediately, and return it.
@@ -37,6 +42,7 @@ fn probe(name: &'static str, f: impl FnOnce() + Send + 'static) -> (&'static str
 
 #[test]
 fn report_which_public_entry_points_fault_on_a_non_finite_input() {
+    let _serial = PANIC_HOOK.lock().unwrap_or_else(|e| e.into_inner());
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
 
@@ -97,6 +103,35 @@ fn report_which_public_entry_points_fault_on_a_non_finite_input() {
         let _ = w2_gaussian(&m1, &s1, &m2, &s2);
     }));
 
+    rows.push(probe("Bvh::build (NaN on EVERY axis)", || {
+        // The earlier version of this probe put the NaN on one axis only, and the split happened not to
+        // compare that axis, so it read as "returned". Luck, not a guarantee.
+        let boxes = vec![
+            Aabb { min: Vector3::new(0.0, 0.0, 0.0), max: Vector3::new(1.0, 1.0, 1.0) },
+            Aabb { min: Vector3::new(NAN, NAN, NAN), max: Vector3::new(NAN, NAN, NAN) },
+            Aabb { min: Vector3::new(2.0, 2.0, 2.0), max: Vector3::new(3.0, 3.0, 3.0) },
+            Aabb { min: Vector3::new(4.0, 0.0, 0.0), max: Vector3::new(5.0, 1.0, 1.0) },
+        ];
+        let _ = Bvh::build(&boxes);
+    }));
+    rows.push(probe("SdfScene::gradient (a NaN query point)", || {
+        let s = SdfScene { prims: vec![Sdf::Box { center: Vector3::zeros(), half: Vector3::new(1.0, 1.0, 1.0) }] };
+        let _ = s.gradient(&Vector3::new(NAN, 0.0, 0.0));
+    }));
+    rows.push(probe("SdfScene::nearest (a NaN query point)", || {
+        let s = SdfScene { prims: vec![Sdf::Sphere { center: Vector3::zeros(), radius: 1.0 }, Sdf::Sphere { center: Vector3::new(3.0, 0.0, 0.0), radius: 1.0 }] };
+        let _ = s.nearest(&Vector3::new(NAN, 0.0, 0.0));
+    }));
+    rows.push(probe("gjk::intersects (a NaN hull vertex)", || {
+        let hull = ConvexPoints { pts: vec![Vector3::new(0.0, 0.0, 0.0), Vector3::new(NAN, 1.0, 0.0), Vector3::new(1.0, 0.0, 1.0)] };
+        let ball = Ball { center: Vector3::new(0.5, 0.2, 0.2), radius: 0.4 };
+        let _ = intersects(&hull, &ball);
+    }));
+    rows.push(probe("epa::sphere_penetration (a NaN centre)", || {
+        let a = Ball { center: Vector3::new(NAN, 0.0, 0.0), radius: 1.0 };
+        let b = Ball { center: Vector3::new(0.5, 0.0, 0.0), radius: 1.0 };
+        let _ = ferromotion_core::sphere_penetration(&a, &b);
+    }));
     std::panic::set_hook(prev);
     let bad: Vec<&str> = rows.iter().filter(|(_, v)| *v != "returned").map(|(n, _)| *n).collect();
     eprintln!("\n{} entry points probed, {} did not simply return\n", rows.len(), bad.len());
@@ -111,6 +146,7 @@ fn report_which_public_entry_points_fault_on_a_non_finite_input() {
 /// mathematical entity and the return type cannot say "no answer".
 #[test]
 fn each_entry_point_honours_its_documented_non_finite_contract() {
+    let _serial = PANIC_HOOK.lock().unwrap_or_else(|e| e.into_inner());
     // --- signature already carries the failure: None ---
     assert!(w1_empirical_1d(&[0.0, 1.0, 2.0], &[0.0, 1.0, 3.0]).is_some(), "control");
     assert!(w1_empirical_1d(&[0.0, 1.0, NAN], &[0.0, 1.0, 2.0]).is_none(), "w1 refuses a non-finite sample");
@@ -155,4 +191,32 @@ fn each_entry_point_honours_its_documented_non_finite_contract() {
     assert!((a.centroid - b.centroid).norm() < 1e-12, "the invalid points must not move the centroid");
     assert!((a.variances - b.variances).norm() < 1e-12, "nor the variances");
     assert!(pca(&[Vector3::new(NAN, NAN, NAN)]).centroid.iter().all(|v| !v.is_finite()), "nothing real leaves no axis");
+    // --- geometry and collision: an unusable element is skipped, not ranked ---
+    let clean_boxes = vec![
+        Aabb { min: Vector3::new(0.0, 0.0, 0.0), max: Vector3::new(1.0, 1.0, 1.0) },
+        Aabb { min: Vector3::new(2.0, 2.0, 2.0), max: Vector3::new(3.0, 3.0, 3.0) },
+    ];
+    let mut dirty_boxes = clean_boxes.clone();
+    dirty_boxes.insert(1, Aabb { min: Vector3::new(NAN, NAN, NAN), max: Vector3::new(NAN, NAN, NAN) });
+    let bvh = Bvh::build(&dirty_boxes);
+    let hits = bvh.query(&Aabb { min: Vector3::new(-5.0, -5.0, -5.0), max: Vector3::new(5.0, 5.0, 5.0) });
+    assert!(!hits.contains(&1), "the non-finite box must never be reported as a hit: {hits:?}");
+    assert_eq!(hits.len(), 2, "both real boxes are still found: {hits:?}");
+
+    let scene = SdfScene { prims: vec![Sdf::Sphere { center: Vector3::zeros(), radius: 1.0 }, Sdf::Sphere { center: Vector3::new(3.0, 0.0, 0.0), radius: 1.0 }] };
+    assert!(scene.nearest(&Vector3::new(0.4, 0.0, 0.0)).is_some(), "control finds a nearest primitive");
+    assert!(scene.nearest(&Vector3::new(NAN, 0.0, 0.0)).is_none(), "no primitive is at a knowable distance from nowhere");
+    assert!(scene.gradient(&Vector3::new(NAN, 0.0, 0.0)).iter().all(|v| v.is_finite()), "the union gradient stays finite");
+    let boxed = SdfScene { prims: vec![Sdf::Box { center: Vector3::zeros(), half: Vector3::new(1.0, 1.0, 1.0) }] };
+    assert!(boxed.gradient(&Vector3::new(NAN, 0.0, 0.0)).iter().all(|v| v.is_finite()), "and so does a box's");
+
+    // A hull's support point must be the same whether or not an unusable vertex is present, because a
+    // NaN dot product compares GREATEST and would otherwise be returned as the extreme point.
+    let dir = Vector3::new(0.3, 0.9, -0.2);
+    let good = ConvexPoints { pts: vec![Vector3::new(0.0, 0.0, 0.0), Vector3::new(1.0, 0.0, 1.0), Vector3::new(0.0, 2.0, 0.0)] };
+    let mut bad_pts = good.pts.clone();
+    bad_pts.insert(1, Vector3::new(NAN, 1.0, 0.0));
+    let bad = ConvexPoints { pts: bad_pts };
+    assert_eq!(good.support(&dir), bad.support(&dir), "the unusable vertex must not become the support point");
+    assert_eq!(ConvexPoints { pts: vec![Vector3::new(NAN, NAN, NAN)] }.support(&dir), Vector3::zeros(), "a hull with nothing real supports nothing");
 }

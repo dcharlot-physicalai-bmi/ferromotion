@@ -57,7 +57,11 @@ impl Sdf {
                     safe_normalize(s.component_mul(&qp))
                 } else {
                     // Inside: point out through the nearest face (the largest, least-negative q).
-                    let imax = (0..3).max_by(|&i, &j| q[i].partial_cmp(&q[j]).unwrap()).unwrap();
+                    // Skip non-finite components: a NaN compares greatest under a total order and
+                    // would name the wrong face. With none usable there is no outward direction.
+                    let Some(imax) = (0..3).filter(|&i| q[i].is_finite()).max_by(|&i, &j| q[i].total_cmp(&q[j])) else {
+                        return Vector3::zeros();
+                    };
                     let mut g = Vector3::zeros();
                     g[imax] = s[imax];
                     g
@@ -122,7 +126,8 @@ impl SdfScene {
 
     /// Gradient of the union — the gradient of the nearest primitive.
     pub fn gradient(&self, p: &Vector3<f64>) -> Vector3<f64> {
-        let nearest = self.prims.iter().min_by(|x, y| x.distance(p).partial_cmp(&y.distance(p)).unwrap());
+        // Primitives at a non-finite distance (a non-finite query point, say) are skipped.
+        let nearest = self.prims.iter().filter(|s| s.distance(p).is_finite()).min_by(|x, y| x.distance(p).total_cmp(&y.distance(p)));
         nearest.map(|s| s.gradient(p)).unwrap_or_else(|| Vector3::new(0.0, 0.0, 1.0))
     }
 
@@ -133,7 +138,8 @@ impl SdfScene {
             .iter()
             .enumerate()
             .map(|(i, s)| (i, s.distance(p)))
-            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .filter(|(_, d)| d.is_finite())
+            .min_by(|a, b| a.1.total_cmp(&b.1))
     }
 
     /// Minimum clearance of a set of collision spheres `(center, radius)` (negative ⇒ penetration).

@@ -130,7 +130,7 @@ impl Roadmap {
         }
         impl Ord for St {
             fn cmp(&self, o: &Self) -> Ordering {
-                o.0.partial_cmp(&self.0).unwrap() // min-heap on cost
+                o.0.total_cmp(&self.0) // min-heap on cost
             }
         }
         let total = n + 2;

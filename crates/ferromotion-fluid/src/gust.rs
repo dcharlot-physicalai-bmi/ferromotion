@@ -95,7 +95,10 @@ fn lstsq(features: &[Vec<f64>], target: &[f64]) -> (Vec<f64>, f64) {
 fn solve_dense(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Vec<f64> {
     let n = b.len();
     for col in 0..n {
-        let piv = (col..n).max_by(|&i, &j| a[i][col].abs().partial_cmp(&a[j][col].abs()).unwrap()).unwrap();
+        // Skip non-finite candidates: a NaN compares GREATEST under a total order, so it would be
+        // chosen as the pivot and poison the whole elimination. No finite candidate leaves the column
+        // singular, which the check below already handles.
+        let piv = (col..n).filter(|&i| a[i][col].is_finite()).max_by(|&i, &j| a[i][col].abs().total_cmp(&a[j][col].abs())).unwrap_or(col);
         a.swap(col, piv);
         b.swap(col, piv);
         if a[col][col].abs() < 1e-14 {

@@ -32,7 +32,7 @@ pub fn gauss_legendre(n: usize) -> (Vec<f64>, Vec<f64>) {
     let eig = SymmetricEigen::new(j);
     // nodes = eigenvalues; weights = 2·(first component of the normalized eigenvector)²
     let mut nw: Vec<(f64, f64)> = (0..n).map(|i| (eig.eigenvalues[i], 2.0 * eig.eigenvectors[(0, i)].powi(2))).collect();
-    nw.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    nw.sort_by(|a, b| a.0.total_cmp(&b.0));
     (nw.iter().map(|x| x.0).collect(), nw.iter().map(|x| x.1).collect())
 }
 

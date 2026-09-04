@@ -60,7 +60,15 @@ pub struct ConvexPoints {
 }
 impl Support for ConvexPoints {
     fn support(&self, dir: &Vector3<f64>) -> Vector3<f64> {
-        *self.pts.iter().max_by(|a, b| a.dot(dir).partial_cmp(&b.dot(dir)).unwrap()).unwrap()
+        // A vertex with a non-finite coordinate is SKIPPED, not merely ordered: under a total order a
+        // NaN dot product compares greatest, so it would be returned as the support point and poison
+        // every simplex built from it. A hull with no usable vertex supports nothing.
+        self.pts
+            .iter()
+            .filter(|p| p.iter().all(|v| v.is_finite()))
+            .max_by(|a, b| a.dot(dir).total_cmp(&b.dot(dir)))
+            .copied()
+            .unwrap_or_else(Vector3::zeros)
     }
 }
 

@@ -63,7 +63,7 @@ fn jacobi_eigen(mut a: Vec<Vec<f64>>) -> (Vec<f64>, Vec<Vec<f64>>) {
         }
     }
     let mut idx: Vec<usize> = (0..n).collect();
-    idx.sort_by(|&i, &j| a[j][j].partial_cmp(&a[i][i]).unwrap());
+    idx.sort_by(|&i, &j| a[j][j].total_cmp(&a[i][i]));
     let vals = idx.iter().map(|&i| a[i][i]).collect();
     let vecs = idx.iter().map(|&i| (0..n).map(|k| v[k][i]).collect()).collect();
     (vals, vecs)
