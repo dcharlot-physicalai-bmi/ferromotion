@@ -63,8 +63,33 @@ impl ModalModel {
         &self.basis * q
     }
 
+    /// **The largest `dt` for which [`ModalModel::step`] is stable. Compare it against your step.**
+    ///
+    /// Semi-implicit Euler on `q̈ = −ω²q` is stable exactly while `dt·ω < 2`, so the bound is
+    /// `2/ω_max` over the RETAINED modes. Measured on a six-mass chain at 1, 3 and 6 modes: bounded at
+    /// `dt·ω_max = 1.98`, non-finite at `2.02`, in every case. Past the limit it diverges silently —
+    /// no error, no clamp — which is why this is worth asking for.
+    ///
+    /// **Keeping more modes costs step size.** On that chain the limit falls from 142.1 ms at one mode
+    /// to 32.4 ms at six, a factor of 4.4, because `ω_max` is the highest frequency you kept. Raising
+    /// `r` for accuracy while holding `dt` fixed is how a working reduced model starts diverging.
+    ///
+    /// Follows this workspace's convention (`Admittance::stability_limit` in `ferromotion-control`,
+    /// and the `max_stable_dt` on its motor, friction and rotordynamics models): `f64::INFINITY` when there is
+    /// no bound to report (every retained frequency zero, so nothing can grow) and `f64::NAN` for a
+    /// model whose frequencies are not finite, which is not an unstable system but no system at all.
+    pub fn max_stable_dt(&self) -> f64 {
+        if !self.freq.iter().all(|v| v.is_finite()) {
+            return f64::NAN;
+        }
+        let w_max = self.freq.iter().cloned().fold(0.0f64, f64::max);
+        if w_max <= 0.0 { f64::INFINITY } else { 2.0 / w_max }
+    }
+
     /// Advance the decoupled modal oscillators one semi-implicit step under a full force `f`
     /// (`q̈_i = −ω_i² q_i + φ_iᵀ f`), updating modal position/velocity in place.
+    ///
+    /// Stable only while `dt` is below [`ModalModel::max_stable_dt`]; past it this diverges silently.
     pub fn step(&self, q: &mut DVector<f64>, qd: &mut DVector<f64>, f: &DVector<f64>, dt: f64) {
         let modal_f = self.basis.transpose() * f;
         for i in 0..self.freq.len() {
@@ -155,5 +180,59 @@ mod tests {
         assert!(err_full < 1e-9, "full modal ≠ full sim: {err_full:.2e}");
         // Three modes capture this low-frequency excitation very well.
         assert!(err_red < 1e-6, "3-mode ROM did not capture the low mode: {err_red:.2e}");
+    }
+
+    /// **`max_stable_dt` must bracket the measured boundary, and the positive control must diverge.**
+    ///
+    /// Semi-implicit Euler on a harmonic oscillator is stable exactly while `dt·ω < 2`, so this checks
+    /// the claim from both sides at several mode counts, and checks the consequence that matters to a
+    /// caller: retaining more modes tightens the bound.
+    #[test]
+    fn max_stable_dt_brackets_the_modal_stability_boundary() {
+        let n = 6;
+        let m = DMatrix::<f64>::identity(n, n);
+        let mut k = DMatrix::<f64>::zeros(n, n);
+        for i in 0..n {
+            k[(i, i)] = 2000.0;
+            if i + 1 < n {
+                k[(i, i + 1)] = -1000.0;
+                k[(i + 1, i)] = -1000.0;
+            }
+        }
+        // `true` if a 1e-6 nudge stays bounded over 20k steps at this dt
+        let bounded = |model: &ModalModel, r: usize, dt: f64| -> bool {
+            let mut q = DVector::from_element(r, 1e-6);
+            let mut qd = DVector::zeros(r);
+            let zero = DVector::zeros(n);
+            for _ in 0..20_000 {
+                model.step(&mut q, &mut qd, &zero, dt);
+                if !q.iter().chain(qd.iter()).all(|v| v.is_finite()) {
+                    return false;
+                }
+                if q.iter().cloned().fold(0.0f64, |a, b| a.max(b.abs())) > 1e-4 {
+                    return false;
+                }
+            }
+            true
+        };
+
+        let mut limits = Vec::new();
+        for &r in &[1usize, 3, 6] {
+            let model = modal_analysis(&m, &k, r);
+            let lim = model.max_stable_dt();
+            assert!(lim.is_finite() && lim > 0.0, "r = {r}: expected a finite bound, got {lim}");
+            assert!(bounded(&model, r, 0.99 * lim), "r = {r}: must be stable just inside the bound ({:.4} ms)", lim * 1e3);
+            assert!(!bounded(&model, r, 1.01 * lim), "POSITIVE CONTROL for r = {r}: must diverge just outside it");
+            limits.push(lim);
+        }
+        // more modes retained => a tighter step, because omega_max is the highest frequency kept
+        assert!(limits[0] > limits[1] && limits[1] > limits[2], "the bound must tighten as modes are added: {limits:?}");
+        assert!(limits[0] > 4.0 * limits[2], "on this chain 1 mode vs 6 is a factor of 4.4: {:.1}", limits[0] / limits[2]);
+
+        // the convention's sentinels
+        let rigid = ModalModel { basis: DMatrix::identity(1, 1), freq: DVector::from_element(1, 0.0), project: DMatrix::identity(1, 1) };
+        assert_eq!(rigid.max_stable_dt(), f64::INFINITY, "no stiffness is no bound");
+        let broken = modal_analysis(&m, &DMatrix::from_element(n, n, f64::NAN), 2);
+        assert!(broken.max_stable_dt().is_nan(), "a model with no finite frequencies is no system");
     }
 }
