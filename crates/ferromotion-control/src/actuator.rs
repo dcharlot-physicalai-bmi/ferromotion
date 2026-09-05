@@ -232,6 +232,9 @@ mod tests {
             tau_s = j.step(dt, cmd, 0.0, 0.0);
         }
         assert!((tau_s - target).abs() < 1e-2, "torque control did not converge: {tau_s} vs {target}");
+        // Settled, not merely passing through the setpoint: measured over a further 0.4 s the torque
+        // spread is 5.2e-7 and peak |omega| 1.3e-8, so require it to be at rest as well as on target.
+        assert!(j.omega.abs() < 1e-6, "torque is on target but the joint is still moving: omega = {}", j.omega);
 
         // Friction dissipates a free oscillation.
         let mut f = SeaJoint { viscous: 0.5, coulomb: 0.02, ..sea(100.0, 1.0) };
