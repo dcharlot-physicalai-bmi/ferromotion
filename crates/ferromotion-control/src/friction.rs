@@ -133,7 +133,16 @@ impl LuGre {
         tau
     }
 
-    /// Largest `dt` for which the explicit bristle update is stable at speed `v`: `g(v)/(σ₀·|v|)`.
+    /// Largest `dt` for which the explicit bristle update is stable at speed `v`:
+    /// `2·g(v)/(σ₀·|v|)`.
+    ///
+    /// The bristle time constant is `τ = g(v)/(σ₀·|v|)`, and forward Euler on `ż = −z/τ + v` is stable
+    /// while `dt < 2τ`, not `dt < τ`. **This returned `τ` and called it the largest stable step, which
+    /// was wrong by exactly a factor of two** — conservative, so nothing diverged, but it told callers
+    /// to take steps half the size they needed and disagreed with every other bound in this workspace
+    /// (`Admittance::stability_limit`'s damping-only branch is `2m/d`, `ModalModel::max_stable_dt` is
+    /// `2/ω`). Measured at `σ₀ = 1e5` and `v ∈ {0.05, 1, 5}` m/s, identically at all three: the bristle
+    /// is stable at `1.99·τ` and diverges at `2.01·τ`.
     ///
     /// Returns `f64::INFINITY` at `v = 0`, where the state does not decay at all — presliding is
     /// non-dissipative in this model, which is exactly why it behaves as a spring there.
@@ -141,7 +150,7 @@ impl LuGre {
         if v == 0.0 {
             return f64::INFINITY;
         }
-        self.curve.g(v) / (self.sigma_0 * v.abs())
+        2.0 * self.curve.g(v) / (self.sigma_0 * v.abs())
     }
 
     /// The steady-state bristle deflection at constant `v`: `z_ss = g(v)·sgn(v)/σ₀`.
@@ -321,5 +330,37 @@ mod tests {
         // A stiffer bristle also tightens it, linearly.
         let stiff = LuGre::new(joint(), 1.0e6, 0.0);
         assert!((stiff.max_stable_dt(1.0) * 10.0 - l.max_stable_dt(1.0)).abs() < 1e-12);
+    }
+
+    /// **The bound must be the LARGEST stable step, verified from both sides.**
+    ///
+    /// The version of this that shipped returned the bristle time constant `τ` and documented it as the
+    /// largest stable step. Forward Euler is stable to `2τ`, so it was a factor of two out. It went
+    /// unnoticed because the tests only checked monotonicity, the degenerate case at rest, and linear
+    /// scaling in `σ₀` — every property that a factor of two preserves. Only running the update PAST
+    /// the bound distinguishes them, which is what this does, at three speeds.
+    #[test]
+    fn max_stable_dt_is_the_largest_stable_step_not_the_time_constant() {
+        let probe = |v: f64, factor: f64| -> bool {
+            let l0 = LuGre::new(joint(), 1.0e5, 0.0);
+            let dt = factor * l0.max_stable_dt(v);
+            let mut l = LuGre::new(joint(), 1.0e5, 0.0);
+            for _ in 0..4000 {
+                l.step(dt, v);
+                if !l.z.is_finite() || l.z.abs() > 1e3 {
+                    return false;
+                }
+            }
+            true
+        };
+        for v in [0.05, 1.0, 5.0] {
+            assert!(probe(v, 0.995), "v = {v}: must be stable just inside its own bound");
+            assert!(!probe(v, 1.005), "POSITIVE CONTROL at v = {v}: must diverge just outside it");
+            // and the factor-of-two error specifically: half the bound must NOT be the boundary
+            assert!(probe(v, 0.9), "v = {v}: 0.9x the bound must be comfortably stable");
+        }
+        let l = LuGre::new(joint(), 1.0e5, 0.0);
+        let tau = l.curve.g(1.0) / (l.sigma_0 * 1.0);
+        assert!((l.max_stable_dt(1.0) - 2.0 * tau).abs() < 1e-18, "the bound is 2 tau, not tau");
     }
 }
