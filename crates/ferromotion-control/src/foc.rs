@@ -439,7 +439,8 @@ impl PiCurrent {
         PiCurrent { kp: l * bandwidth, ki: r_s * bandwidth, v_limit, integral: 0.0 }
     }
 
-    /// The explicit-Euler stability bound imposed by a regulator at `bandwidth` rad/s: `2/bandwidth`.
+    /// An **upper envelope** on the explicit-Euler step imposed by a regulator at `bandwidth` rad/s:
+    /// `2/bandwidth`. A step AT this value is not stable; see the measured range below.
     ///
     /// This is the **asymptotic** limit, and it is necessary rather than sufficient. Measured by bisecting on
     /// the divergence threshold across four machines and three bandwidths, the critical `dt·ω_bw` ranged from

@@ -249,9 +249,29 @@ impl Rotor {
         }
     }
 
-    /// Explicit-Euler stability bound for [`step`](Rotor::step), `2/ω_n`. A useful step is a small fraction.
+    /// Semi-implicit-Euler stability bound for [`step`](Rotor::step). A useful step is a small fraction.
+    ///
+    /// `2/ω_n` is the UNDAMPED bound, and this used to return it. The step is semi-implicit in the
+    /// spring but explicit in the damper, so the real condition is `dt²·ω_n² + 2·dt·γ ≤ 4` with
+    /// `γ = c/m` — the same condition `Admittance::stability_limit` solves — and its root is strictly
+    /// below `2/ω_n` whenever there is damping. **Reporting the undamped value was optimistic in the
+    /// dangerous direction: it called a step safe that diverges.** Measured on a 2 kg, 1e6 N/m disc
+    /// (`ω_n = 707 rad/s`, undamped bound 2.828 ms) from a 1e-6 m nudge:
+    ///
+    /// | `c` | this bound | 0.9 × the OLD bound | 0.99 × the old bound |
+    /// |---|---|---|---|
+    /// | 0 | 2.828 ms | bounded | bounded |
+    /// | 200 | 2.635 ms | bounded | diverged |
+    /// | 800 | 2.139 ms | **diverged** | diverged |
+    ///
+    /// The damped root predicts every one of those transitions.
     pub fn max_stable_dt(&self) -> f64 {
-        2.0 / self.natural_frequency()
+        let w2 = self.natural_frequency().powi(2);
+        let gamma = self.damping / self.mass;
+        if w2 <= 0.0 {
+            return if gamma > 0.0 { 2.0 / gamma } else { f64::INFINITY };
+        }
+        (-gamma + (gamma * gamma + 4.0 * w2).sqrt()) / w2
     }
 
     /// One time-domain step of the planar whirl, for the independent check on [`whirl`](Rotor::whirl).
@@ -625,5 +645,37 @@ mod tests {
         assert!(farther > far, "the damper's contribution rises with speed: {far:.4} then {farther:.4}");
         // Roughly linearly, once the amplitude has settled at e.
         assert!((farther / far - 2.0).abs() < 0.05, "and about linearly, ratio {:.3}", farther / far);
+    }
+
+    /// **The bound must not be optimistic once the rotor is damped.**
+    ///
+    /// `2/ω_n` ignores the damper, which this step treats explicitly, so it called a step safe that
+    /// diverges. This checks the bound from both sides across a range of damping, including the
+    /// undamped case where the old and new values coincide.
+    #[test]
+    fn max_stable_dt_accounts_for_the_damper_and_is_never_optimistic() {
+        let bounded = |r: &Rotor, dt: f64| -> bool {
+            let (mut pos, mut vel) = (Vector3::zeros(), Vector3::new(1e-6, 0.0, 0.0));
+            for k in 0..20_000 {
+                r.step(dt, 0.0, k as f64 * dt, &mut pos, &mut vel);
+                if !pos.iter().all(|v| v.is_finite()) || pos.norm() > 1.0 {
+                    return false;
+                }
+            }
+            true
+        };
+        for &c in &[0.0f64, 50.0, 200.0, 800.0] {
+            let r = Rotor::thin_disc(2.0, 0.05, 1.0e6, c, 1e-4);
+            let lim = r.max_stable_dt();
+            let undamped = 2.0 / r.natural_frequency();
+            assert!(lim <= undamped + 1e-15, "c = {c}: the damped bound cannot exceed the undamped one");
+            assert!(bounded(&r, 0.99 * lim), "c = {c}: must be stable just inside the bound ({lim:.4e})");
+            assert!(!bounded(&r, 1.02 * lim), "POSITIVE CONTROL at c = {c}: must diverge just outside it");
+        }
+        // the defect itself: at heavy damping the OLD bound is optimistic by enough to diverge at 0.9x
+        let heavy = Rotor::thin_disc(2.0, 0.05, 1.0e6, 800.0, 1e-4);
+        let old = 2.0 / heavy.natural_frequency();
+        assert!(!bounded(&heavy, 0.9 * old), "0.9x the undamped bound must diverge here, which is why it was wrong");
+        assert!(bounded(&heavy, 0.9 * heavy.max_stable_dt()), "0.9x the corrected bound must be safe");
     }
 }

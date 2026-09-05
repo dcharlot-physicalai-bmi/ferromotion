@@ -103,8 +103,10 @@ impl MotorThermal {
         self.t_housing += dt * (q_wh - q_ha) / self.c_housing;
     }
 
-    /// The largest `dt` for which [`MotorThermal::step`] is stable, from the faster (winding) node:
-    /// `C_w·R_wh`, which is that node's time constant.
+    /// A **practical** step bound from the faster (winding) node: its time constant `C_w·R_wh`.
+    ///
+    /// Deliberately HALF the stability limit, and named for the convention rather than for what it
+    /// returns — the paragraph below is the contract, not this line.
     ///
     /// Explicit Euler on a linear decay needs `dt < 2τ`; this returns `τ` as the practical bound, since running
     /// at the stability edge gives an oscillating temperature that is useless even when bounded.
