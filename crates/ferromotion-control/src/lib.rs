@@ -254,6 +254,24 @@ impl ComputedTorque {
         (dt.is_finite() && dt > 0.0 && (self.kd * dt).is_finite()).then_some(self.kd * dt)
     }
 
+    /// **The largest control period at which this controller can hold a posture**, by the same
+    /// condition [`crate::Admittance::stability_limit`] uses: `dt²·ω² + 2·dt·γ ≤ 4`.
+    ///
+    /// Because this controller cancels `M`, the closed loop is `ë + kd·ė + kp·e = 0` per joint and the
+    /// rates ARE the gains: `ω² = kp`, `γ = kd`. No posture, no mass matrix, no robot. Measured on the
+    /// two-link fixture at `kp = 400, kd = 40` this returns **41.42 ms**, and the plant holds at 40 ms
+    /// and diverges to non-finite at 60 ms. The impedance controller on the same arm is limited to
+    /// 8.05 ms, so cancelling `M` buys a fivefold coarser control rate.
+    pub fn max_stable_dt(&self) -> Option<f64> {
+        if !self.kp.is_finite() || !self.kd.is_finite() || self.kp < 0.0 || self.kd < 0.0 {
+            return None;
+        }
+        if self.kp <= 0.0 {
+            return Some(if self.kd > 0.0 { 2.0 / self.kd } else { f64::INFINITY });
+        }
+        Some((-self.kd + (self.kd * self.kd + 4.0 * self.kp).sqrt()) / self.kp)
+    }
+
     pub fn new(kp: f64, kd: f64) -> Self {
         Self { kp, kd }
     }
@@ -338,16 +356,45 @@ impl CartesianImpedance {
     /// instead of the eigenvalue would put the apparent boundary near 1 and make this criterion look
     /// wrong. `None` if `q` is the wrong length, any input is non-finite, or `M` is not invertible.
     pub fn damping_zoh_ratio(&self, robot: &Robot, inertia: &[LinkInertia], q: &[f64], dt: f64) -> Option<f64> {
-        if q.len() != robot.dof() || !q.iter().all(|v| v.is_finite()) || !dt.is_finite() || dt <= 0.0 {
+        Some(self.rates(robot, inertia, q)?.1 * dt).filter(|r| r.is_finite() && dt.is_finite() && dt > 0.0)
+    }
+
+    /// **The largest control period at which this controller can hold posture `q`.** Compare it against
+    /// your control period, as with [`crate::Admittance::stability_limit`] and the `max_stable_dt` this
+    /// crate's motor, friction and rotordynamics models already expose.
+    ///
+    /// Same condition those use — `dt²·ω² + 2·dt·γ ≤ 4` for a sampled spring-damper — with the
+    /// multi-joint rates `ω² = λ_max(M⁻¹K)` and `γ = λ_max(M⁻¹D)`, where `K = Jₚᵀ(Kp·I)Jₚ` and
+    /// `D = Jₚᵀ(Kd·I)Jₚ + Dⱼ·I`. Both act through the Jacobian, so neither is the bare gain: on the
+    /// two-link fixture `γ` is 243 s⁻¹ where `joint_damping` alone would suggest 100 s⁻¹.
+    ///
+    /// Measured on that fixture from a 1e-6 rad nudge at rest, this returns **8.05 ms**, and the plant
+    /// holds at 5 ms while settling into a 0.497 rad limit cycle at 35 rad/s at 10 ms. Past the limit
+    /// it does not error or clamp — it simply stops holding still, and a position-only convergence
+    /// check cannot tell that from success. `None` if `q` is the wrong length, any input is
+    /// non-finite, or `M` is not invertible.
+    pub fn max_stable_dt(&self, robot: &Robot, inertia: &[LinkInertia], q: &[f64]) -> Option<f64> {
+        let (w2, gamma) = self.rates(robot, inertia, q)?;
+        if w2 <= 0.0 {
+            return Some(if gamma > 0.0 { 2.0 / gamma } else { f64::INFINITY });
+        }
+        Some((-gamma + (gamma * gamma + 4.0 * w2).sqrt()) / w2)
+    }
+
+    /// `(ω², γ)`: the stiffness and damping rates this posture presents to a sampled controller.
+    fn rates(&self, robot: &Robot, inertia: &[LinkInertia], q: &[f64]) -> Option<(f64, f64)> {
+        if q.len() != robot.dof() || !q.iter().all(|v| v.is_finite()) {
             return None;
         }
         let n = robot.dof();
         let tip = robot.fk(q).translation.vector;
         let jp = robot.point_jacobian(q, n, &tip);
+        let k_eff = jp.transpose() * (self.kp * &jp);
         let d_eff = jp.transpose() * (self.kd * &jp) + nalgebra::DMatrix::identity(n, n) * self.joint_damping;
-        let minv_d = mass_matrix(robot, inertia, q).try_inverse()? * &d_eff;
-        let lambda = minv_d.complex_eigenvalues().iter().map(|z| z.re.abs()).fold(0.0f64, f64::max);
-        (lambda * dt).is_finite().then_some(lambda * dt)
+        let minv = mass_matrix(robot, inertia, q).try_inverse()?;
+        let spectral = |m: nalgebra::DMatrix<f64>| m.complex_eigenvalues().iter().map(|z| z.re.abs()).fold(0.0f64, f64::max);
+        let (w2, gamma) = (spectral(&minv * &k_eff), spectral(&minv * &d_eff));
+        (w2.is_finite() && gamma.is_finite()).then_some((w2, gamma))
     }
 }
 
@@ -563,6 +610,25 @@ mod tests {
         let c = ComputedTorque::new(400.0, 40.0);
         assert_eq!(c.damping_zoh_ratio(1e-3), Some(0.04));
         assert!(c.damping_zoh_ratio(0.0).is_none() && c.damping_zoh_ratio(-1e-3).is_none() && c.damping_zoh_ratio(f64::NAN).is_none());
+    }
+
+    /// The house convention (`max_stable_dt`, as in `Admittance::stability_limit` and the motor,
+    /// friction and rotordynamics models) must BRACKET the measured boundary for both controllers.
+    #[test]
+    fn max_stable_dt_brackets_the_measured_boundary_for_both_controllers() {
+        let (robot, inertia) = from_urdf_full(ARM2, "base", "tool").unwrap();
+        let q0 = [0.3, -0.4];
+        let imp = CartesianImpedance::new(300.0, 40.0, 2.0);
+        let ct = ComputedTorque::new(400.0, 40.0);
+        let imp_lim = imp.max_stable_dt(&robot, &inertia, &q0).expect("limit");
+        let ct_lim = ct.max_stable_dt().expect("limit");
+        eprintln!("  impedance max_stable_dt = {:.2} ms (holds at 5 ms, limit-cycles at 10 ms)", imp_lim * 1e3);
+        eprintln!("  computed torque         = {:.2} ms (holds at 40 ms, diverges at 60 ms)", ct_lim * 1e3);
+        assert!((5e-3..10e-3).contains(&imp_lim), "impedance limit must fall between the measured stable and unstable ticks: {imp_lim:.4}");
+        assert!((40e-3..60e-3).contains(&ct_lim), "computed-torque limit must too: {ct_lim:.4}");
+        assert!(ct_lim > 4.0 * imp_lim, "cancelling M must buy a materially coarser tick: {:.1}x", ct_lim / imp_lim);
+        assert!(imp.max_stable_dt(&robot, &inertia, &[f64::NAN, 0.0]).is_none(), "refuses non-finite q");
+        assert!(ComputedTorque::new(f64::NAN, 40.0).max_stable_dt().is_none(), "refuses non-finite gains");
     }
     /// `damping_zoh_ratio` refuses inputs it cannot answer for.
     #[test]
