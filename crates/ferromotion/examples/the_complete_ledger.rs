@@ -12,7 +12,8 @@
 //!
 //! ⛔ **The first version of this file was titled "the complete ledger", named `E_compute` in its own
 //! opening line as the term it was extending, and then omitted it.** At this workspace's own published
-//! platform constant (15 W, Orin NX policy-only, from the punch-energetics bench) that is 473 MJ over a
+//! platform constant (15 W, Orin NX policy-only, TR-2026-41 *Joules per Punch*,
+//! <https://physicalai-bmi.org/assets/papers/joules-per-punch>) that is 473 MJ over a
 //! year — LARGER than the build term at the nominal intensity, and the largest single term at the low end
 //! of the intensity span. It also priced the hold as copper loss alone while the same repo
 //! states 4.0 W per actuator for drive electronics, understating the hold sevenfold. Both are counted
@@ -74,10 +75,13 @@ const R25: f64 = 0.50;
 /// published figures for processed metals and motor assemblies span roughly an order of magnitude with
 /// the process and the accounting boundary, so this is the caller's number to justify, not the module's.
 const ARM_INTENSITY_MJ_PER_KG: f64 = 60.0;
-/// Per-actuator drive electronics plus holding current (W) — this workspace's own `P_IDLE_ACT`.
+/// Per-actuator drive electronics plus holding current (W) — `P_IDLE_ACT = 4.0` from TR-2026-41, the
+/// same stated constant `joules_to_stand_still.rs` uses, so the two benches are comparable.
 const P_ELECTRONICS_PER_JOINT_W: f64 = 4.0;
-/// Compute platform draw (W). 15 W is the Orin NX policy-only figure the punch-energetics bench sweeps;
-/// that same sweep also runs 25 W for perception plus policy, so this is the LOW end of a stated range.
+/// Compute platform draw (W). 15 W is the "Orin NX, policy-only duty" point of the two-point platform
+/// sweep in TR-2026-41 *Joules per Punch* (<https://physicalai-bmi.org/assets/papers/joules-per-punch>);
+/// the other point is 25 W for "Orin NX, perception + policy", so this is the LOW end of a stated
+/// range and a platform constant rather than a measurement of this body.
 const P_COMPUTE_W: f64 = 15.0;
 /// Embodied intensity for the sensor head, which is electronics and therefore far higher per kilogram.
 const SENSOR_INTENSITY_MJ_PER_KG: f64 = 250.0;
@@ -178,7 +182,7 @@ fn main() {
     let hold_w = holding_watts(&[0.0, 0.0, 0.0]);
 
     // The sensing floor is set by the plant, not by the sensor: the delay margin is the budget. Using the
-    // 330 ms margin `latency.rs` measures for its own 100 Hz loop, 1% accuracy, 1 nJ per sample, 1 ms
+    // 330 ms margin `latency.rs` COMPUTES for its own 100 Hz loop, 1% accuracy, 1 nJ per sample, 1 ms
     // correlation time. See `a_plants_delay_margin_sets_a_sensing_power_floor`.
     let floor = sensing_power_floor(0.01, 0.330, 1e-9, 1e-3).expect("well-posed");
     println!(

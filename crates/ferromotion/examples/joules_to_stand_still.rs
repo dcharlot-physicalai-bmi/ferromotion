@@ -28,7 +28,8 @@
 //! # What the numbers actually say
 //!
 //! Copper loss is not the bill. This workspace's own published bench states **4.0 W per actuator for
-//! electronics plus holding current** (`punch_energetics.rs`, `P_IDLE_ACT`), and a first version of this
+//! electronics plus holding current** (`P_IDLE_ACT`, TR-2026-41 *Joules per Punch*,
+//! <https://physicalai-bmi.org/assets/papers/joules-per-punch>), and a first version of this
 //! file used zero, which overstated the importance of posture by a factor of three and inverted its own
 //! endurance claim. With the drive electronics counted, the posture-choice lever is almost entirely
 //! swamped, and the interesting consequence changes with it:
@@ -75,9 +76,14 @@ const GEAR: [f64; 3] = [120.0, 100.0, 80.0];
 /// Winding resistance at 25 °C (Ω) for a small BLDC joint motor.
 const R25: f64 = 0.50;
 /// **Per-actuator drive electronics plus holding current (W).** Not zero, and not this file's invention:
-/// it is the constant this workspace's own published punch-energetics bench uses (`P_IDLE_ACT = 4.0`).
-/// A sibling bench in the same repo uses 6.0. Omitting it is what made the first version of this file
-/// overstate the posture lever and claim a 24-hour watch the pack cannot actually support.
+/// it is `P_IDLE_ACT = 4.0`, declared as "W per actuator: electronics + holding current" by the bench
+/// behind TR-2026-41 *Joules per Punch* (<https://physicalai-bmi.org/assets/papers/joules-per-punch>).
+/// A sibling bench uses 6.0, so this is the LOW end of the pair. Omitting it is what made the first
+/// version of this file overstate the posture lever and claim a 24-hour watch the pack cannot support.
+///
+/// ⛔ **It is a stated design constant, not a measurement of a physical driver**, and earlier wording
+/// here cited it only as "this workspace's own bench", a path a reader of the published crate cannot
+/// resolve. The report is the citable artifact; the bench source is not part of this repository.
 const P_ELECTRONICS_PER_JOINT_W: f64 = 4.0;
 /// Pack: 5 Ah at 48 V. Capacity below is in COULOMBS, which is what `Battery::capacity_c` wants.
 const PACK_AH: f64 = 5.0;
