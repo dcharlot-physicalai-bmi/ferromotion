@@ -8,10 +8,25 @@
 //!
 //! # Biology's own ratio inverts across taxa
 //!
-//! Flagellar construction is 5–16.5% of a cell-cycle energy budget against 0.73–5.2% for operation, so
-//! build-to-operate runs about **23:1** for *Pyrococcus furiosus* archaella and about **1.2:1** for
-//! *Chlamydomonas*. Life therefore sits at build-cheap/run-hot for large cells and build-expensive/run-free
-//! for small ones. Which side a design is on is a decision with a threshold, not a preference.
+//! Schavemaker & Lynch price flagellar construction and operation against the whole cell-cycle energy
+//! budget (eLife 2022;11:e77266, Table 1):
+//!
+//! | organism | volume | construction | operation | build:operate |
+//! |---|---|---|---|---|
+//! | *Pyrococcus furiosus* (archaellum) | 0.22 µm³ | 16.5% | 0.73% | **23:1** |
+//! | *Escherichia coli* | 1.0 µm³ | 5.0% | 5.2% | 0.96:1 |
+//! | *Chlamydomonas reinhardtii* | 122 µm³ | 1.4% | 1.2% | **1.2:1** |
+//!
+//! The bill falls with cell volume and, as it falls, it shifts from operation-shared to
+//! construction-dominated: the *smallest* cell here is the build-expensive/run-free one, and the largest
+//! pays little for either. Which side a design is on is a decision with a threshold, not a preference.
+//!
+//! ⛔ **An earlier version of this note stated the construction range as "5–16.5%", which silently
+//! excluded *Chlamydomonas* at 1.4%, and it called the large end "build-cheap/run-hot".** The two ratios
+//! it quoted, 23:1 and 1.2:1, were right and were attached to the right organisms, but *Chlamydomonas*
+//! runs on 1.2% of its budget, the second lowest operating cost in the table: the large cell is cheap on
+//! both sides, not hot on one. The run-hot organism is *E. coli* at 5.2%, in the middle by volume. The
+//! table above is the primary source's own.
 //!
 //! # The arithmetic, and the one input this module refuses to hide
 //!
@@ -118,10 +133,26 @@ impl OwnedCapability {
     ///
     /// The third term is the one that makes this a *body* question rather than an electronics question:
     /// carrying mass costs energy in proportion to the body's cost of transport, so the same sensor is a
-    /// different decision on a different chassis. Cost of transport is dimensionless, `E/(mgd)`, and the
-    /// numbers to compare against are measured: a walking human is about **0.32**, a passive-dynamic
-    /// biped about **0.2**, and legged robots typically **above 1**. `None` unless every input is finite
-    /// and non-negative.
+    /// different decision on a different chassis.
+    ///
+    /// Cost of transport is dimensionless, `E/(mgd)`, the same quantity the locomotion literature also
+    /// calls specific resistance. Reference points, each with its source:
+    ///
+    /// | system | CoT | source |
+    /// |---|---|---|
+    /// | human walking | **0.2** | Tucker 1975, the standard benchmark |
+    /// | MIT Cheetah, with electrical regeneration | 0.5 | Seok et al. 2015 |
+    /// | Cassie, 1.0 m/s | 0.7 | 30 kg at 200 W total |
+    /// | Honda ASIMO | **2** | 54 kg, 1.8 kW at 1.5 m/s, Sakagami et al. 2002 |
+    /// | Walk-Man, actuation only / including electronics | 1.35 / 2.8 | Tsagarakis et al. 2017 |
+    /// | BigDog, hydraulic | 15 | the high end of the published span |
+    ///
+    /// Collected in the review at `doi:10.3389/frobt.2018.00129`, which states the `E/(Mgd)` definition
+    /// used here. ⛔ **An earlier version of this doc gave "a walking human is about 0.32" and called all
+    /// three of its figures "measured" with no citation.** The human figure is 0.2; 0.32 matched no
+    /// measurement in the literature this review located.
+    ///
+    /// `None` unless every input is finite and non-negative.
     pub fn owned_cost_j(&self, mission_s: f64, distance_m: f64, cost_of_transport: f64) -> Option<f64> {
         let ok = [mission_s, distance_m, cost_of_transport, self.quiescent_w]
             .iter()
@@ -258,32 +289,70 @@ mod tests {
         };
         let (mission_s, distance_m) = (8.0 * 3600.0, 12_000.0); // an 8-hour, 12 km shift
 
-        // The same sensor on three chassis. Cost of transport is the only thing that changes.
-        let human = sensor.owned_cost_j(mission_s, distance_m, 0.32).expect("well-posed");
-        let passive = sensor.owned_cost_j(mission_s, distance_m, 0.2).expect("well-posed");
-        let robot = sensor.owned_cost_j(mission_s, distance_m, 3.2).expect("well-posed");
+        // The same sensor on three chassis. Cost of transport is the only thing that changes, and every
+        // value here is one of the sourced reference points on `owned_cost_j`.
+        const HUMAN: f64 = 0.2; // Tucker 1975
+        const CHEETAH: f64 = 0.5; // Seok et al. 2015, with electrical regeneration
+        const ASIMO: f64 = 2.0; // Sakagami et al. 2002, 54 kg at 1.8 kW and 1.5 m/s
+        let human = sensor.owned_cost_j(mission_s, distance_m, HUMAN).expect("well-posed");
+        let cheetah = sensor.owned_cost_j(mission_s, distance_m, CHEETAH).expect("well-posed");
+        let robot = sensor.owned_cost_j(mission_s, distance_m, ASIMO).expect("well-posed");
 
         let build = sensor.built.build_j().unwrap();
         let standing = sensor.quiescent_w * mission_s;
+        let carried = |total: f64| total - build - standing;
         eprintln!(
-            "  build {:.1} kJ | standing {:.1} kJ | carried: {:.1} kJ at CoT 0.2, {:.1} kJ at 0.32, {:.1} kJ at 3.2",
-            build / 1e3, standing / 1e3,
-            (passive - build - standing) / 1e3, (human - build - standing) / 1e3, (robot - build - standing) / 1e3
+            "  build {:.1} kJ | standing {:.1} kJ | carried: {:.1} kJ at CoT 0.2, {:.1} kJ at 0.5, {:.1} kJ at 2.0",
+            build / 1e3, standing / 1e3, carried(human) / 1e3, carried(cheetah) / 1e3, carried(robot) / 1e3
         );
 
-        assert!(robot > human && human > passive, "a worse chassis makes the same sensor more expensive to own");
+        assert!(robot > cheetah && cheetah > human, "a worse chassis makes the same sensor more expensive to own");
         // The carrying term scales exactly with cost of transport, which is why the chassis is the decision.
-        let carried_ratio = (robot - build - standing) / (human - build - standing);
-        assert!((carried_ratio - 10.0).abs() < 1e-9, "CoT 3.2 vs 0.32 must be 10x to carry, got {carried_ratio:.3}x");
+        let carried_ratio = carried(robot) / carried(human);
+        assert!((carried_ratio - 10.0).abs() < 1e-9, "CoT 2.0 vs 0.2 must be 10x to carry, got {carried_ratio:.3}x");
+
+        // ⛔ Scaling in cost of transport is ALL the first version of this test checked, so magnitude,
+        // mass-dependence and `g` were unconstrained: an implementation that dropped `mass_kg` entirely,
+        // or used 9.8 for `g`, or multiplied by distance twice, passed it. The term is E = CoT·m·g·d and
+        // the whole product is asserted, which is the only assertion that pins the hidden constant.
+        // The tolerance is relative because `carried` is a difference against a 30 MJ build cost, so the
+        // absolute resolution of an f64 there is already about 7e-9 J.
+        let g = 9.81;
+        let expected_carry = ASIMO * sensor.built.mass_kg * g * distance_m;
+        assert!(
+            (carried(robot) / expected_carry - 1.0).abs() < 1e-9,
+            "E_carry must be exactly CoT*m*g*d, got {:.6} J against {expected_carry:.6} J",
+            carried(robot)
+        );
+        assert!(carried(robot) > 0.0, "carrying mass over a distance costs something");
+
+        // Mass-dependence, from outside: twice the sensor is twice the carrying bill. Build scales with
+        // mass too, so the carried term is isolated before comparing.
+        let heavier = OwnedCapability { built: EmbodiedActuator { mass_kg: 0.240, ..sensor.built }, ..sensor };
+        let heavier_total = heavier.owned_cost_j(mission_s, distance_m, ASIMO).expect("well-posed");
+        let heavier_carried = heavier_total - heavier.built.build_j().unwrap() - standing;
+        assert!(
+            (heavier_carried / carried(robot) - 2.0).abs() < 1e-9,
+            "doubling the mass must double the carrying term, got {:.4}x",
+            heavier_carried / carried(robot)
+        );
+
+        // Distance-dependence, and it is linear rather than quadratic: build and standing do not move.
+        let far = sensor.owned_cost_j(mission_s, distance_m * 2.0, ASIMO).expect("well-posed");
+        assert!(
+            (carried(far) / carried(robot) - 2.0).abs() < 1e-9,
+            "doubling the distance must double the carrying term, got {:.4}x",
+            carried(far) / carried(robot)
+        );
 
         // And it is never free: an unused sensor still costs its build plus its standing draw.
-        let stationary = sensor.owned_cost_j(mission_s, 0.0, 3.2).expect("well-posed");
+        let stationary = sensor.owned_cost_j(mission_s, 0.0, ASIMO).expect("well-posed");
         assert!(stationary > 0.0 && stationary == build + standing, "standing still does not make ownership free");
 
         // The deletion threshold is the same number, named for the decision it informs.
         assert_eq!(
-            sensor.break_even_value_j(mission_s, distance_m, 3.2),
-            sensor.owned_cost_j(mission_s, distance_m, 3.2)
+            sensor.break_even_value_j(mission_s, distance_m, ASIMO),
+            sensor.owned_cost_j(mission_s, distance_m, ASIMO)
         );
     }
 
