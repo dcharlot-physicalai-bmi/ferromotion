@@ -92,6 +92,63 @@ pub fn crossover_seconds(a: &EmbodiedActuator, b: &EmbodiedActuator) -> Option<f
     (t.is_finite() && t > 0.0).then_some(t)
 }
 
+/// A capability the body OWNS, priced whether or not it is ever used.
+///
+/// The third missing ledger term. In mammalian standard metabolic rate, protein synthesis is one of the
+/// largest single ATP sinks (Rolfe & Brown, *Physiol Rev* 77:731–758, 1997,
+/// `doi:10.1152/physrev.1997.77.3.731` — a review-level decomposition; take percentages from its own
+/// tables with the tissue named). The bill for a tissue is **not per use, it is per owned gram per day**,
+/// and that is why *deleting the modality* is evolution's move rather than duty-cycling it.
+///
+/// A robot ledger has no per-owned-gram term. It should, because a sensor that is never read still costs
+/// three things: the energy that built it, its quiescent draw for every second it is owned, and the
+/// energy to carry its mass for every metre the body moves.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OwnedCapability {
+    /// What it is made of and what it draws when idle.
+    pub built: EmbodiedActuator,
+    /// Quiescent power while owned and unused (W) — the standing bill, distinct from `built.operating_w`.
+    pub quiescent_w: f64,
+}
+
+impl OwnedCapability {
+    /// **What owning this costs over a mission, used or not.**
+    ///
+    /// `E_own = E_build + quiescent·T + CoT·m·g·d`
+    ///
+    /// The third term is the one that makes this a *body* question rather than an electronics question:
+    /// carrying mass costs energy in proportion to the body's cost of transport, so the same sensor is a
+    /// different decision on a different chassis. Cost of transport is dimensionless, `E/(mgd)`, and the
+    /// numbers to compare against are measured: a walking human is about **0.32**, a passive-dynamic
+    /// biped about **0.2**, and legged robots typically **above 1**. `None` unless every input is finite
+    /// and non-negative.
+    pub fn owned_cost_j(&self, mission_s: f64, distance_m: f64, cost_of_transport: f64) -> Option<f64> {
+        let ok = [mission_s, distance_m, cost_of_transport, self.quiescent_w]
+            .iter()
+            .all(|v| v.is_finite() && *v >= 0.0);
+        if !ok {
+            return None;
+        }
+        let build = self.built.build_j()?;
+        let standing = self.quiescent_w * mission_s;
+        let carried = cost_of_transport * self.built.mass_kg * 9.81 * distance_m;
+        let total = build + standing + carried;
+        total.is_finite().then_some(total)
+    }
+
+    /// **The value this capability must buy to be worth owning.** Identical to [`Self::owned_cost_j`] —
+    /// named separately because it is the DELETION THRESHOLD, and naming it that way is the point.
+    ///
+    /// A capability earns its place only if what it saves elsewhere exceeds what owning it costs. This
+    /// workspace already has the behavioural half of that argument on record: integrated gradients on a
+    /// quadruped attribute about 80% to 4 of 9 feedback states, and reduced-set policies reach 93.7–99.1%
+    /// of full-state performance (`arXiv:2306.17101`). Five of nine sensors were unnecessary
+    /// *behaviourally*. This turns that into joules, so the deletion decision has a number on both sides.
+    pub fn break_even_value_j(&self, mission_s: f64, distance_m: f64, cost_of_transport: f64) -> Option<f64> {
+        self.owned_cost_j(mission_s, distance_m, cost_of_transport)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,5 +246,96 @@ mod tests {
         assert!(EmbodiedActuator { intensity_mj_per_kg: f64::NAN, ..a }.build_j().is_none(), "non-finite intensity");
         assert!(EmbodiedActuator { operating_w: -1.0, ..a }.task_j(10.0).is_none(), "negative power");
         assert!(a.build_share(0.0).is_some_and(|s| (s - 1.0).abs() < 1e-12), "at T=0 the share is all build");
+    }
+
+    /// **Owning a capability costs energy even if it is never used, and the chassis changes the answer.**
+    #[test]
+    fn an_unused_sensor_still_costs_three_ways_and_the_chassis_decides_which_dominates() {
+        // A 120 g sensor: cheap to build, 0.25 W quiescent, never read on this mission.
+        let sensor = OwnedCapability {
+            built: EmbodiedActuator { mass_kg: 0.120, intensity_mj_per_kg: 250.0, operating_w: 0.0 },
+            quiescent_w: 0.25,
+        };
+        let (mission_s, distance_m) = (8.0 * 3600.0, 12_000.0); // an 8-hour, 12 km shift
+
+        // The same sensor on three chassis. Cost of transport is the only thing that changes.
+        let human = sensor.owned_cost_j(mission_s, distance_m, 0.32).expect("well-posed");
+        let passive = sensor.owned_cost_j(mission_s, distance_m, 0.2).expect("well-posed");
+        let robot = sensor.owned_cost_j(mission_s, distance_m, 3.2).expect("well-posed");
+
+        let build = sensor.built.build_j().unwrap();
+        let standing = sensor.quiescent_w * mission_s;
+        eprintln!(
+            "  build {:.1} kJ | standing {:.1} kJ | carried: {:.1} kJ at CoT 0.2, {:.1} kJ at 0.32, {:.1} kJ at 3.2",
+            build / 1e3, standing / 1e3,
+            (passive - build - standing) / 1e3, (human - build - standing) / 1e3, (robot - build - standing) / 1e3
+        );
+
+        assert!(robot > human && human > passive, "a worse chassis makes the same sensor more expensive to own");
+        // The carrying term scales exactly with cost of transport, which is why the chassis is the decision.
+        let carried_ratio = (robot - build - standing) / (human - build - standing);
+        assert!((carried_ratio - 10.0).abs() < 1e-9, "CoT 3.2 vs 0.32 must be 10x to carry, got {carried_ratio:.3}x");
+
+        // And it is never free: an unused sensor still costs its build plus its standing draw.
+        let stationary = sensor.owned_cost_j(mission_s, 0.0, 3.2).expect("well-posed");
+        assert!(stationary > 0.0 && stationary == build + standing, "standing still does not make ownership free");
+
+        // The deletion threshold is the same number, named for the decision it informs.
+        assert_eq!(
+            sensor.break_even_value_j(mission_s, distance_m, 3.2),
+            sensor.owned_cost_j(mission_s, distance_m, 3.2)
+        );
+    }
+
+    /// **For electronics the ownership bill is overwhelmingly SUNK AT MANUFACTURE, and that is why
+    /// evolution deletes the modality instead of duty-cycling it.**
+    ///
+    /// I assumed the standing draw would dominate over a long watch and asserted it. It does not, by three
+    /// orders of magnitude, and the test caught it. The correct statement is the more useful one: a part
+    /// must idle for MONTHS before its quiescent draw equals what it cost to build, so duty-cycling a
+    /// sensor is nearly pointless energetically. The decision that matters is whether it exists at all —
+    /// which is exactly the move biology makes.
+    #[test]
+    fn the_ownership_bill_is_sunk_at_manufacture_so_deletion_beats_duty_cycling() {
+        let part = OwnedCapability {
+            built: EmbodiedActuator { mass_kg: 0.05, intensity_mj_per_kg: 250.0, operating_w: 0.0 },
+            quiescent_w: 2.0,
+        };
+        let build = part.built.build_j().unwrap();
+
+        // Over a full day of idling, the standing draw is a rounding error against the build cost.
+        let watch_day = part.owned_cost_j(24.0 * 3600.0, 0.0, 3.2).expect("well-posed");
+        let standing_day = watch_day - build;
+        assert!(standing_day < 0.02 * build, "over a day, standing draw is <2% of build: {:.4}", standing_day / build);
+
+        // How long must it idle before the standing draw catches the build cost? That is the real number.
+        let catch_up_s = build / part.quiescent_w;
+        assert!(catch_up_s > 30.0 * 86400.0, "catch-up must be months, got {:.1} d", catch_up_s / 86400.0);
+        let recomputed = part.owned_cost_j(catch_up_s, 0.0, 3.2).expect("well-posed");
+        assert!((recomputed - 2.0 * build).abs() < 1e-6 * build, "at catch-up the total is exactly twice the build");
+
+        eprintln!(
+            "  a {:.0} g part at {:.0} MJ/kg drawing {:.1} W must idle {:.0} DAYS before its standing draw \
+equals its build cost; over one day it is {:.2}% of it",
+            part.built.mass_kg * 1e3, part.built.intensity_mj_per_kg, part.quiescent_w,
+            catch_up_s / 86400.0, 100.0 * standing_day / build
+        );
+
+        // So the saving from deleting it is almost entirely the build cost, not the runtime.
+        let deleted_saving_fraction = build / watch_day;
+        assert!(deleted_saving_fraction > 0.98, "deleting saves ~all of it, and almost none of that is runtime");
+    }
+
+    #[test]
+    fn ownership_refuses_what_it_cannot_answer_for() {
+        let c = OwnedCapability {
+            built: EmbodiedActuator { mass_kg: 0.1, intensity_mj_per_kg: 100.0, operating_w: 0.0 },
+            quiescent_w: 0.1,
+        };
+        assert!(c.owned_cost_j(1.0, 1.0, 1.0).is_some(), "control");
+        assert!(c.owned_cost_j(-1.0, 1.0, 1.0).is_none(), "negative mission");
+        assert!(c.owned_cost_j(1.0, -1.0, 1.0).is_none(), "negative distance");
+        assert!(c.owned_cost_j(1.0, 1.0, f64::NAN).is_none(), "non-finite cost of transport");
+        assert!(OwnedCapability { quiescent_w: -1.0, ..c }.owned_cost_j(1.0, 1.0, 1.0).is_none(), "negative quiescent");
     }
 }
