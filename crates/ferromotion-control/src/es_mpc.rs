@@ -150,15 +150,39 @@ mod tests {
         assert!(omega.norm() < 1e-2, "angular velocity did not settle: {}", omega.norm());
     }
 
+    /// ⛔ **Two defects this test carried, both of which made the feedforward unfalsifiable.**
+    ///
+    /// 1. `ω_d = (0, 0, 1.5)` is along a principal axis of the diagonal inertia `(0.05, 0.08, 0.10)`, so
+    ///    `ω_d × J ω_d` is **bit-exactly zero**, and `ω̇_d` was `zeros()` at every call site in the crate.
+    ///    The whole documented feedforward `τ_ff = ω_d × J ω_d + J ω̇_d` therefore evaluated to `(0,0,0)`
+    ///    everywhere it was tested. Replacing the expression with `Vector3::zeros()`, flipping its sign, or
+    ///    reversing the cross product all passed. The reference is now genuinely tumbling.
+    /// 2. The pass criterion was `err_late.min(...)`, the MINIMUM error over the last 1000 steps, so a
+    ///    controller that merely grazed the reference once satisfied it. It is the maximum now.
     #[test]
     fn tracks_a_spinning_reference() {
-        // Feedforward + error feedback: follow a reference spinning at constant ω_d from a wrong start.
+        // Feedforward + error feedback: follow a TUMBLING reference from a wrong start. Not along a
+        // principal axis, so the gyroscopic feedforward is non-zero, and accelerating, so J ω̇_d is too.
         let c = ctrl();
-        let omega_d = Vector3::new(0.0, 0.0, 1.5); // spin about z
+        let omega_d = Vector3::new(1.5, 1.0, -0.7);
+        let omega_d_dot = Vector3::new(0.2, -0.3, 0.4);
+        let jd = Matrix3::from_diagonal(&c.j);
+        let ff = omega_d.cross(&(jd * omega_d)) + jd * omega_d_dot;
+        assert!(ff.norm() > 1e-2, "this reference must exercise the feedforward, ‖ff‖ = {}", ff.norm());
+
+        // At ZERO error the control IS the feedforward: ξ and δω both vanish, so `control` returns `ff`
+        // alone. That pins the expression itself, independently of any convergence behaviour.
+        let r0 = exp_so3(Vector3::new(0.2, -0.1, 0.35));
+        let bare = c.control(&r0, omega_d, &r0, omega_d, omega_d_dot);
+        assert!((bare - ff).norm() < 1e-12, "at zero error the torque must be exactly the feedforward: {bare:?} vs {ff:?}");
+        eprintln!("  feedforward at zero error: ‖ff‖ = {:.4e} N·m, control matches to {:.2e}", ff.norm(), (bare - ff).norm());
+
+        // A constant-ω_d reference is the one whose trajectory is easy to advance exactly, so track that
+        // and keep ω̇_d = 0 for the rollout; the zero-error check above is what covers the J ω̇_d term.
         let (mut r, mut omega) = (exp_so3(Vector3::new(0.4, 0.3, 0.0)), Vector3::zeros());
         let mut r_d = Matrix3::identity();
         let dt = 0.005;
-        let mut err_late: f64 = 1e9;
+        let mut err_late: f64 = 0.0;
         for k in 0..4000 {
             let tau = c.control(&r, omega, &r_d, omega_d, Vector3::zeros());
             let (r2, w2) = c.step(&r, omega, tau, dt);
@@ -166,10 +190,12 @@ mod tests {
             omega = w2;
             r_d *= exp_so3(omega_d * dt); // advance the reference
             if k > 3000 {
-                err_late = err_late.min(log_so3(&(r_d.transpose() * r)).norm());
+                // the MAXIMUM over the late window: a minimum is satisfied by grazing the reference once
+                err_late = err_late.max(log_so3(&(r_d.transpose() * r)).norm());
             }
         }
-        assert!(err_late < 5e-2, "did not lock onto the spinning reference: {err_late}");
+        eprintln!("  tumbling ω_d = {omega_d:?}: worst late error {err_late:.3e} rad");
+        assert!(err_late < 5e-2, "did not lock onto the tumbling reference: worst late error {err_late}");
     }
 
     #[test]
