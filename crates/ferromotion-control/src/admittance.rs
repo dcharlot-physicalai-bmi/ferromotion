@@ -77,6 +77,7 @@ impl Admittance {
     /// Exists because the scheme is conditionally stable and diverges *silently* past the limit — a
     /// caller has no way to notice except by watching the command blow up. Compare it against your
     /// control period; the margin shrinks as `k` rises or `m` falls.
+    /// CROSSED BY: admittance_is_conditionally_stable_and_reports_its_own_limit
     pub fn stability_limit(&self) -> f64 {
         if self.m <= 0.0 {
             return f64::NAN; // a non-positive virtual mass is not a system, not an unstable one

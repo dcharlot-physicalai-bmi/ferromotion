@@ -250,6 +250,9 @@ impl Pmsm {
     /// Stepping at a tenth of *this* bound and closing a 500 Hz loop produced `NaN` on the first attempt at
     /// the test below, from 2 samples per loop period. Use [`PiCurrent::max_stable_dt`] whenever a regulator
     /// is in the loop, and a small fraction of whichever bound is smaller.
+    /// BOUND NOT THE EDGE: the PLANT's open-loop electrical bound. The closed loop binds far tighter
+    /// (by more than 10x here), so crossing this one says nothing about a regulated machine; see
+    /// the_closed_loop_stability_bound_is_the_one_that_binds.
     pub fn max_stable_dt(&self) -> f64 {
         2.0 * self.l_d.min(self.l_q) / self.r_s
     }
@@ -450,6 +453,9 @@ impl PiCurrent {
     ///
     /// So a step *at* this bound is not safe; a fifth of it or less is. Note this bound is independent of the
     /// machine, which is the flip side of what makes [`PiCurrent::tuned`] work.
+    /// BOUND NOT THE EDGE: an upper ENVELOPE, verified never to be optimistic by bisecting the real
+    /// divergence threshold across four machines and three bandwidths (1.22-1.94, always below 2) in
+    /// the_closed_loop_stability_bound_is_the_one_that_binds. A step AT it is not stable.
     pub fn max_stable_dt(bandwidth: f64) -> f64 {
         2.0 / bandwidth
     }

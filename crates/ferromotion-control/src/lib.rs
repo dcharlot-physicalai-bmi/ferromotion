@@ -262,6 +262,7 @@ impl ComputedTorque {
     /// two-link fixture at `kp = 400, kd = 40` this returns **41.42 ms**, and the plant holds at 40 ms
     /// and diverges to non-finite at 60 ms. The impedance controller on the same arm is limited to
     /// 8.05 ms, so cancelling `M` buys a fivefold coarser control rate.
+    /// CROSSED BY: computed_torque_holds_its_posture_at_a_far_coarser_tick_than_impedance
     pub fn max_stable_dt(&self) -> Option<f64> {
         if !self.kp.is_finite() || !self.kd.is_finite() || self.kp < 0.0 || self.kd < 0.0 {
             return None;
@@ -373,6 +374,7 @@ impl CartesianImpedance {
     /// it does not error or clamp — it simply stops holding still, and a position-only convergence
     /// check cannot tell that from success. `None` if `q` is the wrong length, any input is
     /// non-finite, or `M` is not invertible.
+    /// CROSSED BY: the_arm_holds_its_own_posture_and_a_coarse_tick_proves_the_probe_can_fail
     pub fn max_stable_dt(&self, robot: &Robot, inertia: &[LinkInertia], q: &[f64]) -> Option<f64> {
         let (w2, gamma) = self.rates(robot, inertia, q)?;
         if w2 <= 0.0 {

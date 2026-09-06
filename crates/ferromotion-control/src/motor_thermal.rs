@@ -110,6 +110,8 @@ impl MotorThermal {
     ///
     /// Explicit Euler on a linear decay needs `dt < 2τ`; this returns `τ` as the practical bound, since running
     /// at the stability edge gives an oscillating temperature that is useless even when bounded.
+    /// BOUND NOT THE EDGE: deliberately the winding time constant, half the stability limit, because
+    /// running at the edge gives a bounded but oscillating temperature that is useless.
     pub fn max_stable_dt(&self) -> f64 {
         self.c_winding * self.r_wh
     }

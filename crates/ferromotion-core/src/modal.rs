@@ -78,6 +78,7 @@ impl ModalModel {
     /// and the `max_stable_dt` on its motor, friction and rotordynamics models): `f64::INFINITY` when there is
     /// no bound to report (every retained frequency zero, so nothing can grow) and `f64::NAN` for a
     /// model whose frequencies are not finite, which is not an unstable system but no system at all.
+    /// CROSSED BY: max_stable_dt_brackets_the_modal_stability_boundary
     pub fn max_stable_dt(&self) -> f64 {
         if !self.freq.iter().all(|v| v.is_finite()) {
             return f64::NAN;

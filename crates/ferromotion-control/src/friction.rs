@@ -146,6 +146,7 @@ impl LuGre {
     ///
     /// Returns `f64::INFINITY` at `v = 0`, where the state does not decay at all — presliding is
     /// non-dissipative in this model, which is exactly why it behaves as a spring there.
+    /// CROSSED BY: max_stable_dt_is_the_largest_stable_step_not_the_time_constant
     pub fn max_stable_dt(&self, v: f64) -> f64 {
         if v == 0.0 {
             return f64::INFINITY;

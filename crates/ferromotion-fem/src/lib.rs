@@ -301,6 +301,7 @@ impl FemSim {
     /// deformation, stiff penalty contact (`k_contact`) or plasticity can still need less.
     ///
     /// Returns `f64::INFINITY` for a body with no elements or no stiffness.
+    /// CROSSED BY: stable_timestep_bounds_the_measured_limit
     pub fn stable_timestep(&self) -> f64 {
         /// Calibrated against measured limits; leaves 1.78×–2.25× of margin over the swept range.
         /// See `stable_timestep_bounds_the_measured_limit`.

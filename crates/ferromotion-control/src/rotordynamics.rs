@@ -265,6 +265,7 @@ impl Rotor {
     /// | 800 | 2.139 ms | **diverged** | diverged |
     ///
     /// The damped root predicts every one of those transitions.
+    /// CROSSED BY: max_stable_dt_accounts_for_the_damper_and_is_never_optimistic
     pub fn max_stable_dt(&self) -> f64 {
         let w2 = self.natural_frequency().powi(2);
         let gamma = self.damping / self.mass;
