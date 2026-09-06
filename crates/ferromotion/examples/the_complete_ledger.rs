@@ -285,6 +285,29 @@ fn main() {
         );
     }
 
+    // THE MISSION-SHAPE CLAIM, CHECKED AT EVERY CORNER RATHER THAN AT THE NOMINAL POINT. The claim that
+    // survives the box has to be shown to survive it, so this asserts rather than prints: build is the
+    // largest term on the two short missions and is NOT the largest at ten years, for all 12 corners.
+    let mut short_build = 0;
+    let mut long_not_build = 0;
+    for (_, iscale) in INTENSITY_SPAN {
+        for (_, cot) in COT_SPAN {
+            let minute = ledger_at(60.0, 0.0, cot, hold_w, floor.power_w, iscale);
+            let shift = ledger_at(8.0 * 3600.0, 12_000.0, cot, hold_w, floor.power_w, iscale);
+            let decade = ledger_at(3650.0 * 86400.0, 50_000_000.0, cot, hold_w, floor.power_w, iscale);
+            assert_eq!(minute.dominant(), "build", "a one-minute mission is all build at every corner");
+            assert_eq!(shift.dominant(), "build", "an 8 h shift is still build-dominated at every corner");
+            assert_ne!(decade.dominant(), "build", "at ten years build is never the largest term");
+            short_build += 2;
+            long_not_build += 1;
+        }
+    }
+    println!(
+        "  Mission shape DOES survive the box: build largest on both short missions at {}/{} corner-missions,\n  and never largest at ten years ({}/{}). The shape is the finding; the split is not.",
+        short_build, 2 * INTENSITY_SPAN.len() * COT_SPAN.len(),
+        long_not_build, INTENSITY_SPAN.len() * COT_SPAN.len()
+    );
+
     println!(
         "\n  ⭐ THE SENSE LEDGER ANSWER, AND IT REFRAMES THE QUESTION. The information floor for sensing is\n  \
          {:.1} uW against a {:.2} W hold — {:.4}% of the standing power, and utterly invisible in the total.\n  \
