@@ -161,8 +161,12 @@ pub struct SensingBudget {
     pub power_w: f64,
     /// Independent samples the target accuracy requires, `1/ε²`.
     pub samples: f64,
-    /// Parallel channels needed once integration time is capped by the margin.
+    /// Parallel channels needed once integration time is capped by the margin. Never below 1.
     pub channels: f64,
+    /// Whether `power_w` is the TIGHT floor `e_s/(ε²·T)`, which holds only above the knee `T/τ_c ≤ 1/ε²`.
+    /// When false, one channel already suffices inside the budget, `power_w` is that channel's own
+    /// `e_s/τ_c`, and the three shape laws in the function's doc do not apply.
+    pub tight: bool,
     /// The integration time actually used (s) — the delay budget, since time is the cheap axis.
     pub integration_s: f64,
 }
@@ -178,9 +182,17 @@ pub struct SensingBudget {
 /// Counting-limited sensing needs `N = 1/ε²` independent samples for relative error `ε`. Two routes buy
 /// them and they are substitutes:
 ///
-/// * **Serial integration.** Integrate for `T`, collecting `T/τ_c` independent samples. Berg & Purcell's
-///   point is that this costs essentially no energy — diffusion does the work — so **time is the cheap
-///   axis** (Berg & Purcell 1977, `doi:10.1016/S0006-3495(77)85544-6`).
+/// * **Serial integration.** Integrate for `T`, collecting `T/τ_c` independent samples. Berg & Purcell
+///   give the counting bound: achievable precision improves as `1/√(T/τ_c)`, so **integration time buys
+///   accuracy** (Berg & Purcell 1977, `doi:10.1016/S0006-3495(77)85544-6`).
+///
+///   ⛔ **An earlier version of this doc attributed to that paper the claim that integrating "costs
+///   essentially no energy — diffusion does the work". That claim is NOT in Berg & Purcell**, and the
+///   later literature contradicts it: there is a thermodynamic cost to sensing that rises with precision
+///   (Mehta & Schwab 2012, `doi:10.1073/pnas.1207814109`). What survives, and all this derivation needs,
+///   is the weaker statement that a serial sample costs no additional channel HARDWARE. Whether
+///   integration is energetically free is an open question this module does not answer and must not
+///   assume.
 /// * **Parallel channels.** Run `n` transducers at once. This costs `n·e_s/τ_c` watts and no delay.
 ///
 /// A control loop caps the first route. The delay margin from [`delay_margin_seconds`] is a hard ceiling
@@ -191,9 +203,23 @@ pub struct SensingBudget {
 /// n ≥ 1 / (ε² · T/τ_c)      and      P = n·e_s/τ_c  ⇒  P ≥ e_s / (ε²·T)
 /// ```
 ///
-/// **The floor is inversely proportional to the delay budget.** Halving the tolerable delay doubles the
-/// sensing power bill for the same accuracy, and `τ_c` cancels out entirely: the correlation time decides
-/// how the samples are split between the two routes, not how many joules the answer costs.
+/// **Above the knee, the floor is inversely proportional to the delay budget.** Halving the tolerable
+/// delay doubles the sensing power bill for the same accuracy, and `τ_c` cancels out entirely.
+///
+/// ⛔ **THE KNEE, which an earlier version of this doc omitted while stating those laws
+/// unconditionally.** The derivation needs `n ≥ 1`, because there is no such thing as a fraction of a
+/// transducer. That holds only while
+///
+/// ```text
+/// T/τ_c ≤ 1/ε²        equivalently        ε ≤ √(τ_c/T)
+/// ```
+///
+/// Below the knee a single channel already gathers enough samples inside the budget, the binding cost is
+/// that one channel's own power `e_s/τ_c`, and **all three headline laws fail there**: the returned power
+/// stops depending on `T` or on `ε` at all, and `τ_c` no longer cancels. `e_s/(ε²·T)` is still a valid
+/// LOWER bound in that regime but is no longer tight, and can understate the real minimum by orders of
+/// magnitude. [`SensingBudget::tight`] reports which regime the answer is in, and the test below crosses
+/// the knee in both directions.
 ///
 /// # Why this is the bridge and not a restatement
 ///
@@ -210,9 +236,13 @@ pub fn sensing_power_floor(rel_error: f64, delay_budget_s: f64, energy_per_sampl
     }
     let samples = 1.0 / (rel_error * rel_error);
     let per_channel = delay_budget_s / correlation_time_s; // samples one channel can gather in the budget
-    let channels = (samples / per_channel).max(1.0);
+    let exact = samples / per_channel;
+    let tight = exact >= 1.0; // below this, the derivation would need a fraction of a transducer
+    let channels = exact.max(1.0);
     let power_w = channels * energy_per_sample_j / correlation_time_s;
-    power_w.is_finite().then_some(SensingBudget { power_w, samples, channels, integration_s: delay_budget_s })
+    power_w
+        .is_finite()
+        .then_some(SensingBudget { power_w, samples, channels, integration_s: delay_budget_s, tight })
 }
 
 #[cfg(test)]
@@ -369,6 +399,12 @@ mod tests {
     /// minimum watts an accuracy target costs. The test asserts the shape of the law rather than one number,
     /// because the shape is the claim: the floor is inversely proportional to the delay budget, quadratic in
     /// the accuracy demanded, and independent of the correlation time.
+    ///
+    /// ⛔ **Those three laws hold only ABOVE the knee `T/τ_c ≤ 1/ε²`, and the first version of this test
+    /// could not tell.** It exercised one point, which happened to be tight, and asserted the laws
+    /// unconditionally — so the `channels.max(1.0)` clamp voided all three below the knee and no
+    /// assertion moved. The test now crosses the knee in both directions and asserts that the laws FAIL
+    /// on the far side, which is the only way a regime boundary is actually pinned.
     #[test]
     fn a_plants_delay_margin_sets_a_sensing_power_floor() {
         let (a, b, _) = double_integrator();
@@ -381,6 +417,7 @@ mod tests {
         let (e_s, tau_c, eps) = (1e-9, 1e-3, 0.01);
         let f = sensing_power_floor(eps, budget, e_s, tau_c).expect("well-posed");
         assert_eq!(f.samples, 1.0 / (eps * eps), "1% accuracy is 10,000 independent samples");
+        assert!(f.tight, "this operating point must be ABOVE the knee for the three laws to apply");
         assert!((f.power_w - e_s / (eps * eps * budget)).abs() < 1e-18, "the floor is e_s/(eps^2 T)");
         eprintln!(
             "  delay margin {:.1} ms -> {:.0} samples over {:.0} channels -> {:.3} mW floor",
@@ -392,8 +429,40 @@ mod tests {
         assert!((half.power_w / f.power_w - 2.0).abs() < 1e-9, "halving the delay must double the floor, got {:.4}x", half.power_w / f.power_w);
 
         // 2. Quadratic in accuracy: ten times tighter costs a hundred times the power.
-        let tight = sensing_power_floor(eps / 10.0, budget, e_s, tau_c).expect("well-posed");
-        assert!((tight.power_w / f.power_w - 100.0).abs() < 1e-6, "10x accuracy must cost 100x, got {:.1}x", tight.power_w / f.power_w);
+        let tighter = sensing_power_floor(eps / 10.0, budget, e_s, tau_c).expect("well-posed");
+        assert!((tighter.power_w / f.power_w - 100.0).abs() < 1e-6, "10x accuracy must cost 100x, got {:.1}x", tighter.power_w / f.power_w);
+
+        // 2b. BELOW THE KNEE THE LAWS FAIL, and that is asserted rather than left to chance. At 50%
+        // accuracy one channel gathers 330 samples inside the budget and only 4 are needed, so the
+        // binding cost is that single channel's own e_s/tau_c and nothing scales any more.
+        let coarse = sensing_power_floor(0.5, budget, e_s, tau_c).expect("well-posed");
+        assert!(!coarse.tight, "50% accuracy on a 330 ms budget must be BELOW the knee");
+        assert_eq!(coarse.channels, 1.0, "below the knee a single channel suffices");
+        assert!((coarse.power_w - e_s / tau_c).abs() < 1e-18, "below the knee the cost is one channel's own power");
+        // the inverse-delay law is FALSE here: halving the delay changes nothing at all
+        let coarse_half = sensing_power_floor(0.5, budget / 2.0, e_s, tau_c).expect("well-posed");
+        assert!(
+            (coarse_half.power_w - coarse.power_w).abs() < 1e-18,
+            "below the knee, halving the delay must NOT change the power — that is why the regime flag exists"
+        );
+        // and the tight formula is still a valid LOWER bound there, just not tight
+        assert!(
+            coarse.power_w > e_s / (0.5 * 0.5 * budget),
+            "e_s/(eps^2 T) must remain a lower bound below the knee, understating the real minimum"
+        );
+        eprintln!(
+            "  knee at eps = sqrt(tau_c/T) = {:.4}: at eps=0.01 tight={}, at eps=0.5 tight={} ({:.1} uW flat)",
+            (tau_c / budget).sqrt(), f.tight, coarse.tight, coarse.power_w * 1e6
+        );
+
+        // 2c. ON the knee, `tight` must be true: one channel gathers exactly the samples needed, so the
+        // clamp is not clamping and the tight formula holds with equality. All three arguments here are
+        // exact in binary, so `exact` is exactly 1.0 and this pins the boundary case of the comparison
+        // rather than approaching it. Weakening `>=` to `>` survived every other assertion in this test.
+        let on_knee = sensing_power_floor(0.5, 2.0, e_s, 0.5).expect("well-posed");
+        assert_eq!(on_knee.channels, 1.0, "the knee is exactly one channel");
+        assert!(on_knee.tight, "the knee itself belongs to the tight regime");
+        assert!((on_knee.power_w - e_s / (0.5 * 0.5 * 2.0)).abs() < 1e-18, "on the knee both formulas agree");
 
         // 3. Independent of correlation time: tau_c splits the samples between routes, it does not price them.
         let slow = sensing_power_floor(eps, budget, e_s, tau_c * 10.0).expect("well-posed");
