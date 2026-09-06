@@ -188,9 +188,18 @@ fn main() {
         d_per_eta = d_per_eta.max(worst / eta);
     }
     let eta_pred = at_star / d_per_eta.max(1e-12);
+    // ⛔ at_star is the widest SURVIVING |d| in the kernel, and it saturates at the grid's own edge, so
+    // eta_pred is a linear function of `d_max` — a grid choice, not a dynamical quantity. Say so where the
+    // number is printed rather than letting a reader take it as measured.
+    let grid_limited = (at_star - d_max).abs() < 1e-9;
     println!("\n    PREDICTED fall threshold from the JOINT funnel: eta = {at_star:.3} / {d_per_eta:.4} = {eta_pred:.3}");
-    println!("    (the section-only rules gave 272 for a bias - optimistic by 5x - and a first-passage number that");
-    println!("     did not describe the failure at all)");
+    if grid_limited {
+        println!("    ⛔ at_star = {at_star:.3} IS THE GRID EDGE (d_max = {d_max:.3}), not a kernel boundary, so this");
+        println!("       prediction scales linearly with an arbitrary grid half-width and is a LOWER bound on the");
+        println!("       funnel's real tolerance. Doubling d_max doubles the number printed above.");
+    }
+    println!("    (the section-only rules gave a bias threshold optimistic by several fold, and a first-passage");
+    println!("     number that did not describe the failure at all)");
 
     println!("\n      eta      survived 60 steps (of 8 runs)");
     let (mut up_to, mut fell_at) = (0.0f64, f64::INFINITY);
@@ -278,32 +287,58 @@ fn main() {
     };
     println!("      alpha (the step's angular scale) = {alpha_:.3}");
     println!("      eta      peak |y| in the step   |y|/alpha   nominal rms torque   eta/rms   step completed");
+    // ⛔ The prose below quoted 0.04, 0.012 and "every single step completes" as typed literals. They are
+    // accumulated from the table now, and the "every step completes" claim is a counted fact.
+    let (mut worst_auth, mut worst_excursion, mut all_complete, mut top_eta) = (0.0f64, 0.0f64, true, 0.0f64);
     for &eta in &[0.0f64, 1.0, 2.0, 3.0, 4.0, 6.0] {
         let (py, _pt, rt, ok) = excursion(eta);
         println!("      {eta:<8} {py:>20.4}   {:>9.3}   {rt:>18.1}   {:>7.3}   {ok}", py / alpha_, eta / rt);
+        worst_auth = worst_auth.max(eta / rt);
+        worst_excursion = worst_excursion.max(py / alpha_);
+        all_complete &= ok;
+        top_eta = top_eta.max(eta);
     }
-    println!("\n    Both hypotheses are REJECTED by this table, and note the last column especially: every single");
-    println!("    step completes, even at eta = 6, while the 60-step runs fell at eta = 3. So the failure is");
-    println!("    CUMULATIVE ACROSS STEPS and no single-step quantity here explains it. eta/rms stays at 0.04, so");
-    println!("    authority is not saturated. |y|/alpha reaches 0.012, so the output excursion is not saturating the");
-    println!("    geometry either.");
+    println!("\n    Both hypotheses are REJECTED by this table, and note the last column especially: {}", if all_complete { "every single" } else { "NOT every" });
+    println!("    step completes, even at eta = {top_eta}, while the 60-step runs fell at eta = {fell_at}. So the failure is");
+    println!("    CUMULATIVE ACROSS STEPS and no single-step quantity here explains it. eta/rms peaks at {worst_auth:.3}, so");
+    println!("    authority is not saturated. |y|/alpha reaches {worst_excursion:.3}, so the output excursion is not");
+    println!("    saturating the geometry either.");
 
     println!("\nWhat this settles, across three attempts. P1's sub-problem (b) asks for a funnel to replace global");
     println!("contraction on a contact-rich loop. Two state-space funnels were built and both are OPTIMISTIC, in the");
     println!("dangerous direction:");
-    println!("  - the section basin alone           predicted 272   (measured 3)   optimistic ~90x");
-    println!("  - a joint (zeta, transverse) kernel predicted 48    (measured 3)   optimistic ~16x");
+    // ⛔ These two lines were TYPED LITERALS ("predicted 48 ... optimistic ~16x") while main() computed
+    // and printed the live values a few lines above, so moving `d_max`, DT, NZ/ND, EPS or a seed changed
+    // the run's output and left the verdict claiming the old numbers. There is not one assert! in this
+    // file, so nothing tied them together. They are interpolated now, and asserted below.
+    println!(
+        "  - a joint (zeta, transverse) kernel predicted {eta_pred:.0}    (measured {fell_at})   optimistic ~{:.0}x{}",
+        eta_pred / fell_at,
+        if grid_limited { "   [and that prediction is grid-limited, see above]" } else { "" }
+    );
     println!("\nAnd the mechanism is NOT IDENTIFIED. What this run establishes is a set of eliminations, each by");
     println!("measurement rather than argument:");
     println!("  - the section coordinate is at full basin depth when the robot falls, so it is not a basin exit");
     println!("  - a STATIC transverse displacement 1000x larger than the fatal error injects is survivable");
-    println!("  - control authority is not saturated: the nominal torque is 83 rms against a fatal error of 3");
-    println!("  - the output excursion reaches only 1.2% of the step^s angular scale at twice the fatal error");
-    println!("  - and every SINGLE step completes at twice the fatal error, so the failure is cumulative");
+    println!("  - control authority is not saturated: see the eta/rms column above, which stays far below 1");
+    println!("  - the output excursion reaches only {:.1}% of the step^s angular scale at eta = {top_eta}", 100.0 * worst_excursion);
+    println!("  - and every SINGLE step completes up to eta = {top_eta}, {:.1}x the fatal error, so the failure is cumulative", top_eta / fell_at);
     println!("\nFive candidate explanations, five eliminations, and the honest state is that the failure mode of a");
     println!("contact task under persistent action error is not captured by any of the obvious single-step");
     println!("quantities. That is worth more than a sixth hypothesis asserted without evidence: it says P1(b) is");
     println!("harder than it looks, and it says specifically WHY the natural attacks fail rather than that they do.");
+    // The verdict above is now a function of what the run measured, and these assertions are what keep it
+    // that way: if a constant moves and the numbers change, the example fails instead of printing a stale
+    // conclusion and exiting 0.
+    assert!(fell_at.is_finite(), "the verdict quotes a measured fall threshold, so the sweep must find one");
+    assert!(eta_pred > fell_at, "the verdict's word is OPTIMISTIC: the prediction must exceed the measurement");
+    assert!(up_to < fell_at, "runs must survive below the fall threshold and not at it");
+    assert!(d_per_eta > 0.0, "a zero transverse injection would make the prediction infinite, not optimistic");
+    assert!(all_complete, "the verdict says every single step completes; if one stopped, the elimination is void");
+    assert!(worst_auth < 1.0, "the verdict says authority is not saturated, which means eta/rms below 1, got {worst_auth:.3}");
+    assert!(worst_excursion < 0.1, "the verdict calls the excursion small; it reached {:.1}% of the angular scale", 100.0 * worst_excursion);
+    assert!(top_eta > fell_at, "the single-step table must reach past the fatal error for the cumulative claim to mean anything");
+
     println!("\nWhat would settle it is a measurement this run does not make: the joint distribution of (zeta, y, ydot)");
     println!("over a long run at the fatal error, and which coordinate is anomalous on the step that fails. The");
     println!("machinery to do that is all here; the finding is that it is necessary, because none of the cheap");

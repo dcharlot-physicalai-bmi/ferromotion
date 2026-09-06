@@ -366,33 +366,126 @@ mod tests {
     /// `Rotor::max_stable_dt` solve: `dt²·(kn/m) + 2·dt·(kd/m) ≤ 4`. Nothing here reports that bound —
     /// `kn`, `kd` and `dt` are all the caller's — so this pins the configurations the repo itself uses.
     ///
-    /// Measured margins at the time of writing, over effective masses from 0.5 to 6 kg: the tightest is
-    /// **5.0x** (this module's own `kn = 2e4, kd = 150, dt = 1e-3` at 0.5 kg) and the loosest 164x.
-    /// Comfortable, and that is the point of recording it: stiffening a contact or coarsening a step
-    /// without checking is how the margin disappears, and the failure is silent.
+    /// ⛔ **This used to read a HAND-COPIED table of four rows, and it was both wrong and short.** Its
+    /// tightest row claimed `kn = 2e4, kd = 150, dt = 1e-3` for "this module's contact test"; that site
+    /// sets `dt = 2e-4` on the very next line, and this review did not locate `2e4/150` at `1e-3` anywhere
+    /// in the workspace. So the quoted "tightest 5.0x" belonged to a configuration nothing ships, while
+    /// the named site's real margin is 25x. Meanwhile the actually-tightest live site,
+    /// `gpu.rs`'s `(0.0, 1.5e4, 120.0, 1e-3)`, was not in the table at all, so the gate was not watching
+    /// it: coarsening that step to `1e-2` puts it at 0.6x its stability limit with this test still green.
+    /// That is the canonical vacuity failure — a gate whose subject count is smaller than its claim.
+    ///
+    /// The table is gone. The gate READS THE SOURCE, finds every `let (…, kn, kd[, dt]) = (…)` binding in
+    /// the workspace, resolves a nearby literal `dt` when the binding does not carry one, and checks the
+    /// margin at every site it finds. It also asserts the subject count, so a refactor that changes the
+    /// binding shape shows up as a shrinking scan rather than as a quietly narrower gate.
     #[test]
     fn the_shipped_contact_parameters_stay_inside_the_explicit_integration_limit() {
-        // (kn, kd, dt, where it is used)
-        let shipped = [
-            (2.0e4f64, 150.0f64, 1e-3f64, "this module's contact test"),
-            (1.5e4, 120.0, 2e-4, "this module's gait test"),
-            (4.0e3, 40.0, 1e-3, "gpu tree gait"),
-            (6.0e3, 80.0, 1e-3, "gpu floating gait"),
-        ];
         let limit = |kn: f64, kd: f64, m: f64| {
             let (w2, gamma) = (kn / m, kd / m);
             (-gamma + (gamma * gamma + 4.0 * w2).sqrt()) / w2
         };
-        let mut tightest = f64::INFINITY;
-        for (kn, kd, dt, what) in shipped {
+
+        // ---- read every contact-parameter site out of the workspace source ----
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("crates/").to_path_buf();
+        let mut files = Vec::new();
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        for c in std::fs::read_dir(&root).expect("crates/ readable").flatten() {
+            for sub in ["src", "examples"] {
+                let d = c.path().join(sub);
+                if d.is_dir() {
+                    walk(&d, &mut files);
+                }
+            }
+        }
+        files.sort();
+        assert!(files.len() > 100, "the walk should cover the workspace, found {}", files.len());
+
+        let num = |t: &str| t.trim().parse::<f64>().ok();
+        let mut sites: Vec<(String, f64, f64, f64)> = Vec::new();
+        let mut unresolved: Vec<String> = Vec::new();
+        for f in &files {
+            let text = std::fs::read_to_string(f).expect("readable");
+            let rel = f.strip_prefix(&root).unwrap_or(f).display().to_string();
+            let lines: Vec<&str> = text.lines().collect();
+            for (ln, line) in lines.iter().enumerate() {
+                let t = line.trim();
+                // `let (<names>) = (<values>);` with kn and kd among the names
+                let Some(rest) = t.strip_prefix("let (") else { continue };
+                let Some((names, tail)) = rest.split_once(") = (") else { continue };
+                let Some(values) = tail.strip_suffix(");") else { continue };
+                let names: Vec<&str> = names.split(',').map(|x| x.trim()).collect();
+                let values: Vec<&str> = values.split(',').map(|x| x.trim()).collect();
+                if names.len() != values.len() || !names.contains(&"kn") || !names.contains(&"kd") {
+                    continue;
+                }
+                let at = |want: &str| names.iter().position(|n| *n == want).and_then(|i| num(values[i]));
+                let (Some(kn), Some(kd)) = (at("kn"), at("kd")) else {
+                    unresolved.push(format!("{rel}:{} kn/kd are not literals", ln + 1));
+                    continue;
+                };
+                // dt from the same binding, else the nearest literal `let dt = …;` within three lines
+                let dt = at("dt").or_else(|| {
+                    let lo = ln.saturating_sub(3);
+                    let hi = (ln + 4).min(lines.len());
+                    lines[lo..hi].iter().find_map(|l| {
+                        l.trim().strip_prefix("let dt = ").and_then(|v| num(v.trim_end_matches(';')))
+                    })
+                });
+                match dt {
+                    Some(dt) => sites.push((format!("{rel}:{}", ln + 1), kn, kd, dt)),
+                    None => unresolved.push(format!("{rel}:{} no literal dt within three lines", ln + 1)),
+                }
+            }
+        }
+
+        // ---- the subject count, which is the thing the old hand table got wrong ----
+        eprintln!("\n  contact-parameter sites found in source: {} resolved, {} unresolved", sites.len(), unresolved.len());
+        assert!(
+            sites.len() >= 9,
+            "the scan found only {} sites; it found 9 when written, so either sites were deleted or the \
+             binding shape changed and this gate is now watching less than it claims. Sites: {sites:#?}",
+            sites.len()
+        );
+        // exactly one site is legitimately unresolvable: physics_lab's dt is a runtime field, not a literal
+        for u in &unresolved {
+            eprintln!("    unresolved: {u}");
+        }
+        assert!(
+            unresolved.len() <= 1,
+            "a new contact site the scan cannot read is a hole in this gate, not something to ignore: {unresolved:#?}"
+        );
+
+        // ---- the check itself, at every site found ----
+        let mut tightest = (f64::INFINITY, String::new());
+        for (what, kn, kd, dt) in &sites {
             // 0.5 kg is a deliberately small effective mass: a light foot link is the worst case, since
             // the bound falls as the mass does.
-            let lim = limit(kn, kd, 0.5);
+            let lim = limit(*kn, *kd, 0.5);
             let margin = lim / dt;
+            eprintln!("    {margin:>7.1}x  kn {kn:>8.1e} kd {kd:>6.1} dt {dt:.0e}  {what}");
             assert!(margin > 3.0, "{what}: dt {dt:.0e} is only {margin:.1}x inside the {lim:.3e} s limit");
-            tightest = tightest.min(margin);
+            if margin < tightest.0 {
+                tightest = (margin, what.clone());
+            }
         }
-        assert!(tightest < 20.0, "if every margin is now huge, the fixtures changed and this guard is no longer watching what it was written for: tightest {tightest:.1}x");
+        eprintln!("  tightest: {:.1}x at {}\n", tightest.0, tightest.1);
+        assert!(
+            tightest.0 < 20.0,
+            "if every margin is now huge, the fixtures changed and this guard is no longer watching what it \
+             was written for: tightest {:.1}x at {}",
+            tightest.0, tightest.1
+        );
         // and the bound must actually tighten with stiffness, or it is not this bound
         assert!(limit(1.0e6, 150.0, 0.5) < limit(2.0e4, 150.0, 0.5), "a stiffer contact must permit a smaller step");
         assert!(limit(2.0e4, 150.0, 0.1) < limit(2.0e4, 150.0, 6.0), "a lighter effective mass must too");
