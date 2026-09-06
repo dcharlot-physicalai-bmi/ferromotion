@@ -242,19 +242,56 @@ impl Pmsm {
         self.torque()
     }
 
-    /// The explicit-Euler stability bound for the **open-loop** machine: `2 L/R` on the slower axis.
+    /// The explicit-Euler stability bound for the **open-loop** machine **at electrical speed `omega_e`**.
+    ///
+    /// [`Self::step`] integrates the ROTATING `dq` machine, whose homogeneous matrix carries the
+    /// cross-coupling that speed creates:
+    ///
+    /// ```text
+    ///   A = [ −R/L_d      ω_e L_q/L_d ]      tr = −R(1/L_d + 1/L_q)
+    ///       [ −ω_e L_d/L_q   −R/L_q   ]     det = R²/(L_d L_q) + ω_e²
+    /// ```
+    ///
+    /// Forward Euler needs `|1 + dt·λ| < 1` for both eigenvalues. When the pair is complex, which it is
+    /// for any `ω_e` past `R|1/L_d − 1/L_q|/2`, that is `dt < −tr/det`; when it is real, the most negative
+    /// eigenvalue binds and it is `dt < 4/(√(tr²−4det) − tr)`. For a surface machine the first reduces to
+    ///
+    /// ```text
+    ///   dt < 2(R/L) / ((R/L)² + ω_e²)
+    /// ```
+    ///
+    /// which is `2L/R` at standstill and falls as `1/ω_e²` thereafter.
+    ///
+    /// ⛔ **This took no argument and returned `2·min(L_d,L_q)/R` at every speed, the standstill value.**
+    /// It is exact only at `ω_e = 0` and unboundedly optimistic above it. On the test machine
+    /// (`R = 0.1 Ω`, `L = 0.5 mH`) it reported 10 ms at every speed while the true bound at 1000 rpm is
+    /// 0.693 ms, so it was 14.4x optimistic there and 122x at 3000 rpm. Stepping at a TENTH of the number
+    /// it returned, at 1000 rpm, sends `i_q` to 1e72 in 2000 steps with no error and no clamp. Both tests
+    /// that touched it ran at exactly `ω_e = 0`, the one speed where the formula happened to be right.
+    /// The old doc also called `min(L_d, L_q)` "the slower axis"; it is the SHORTER time constant `L/R`,
+    /// so it is the faster axis, though `min` is still the conservative choice.
     ///
     /// **This is not the bound that matters once a current regulator is closed around it**, and the
     /// difference is not small. This bound describes the plant alone; a PI regulator at bandwidth `ω_bw`
     /// imposes its own, roughly `2/ω_bw`, which for a 500 Hz loop on a 5 ms machine is **15.7 times tighter**.
     /// Stepping at a tenth of *this* bound and closing a 500 Hz loop produced `NaN` on the first attempt at
     /// the test below, from 2 samples per loop period. Use [`PiCurrent::max_stable_dt`] whenever a regulator
-    /// is in the loop, and a small fraction of whichever bound is smaller.
-    /// BOUND NOT THE EDGE: the PLANT's open-loop electrical bound. The closed loop binds far tighter
-    /// (by more than 10x here), so crossing this one says nothing about a regulated machine; see
-    /// the_closed_loop_stability_bound_is_the_one_that_binds.
-    pub fn max_stable_dt(&self) -> f64 {
-        2.0 * self.l_d.min(self.l_q) / self.r_s
+    /// is in the loop, and a small fraction of whichever bound is smaller — which one that is now depends on
+    /// the speed, since the plant bound overtakes the regulator's above roughly 1000 rpm on this machine.
+    /// CROSSED BY: the_open_loop_bound_tracks_speed_and_the_machine_diverges_just_past_it
+    pub fn max_stable_dt(&self, omega_e: f64) -> f64 {
+        let (tr, det) = (
+            -self.r_s * (1.0 / self.l_d + 1.0 / self.l_q),
+            self.r_s * self.r_s / (self.l_d * self.l_q) + omega_e * omega_e,
+        );
+        let disc = tr * tr - 4.0 * det;
+        if disc > 0.0 {
+            // real pair: the most negative eigenvalue binds
+            4.0 / (disc.sqrt() - tr)
+        } else {
+            // complex pair: |1 + dt(σ ± jν)| < 1 gives dt < −2σ/|λ|² = −tr/det
+            -tr / det
+        }
     }
 
     /// The `dq` currents of least magnitude that produce `torque`: **maximum torque per amp**.
@@ -497,6 +534,57 @@ mod tests {
 
     fn test_machine_interior() -> Pmsm {
         Pmsm::interior(7.0, 0.1, 0.3e-3, 0.9e-3, 0.02)
+    }
+
+    /// **The open-loop bound tracks speed, and the machine diverges just past it.**
+    ///
+    /// `Pmsm::step` integrates the ROTATING `dq` machine, so its Euler bound depends on `omega_e`. The
+    /// shipped bound took no argument and returned the standstill value at every speed. This runs the
+    /// actual machine on both sides of the returned number, at four speeds, on both a surface and a
+    /// salient machine, which is the only check that separates a correct bound from an optimistic one.
+    ///
+    /// ⛔ Both tests that previously touched this bound ran at exactly `omega_e = 0`, the one speed where
+    /// the old formula was right. It was 14.4x optimistic at 1000 rpm and 121.9x at 3000 rpm.
+    ///
+    /// "Bounded" below the bound is not "decays to zero": with the terminals shorted the back-EMF
+    /// `omega_e * lambda_m` drives a real steady-state current (146 A at 1000 rpm on this machine), so the
+    /// stable trajectories settle at tens of amps. Instability is separated from that by four orders.
+    #[test]
+    fn the_open_loop_bound_tracks_speed_and_the_machine_diverges_just_past_it() {
+        // Peak |i_dq| over a run from a small initial current with the terminals shorted.
+        let peak = |m: &Pmsm, omega_e: f64, dt: f64| -> f64 {
+            let mut m = *m;
+            m.i_d = 1e-3;
+            m.i_q = 1e-3;
+            let mut mx = 0.0f64;
+            for _ in 0..4000 {
+                m.step(dt, 0.0, 0.0, omega_e);
+                let mag = (m.i_d * m.i_d + m.i_q * m.i_q).sqrt();
+                if !mag.is_finite() {
+                    return f64::INFINITY;
+                }
+                mx = mx.max(mag);
+            }
+            mx
+        };
+
+        for (label, m) in [("surface", test_machine_surface()), ("interior", test_machine_interior())] {
+            let standstill = m.max_stable_dt(0.0);
+            for rpm in [0.0, 300.0, 1000.0, 3000.0] {
+                let omega_e = rpm / 60.0 * 2.0 * PI * m.pole_pairs;
+                let lim = m.max_stable_dt(omega_e);
+                let (below, above) = (peak(&m, omega_e, 0.9 * lim), peak(&m, omega_e, 1.1 * lim));
+                eprintln!(
+                    "  {label:8} {rpm:6.0} rpm: bound {lim:.4e} s ({:6.2}x tighter than standstill {standstill:.4e}) -> 0.9x peak {below:.3e} A, 1.1x peak {above:.3e} A",
+                    standstill / lim
+                );
+                assert!(below < 1e3, "{label} at {rpm} rpm must stay bounded at 0.9x the bound, peaked at {below:.3e} A");
+                assert!(above > 1e4, "{label} at {rpm} rpm must diverge at 1.1x the bound, peaked only at {above:.3e} A");
+            }
+            // and the bound is the standstill value only at standstill
+            assert!((m.max_stable_dt(0.0) - 2.0 * m.l_d.min(m.l_q) / m.r_s).abs() < 1e-15, "at rest it must reduce to 2L/R");
+            assert!(m.max_stable_dt(1000.0) < 0.2 * standstill, "the bound must FALL with speed, which the old one did not");
+        }
     }
 
     #[test]
@@ -841,10 +929,13 @@ mod tests {
         // and the run produced NaN; the plant bound says nothing about the closed loop.
         let dt = 0.05 * PiCurrent::max_stable_dt(bw);
         assert!(dt < PiCurrent::max_stable_dt(bw), "inside the regulator's bound");
-        assert!(dt < m.max_stable_dt(), "and inside the plant's, which here is the looser of the two");
+        // AT STANDSTILL, which is where this test runs the machine (`omega_e = 0.0` below). The plant
+        // bound falls as 1/omega_e^2, so "the looser of the two" is a statement about this operating point
+        // and not about the machine; see the_open_loop_bound_tracks_speed_and_the_machine_diverges_just_past_it.
+        assert!(dt < m.max_stable_dt(0.0), "and inside the plant's, which here is the looser of the two");
         assert!(
-            m.max_stable_dt() > 10.0 * PiCurrent::max_stable_dt(bw),
-            "the two bounds differ by more than an order of magnitude here, which is the point"
+            m.max_stable_dt(0.0) > 10.0 * PiCurrent::max_stable_dt(bw),
+            "the two bounds differ by more than an order of magnitude AT REST, which is the point"
         );
 
         let mut mm = m;
@@ -904,7 +995,9 @@ mod tests {
         }
         // And the two bounds are genuinely different quantities, not the same one twice.
         let m = test_machine_surface();
-        assert!(m.max_stable_dt() > 15.0 * PiCurrent::max_stable_dt(2.0 * PI * 500.0));
+        // at STANDSTILL. The plant bound falls as 1/omega_e^2 and overtakes the regulator's above
+        // roughly 1000 rpm on this machine, which is why the bound now takes the speed.
+        assert!(m.max_stable_dt(0.0) > 15.0 * PiCurrent::max_stable_dt(2.0 * PI * 500.0));
     }
 
     #[test]

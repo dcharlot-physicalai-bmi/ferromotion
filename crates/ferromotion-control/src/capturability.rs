@@ -75,15 +75,29 @@ impl CaptureParams {
         self.foot_radius * an + self.step_length * (a - a * an) / (1.0 - a)
     }
 
-    /// The **saturation boundary** `d_∞ = l_max/(e^{ωT} − 1)`: no number of steps captures an offset beyond
-    /// this. Past it the robot is falling for reasons no controller reaches, and the honest response is to
-    /// change the hardware or the step time, not the policy.
+    /// The **saturation boundary** `max(r, d_∞)` with `d_∞ = l_max/(e^{ωT} − 1)`: no number of steps
+    /// captures an offset beyond this. Past it the robot is falling for reasons no controller reaches, and
+    /// the honest response is to change the hardware or the step time, not the policy.
+    ///
+    /// The `N`-step boundary is `d_N = d_∞ + (r − d_∞)·a^N` with `a = e^{−ωT}`, so it moves monotonically
+    /// from `d_0 = r` toward `d_∞`. **The supremum over step budgets is therefore `max(r, d_∞)`, not `d_∞`,
+    /// and which of the two binds depends on the hardware.** A long swing or a short stride puts `d_∞`
+    /// BELOW the foot radius, and then the sequence decreases: standing still captures more than stepping
+    /// does, and the ceiling is the foot.
+    ///
+    /// ⛔ **This returned `d_∞` alone, and was wrong in exactly that regime.** On
+    /// `from_height(0.9, 9.81, 0.10, 0.40, 1.0)` it reported 0.0153 m while `boundary(0)` is 0.1000 m, so
+    /// [`Self::steps_to_capture`] answered `None` — "no controller reaches this" — for offsets that
+    /// [`Self::capturable_in`]`(offset, 0)` called capturable in ZERO steps. The two public functions
+    /// contradicted each other over a 0.0153–0.1000 m band, and the module's own nesting invariant is
+    /// false there. Every test used one fixture, whose `r = 0.10 < d_∞ = 0.2758`: the only regime in
+    /// which `d_∞` alone happens to be the supremum.
     pub fn boundary_limit(&self) -> f64 {
         let e = (self.omega * self.step_time).exp();
         if e <= 1.0 + 1e-15 {
             return f64::INFINITY;
         }
-        self.step_length / (e - 1.0)
+        self.foot_radius.max(self.step_length / (e - 1.0))
     }
 
     /// Whether an offset is capturable within `n` steps.
@@ -197,6 +211,64 @@ mod tests {
         for k in 1..60 {
             let off = k as f64 * 0.02;
             assert_eq!(p.steps_to_capture(off), greedy_steps(off), "disagreement at offset {off:.3} m");
+        }
+    }
+
+    /// **The other regime, where the foot beats the stride — and the boundary was wrong there.**
+    ///
+    /// `d_N = d_∞ + (r − d_∞)·a^N` moves monotonically from `d_0 = r` toward `d_∞`, so the supremum over
+    /// step budgets is `max(r, d_∞)`. When `d_∞ < r` the sequence DECREASES and the ceiling is the foot,
+    /// not the stride. Every other test here uses `humanoid()`, whose `r = 0.10 < d_∞ = 0.2758`: the only
+    /// regime in which `d_∞` alone is the supremum, which is why shipping `boundary_limit = d_∞` was
+    /// invisible. This crosses into the other regime and checks the two public functions against each
+    /// other and against the same greedy simulation the sibling test uses.
+    #[test]
+    fn the_saturation_boundary_is_the_supremum_in_both_regimes() {
+        // A greedy stepper, the same LIP recursion as `simulating_a_greedy_stepper_...`, taking its
+        // parameters rather than closing over one fixture.
+        let greedy_steps = |p: &CaptureParams, offset: f64| -> Option<usize> {
+            let a = (p.omega * p.step_time).exp();
+            let mut xi = offset.abs();
+            for n in 0..40 {
+                if xi <= p.foot_radius + 1e-9 {
+                    return Some(n);
+                }
+                xi = xi * a - p.step_length;
+                if xi < -p.foot_radius {
+                    return Some(n + 1);
+                }
+            }
+            None
+        };
+
+        // wide foot, short stride, slow swing: d_inf falls BELOW the foot radius
+        let wide = CaptureParams::from_height(0.9, 9.81, 0.10, 0.40, 1.0).unwrap();
+        let d_inf = wide.step_length / ((wide.omega * wide.step_time).exp() - 1.0);
+        assert!(d_inf < wide.foot_radius, "this fixture must be in the other regime: d_inf {d_inf:.4} vs r {:.4}", wide.foot_radius);
+        eprintln!("  wide foot: d_0 = {:.4} m, d_1 = {:.4}, d_inf = {d_inf:.4}, limit = {:.4}", wide.boundary(0), wide.boundary(1), wide.boundary_limit());
+
+        for p in [humanoid(), wide] {
+            let limit = p.boundary_limit();
+            // 1. the limit IS the supremum over budgets, in whichever direction the sequence runs
+            let sup = (0..400).map(|n| p.boundary(n)).fold(f64::NEG_INFINITY, f64::max);
+            assert!((limit - sup).abs() < 1e-12, "boundary_limit {limit} must be sup_n d_n = {sup}");
+            // 2. and the sequence is monotone TOWARD d_inf, which is what makes that supremum an endpoint
+            let d_infinity = p.step_length / ((p.omega * p.step_time).exp() - 1.0);
+            for n in 0..40 {
+                let (a, b) = ((p.boundary(n) - d_infinity).abs(), (p.boundary(n + 1) - d_infinity).abs());
+                assert!(b <= a + 1e-15, "d_n must approach d_inf monotonically: |d_{n} - d_inf| = {a}, next {b}");
+            }
+            // 3. the two public functions must not contradict each other, in either regime
+            for k in 1..200 {
+                let off = k as f64 * 0.005;
+                let reachable = (0..1000).any(|n| p.capturable_in(off, n));
+                assert_eq!(
+                    p.steps_to_capture(off).is_some(), reachable,
+                    "steps_to_capture and capturable_in disagree at offset {off:.3} m (limit {limit:.4})"
+                );
+                // 4. and both must agree with the simulation
+                assert_eq!(p.steps_to_capture(off), greedy_steps(&p, off), "the formula disagrees with the greedy stepper at {off:.3} m");
+            }
         }
     }
 
