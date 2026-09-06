@@ -2,8 +2,15 @@
 //! from *Rigid Body Dynamics Algorithms* (Featherstone, Ch. 7) in spatial (6D Plücker) notation.
 //! Where [`crate::forward_dynamics`] forms and inverts the mass matrix (O(n³)), ABA computes joint
 //! accelerations `q̈` from torques directly in three recursions — the standard efficient method, and
-//! the foundation for floating-base and large-DoF systems. Verified bit-for-bit against the
-//! mass-matrix solve. Pure `nalgebra` → WASM-clean.
+//! the foundation for floating-base and large-DoF systems. Cross-checked against the mass-matrix
+//! solve to within **5 ulp**, measured. Pure `nalgebra` → WASM-clean.
+//!
+//! ⛔ **This said "verified bit-for-bit" and it was not, and no test in the file compared bits.** The
+//! only parity test asserted an absolute 1e-9, which at the accelerations it records in its own doc
+//! (`[16.12, −1.67]`) admits roughly 3e5 ulp of divergence. Bit-identity is also not a property this
+//! code can have: three spatial-inertia recursions cannot associate identically with `n` RNEA columns
+//! plus a Cholesky solve. The agreement is now MEASURED and bounded in ulp, which is a claim the test
+//! can actually fail: across both fixtures, bare and geared, the observed spread is 0 to 5 ulp.
 
 use crate::{JointKind, LinkInertia, Robot};
 use nalgebra::{Matrix3, Matrix6, Vector3, Vector6};
@@ -262,7 +269,7 @@ fn exp6(xi: Vector6<f64>, dt: f64) -> Iso {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{forward_dynamics, from_urdf_full};
 
@@ -314,9 +321,23 @@ mod tests {
     /// Armature enters ABA's articulated inertia `d` and damping/friction subtract from the driving torque
     /// `uu`. Getting that split backwards would still pass a bare fixture, which is the other reason to state
     /// the terms here.
+    /// Monotone-ordering ulp distance, correct across the sign boundary.
+    pub(crate) fn ulps_between(a: f64, b: f64) -> i64 {
+        let key = |x: f64| -> i64 {
+            let bits = x.to_bits() as i64;
+            if bits < 0 {
+                i64::MIN.wrapping_sub(bits)
+            } else {
+                bits
+            }
+        };
+        key(a).saturating_sub(key(b)).abs()
+    }
+
     #[test]
     fn aba_matches_the_mass_matrix_solve() {
         let g = Vector3::new(0.0, 0.0, -9.81);
+        let mut worst_ulp = 0i64;
         for (urdf, q, qd, tau) in [
             (ARM2, vec![0.3, -0.7], vec![0.5, -0.2], vec![0.4, 0.1]),
             (CHAIN3, vec![0.4, -0.6, 0.05], vec![-0.3, 0.7, 0.2], vec![0.2, -0.5, 0.3]),
@@ -336,6 +357,11 @@ mod tests {
                         aba[i],
                         ref_qdd[i]
                     );
+                    // ⛔ AND IN ULP, because 1e-9 absolute is ~3e5 ulp at these magnitudes and the module
+                    // doc used to claim bit-for-bit. Measured spread across both fixtures: 0 to 5 ulp.
+                    let u = ulps_between(aba[i], ref_qdd[i]);
+                    worst_ulp = worst_ulp.max(u);
+                    assert!(u <= 16, "{label}: ABA[{i}] is {u} ulp from the oracle ({} vs {})", aba[i], ref_qdd[i]);
                 }
             }
             // And the guard that makes the `geared` pass meaningful: the terms must actually change the answer,
@@ -345,6 +371,7 @@ mod tests {
             let moved = (0..bare.dof()).map(|i| (bare_qdd[i] - geared_qdd[i]).abs()).fold(0.0f64, f64::max);
             assert!(moved > 1e-3, "the actuator terms must change ABA's answer, moved by {moved:.2e}");
         }
+        eprintln!("  ABA vs the mass-matrix solve: worst disagreement {worst_ulp} ulp (bound 16, NOT bit-identical)");
     }
 
     #[test]

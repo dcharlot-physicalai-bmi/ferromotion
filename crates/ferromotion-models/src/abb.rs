@@ -8,9 +8,20 @@
 //! degrees with `f64::to_radians`. Where a source prints `π/2` to seven decimals it is a transcription
 //! of the exact angle, and the exact constant is used.
 //!
-//! [`DhRow`] carries a joint limit and nothing else, so the velocity limits quoted in each doc comment
-//! are recorded there for the reader and are **not** attached to the model; effort limits and inertial
-//! parameters are not published by ABB for any of these arms and are left unset.
+//! Each joint carries its **joint range and its datasheet speed**, the latter through
+//! [`DhRow::with_max_velocity`], the same path `ur`, `kuka`, `kinova` and `others` use. Effort limits and
+//! inertial parameters are not published by ABB for any of these arms and are left unset.
+//!
+//! ⛔ **This module said "[`DhRow`] carries a joint limit and nothing else, so the velocity limits quoted
+//! in each doc comment ... are **not** attached to the model". That is false about the type**: `DhRow` has
+//! `limits`, `effort` AND `max_velocity`, with `with_effort`/`with_max_velocity` builders that
+//! [`Robot::from_dh`] copies onto every joint, and four sibling modules in this crate already use them.
+//! The consequence was real data loss, not a wording slip: a caller reading
+//! `joint.max_velocity.unwrap_or(f64::INFINITY)` got the datasheet rate for every UR, KUKA, Kinova and
+//! xArm model and **unlimited** for every ABB one, while the doc told the reader the type could not carry
+//! it, so they had no reason to look. No ABB test asserted `max_velocity` in either direction. The rates
+//! are attached now, from the same product specifications each constructor's doc already cites, and
+//! `every_abb_joint_carries_its_datasheet_speed` pins them.
 //!
 //! **What is verified, and against what.** For each model the tests check: the forward kinematics at
 //! the all-zero pose against the position computed by hand from the table (the sources do not print
@@ -34,6 +45,23 @@ fn tool_z(d: f64) -> Iso {
 
 /// The IRB 140 rows in the paper's **modified** (Craig) convention, without the flange, so the tests
 /// can build the same table under either convention and with or without the tool.
+/// Datasheet axis speeds (deg/s) per model, from the ABB product specifications each constructor's doc
+/// cites. Attached to the rows through [`DhRow::with_max_velocity`] in radians per second.
+fn with_speeds<const N: usize>(rows: [DhRow; N], deg_per_s: [f64; N]) -> Vec<DhRow> {
+    rows.iter().zip(deg_per_s).map(|(r, v)| r.with_max_velocity(v.to_radians())).collect()
+}
+
+/// IRB 140-6/0.8, 'Product specification IRB 140' axis-speed table.
+pub(crate) const IRB140_SPEEDS_DEG_S: [f64; 6] = [200.0, 200.0, 260.0, 360.0, 360.0, 450.0];
+/// IRB 120-3/0.6, 'Product specification IRB 120' axis-speed table.
+pub(crate) const IRB120_SPEEDS_DEG_S: [f64; 6] = [250.0, 250.0, 250.0, 320.0, 320.0, 420.0];
+/// IRB 1600-6/1.45, 'Product specification IRB 1600' axis-speed table.
+pub(crate) const IRB1600_SPEEDS_DEG_S: [f64; 6] = [150.0, 160.0, 170.0, 320.0, 400.0, 460.0];
+/// IRB 14000 (YuMi), 3HAC052982-001 velocity table, in the PAPER's joint numbering. The zero and sign
+/// correspondence to the controller's numbering was not verified by the specification, so this mapping is
+/// **provisional in exactly the same way the joint limits above already are**.
+pub(crate) const YUMI_SPEEDS_DEG_S: [f64; 7] = [180.0, 180.0, 180.0, 180.0, 400.0, 400.0, 400.0];
+
 fn irb140_rows() -> [DhRow; 6] {
     [
         DhRow::revolute(0.0, 0.352, 0.0, 0.0).with_limits((-180.0f64).to_radians(), 180.0f64.to_radians()),
@@ -70,7 +98,7 @@ fn irb140_rows() -> [DhRow; 6] {
 /// matches ABB's drawing (axis-1 to axis-5 = 70 + 380 mm; base to axis-2 352 mm plus 360 mm arm);
 /// the flange is 0.065 m further along `x` at this pose, `(0.515, 0, 0.712)` m. Both are tested.
 pub fn irb140() -> Robot {
-    Robot::from_dh(&irb140_rows(), DhConvention::Modified, tool_z(0.065)).expect("the IRB 140 table is finite and non-empty")
+    Robot::from_dh(&with_speeds(irb140_rows(), IRB140_SPEEDS_DEG_S), DhConvention::Modified, tool_z(0.065)).expect("the IRB 140 table is finite and non-empty")
 }
 
 /// The IRB 120 rows in **standard** DH.
@@ -111,7 +139,7 @@ fn irb120_rows() -> [DhRow; 6] {
 /// `z = 0.290 + 0.270 + 0.070 = 0.630` m, the flange centre with the arm vertical; equal to the ETH
 /// transform product `0.134 + 0.168 + 0.072 = 0.374`.
 pub fn irb120() -> Robot {
-    Robot::from_dh(&irb120_rows(), DhConvention::Standard, Iso::identity()).expect("the IRB 120 table is finite and non-empty")
+    Robot::from_dh(&with_speeds(irb120_rows(), IRB120_SPEEDS_DEG_S), DhConvention::Standard, Iso::identity()).expect("the IRB 120 table is finite and non-empty")
 }
 
 /// The IRB 1600-X/1.45 rows in **standard** DH.
@@ -150,7 +178,7 @@ fn irb1600_rows() -> [DhRow; 6] {
 /// Known answer, **computed by hand from the table** (neither source prints a position): at `q = 0`,
 /// `x = 0.150 + 0.600 + 0.065 = 0.815`, `z = 0.4865 + 0.700 = 1.1865` m, flange centre, arm vertical.
 pub fn irb1600_1_45() -> Robot {
-    Robot::from_dh(&irb1600_rows(), DhConvention::Standard, Iso::identity()).expect("the IRB 1600 table is finite and non-empty")
+    Robot::from_dh(&with_speeds(irb1600_rows(), IRB1600_SPEEDS_DEG_S), DhConvention::Standard, Iso::identity()).expect("the IRB 1600 table is finite and non-empty")
 }
 
 /// One YuMi arm's rows in **standard** DH, in the paper's consecutive joint numbering.
@@ -195,7 +223,7 @@ fn yumi_rows() -> [DhRow; 7] {
 /// `x = 0.301 + 0.0405 = 0.3415` with the second `b` landing on `z`, and the `a = ±0.030` pair cancels
 /// on `x`; `z = d + e + b = 0.166 + 0.2515 + 0.0405 = 0.458` m.
 pub fn yumi_single_arm() -> Robot {
-    Robot::from_dh(&yumi_rows(), DhConvention::Standard, Iso::identity()).expect("the YuMi table is finite and non-empty")
+    Robot::from_dh(&with_speeds(yumi_rows(), YUMI_SPEEDS_DEG_S), DhConvention::Standard, Iso::identity()).expect("the YuMi table is finite and non-empty")
 }
 
 #[cfg(test)]
@@ -259,6 +287,32 @@ mod tests {
     }
 
     // ---- IRB 140 --------------------------------------------------------------------------------
+
+    /// ⛔ **No ABB test asserted `max_velocity` in either direction**, so both the omission and a later
+    /// edit attaching wrong speeds were invisible. This is the sibling of `ur.rs`'s
+    /// `assert_datasheet_limits`, `kuka.rs`'s `assert_all_speeds_carried` and `others.rs`'s
+    /// `assert_limits_and_speeds`.
+    #[test]
+    fn every_abb_joint_carries_its_datasheet_speed() {
+        let check = |name: &str, r: &Robot, deg: &[f64]| {
+            assert_eq!(r.dof(), deg.len(), "{name}: the speed fixture must cover every joint");
+            for (i, j) in r.joints.iter().enumerate() {
+                let v = j.max_velocity.unwrap_or_else(|| panic!("{name} joint {} carries no datasheet speed", i + 1));
+                assert!((v - deg[i].to_radians()).abs() < 1e-12, "{name} joint {}: {v} rad/s vs {} deg/s", i + 1, deg[i]);
+                assert!(v > 0.0, "{name} joint {}: a speed limit must be positive", i + 1);
+                assert!(j.effort.is_none(), "{name} joint {}: ABB publishes no effort for these arms", i + 1);
+                assert!(j.limits.is_some(), "{name} joint {}: the joint range must still be attached", i + 1);
+            }
+            eprintln!("  {name}: {} joints, speeds {:?} deg/s", r.dof(), deg);
+        };
+        check("IRB 140", &irb140(), &IRB140_SPEEDS_DEG_S);
+        check("IRB 120", &irb120(), &IRB120_SPEEDS_DEG_S);
+        check("IRB 1600-6/1.45", &irb1600_1_45(), &IRB1600_SPEEDS_DEG_S);
+        check("YuMi", &yumi_single_arm(), &YUMI_SPEEDS_DEG_S);
+        // and the speeds must not be all-equal placeholders: three of the four tables vary across joints
+        assert!(IRB140_SPEEDS_DEG_S.iter().any(|v| *v != IRB140_SPEEDS_DEG_S[0]), "the IRB 140 table must vary by joint");
+        assert!(IRB1600_SPEEDS_DEG_S.iter().any(|v| *v != IRB1600_SPEEDS_DEG_S[0]), "the IRB 1600 table must vary by joint");
+    }
 
     #[test]
     fn irb140_zero_pose_matches_the_hand_computed_flange_and_wrist_centre() {

@@ -1,8 +1,12 @@
 //! Featherstone's **Composite-Rigid-Body Algorithm** — the O(n²) joint-space inertia (mass) matrix,
 //! a clean-room implementation from *Rigid Body Dynamics Algorithms* (Ch. 6) in spatial (6D Plücker)
 //! notation. Where [`crate::mass_matrix`] builds the matrix column-by-column with n RNEA passes
-//! (O(n²·n) work), CRBA computes it directly by propagating composite inertias inward once. Verified
-//! bit-for-bit against that reference. Pure `nalgebra` → WASM-clean.
+//! (O(n²·n) work), CRBA computes it directly by propagating composite inertias inward once.
+//! Cross-checked against that reference to within **2 ulp**, measured. Pure `nalgebra` → WASM-clean.
+//!
+//! ⛔ **This said "verified bit-for-bit" while the test asserted an absolute 1e-10 and compared no
+//! bits**, the same defect as [`crate::aba`]. Measured across three configurations, bare and geared,
+//! the spread is 0 to 2 ulp, and the test bounds it in ulp now.
 
 use crate::aba::{motion_subspace, motion_transform, spatial_inertia};
 use crate::Robot;
@@ -88,6 +92,7 @@ mod verification {
     #[test]
     fn crba_matches_mass_matrix() {
         let (bare, inertia) = arm();
+        let mut worst_ulp = 0i64;
         let mut geared = bare.clone();
         for (i, j) in geared.joints.iter_mut().enumerate() {
             *j = j.clone().with_armature(0.011 + 0.002 * i as f64);
@@ -103,11 +108,17 @@ mod verification {
             let m_ref = crate::mass_matrix(robot, &inertia, &qset);
             let err = (&m_crba - &m_ref).amax();
             assert!(err < 1e-10, "CRBA ≠ mass_matrix at {qset:?}: {err}");
+            // and in ulp: 1e-10 absolute is a very wide band on entries this size, and the module doc
+            // used to claim bit-for-bit. Measured spread: 0 to 2 ulp.
+            let ulps = m_crba.iter().zip(m_ref.iter()).map(|(a, b)| crate::aba::tests::ulps_between(*a, *b)).max().unwrap_or(0);
+            assert!(ulps <= 8, "CRBA is {ulps} ulp from mass_matrix at {qset:?}");
+            worst_ulp = worst_ulp.max(ulps);
             // symmetry + positive-definiteness (Cholesky exists)
             assert!((&m_crba - m_crba.transpose()).amax() < 1e-12, "M not symmetric");
             assert!(m_crba.clone().cholesky().is_some(), "M not positive-definite");
         }
         }
+        eprintln!("  CRBA vs mass_matrix: worst disagreement {worst_ulp} ulp (bound 8, NOT bit-identical)");
         let m = crba(&bare, &inertia, &[0.3, -0.7, 0.2]);
         let mg = crba(&geared, &inertia, &[0.3, -0.7, 0.2]);
         eprintln!(

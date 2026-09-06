@@ -1,9 +1,35 @@
 //! **Hamiltonian Neural Network (HNN)** — physics injected into the **architecture**. Instead of predicting
 //! the dynamics directly, the network learns a single scalar function, the Hamiltonian `H_θ(q, p)` (the total
 //! energy), and the dynamics are *derived* from it by Hamilton's equations: `q̇ = ∂H/∂p`, `ṗ = −∂H/∂q`. A
-//! vector field obtained this way is symplectic by construction, so trajectories conserve the learned `H` —
-//! the network cannot leak or inject energy no matter how long you roll it out. This is the structural answer
-//! to the integrator-drift problem from the energy lesson: conservation is baked in, not hoped for.
+//! vector field obtained this way is symplectic by construction, so the CONTINUOUS flow of that field
+//! conserves the learned `H` exactly. This is the structural answer to the integrator-drift problem from the
+//! energy lesson: conservation is a property of the field, not something the loss has to hope for.
+//!
+//! ⛔ **The integrator is not symplectic, and this said the network "cannot leak or inject energy no matter
+//! how long you roll it out".** What is Hamiltonian by construction is the continuous field; the only
+//! rollout this crate exposes is [`Hnn::step_rk4`], classical explicit four-stage Runge–Kutta, whose
+//! discrete map conserves neither the learned `H` nor a nearby modified Hamiltonian. It accepts any `dt`
+//! with no bound and no warning. On the ideal mass–spring the module is verified against, RK4's
+//! amplification factor is `|R(i·dt)|` with `R(z) = 1 + z + z²/2 + z³/6 + z⁴/24`, so energy scales as
+//! `|R|^{2n}`. **Measured** on the trained net over 40 time units:
+//!
+//! | `dt` | energy lost | RK4's `\|R\|^{2n}` predicts |
+//! |---|---|---|
+//! | 0.02 | 4.800e-4 | 1.778e-9 |
+//! | 0.10 | 4.854e-4 | 5.549e-6 |
+//! | 0.40 | 6.027e-3 | 5.560e-3 |
+//! | 0.80 | **1.535e-1** | 1.544e-1 |
+//!
+//! At `dt = 0.8` the rollout loses **15.4% of its energy**, tracking RK4's own amplification factor to
+//! 0.6%, and 0.8 is well inside RK4's imaginary-axis stability limit of ~2.83 and is accepted without
+//! complaint. Below `dt ≈ 0.1` the leak is floored around 4.8e-4 by the learned `H` not being exactly
+//! `½(q²+p²)`, three orders above what the integrator contributes there. The single guard in the file ran
+//! 2000 steps at `dt = 0.02` and asserted an 8.9% band, so it sat in the floor-limited regime with no `dt`
+//! sweep and never saw the integrator at all.
+//!
+//! So: the field conserves `H`, the stepper approximately conserves it with error growing in `dt`, and
+//! `the_rk4_stepper_leaks_energy_and_the_leak_grows_with_dt` measures the leak rather than denying it. For a
+//! long horizon, use a small `dt` or supply a symplectic stepper.
 //!
 //! Training uses the network's derivatives w.r.t. its **inputs** `(q, p)` as the predicted velocities, matched
 //! to observed `(q̇, ṗ)`. Those input-derivatives are computed exactly by propagating a first-order two-input
@@ -223,5 +249,44 @@ mod tests {
             max_dev = max_dev.max((0.5 * (qq * qq + pp * pp) - e0).abs());
         }
         assert!(max_dev < 0.1, "HNN rollout should conserve energy: max deviation {max_dev}");
+
+        // ⛔ AND THE STEPPER LEAKS, which the module doc used to deny. Same trained net, same total
+        // simulated time, three step sizes: explicit RK4 is not symplectic, so the drift is a property of
+        // dt and grows with it. Asserting the ORDERING is what makes the claim falsifiable; the single
+        // dt = 0.02 point above cannot distinguish "conserves" from "conserves at this one step size".
+        let horizon = 40.0;
+        let leak = |dt: f64| -> f64 {
+            let (mut qq, mut pp) = (1.5, 0.0);
+            let e0 = 0.5 * (qq * qq + pp * pp);
+            for _ in 0..(horizon / dt) as usize {
+                let (nq, np) = hnn.step_rk4(qq, pp, dt);
+                qq = nq;
+                pp = np;
+            }
+            ((0.5 * (qq * qq + pp * pp) - e0) / e0).abs()
+        };
+        // The independent reference is RK4's own stability polynomial on the ideal field (p, −q), whose
+        // eigenvalues are ±i: energy scales as |R(i·dt)|^{2n} with R(z) = 1 + z + z²/2 + z³/6 + z⁴/24.
+        // That is textbook RK4, not this crate's code, so it is a real reference and not a restatement.
+        let analytic = |dt: f64| -> f64 {
+            let (re, im) = (1.0 - dt * dt / 2.0 + dt.powi(4) / 24.0, dt - dt.powi(3) / 6.0);
+            let r = (re * re + im * im).sqrt();
+            1.0 - r.powf(2.0 * (horizon / dt))
+        };
+        for dt in [0.4, 0.8] {
+            let (measured, want) = (leak(dt), analytic(dt));
+            eprintln!("  RK4 leak over {horizon} time units at dt={dt}: measured {measured:.3e}, RK4 stability polynomial {want:.3e}");
+            assert!(
+                (measured - want).abs() < 0.3 * want,
+                "the leak must track RK4's own amplification factor at dt={dt}: {measured:.3e} vs {want:.3e}"
+            );
+        }
+        // Below dt ≈ 0.1 the leak is floored by the learned H not being exactly ½(q²+p²), not by the
+        // integrator: the RK4 prediction there is 5.5e-6 and the measured floor is three orders larger,
+        // which is why the single dt = 0.02 point above could never have seen the integrator at all.
+        let (l_fine, l_mid) = (leak(0.02), leak(0.1));
+        eprintln!("  learned-H floor: {l_fine:.3e} at dt=0.02 and {l_mid:.3e} at dt=0.1, against RK4 predictions {:.3e} and {:.3e}", analytic(0.02), analytic(0.1));
+        assert!(l_fine > 100.0 * analytic(0.02), "at dt=0.02 the leak must be dominated by the learned H, not RK4");
+        assert!(leak(0.8) > 100.0 * l_fine, "a coarse step must leak far past the learned-H floor: {:.3e} vs {l_fine:.3e}", leak(0.8));
     }
 }
