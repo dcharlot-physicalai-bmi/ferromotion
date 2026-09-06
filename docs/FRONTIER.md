@@ -1,12 +1,23 @@
 # Ferromotion — the SOTA Frontier Map
 
-> **⚑ CURRENT STATUS (v0.32.0, 2026-07-25 — supersedes everything below).** The detailed
-> sections that follow are the historical v0.21-era sweep; **many items marked 🔲 missing in
-> them are in fact shipped.** A full 2026-07-25 re-review (capability-map over all crates +
-> global landscape: Pinocchio/Parry/Rapier/Dojo/Newton/Genesis/cuRobo/OMPL/GTSAM/Isaac) found
-> ferromotion is the closest thing to a Rust-native Pinocchio + control + estimation + planning +
-> differentiable-physics stack, wasm-clean. Scale: **15 crates, ~860 test fns, v0.32.0 on
-> crates.io.**
+> **⚑ CURRENT STATUS (v0.72.0, 2026-09-06 — supersedes everything below).** The detailed
+> sections that follow are the historical v0.21-era sweep, and the 2026-07-25 re-review that used
+> to head this file is itself now historical; **many items marked 🔲 missing in them are in fact
+> shipped.** Scale, measured 2026-09-06: **19 crates, 387 modules, 1,812 test functions in the
+> tree; `cargo test --workspace --all-features` reports 1,844 passing across 43 binaries; v0.72.0
+> on crates.io, all 19 crates published.**
+>
+> ⛔ **This header stood at "v0.32.0, 15 crates, ~860 test fns" for 40 minor releases while
+> declaring itself CURRENT STATUS**, which understated the crate count by four and the test count
+> by 2.1x. A status block that supersedes the document below it has to be dated and re-measured,
+> not written once.
+>
+> ⛔ **It also read "ferromotion is the closest thing to a Rust-native Pinocchio + control +
+> estimation + planning + differentiable-physics stack".** That is a comparative claim about other
+> projects and this repository does not make them. The 2026-07-25 capability map read this tree
+> against the landscape (Pinocchio, Parry, Rapier, Dojo, Newton, Genesis, cuRobo, OMPL, GTSAM,
+> Isaac) to decide *what to look for*; the result is the shipped list below, which stands on its
+> own without a ranking.
 >
 > **Shipped (confirmed in source), not to rebuild:** FK/Jac/RNEA/ABA/floating-base + analytic
 > dynamics derivatives + generic-scalar `gendyn` + **CRBA**; constraint/contact (Delassus, PGS,
@@ -186,7 +197,8 @@ These surfaced as highest-leverage across *multiple* sweeps, or unblock large fa
 - 🔲 **RRT-Connect / RRT\* / Informed-RRT\* / BIT\*** — the real global planner family.
 - 🔲 **IRIS / IRIS-NP** (Deits–Tedrake) — convex free-space region inflation (clarabel SDP).
 - 🔲 **GCS — Graphs of Convex Sets** (Marcucci et al., Science Robotics 2023) — seed-free
-  global trajopt around obstacles. *A genuine moat (no pure-Rust impl exists).*
+  global trajopt around obstacles. *This review did not locate a pure-Rust implementation, which
+  is a search result and not a fact about the ecosystem.*
 - 🔲 **CHOMP / STOMP** (Ratliff 2009 / Kalakrishnan 2011) — SDF-consuming trajectory
   optimizers; nearly free on our SDF.
 - 🔲 **C-IRIS + SOS certified collision-free regions** — *proven* safe regions (auditable).
@@ -323,7 +335,7 @@ citation is not a result.
 1. **Foundational, no-solver, exact-oracle quick wins:** screw/manipulability toolkit,
    GJK/EPA+CCD, RRT-Connect/RRT\*, XPBD, GNC robust kernels, ALIP/Raibert/CPG, CHOMP.
 2. **clarabel-native convex-geometry line:** IRIS → GCS → Safe Flight Corridors →
-   C-IRIS (the certified-region moat), reusing the composite C-space SDF.
+   C-IRIS (certified collision-free regions), reusing the composite C-space SDF.
 3. **Whole-body/legged deployment tier:** FDDP/box-DDP → WBIC bridge → step-timing → TOWR.
 4. **Perception backbone:** iSAM2 → GNC → ICP/GICP → MSCKF VIO → MHE.
 5. **Differentiable-physics & learning:** differentiable contact stepper → analytic LCP

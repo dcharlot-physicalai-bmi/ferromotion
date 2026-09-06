@@ -8,21 +8,25 @@ GCS/IRIS, ALGAMES/DP-iLQR, …)._
 
 ## The strategic read (both sweeps corroborate)
 
-- **The Rust model-based core is an open lane.** Mid-2026 web sweep verdict: no Rust-native
-  equivalent of Pinocchio exists — no crate with Featherstone dynamics + analytical derivatives +
-  constrained/contact dynamics + an optimal-control stack. Ferromotion is the closest thing; the
-  gaps below are what closes the claim.
+- **The Rust model-based core is where this stack invests.** The mid-2026 sweep looked for a
+  Rust crate combining Featherstone dynamics, analytical derivatives, constrained/contact dynamics
+  and an optimal-control stack, and did not locate one; that is what the sweep found, not a fact
+  about what exists. Either way the gaps listed below are the work, and they are stated as work
+  rather than as a ranking against anyone else's software.
 - **Differentiability found its real job: calibration, not policy learning.** The industry's fast
   paths (MJWarp, Genesis rigid) dropped differentiability; gradient-based real-to-sim/sys-ID is the
   validated 2026 use (1–2 orders over black-box). MuJoCo 3.5 shipped a SysID toolbox; actuator/sensor
   fidelity (delays, electrical dynamics) is the sim-to-real agenda.
-- **Our unclaimed seams, named by the sweeps**: portable/deterministic/memory-lean differentiable
-  stack; maintained LNN/HNN/VIN model classes (ferromotion-learn IS this); a maintained
-  differentiable-NLS + Lie-group layer (theseus frozen since 2024-09); permissive answers to the
-  monetized choke points (Ruckig Pro waypoints). Sampling-MPC — where the field's momentum actually
-  is — we already cover (MPPI/CEM/iCEM/DIAL/tube/Tiny/SRBD).
-- **We do not out-FPS Newton on NVIDIA silicon.** GPU scale is not this library's axis; the
-  browser/wasm + determinism + structure axis is.
+- **What this stack invests in, named by the sweeps**: a portable, deterministic, memory-lean
+  differentiable stack; LNN/HNN/VIN model classes (ferromotion-learn IS this); a differentiable-NLS
+  + Lie-group layer; permissively-licensed jerk-limited waypoint generation. Sampling-MPC, where
+  the field's momentum is, is already covered (MPPI/CEM/iCEM/DIAL/tube/Tiny/SRBD).
+  ⛔ *An earlier version of this bullet listed these as "our unclaimed seams" and justified each by
+  naming another project's maintenance state or paywall. This repository states what it builds and
+  why; it does not rank itself against other people's software, and a gap in someone else's roadmap
+  is not a reason for anything in ours.*
+- **Raw GPU throughput is not this library's axis.** The axis is browser/wasm reach, determinism,
+  and structure-preserving formulation.
 
 ## Ranked gaps (corroborated across sweeps + inventory)
 
