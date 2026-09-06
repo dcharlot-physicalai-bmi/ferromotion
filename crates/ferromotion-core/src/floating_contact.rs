@@ -358,4 +358,43 @@ mod tests {
         }
         t
     }
+
+    /// **The contact stiffnesses this repo ships must stay inside the explicit-integration limit.**
+    ///
+    /// A foot on the floor is a spring-damper against the effective mass at that foot, integrated
+    /// explicitly in the damper, so the condition is the same one `Admittance::stability_limit` and
+    /// `Rotor::max_stable_dt` solve: `dt²·(kn/m) + 2·dt·(kd/m) ≤ 4`. Nothing here reports that bound —
+    /// `kn`, `kd` and `dt` are all the caller's — so this pins the configurations the repo itself uses.
+    ///
+    /// Measured margins at the time of writing, over effective masses from 0.5 to 6 kg: the tightest is
+    /// **5.0x** (this module's own `kn = 2e4, kd = 150, dt = 1e-3` at 0.5 kg) and the loosest 164x.
+    /// Comfortable, and that is the point of recording it: stiffening a contact or coarsening a step
+    /// without checking is how the margin disappears, and the failure is silent.
+    #[test]
+    fn the_shipped_contact_parameters_stay_inside_the_explicit_integration_limit() {
+        // (kn, kd, dt, where it is used)
+        let shipped = [
+            (2.0e4f64, 150.0f64, 1e-3f64, "this module's contact test"),
+            (1.5e4, 120.0, 2e-4, "this module's gait test"),
+            (4.0e3, 40.0, 1e-3, "gpu tree gait"),
+            (6.0e3, 80.0, 1e-3, "gpu floating gait"),
+        ];
+        let limit = |kn: f64, kd: f64, m: f64| {
+            let (w2, gamma) = (kn / m, kd / m);
+            (-gamma + (gamma * gamma + 4.0 * w2).sqrt()) / w2
+        };
+        let mut tightest = f64::INFINITY;
+        for (kn, kd, dt, what) in shipped {
+            // 0.5 kg is a deliberately small effective mass: a light foot link is the worst case, since
+            // the bound falls as the mass does.
+            let lim = limit(kn, kd, 0.5);
+            let margin = lim / dt;
+            assert!(margin > 3.0, "{what}: dt {dt:.0e} is only {margin:.1}x inside the {lim:.3e} s limit");
+            tightest = tightest.min(margin);
+        }
+        assert!(tightest < 20.0, "if every margin is now huge, the fixtures changed and this guard is no longer watching what it was written for: tightest {tightest:.1}x");
+        // and the bound must actually tighten with stiffness, or it is not this bound
+        assert!(limit(1.0e6, 150.0, 0.5) < limit(2.0e4, 150.0, 0.5), "a stiffer contact must permit a smaller step");
+        assert!(limit(2.0e4, 150.0, 0.1) < limit(2.0e4, 150.0, 6.0), "a lighter effective mass must too");
+    }
 }
