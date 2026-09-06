@@ -5,10 +5,22 @@
 //! arXiv 2606.15918). This review did not locate a figure for the other thing a body spends its day
 //! doing, which is holding a posture it is already in.
 //!
-//! An earthling holds one for almost nothing. A horse's stay apparatus locks the limb with ligaments and
-//! tendons that do not fatigue, so prolonged standing costs virtually no muscular effort; a bird's digital
-//! tendon-locking mechanism is a ratchet whose grip is passive at zero muscular energy. Neither is a
-//! controller. Both are ANATOMY.
+//! Some earthlings hold one for almost nothing. A horse's stay apparatus locks the limb with ligaments
+//! and tendons that do not fatigue, so prolonged standing costs virtually no muscular effort. That is
+//! ANATOMY, not a controller, and it is the existence proof this bench is measured against.
+//!
+//! ⛔ **The bird is NOT a second example, and the first version of this file said it was.** The claim that
+//! a perching bird's digital tendon-locking mechanism holds it asleep at zero muscular effort is the
+//! textbook story and it was **experimentally refuted**: sleeping European starlings flex knee and ankle
+//! only slightly and do not grip a 6 mm perch with the distal two-thirds of the toes; passive leg flexion
+//! produces no toe flexion under anaesthesia; anaesthetised starlings cannot stay perched even with the
+//! mechanism intact; and birds whose digital flexor tendons were severed slept on the perch normally
+//! (Galton & Shepherd, J Exp Zool A 317:262-273, 2012, <https://doi.org/10.1002/jez.1714>). The tendon-locking
+//! mechanism is real and does other work; automatic perching during sleep is not what it does.
+//!
+//! That correction is worth more than the example it damaged, because it is the mechanism robotics
+//! imported: avian-inspired perching claws are built on the refuted story. A mechanism can be anatomically
+//! real, widely cited, copied into hardware, and still not do the job it is famous for.
 //!
 //! A robot has no such element. It pays gravity-compensation torque as current, and current as copper
 //! loss, for as long as it stands there. That much is obvious. What is not obvious is the SECOND-ORDER
@@ -161,7 +173,8 @@ fn main() {
          A latch removes the integral entirely, and with it the thermal term that makes it grow. What becomes\n  \
          possible is a body that can hold a posture indefinitely, which is the precondition for waiting,\n  \
          watching and reacting rather than cycling. Biology solved it with anatomy, not control: the equine\n  \
-         stay apparatus and the avian tendon lock both hold at zero metabolic cost.",
+         stay apparatus holds a standing limb at virtually no muscular effort. Note what the header says\n  \
+         about the BIRD: that second example is the refuted one, and it is the one robotics copied.",
         horizontal.2, horizontal.4, horizontal.4 * 144.0
     );
     println!(
