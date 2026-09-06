@@ -1274,6 +1274,7 @@ dependencies = [
  "ferromotion-rod",
  "ferromotion-ruckig",
  "ferromotion-tactile",
+ "nalgebra",
 ]
 
 [[package]]

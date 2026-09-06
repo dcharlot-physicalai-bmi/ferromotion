@@ -30,3 +30,6 @@ ferromotion-models = { path = "../ferromotion-models", version = "0.72.0" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+nalgebra = { workspace = true }
