@@ -154,6 +154,67 @@ pub fn optimal_compute(error_of_compute: &dyn Fn(f64) -> f64, latency_of_compute
     best
 }
 
+/// The sensing budget that meets an accuracy target inside a loop's delay margin.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SensingBudget {
+    /// Minimum continuous sensing power (W).
+    pub power_w: f64,
+    /// Independent samples the target accuracy requires, `1/ε²`.
+    pub samples: f64,
+    /// Parallel channels needed once integration time is capped by the margin.
+    pub channels: f64,
+    /// The integration time actually used (s) — the delay budget, since time is the cheap axis.
+    pub integration_s: f64,
+}
+
+/// **The sensing power floor a stability margin imposes: `P ≥ e_s / (ε²·T)`.**
+///
+/// This joins the two halves of the loop that are usually priced apart. Section 3 above prices COMPUTE
+/// against latency. This prices SENSING against the same latency, and the result is a floor rather than
+/// an optimum, because accuracy has two currencies and only one of them is capped.
+///
+/// # The derivation
+///
+/// Counting-limited sensing needs `N = 1/ε²` independent samples for relative error `ε`. Two routes buy
+/// them and they are substitutes:
+///
+/// * **Serial integration.** Integrate for `T`, collecting `T/τ_c` independent samples. Berg & Purcell's
+///   point is that this costs essentially no energy — diffusion does the work — so **time is the cheap
+///   axis** (Berg & Purcell 1977, `doi:10.1016/S0006-3495(77)85544-6`).
+/// * **Parallel channels.** Run `n` transducers at once. This costs `n·e_s/τ_c` watts and no delay.
+///
+/// A control loop caps the first route. The delay margin from [`delay_margin_seconds`] is a hard ceiling
+/// on `T`, so once integration is pushed to that ceiling every remaining sample must be bought with
+/// power:
+///
+/// ```text
+/// n ≥ 1 / (ε² · T/τ_c)      and      P = n·e_s/τ_c  ⇒  P ≥ e_s / (ε²·T)
+/// ```
+///
+/// **The floor is inversely proportional to the delay budget.** Halving the tolerable delay doubles the
+/// sensing power bill for the same accuracy, and `τ_c` cancels out entirely: the correlation time decides
+/// how the samples are split between the two routes, not how many joules the answer costs.
+///
+/// # Why this is the bridge and not a restatement
+///
+/// A stability margin is normally spent on compute or on actuator bandwidth. It is also a sensing energy
+/// budget, and nothing in this module priced it that way. It also inverts a habit: the cheapest way to cut
+/// a sensing bill is not a better transducer, it is a plant that tolerates more delay. That is a mechanical
+/// change with an electrical payoff.
+///
+/// `None` unless every argument is finite and positive with `rel_error < 1`.
+pub fn sensing_power_floor(rel_error: f64, delay_budget_s: f64, energy_per_sample_j: f64, correlation_time_s: f64) -> Option<SensingBudget> {
+    let ok = [rel_error, delay_budget_s, energy_per_sample_j, correlation_time_s].iter().all(|v| v.is_finite() && *v > 0.0);
+    if !ok || rel_error >= 1.0 {
+        return None;
+    }
+    let samples = 1.0 / (rel_error * rel_error);
+    let per_channel = delay_budget_s / correlation_time_s; // samples one channel can gather in the budget
+    let channels = (samples / per_channel).max(1.0);
+    let power_w = channels * energy_per_sample_j / correlation_time_s;
+    power_w.is_finite().then_some(SensingBudget { power_w, samples, channels, integration_s: delay_budget_s })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,5 +360,66 @@ mod tests {
         eprintln!("   the optimum sits at the margin boundary, so the binding constraint is LATENCY, not accuracy:");
         eprintln!("   widening the margin is worth more than shrinking the model.");
         assert!(best.latency_samples > 0.5 * margin as f64, "the optimum should be pressed against the margin");
+    }
+
+    /// **The bridge: a plant's delay margin IS a sensing power budget.**
+    ///
+    /// Everything needed for this was already in the tree and never joined. `delay_margin_seconds` turns a
+    /// plant and its gain into a hard latency ceiling; `sensing_power_floor` turns that ceiling into the
+    /// minimum watts an accuracy target costs. The test asserts the shape of the law rather than one number,
+    /// because the shape is the claim: the floor is inversely proportional to the delay budget, quadratic in
+    /// the accuracy demanded, and independent of the correlation time.
+    #[test]
+    fn a_plants_delay_margin_sets_a_sensing_power_floor() {
+        let (a, b, _) = double_integrator();
+        let k = lqr_gain(&a, &b, &DMatrix::identity(2, 2), &DMatrix::from_row_slice(1, 1, &[0.1]));
+        let period = 0.01;
+        let budget = delay_margin_seconds(&a, &b, &k, period, 60).expect("this loop has a margin");
+        assert!(budget > 0.0, "a stabilising gain must tolerate some delay");
+
+        // A transducer costing 1 nJ per independent sample with a 1 ms correlation time, asked for 1% accuracy.
+        let (e_s, tau_c, eps) = (1e-9, 1e-3, 0.01);
+        let f = sensing_power_floor(eps, budget, e_s, tau_c).expect("well-posed");
+        assert_eq!(f.samples, 1.0 / (eps * eps), "1% accuracy is 10,000 independent samples");
+        assert!((f.power_w - e_s / (eps * eps * budget)).abs() < 1e-18, "the floor is e_s/(eps^2 T)");
+        eprintln!(
+            "  delay margin {:.1} ms -> {:.0} samples over {:.0} channels -> {:.3} mW floor",
+            budget * 1e3, f.samples, f.channels, f.power_w * 1e3
+        );
+
+        // 1. Inversely proportional to the delay budget: half the tolerable delay, twice the power.
+        let half = sensing_power_floor(eps, budget / 2.0, e_s, tau_c).expect("well-posed");
+        assert!((half.power_w / f.power_w - 2.0).abs() < 1e-9, "halving the delay must double the floor, got {:.4}x", half.power_w / f.power_w);
+
+        // 2. Quadratic in accuracy: ten times tighter costs a hundred times the power.
+        let tight = sensing_power_floor(eps / 10.0, budget, e_s, tau_c).expect("well-posed");
+        assert!((tight.power_w / f.power_w - 100.0).abs() < 1e-6, "10x accuracy must cost 100x, got {:.1}x", tight.power_w / f.power_w);
+
+        // 3. Independent of correlation time: tau_c splits the samples between routes, it does not price them.
+        let slow = sensing_power_floor(eps, budget, e_s, tau_c * 10.0).expect("well-posed");
+        assert!((slow.power_w / f.power_w - 1.0).abs() < 1e-9, "tau_c must cancel, got {:.4}x", slow.power_w / f.power_w);
+        // A slower transducer needs MORE channels (each gathers fewer samples in the same budget) and each
+        // costs proportionally LESS power (e_s/tau_c falls), which is exactly why tau_c cancels. I asserted
+        // this backwards first and the test caught it.
+        assert!(
+            (slow.channels / f.channels - 10.0).abs() < 1e-9,
+            "a 10x slower transducer needs 10x the channels, got {:.3}x",
+            slow.channels / f.channels
+        );
+
+        // 4. The floor is a floor: one channel integrating for the whole budget cannot beat it.
+        let one_channel_samples = budget / tau_c;
+        assert!(one_channel_samples < f.samples, "if one channel sufficed there would be no floor to report");
+    }
+
+    /// `sensing_power_floor` refuses what it cannot answer for.
+    #[test]
+    fn sensing_power_floor_refuses_unusable_input() {
+        assert!(sensing_power_floor(0.01, 0.05, 1e-9, 1e-3).is_some(), "control");
+        assert!(sensing_power_floor(0.0, 0.05, 1e-9, 1e-3).is_none(), "zero error demands infinite samples");
+        assert!(sensing_power_floor(1.0, 0.05, 1e-9, 1e-3).is_none(), "100% error is not an accuracy target");
+        assert!(sensing_power_floor(0.01, 0.0, 1e-9, 1e-3).is_none(), "no delay budget");
+        assert!(sensing_power_floor(0.01, 0.05, 1e-9, f64::NAN).is_none(), "non-finite correlation time");
+        assert!(sensing_power_floor(f64::NAN, 0.05, 1e-9, 1e-3).is_none(), "non-finite accuracy");
     }
 }
