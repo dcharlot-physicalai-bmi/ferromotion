@@ -129,6 +129,14 @@ mod tests {
     /// propagated exactly and the distance read from the closed-form `W₂`. The claim under test is that the
     /// error grows **linearly** in `ε` — not exponentially — which is what makes "reduce the training loss" a
     /// well-posed instruction.
+    ///
+    /// ⛔ **This test calls no item of this module, and its result is an identity of its own arithmetic.**
+    /// Starting from `m = 0`, the recurrence `m -= (a·m − ε)·dt` is exactly proportional to `ε`, and `var`
+    /// does not depend on `ε` at all, so `score_part/ε` is constant to rounding: the three measured ratios
+    /// agree to **7.6e-15** against a 2% assertion bar. It cannot fail for any implementation, correct or
+    /// not. It is kept because the closed-form propagation is a useful sanity model of the reverse SDE, but
+    /// it is a check on THAT MODEL. The linearity of the shipped bound in `eps_score` is asserted on the
+    /// shipped function, in `the_three_error_terms_respond_to_their_own_levers`.
     #[test]
     fn sampler_error_grows_linearly_in_the_score_error() {
         let target_var = 0.25f64;
@@ -189,8 +197,18 @@ mod tests {
         assert!(ratios.last().unwrap() / ratios[0] < 1.05, "linear, not exponential: {ratios:?}");
     }
 
-    /// The second structural claim: the amplification is set by the **diffusion** horizon and grows like
-    /// `√T`, not like `e^T`. Measured on the same ODE by sweeping the horizon at a fixed score error.
+    /// The second structural claim: the amplification is set by the **diffusion** horizon and grows
+    /// polynomially, not like `e^T`. Measured on the same ODE by sweeping the horizon at a fixed score error.
+    ///
+    /// ⛔ **This test calls NO item of this module, and it does not evidence the `√T` exponent.** It
+    /// integrates a five-line affine recurrence written inside itself, so it is a statement about that toy
+    /// reverse-SDE model and not about [`score_to_tv`]. Measured, its mean deviation grows **6.571x from
+    /// T = 1 to T = 8** where `√T` growth would be 2.83x — closer to linear in `T` than to `√T`. The two
+    /// quantities are different (a mean deviation of a particular reverse SDE under a constant score
+    /// offset, against an `L²`-score-error-to-TV bound), and the claim the two share is the one this test
+    /// actually checks: **polynomial, not exponential** — 6.571x against `e⁷ = 1097x`. The `√T` exponent of
+    /// the shipped bound is asserted directly on the shipped function in
+    /// `the_three_error_terms_respond_to_their_own_levers`, which is where it belongs.
     #[test]
     fn the_amplification_grows_with_the_diffusion_horizon_not_exponentially_in_it() {
         let target_var = 0.25f64;
@@ -221,8 +239,15 @@ mod tests {
             prev = dev;
         }
         let ratio = run(8.0) / run(1.0);
-        eprintln!("   amplification from T=1 to T=8: {ratio:.3}x (exponential would be e^7 = {:.0}x)", 7.0f64.exp());
+        eprintln!(
+            "   amplification from T=1 to T=8: {ratio:.3}x (exponential would be e^7 = {:.0}x; the shipped \
+             bound's sqrt(T) over the same range is {:.3}x, so this MODEL is not evidence for that exponent)",
+            7.0f64.exp(), 8.0f64.sqrt()
+        );
         assert!(ratio < 20.0, "growth in the diffusion horizon must be polynomial, got {ratio}x");
+        // Stated rather than glossed: this toy model grows FASTER than the shipped bound's sqrt(T). Both
+        // are polynomial, which is the shared claim; the exponent is not what this test establishes.
+        assert!(ratio > 8.0f64.sqrt(), "if the model ever matched sqrt(T) this comment would need rewriting, ratio {ratio:.3}");
     }
 
     /// The additive decomposition is the useful part of the bound, because the three terms are reduced by
@@ -236,6 +261,17 @@ mod tests {
         // noising longer kills only the mixing term
         let longer = score_to_tv(2.0, 20.0, 1e-4, 1.0, 16, 1.0, 1e-2).unwrap();
         assert!(longer.mixing < base.mixing * 1e-6, "mixing decays exponentially in T");
+        // ⛔ AND IT COSTS sqrt(T) ON THE OTHER TWO, which nothing here asserted. The only two-horizon
+        // comparison in this test looked at `.mixing` alone, and the one `.score` comparison below is
+        // between two calls at the SAME T. So the module's headline factor was free: making the score
+        // term `eps_score * t_diffusion.exp()` — exponential in T, the exact thing the module doc says it
+        // is not — passed every assertion in this file. sqrt(20/5) = 2 exactly in f64.
+        assert!((longer.score / base.score - 2.0).abs() < 1e-12, "the score term must grow as sqrt(T): {} vs 2.0", longer.score / base.score);
+        assert!((longer.discretization / base.discretization - 2.0).abs() < 1e-12, "the discretisation term must grow as sqrt(T) too: {}", longer.discretization / base.discretization);
+        // and quadrupling T again multiplies both by exactly 2 again, which an exponent other than 1/2
+        // cannot do twice in a row
+        let longest = score_to_tv(2.0, 80.0, 1e-4, 1.0, 16, 1.0, 1e-2).unwrap();
+        assert!((longest.score / longer.score - 2.0).abs() < 1e-12, "sqrt(T) must hold across the whole range, not at one pair");
         // finer steps kill only the discretisation term
         let finer = score_to_tv(2.0, 5.0, 1e-8, 1.0, 16, 1.0, 1e-2).unwrap();
         assert!((finer.discretization / base.discretization - 0.01).abs() < 1e-9, "discretisation scales as sqrt(h)");

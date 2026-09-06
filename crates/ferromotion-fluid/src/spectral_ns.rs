@@ -170,6 +170,87 @@ mod verification {
         assert!(err < 1e-9, "spectral NS did not reproduce TG decay: {err}");
     }
 
+    /// **The advection term, against an analytic reference, because nothing else here touches it.**
+    ///
+    /// ⛔ **Both verification tests above use the single-mode Taylor–Green field, whose nonlinear term is
+    /// identically zero** — the doc on the first one says so itself. Every assertion in them is satisfied
+    /// by the integrating factor `e^{−νk²dt}` alone, so replacing the physical-space product `u·∇ω` with
+    /// ZERO, turning this Navier–Stokes solver into a decoupled heat equation, passed both. Worse, all
+    /// four active modes of that field share `|k|² = 2k²`, so scaling `ψ̂` by any function of `k²` keeps
+    /// the cancellation exact and even a wrong Poisson solve passes. The two `dmd.rs` tests do drive this
+    /// solver with a two-mode field, but they compare DMD against the solver's own snapshots, which is the
+    /// solver against itself.
+    ///
+    /// This uses a stream function with two modes at different `|k|`, so nothing cancels, and compares one
+    /// step at `ν = 0` against `−u·∇ω` derived analytically from that stream function rather than from any
+    /// code under test:
+    ///
+    /// ```text
+    ///   ψ  = A sin x sin y + B sin 2x cos y
+    ///   ω  = −∇²ψ = 2A sin x sin y + 5B sin 2x cos y
+    ///   u  =  ∂ψ/∂y =  A sin x cos y − B sin 2x sin y
+    ///   v  = −∂ψ/∂x = −A cos x sin y − 2B cos 2x cos y
+    /// ```
+    ///
+    /// The residual must be first order in `dt`, since IF-RK2 gives `(ω₁−ω₀)/dt = N(ω₀) + O(dt)`. Checking
+    /// the ORDER is what separates "the formula agrees" from "the tolerance is loose".
+    #[test]
+    fn the_advection_term_matches_an_analytic_two_mode_reference() {
+        let n = 64;
+        let l = 2.0 * PI;
+        let (aa, bb) = (1.0f64, 0.7f64);
+        let at = |i: usize, j: usize| (i as f64 * l / n as f64, j as f64 * l / n as f64);
+        let omega = |x: f64, y: f64| 2.0 * aa * x.sin() * y.sin() + 5.0 * bb * (2.0 * x).sin() * y.cos();
+        // −u·∇ω, the right-hand side at ν = 0
+        let rhs = |x: f64, y: f64| {
+            let u = aa * x.sin() * y.cos() - bb * (2.0 * x).sin() * y.sin();
+            let v = -aa * x.cos() * y.sin() - 2.0 * bb * (2.0 * x).cos() * y.cos();
+            let wx = 2.0 * aa * x.cos() * y.sin() + 10.0 * bb * (2.0 * x).cos() * y.cos();
+            let wy = 2.0 * aa * x.sin() * y.cos() - 5.0 * bb * (2.0 * x).sin() * y.sin();
+            -(u * wx + v * wy)
+        };
+
+        let mut w0 = vec![0.0; n * n];
+        let mut exact = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let (x, y) = at(i, j);
+                w0[i * n + j] = omega(x, y);
+                exact[i * n + j] = rhs(x, y);
+            }
+        }
+        let scale = exact.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        assert!(scale > 1.0, "this field must have a substantial advection term, max |u·∇ω| = {scale}");
+
+        // relative residual of one inviscid step against the analytic right-hand side
+        let residual = |dt: f64| -> f64 {
+            let mut ns = SpectralNs::new(&w0, n, l, 0.0);
+            ns.step(dt);
+            let w1 = ns.vorticity();
+            (0..n * n).fold(0.0f64, |m, i| m.max(((w1[i] - w0[i]) / dt - exact[i]).abs())) / scale
+        };
+        let (r_coarse, r_fine) = (residual(1e-3), residual(1e-4));
+        eprintln!("  advection vs analytic: max |u·∇ω| = {scale:.3}, residual {r_coarse:.3e} at dt=1e-3, {r_fine:.3e} at dt=1e-4 (ratio {:.2})", r_coarse / r_fine);
+        assert!(r_fine < 1e-2, "one inviscid step must reproduce the analytic advection: {r_fine:.3e}");
+        let order = r_coarse / r_fine;
+        assert!((5.0..20.0).contains(&order), "the residual must be FIRST ORDER in dt, ratio was {order:.2} for a 10x step reduction");
+
+        // And 2-D Euler advection conserves enstrophy while moving the field a long way, which is the
+        // pair of facts a zeroed advection term cannot produce: it would conserve enstrophy by doing
+        // nothing at all.
+        let mut ns = SpectralNs::new(&w0, n, l, 0.0);
+        let z0 = ns.enstrophy();
+        for _ in 0..2000 {
+            ns.step(1e-3);
+        }
+        let w = ns.vorticity();
+        let drift = (ns.enstrophy() / z0 - 1.0).abs();
+        let moved = (0..n * n).fold(0.0f64, |m, i| m.max((w[i] - w0[i]).abs())) / scale;
+        eprintln!("  inviscid rollout: enstrophy drift {drift:.2e} over 2 s, field moved {moved:.3} of the advection scale");
+        assert!(drift < 1e-3, "inviscid 2-D advection must conserve enstrophy, drifted {drift:.2e}");
+        assert!(moved > 0.1, "the field must actually be advected, it moved only {moved:.3e}");
+    }
+
     /// Enstrophy decays monotonically (viscous dissipation) and tracks the analytic `e^{−4νk²t}`
     /// rate (enstrophy ∝ ω²).
     #[test]
