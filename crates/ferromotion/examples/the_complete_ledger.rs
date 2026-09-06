@@ -13,7 +13,8 @@
 //! ⛔ **The first version of this file was titled "the complete ledger", named `E_compute` in its own
 //! opening line as the term it was extending, and then omitted it.** At this workspace's own published
 //! platform constant (15 W, Orin NX policy-only, from the punch-energetics bench) that is 473 MJ over a
-//! year — LARGER than the build term. It also priced the hold as copper loss alone while the same repo
+//! year — LARGER than the build term at the nominal intensity, and the largest single term at the low end
+//! of the intensity span. It also priced the hold as copper loss alone while the same repo
 //! states 4.0 W per actuator for drive electronics, understating the hold sevenfold. Both are counted
 //! here, both are stated inputs, and the composition below is what changed as a result.
 //!
@@ -28,7 +29,18 @@
 //!
 //! **The result is that no term dominates.** Which one is the bill depends on the mission's shape, and a
 //! ledger that reports a rate cannot say that. That is the finding, not any single number — and counting
-//! the two terms the first version omitted turned a two-term contest into a four-way one at one year.
+//! the two terms the first version omitted turned a two-term contest into a four-way one at one year:
+//! at the nominal inputs the one-year split is build 20.8 / compute 24.5 / hold 22.7 / carry 32.1 percent.
+//!
+//! ⛔ **And that split is a point in a box, not a finding.** Two of the inputs it depends on are not
+//! measurements of this body: the embodied intensities, which this file's own note says span roughly an
+//! order of magnitude, and the chassis cost of transport, whose sourced legged span is 0.2 to 15. Swept
+//! across that box the one-year dominant term is compute, carry OR build depending on the corner, so the
+//! file now prints the sweep and says which claim survives it. What survives is that the composition is a
+//! CONTEST with no negligible term, and that the two constants deciding it are the body's embodied
+//! intensity and its chassis's cost of transport. Those two are the measurements that would make it a
+//! number. An earlier version printed the nominal split as four typed literals, which cannot notice that
+//! a constant moved; every figure in the output is computed now.
 //!
 //! Run: `cargo run -p ferromotion --example the_complete_ledger`
 
@@ -69,6 +81,17 @@ const P_ELECTRONICS_PER_JOINT_W: f64 = 4.0;
 const P_COMPUTE_W: f64 = 15.0;
 /// Embodied intensity for the sensor head, which is electronics and therefore far higher per kilogram.
 const SENSOR_INTENSITY_MJ_PER_KG: f64 = 250.0;
+/// Cost of transport for the chassis the arm rides on. `OwnedCapability::owned_cost_j` carries the
+/// sourced table; ASIMO's 2.0 (54 kg, 1.8 kW at 1.5 m/s, Sakagami et al. 2002) is the mid-legged point.
+///
+/// ⛔ **An earlier version of this file swept at 3.2 with no source, and that single unsourced number
+/// set the term it reported as dominant.** The sourced span for legged systems runs 0.2 to 15, so the
+/// composition is now reported ACROSS that span rather than at one point inside it.
+const COT_NOMINAL: f64 = 2.0;
+/// The chassis span the composition is tested against: every value sourced in `owned_cost_j`'s table.
+const COT_SPAN: [(&str, f64); 4] = [("human 0.2", 0.2), ("Cassie 0.7", 0.7), ("ASIMO 2.0", 2.0), ("BigDog 15", 15.0)];
+/// The embodied-intensity span this file's own constants declare: "roughly an order of magnitude".
+const INTENSITY_SPAN: [(&str, f64); 3] = [("0.3x", 0.3), ("1x", 1.0), ("3x", 3.0)];
 
 /// Steady holding power for a posture, by the same route as `joules_to_stand_still.rs`.
 fn holding_watts(q: &[f64]) -> f64 {
@@ -102,17 +125,37 @@ impl Ledger {
     fn total(&self) -> f64 {
         self.build_j + self.compute_j + self.hold_j + self.sense_j + self.carry_j
     }
+    fn terms(&self) -> [(&'static str, f64); 5] {
+        [("build", self.build_j), ("compute", self.compute_j), ("hold", self.hold_j), ("sense", self.sense_j), ("carry", self.carry_j)]
+    }
     fn dominant(&self) -> &'static str {
-        let terms = [("build", self.build_j), ("compute", self.compute_j), ("hold", self.hold_j), ("sense", self.sense_j), ("carry", self.carry_j)];
-        terms.iter().fold(("none", f64::NEG_INFINITY), |acc, &(n, v)| if v > acc.1 { (n, v) } else { acc }).0
+        self.terms().iter().fold(("none", f64::NEG_INFINITY), |acc, &(n, v)| if v > acc.1 { (n, v) } else { acc }).0
+    }
+    /// The largest single term in joules. Used to say whether anything actually has a majority.
+    fn largest(&self) -> f64 {
+        self.terms().iter().fold(f64::NEG_INFINITY, |a, &(_, v)| a.max(v))
     }
 }
 
 fn ledger(mission_s: f64, distance_m: f64, cost_of_transport: f64, hold_w: f64, sense_w: f64) -> Ledger {
+    ledger_at(mission_s, distance_m, cost_of_transport, hold_w, sense_w, 1.0)
+}
+
+/// The same ledger with both embodied intensities scaled together, so the composition can be tested
+/// against the order-of-magnitude span this file's own constants declare.
+fn ledger_at(mission_s: f64, distance_m: f64, cost_of_transport: f64, hold_w: f64, sense_w: f64, intensity_scale: f64) -> Ledger {
     let arm_mass = 3.2 + 2.1 + 0.9;
-    let arm = EmbodiedActuator { mass_kg: arm_mass, intensity_mj_per_kg: ARM_INTENSITY_MJ_PER_KG, operating_w: hold_w };
+    let arm = EmbodiedActuator {
+        mass_kg: arm_mass,
+        intensity_mj_per_kg: ARM_INTENSITY_MJ_PER_KG * intensity_scale,
+        operating_w: hold_w,
+    };
     let sensor = OwnedCapability {
-        built: EmbodiedActuator { mass_kg: 0.120, intensity_mj_per_kg: SENSOR_INTENSITY_MJ_PER_KG, operating_w: 0.0 },
+        built: EmbodiedActuator {
+            mass_kg: 0.120,
+            intensity_mj_per_kg: SENSOR_INTENSITY_MJ_PER_KG * intensity_scale,
+            operating_w: 0.0,
+        },
         quiescent_w: sense_w,
     };
     let build_j = arm.build_j().expect("finite") + sensor.built.build_j().expect("finite");
@@ -157,7 +200,7 @@ fn main() {
     ];
     let mut dominants = Vec::new();
     for (label, t, d) in cases {
-        let l = ledger(t, d, 3.2, hold_w, floor.power_w);
+        let l = ledger(t, d, COT_NOMINAL, hold_w, floor.power_w);
         let tot = l.total();
         let pct = |v: f64| 100.0 * v / tot;
         println!(
@@ -172,21 +215,76 @@ fn main() {
         dominants.push(l.dominant());
     }
 
+    // ⛔ The one-year composition used to be four typed literals in this println. Typed literals cannot
+    // notice that a constant moved, and two of the constants they depended on were unsourced. They are
+    // computed now, and the sweep below reports how far the answer travels inside the stated uncertainty.
+    let year = ledger(365.0 * 86400.0, 5_000_000.0, COT_NOMINAL, hold_w, floor.power_w);
+    let yr = |v: f64| 100.0 * v / year.total();
+
     println!("\n  WHAT THE LEDGER SAYS");
     let switched = dominants.windows(2).any(|w| w[0] != w[1]);
     if switched {
         println!("  The dominant term CHANGES with the mission: {}.", dominants.join(" -> "));
         println!("  A ledger that reports a rate cannot express that, which is the argument for carrying");
         println!("  five terms rather than the two it had.");
-        println!("  ⭐ AND AT ONE YEAR IT IS A FOUR-WAY CONTEST: build 17.4 / compute 20.5 / hold 19.0 /");
-        println!("  carry 43.0 percent. The first version of this file omitted compute and understated the");
-        println!("  hold sevenfold, which made the same mission look like a two-term contest at 27.7 / 68.2.");
-        println!("  Counting the missing terms did not weaken the finding, it sharpened it.");
+        println!(
+            "  ⭐ AND AT ONE YEAR NO TERM HAS A MAJORITY: build {:.1} / compute {:.1} / hold {:.1} / carry {:.1}",
+            yr(year.build_j), yr(year.compute_j), yr(year.hold_j), yr(year.carry_j)
+        );
+        println!("  percent, largest is {} at {:.1}%. The first version of this file omitted compute and", year.dominant(), yr(year.largest()));
+        println!("  understated the hold sevenfold, which made the same mission look like a two-term");
+        println!("  contest at 27.7 / 68.2. Counting the missing terms did not weaken the finding.");
     } else {
         println!("  On these inputs one term dominates at every duration tested: {}.", dominants[0]);
         println!("  That is an honest negative result, not a vindication of the two-term ledger: it says");
         println!("  the crossover for THIS body lies outside the range swept, and the range is stated.");
     }
+    // HOW FAR THE ANSWER TRAVELS INSIDE THE STATED UNCERTAINTY. Two constants drive the one-year
+    // composition and neither is a measurement of this body: the embodied intensities, which the module
+    // note says span roughly an order of magnitude, and the chassis cost of transport, whose sourced
+    // legged span is 0.2 to 15. Reporting one point inside that box is reporting a choice as a finding.
+    println!("\n  SENSITIVITY OF THE ONE-YEAR COMPOSITION (dominant term, its share)");
+    print!("  {:<14}", "intensity");
+    for (label, _) in COT_SPAN {
+        print!(" {label:>16}");
+    }
+    println!();
+    let mut year_dominants = Vec::new();
+    for (iscale_label, iscale) in INTENSITY_SPAN {
+        print!("  {iscale_label:<14}");
+        for (_, cot) in COT_SPAN {
+            let l = ledger_at(365.0 * 86400.0, 5_000_000.0, cot, hold_w, floor.power_w, iscale);
+            let d = l.dominant();
+            year_dominants.push(d);
+            print!(" {:>10} {:>4.0}%", d, 100.0 * l.largest() / l.total());
+        }
+        println!();
+    }
+    let robust = year_dominants.windows(2).all(|w| w[0] == w[1]);
+    if robust {
+        println!(
+            "  The dominant term is {} at every corner, so the one-year answer survives the whole\n  \
+             stated uncertainty. That is the strong form of the claim.",
+            year_dominants[0]
+        );
+    } else {
+        let mut seen: Vec<&str> = Vec::new();
+        for d in &year_dominants {
+            if !seen.contains(d) {
+                seen.push(d);
+            }
+        }
+        println!(
+            "  ⛔ THE ONE-YEAR DOMINANT TERM IS NOT ROBUST: inside the uncertainty this file itself\n  \
+             declares it is any of {}, so the {:.1}% figure above is a point in a box, not a finding.\n  \
+             What survives the whole box is the weaker and still useful claim: the composition is a\n  \
+             CONTEST, no term is negligible, and the two constants that decide it are the embodied\n  \
+             intensity of this body and the cost of transport of the chassis it rides on. Those two are\n  \
+             the measurements that would turn this into a number.",
+            seen.join(", "), yr(year.largest())
+        );
+    }
+
     println!(
         "\n  ⭐ THE SENSE LEDGER ANSWER, AND IT REFRAMES THE QUESTION. The information floor for sensing is\n  \
          {:.1} uW against a {:.2} W hold — {:.4}% of the standing power, and utterly invisible in the total.\n  \
@@ -196,7 +294,7 @@ fn main() {
          duty-cycling it, and it is a different answer from the one the question implies.",
         floor.power_w * 1e6, hold_w, 100.0 * floor.power_w / hold_w,
         0.120 * SENSOR_INTENSITY_MJ_PER_KG,
-        3.2 * 0.120 * 9.81 * 5_000_000.0 / 1e6
+        COT_NOMINAL * 0.120 * 9.81 * 5_000_000.0 / 1e6
     );
     println!(
         "\n  HONEST SCOPE. Copper loss only for the hold, so E_hold is a LOWER bound; a cited power model of\n  \
