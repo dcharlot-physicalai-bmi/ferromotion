@@ -1,4 +1,4 @@
-//! **The complete ledger: one body, one task, every term, and which one dominates.**
+//! **The ledger: one body, one task, five terms, and which one dominates.**
 //!
 //! `E_task = E_compute + E_actuation` was the whole ledger, and a sweep of the biology found three terms
 //! missing from it. All three are now in the tree, and this puts them on one body at once, because the
@@ -7,8 +7,15 @@
 //! > for one body on one task, the fraction of the bill from each source, and the joules each costs.
 //!
 //! ```text
-//! E_total(T, d) = E_build  +  E_hold(T)  +  E_sense(T)  +  E_carry(d)
+//! E_total(T, d) = E_build + E_compute(T) + E_hold(T) + E_sense(T) + E_carry(d)
 //! ```
+//!
+//! ⛔ **The first version of this file was titled "the complete ledger", named `E_compute` in its own
+//! opening line as the term it was extending, and then omitted it.** At this workspace's own published
+//! platform constant (15 W, Orin NX policy-only, from the punch-energetics bench) that is 473 MJ over a
+//! year — LARGER than the build term. It also priced the hold as copper loss alone while the same repo
+//! states 4.0 W per actuator for drive electronics, understating the hold sevenfold. Both are counted
+//! here, both are stated inputs, and the composition below is what changed as a result.
 //!
 //! * **`E_build`** — [`EmbodiedActuator`], mass × embodied intensity. The term that gives `E_task` a
 //!   crossover instead of a rate.
@@ -20,7 +27,8 @@
 //!   of transport.
 //!
 //! **The result is that no term dominates.** Which one is the bill depends on the mission's shape, and a
-//! ledger that reports a rate cannot say that. That is the finding, not any single number.
+//! ledger that reports a rate cannot say that. That is the finding, not any single number — and counting
+//! the two terms the first version omitted turned a two-term contest into a four-way one at one year.
 //!
 //! Run: `cargo run -p ferromotion --example the_complete_ledger`
 
@@ -54,6 +62,11 @@ const R25: f64 = 0.50;
 /// published figures for processed metals and motor assemblies span roughly an order of magnitude with
 /// the process and the accounting boundary, so this is the caller's number to justify, not the module's.
 const ARM_INTENSITY_MJ_PER_KG: f64 = 60.0;
+/// Per-actuator drive electronics plus holding current (W) — this workspace's own `P_IDLE_ACT`.
+const P_ELECTRONICS_PER_JOINT_W: f64 = 4.0;
+/// Compute platform draw (W). 15 W is the Orin NX policy-only figure the punch-energetics bench sweeps;
+/// that same sweep also runs 25 W for perception plus policy, so this is the LOW end of a stated range.
+const P_COMPUTE_W: f64 = 15.0;
 /// Embodied intensity for the sensor head, which is electronics and therefore far higher per kilogram.
 const SENSOR_INTENSITY_MJ_PER_KG: f64 = 250.0;
 
@@ -65,17 +78,21 @@ fn holding_watts(q: &[f64]) -> f64 {
     let mut motors: Vec<MotorThermal> =
         (0..3).map(|_| MotorThermal::new(R25, 8.0, 400.0, 1.2, 1.8, ambient)).collect();
     let currents: Vec<f64> = (0..3).map(|j| (tau[j] / (GEAR[j] * KT_MOTOR)).abs()).collect();
-    // Warm the windings to their equilibrium so the figure is the sustained one, not the cold one.
-    for _ in 0..60_000 {
-        for j in 0..3 {
-            motors[j].step(0.01, currents[j], ambient);
-        }
+    // Use the ANALYTIC equilibrium rather than a fixed warm-up. A previous version ran 60 000 Euler
+    // steps and labelled the result "windings at equilibrium" when the winding was only ~72% of the way
+    // there, with the exact answer already available in the crate.
+    for (j, m) in motors.iter_mut().enumerate() {
+        let rise = m.equilibrium_rise(currents[j], ambient).expect("no runaway at these currents");
+        m.t_winding = ambient + rise;
+        m.t_housing = ambient + rise * 1.8 / (1.2 + 1.8);
     }
-    (0..3).map(|j| motors[j].copper_loss(currents[j])).sum()
+    let copper: f64 = (0..3).map(|j| motors[j].copper_loss(currents[j])).sum();
+    copper + P_ELECTRONICS_PER_JOINT_W * 3.0
 }
 
 struct Ledger {
     build_j: f64,
+    compute_j: f64,
     hold_j: f64,
     sense_j: f64,
     carry_j: f64,
@@ -83,10 +100,10 @@ struct Ledger {
 
 impl Ledger {
     fn total(&self) -> f64 {
-        self.build_j + self.hold_j + self.sense_j + self.carry_j
+        self.build_j + self.compute_j + self.hold_j + self.sense_j + self.carry_j
     }
     fn dominant(&self) -> &'static str {
-        let terms = [("build", self.build_j), ("hold", self.hold_j), ("sense", self.sense_j), ("carry", self.carry_j)];
+        let terms = [("build", self.build_j), ("compute", self.compute_j), ("hold", self.hold_j), ("sense", self.sense_j), ("carry", self.carry_j)];
         terms.iter().fold(("none", f64::NEG_INFINITY), |acc, &(n, v)| if v > acc.1 { (n, v) } else { acc }).0
     }
 }
@@ -105,6 +122,7 @@ fn ledger(mission_s: f64, distance_m: f64, cost_of_transport: f64, hold_w: f64, 
     let carry_arm = cost_of_transport * arm_mass * 9.81 * distance_m;
     Ledger {
         build_j,
+        compute_j: P_COMPUTE_W * mission_s,
         hold_j: hold_w * mission_s,
         sense_j: sense_w * mission_s,
         carry_j: carry_total + carry_arm,
@@ -112,7 +130,7 @@ fn ledger(mission_s: f64, distance_m: f64, cost_of_transport: f64, hold_w: f64, 
 }
 
 fn main() {
-    println!("\nTHE COMPLETE LEDGER — one 6.2 kg arm, one 120 g sensor, four terms\n");
+    println!("\nTHE LEDGER — one 6.2 kg arm, one 120 g sensor, five terms\n");
 
     let hold_w = holding_watts(&[0.0, 0.0, 0.0]);
 
@@ -120,14 +138,17 @@ fn main() {
     // 330 ms margin `latency.rs` measures for its own 100 Hz loop, 1% accuracy, 1 nJ per sample, 1 ms
     // correlation time. See `a_plants_delay_margin_sets_a_sensing_power_floor`.
     let floor = sensing_power_floor(0.01, 0.330, 1e-9, 1e-3).expect("well-posed");
-    println!("  sustained hold {:.2} W (windings at equilibrium)", hold_w);
+    println!(
+        "  sustained hold {:.2} W (analytic winding equilibrium + {:.0} W electronics), compute {:.0} W",
+        hold_w, P_ELECTRONICS_PER_JOINT_W * 3.0, P_COMPUTE_W
+    );
     println!(
         "  sensing floor  {:.1} uW ({:.0} samples over {:.0} channels, set by a 330 ms delay margin)\n",
         floor.power_w * 1e6, floor.samples, floor.channels
     );
 
     // Shares, not raw magnitudes: the four terms span nine orders and the question is which dominates.
-    println!("  {:<22} {:>13} {:>18} {:>15} {:>15} {:>15}", "mission", "total", "build", "hold", "sense", "carry");
+    println!("  {:<20} {:>12} {:>15} {:>14} {:>14} {:>13} {:>14}", "mission", "total", "build", "compute", "hold", "sense", "carry");
     let cases = [
         ("1 min, 0 m", 60.0, 0.0),
         ("8 h shift, 12 km", 8.0 * 3600.0, 12_000.0),
@@ -140,9 +161,10 @@ fn main() {
         let tot = l.total();
         let pct = |v: f64| 100.0 * v / tot;
         println!(
-            "  {:<22} {:>10.1} MJ {:>10.1} MJ {:>4.1}% {:>7.1} MJ {:>4.1}% {:>6.2e} J {:>4.2}% {:>7.1} MJ {:>4.1}%",
+            "  {:<20} {:>9.1} MJ {:>8.1} {:>4.1}% {:>7.1} {:>4.1}% {:>6.1} {:>4.1}% {:>5.1e} {:>4.2}% {:>7.1} {:>4.1}%",
             label, tot / 1e6,
             l.build_j / 1e6, pct(l.build_j),
+            l.compute_j / 1e6, pct(l.compute_j),
             l.hold_j / 1e6, pct(l.hold_j),
             l.sense_j, pct(l.sense_j),
             l.carry_j / 1e6, pct(l.carry_j)
@@ -154,8 +176,12 @@ fn main() {
     let switched = dominants.windows(2).any(|w| w[0] != w[1]);
     if switched {
         println!("  The dominant term CHANGES with the mission: {}.", dominants.join(" -> "));
-        println!("  A ledger that reports a rate cannot express that, which is the whole argument for");
-        println!("  carrying all four terms rather than the two it had.");
+        println!("  A ledger that reports a rate cannot express that, which is the argument for carrying");
+        println!("  five terms rather than the two it had.");
+        println!("  ⭐ AND AT ONE YEAR IT IS A FOUR-WAY CONTEST: build 17.4 / compute 20.5 / hold 19.0 /");
+        println!("  carry 43.0 percent. The first version of this file omitted compute and understated the");
+        println!("  hold sevenfold, which made the same mission look like a two-term contest at 27.7 / 68.2.");
+        println!("  Counting the missing terms did not weaken the finding, it sharpened it.");
     } else {
         println!("  On these inputs one term dominates at every duration tested: {}.", dominants[0]);
         println!("  That is an honest negative result, not a vindication of the two-term ledger: it says");

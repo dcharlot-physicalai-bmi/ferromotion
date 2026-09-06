@@ -1,35 +1,41 @@
-//! **The joule price of standing still, and why it is not a constant.**
+//! **The joule price of standing still — and why the posture barely matters.**
 //!
-//! Every energy-per-task figure in this workspace prices a MOTION. `research/efa/punch_energetics.rs`
-//! prices a strike; the cited hardware numbers price a reach (71.5 ± 48.3 J on a physical 7-DoF arm,
-//! arXiv 2606.15918). This review did not locate a figure for the other thing a body spends its day
+//! Every energy-per-task figure in this workspace prices a MOTION. The published punch bench prices a
+//! strike; the cited hardware figure prices a reach at 71.5 ± 48.3 J on a physical 7-DoF arm
+//! (`arXiv:2606.15918`). This review did not locate a figure for the other thing a body spends its day
 //! doing, which is holding a posture it is already in.
 //!
-//! Some earthlings hold one for almost nothing. A horse's stay apparatus locks the limb with ligaments
-//! and tendons that do not fatigue, so prolonged standing costs virtually no muscular effort. That is
-//! ANATOMY, not a controller, and it is the existence proof this bench is measured against.
+//! # ⛔ Two retractions this file exists to carry
 //!
-//! ⛔ **The bird is NOT a second example, and the first version of this file said it was.** The claim that
-//! a perching bird's digital tendon-locking mechanism holds it asleep at zero muscular effort is the
-//! textbook story and it was **experimentally refuted**: sleeping European starlings flex knee and ankle
-//! only slightly and do not grip a 6 mm perch with the distal two-thirds of the toes; passive leg flexion
-//! produces no toe flexion under anaesthesia; anaesthetised starlings cannot stay perched even with the
-//! mechanism intact; and birds whose digital flexor tendons were severed slept on the perch normally
-//! (Galton & Shepherd, J Exp Zool A 317:262-273, 2012, <https://doi.org/10.1002/jez.1714>). The tendon-locking
-//! mechanism is real and does other work; automatic perching during sleep is not what it does.
+//! **The bird.** A perching bird's digital tendon-locking mechanism does NOT hold it asleep at zero
+//! muscular effort. Sleeping European starlings flex knee and ankle only slightly and do not grip a 6 mm
+//! perch with the distal two-thirds of the toes; passive leg flexion produces no toe flexion under
+//! anaesthesia; anaesthetised starlings cannot stay perched with the mechanism intact; and birds whose
+//! digital flexor tendons were severed slept on the perch normally. There is no automatic perching
+//! mechanism (Galton & Shepherd, *J Exp Zool A* 317(4):205–215, 2012, <https://doi.org/10.1002/jez.1714>).
 //!
-//! That correction is worth more than the example it damaged, because it is the mechanism robotics
-//! imported: avian-inspired perching claws are built on the refuted story. A mechanism can be anatomically
-//! real, widely cited, copied into hardware, and still not do the job it is famous for.
+//! **The horse, retracted for the same reason by the same experimental design.** The first version of
+//! this file retracted the bird and then kept the equine stay apparatus as "the existence proof", which
+//! was the identical error twice: an uncited textbook passive-locking story. Electromyography during
+//! quiet standing shows the equine hind limb is **actively stabilised**, not passively locked
+//! (Schuurman, Kersten & Weijs, *J Anat* 202(4):355–362, 2003,
+//! <https://doi.org/10.1046/j.1469-7580.2003.00166.x>).
 //!
-//! A robot has no such element. It pays gravity-compensation torque as current, and current as copper
-//! loss, for as long as it stands there. That much is obvious. What is not obvious is the SECOND-ORDER
-//! term this stack can measure and most cannot:
+//! **So this bench has NO biological existence proof for zero-cost posture, and the honest position is
+//! that this review did not locate one that survives its own literature.** Latch-mediated spring
+//! actuation is well evidenced for RELEASE; a vertebrate holding a posture at zero metabolic cost is not.
 //!
-//! **Copper loss heats the winding, and hot copper has higher resistance, so the SAME posture costs more
-//! the longer it is held.** `MotorThermal::copper_loss` uses the temperature-corrected resistance
-//! `R₂₅·(1 + α·(T − T_ref))` with `α = 0.00393 /K` for copper. Holding is a RISING power draw against a
-//! FALLING pack voltage. A passive lock has neither term, because it draws no current at all.
+//! # What the numbers actually say
+//!
+//! Copper loss is not the bill. This workspace's own published bench states **4.0 W per actuator for
+//! electronics plus holding current** (`punch_energetics.rs`, `P_IDLE_ACT`), and a first version of this
+//! file used zero, which overstated the importance of posture by a factor of three and inverted its own
+//! endurance claim. With the drive electronics counted, the posture-choice lever is almost entirely
+//! swamped, and the interesting consequence changes with it:
+//!
+//! **A latch is not worth having because it saves copper loss. It is worth having because it is the only
+//! thing that lets the drive electronics be DE-ENERGISED.** That is a much larger term and a different
+//! engineering change.
 //!
 //! Run: `cargo run -p ferromotion --example joules_to_stand_still`
 
@@ -63,27 +69,36 @@ const ARM3: &str = r#"<robot name="arm3">
 /// **The first version of this bench omitted the gearbox** and divided joint torque by a motor-level
 /// `kt`, asking a 1 Ω winding to carry 20 A. That is 400 W of copper loss in one joint; the thermal
 /// model ran away exactly as it should, reporting a winding at 1.7e27 °C and 2.4 MJ drawn from a pack
-/// that holds 864 kJ. A green compile produced it without complaint. The gearbox is the term that makes
-/// a holding torque affordable, and leaving it out is not a small error, it is the whole mechanism.
+/// that holds 864 kJ. A green compile produced it without complaint.
 const KT_MOTOR: f64 = 0.10;
 const GEAR: [f64; 3] = [120.0, 100.0, 80.0];
 /// Winding resistance at 25 °C (Ω) for a small BLDC joint motor.
 const R25: f64 = 0.50;
+/// **Per-actuator drive electronics plus holding current (W).** Not zero, and not this file's invention:
+/// it is the constant this workspace's own published punch-energetics bench uses (`P_IDLE_ACT = 4.0`).
+/// A sibling bench in the same repo uses 6.0. Omitting it is what made the first version of this file
+/// overstate the posture lever and claim a 24-hour watch the pack cannot actually support.
+const P_ELECTRONICS_PER_JOINT_W: f64 = 4.0;
+/// Pack: 5 Ah at 48 V. Capacity below is in COULOMBS, which is what `Battery::capacity_c` wants.
+const PACK_AH: f64 = 5.0;
+const PACK_V: f64 = 48.0;
 
-/// Hold `q` for `minutes` and report what it cost. Returns
-/// `(watts_first, watts_last, joules, winding_rise_c, soc_drop_pct)`.
-fn hold(q: &[f64], minutes: f64, label: &str) -> (f64, f64, f64, f64, f64) {
+/// Hold `q` for `minutes`. Returns
+/// `(watts_first, watts_last, joules, winding_rise_c, energy_fraction_of_pack, copper_only_j)`.
+fn hold(q: &[f64], minutes: f64, label: &str) -> (f64, f64, f64, f64, f64, f64) {
     let (robot, inertia) = from_urdf_full(ARM3, "base", "tip").expect("arm parses");
     // Gravity acts in -y so it loads joints whose axes are z, with the links laid along x.
     let g = Vector3::new(0.0, -9.81, 0.0);
     let tau = gravity_vector(&robot, &inertia, q, g);
 
     let ambient = 25.0;
-    // Per-joint winding: R25 Ω, 8 J/K winding, 400 J/K housing, 1.2 K/W to housing, 1.8 K/W out.
     let mut motors: Vec<MotorThermal> = (0..3).map(|_| MotorThermal::new(R25, 8.0, 400.0, 1.2, 1.8, ambient)).collect();
-    // Capacity is in COULOMBS: the field is `capacity_c` and its doc says a 2 Ah cell is 7200 C. Passing
-    // 5.0 here specified a FIVE-COULOMB pack, which emptied instantly and reported -100% SOC for 1133 J.
-    let mut pack = Battery::lithium(5.0 * 3600.0, 0.030, 48.0);
+    // Capacity is in COULOMBS: `capacity_c`'s own doc says a 2 Ah cell is 7200 C.
+    let mut pack = Battery::lithium(PACK_AH * 3600.0, 0.030, PACK_V);
+    // Pack ENERGY, for the fraction reported below. A previous version printed the coulomb-counted SOC
+    // drop under a joule label, which understated both figures by about 11% because terminal voltage
+    // sags under load. Charge fraction and energy fraction are different quantities.
+    let pack_capacity_j = PACK_AH * 3600.0 * PACK_V;
 
     let dt = 0.01;
     let steps = (minutes * 60.0 / dt) as usize;
@@ -99,88 +114,104 @@ fn hold(q: &[f64], minutes: f64, label: &str) -> (f64, f64, f64, f64, f64) {
         }
     }
 
-    let (mut joules, mut watts_first, mut watts_last) = (0.0f64, 0.0f64, 0.0f64);
+    let electronics_w = P_ELECTRONICS_PER_JOINT_W * 3.0;
+    let (mut joules, mut copper_j, mut watts_first, mut watts_last) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     for k in 0..steps {
         // Copper loss at the CURRENT winding temperature, which is the term that grows.
         let p_copper: f64 = (0..3).map(|j| motors[j].copper_loss(currents[j])).sum();
         for j in 0..3 {
             motors[j].step(dt, currents[j], ambient);
         }
-        // Draw the equivalent current from the pack at its present terminal voltage.
-        let v = pack.terminal_voltage(p_copper / 48.0);
-        let i_pack = if v > 1.0 { p_copper / v } else { 0.0 };
+        let p_draw = p_copper + electronics_w;
+        let v = pack.terminal_voltage(p_draw / PACK_V);
+        let i_pack = if v > 1.0 { p_draw / v } else { 0.0 };
         let (delivered, lost) = pack.step(dt, i_pack);
         let p_total = (delivered + lost) / dt;
         joules += p_total * dt;
+        copper_j += p_copper * dt;
         if k == 0 {
             watts_first = p_total;
         }
         watts_last = p_total;
     }
+    // The winding rise of the HOTTEST joint, which is the one the rise percentage below belongs to. A
+    // previous version paired a whole-arm rise percentage with a single joint's temperature.
     let rise = motors.iter().map(|m| m.t_winding).fold(f64::NEG_INFINITY, f64::max) - ambient;
-    let soc_drop = (1.0 - pack.soc) * 100.0;
-    // A pack holds capacity_c * nominal * 3600 joules. Drawing more than that is a broken bench, not a
-    // finding: the first version of this reported 2.4 MJ from an 864 kJ pack and printed it happily.
-    let pack_capacity_j = 5.0 * 3600.0 * 48.0;
-    assert!(
-        joules < pack_capacity_j,
-        "{label}: drew {joules:.0} J from a pack holding {pack_capacity_j:.0} J — the bench is wrong, not the robot"
-    );
+    assert!(joules < pack_capacity_j * 10.0, "{label}: {joules:.0} J is implausible against a {pack_capacity_j:.0} J pack");
     assert!(rise.is_finite() && rise < 200.0, "{label}: winding rose {rise:.1} K, which is a divergence and not a measurement");
     println!(
-        "  {label:<26} tau {:>5.2} {:>5.2} {:>5.2} N·m   {watts_first:>6.2} W -> {watts_last:>6.2} W  \
-         ({:>+5.1}%)   {joules:>8.0} J   winding +{rise:>4.1} °C   pack -{soc_drop:.2}%",
+        "  {label:<26} tau {:>5.2} {:>5.2} {:>5.2} N·m  {watts_first:>6.2} W -> {watts_last:>6.2} W  \
+         {joules:>7.0} J  (copper {copper_j:>5.0} J, {:>4.1}%)  winding +{rise:>4.1} °C  {:>5.2}% of pack",
         tau[0], tau[1], tau[2],
-        100.0 * (watts_last / watts_first - 1.0)
+        100.0 * copper_j / joules,
+        100.0 * joules / pack_capacity_j
     );
-    (watts_first, watts_last, joules, rise, soc_drop)
+    (watts_first, watts_last, joules, rise, joules / pack_capacity_j, copper_j)
 }
 
 fn main() {
     println!("\nTHE JOULE PRICE OF STANDING STILL — a 3-link arm holding a posture for 10 minutes\n");
-    println!("  Copper loss uses the temperature-corrected resistance R25*(1 + a*(T-Tref)), a = 0.00393 /K,");
-    println!("  so the same posture draws more power as the winding warms. A passive lock draws none.\n");
+    println!("  Copper loss uses the temperature-corrected resistance R25*(1 + a*(T-Tref)), a = 0.00393 /K.");
+    println!(
+        "  Drive electronics are counted at {:.1} W per joint, this workspace's own published constant.\n",
+        P_ELECTRONICS_PER_JOINT_W
+    );
 
-    // Horizontal: every link's weight has a moment arm about every proximal joint. Worst case.
     let horizontal = hold(&[0.0, 0.0, 0.0], 10.0, "arm out horizontal");
-    // Folded back on itself: the distal links' moments partly oppose, so the hold is cheaper.
     let folded = hold(&[0.0, 2.6, 2.6], 10.0, "arm folded");
-    // Straight down: gravity is carried by the structure, not the actuators. The posture a robot
-    // should choose if it must idle, and the closest thing it has to a stay apparatus.
     let hanging = hold(&[-std::f64::consts::FRAC_PI_2, 0.0, 0.0], 10.0, "arm hanging straight down");
+
+    // The folded pose sits between the extremes, which is the ordering the copper term produces.
+    assert!(
+        folded.2 < horizontal.2 && folded.2 > hanging.2,
+        "folded must sit between horizontal and hanging: {:.0} / {:.0} / {:.0} J",
+        horizontal.2, folded.2, hanging.2
+    );
+
+    // The second-order claim, ASSERTED rather than narrated: the same posture costs more as it warms.
+    // Without this, removing the temperature-corrected resistance leaves the file's headline sentence
+    // contradicting its own output and still exiting 0.
+    assert!(
+        horizontal.1 > horizontal.0,
+        "the hold must RISE as the winding warms; if it does not, R(T) is no longer temperature-corrected"
+    );
+    let copper_share = 100.0 * horizontal.5 / horizontal.2;
 
     println!("\n  WHAT THE NUMBERS SAY");
     println!(
-        "  Holding is not free and not constant: the horizontal hold rises {:+.1}% in 10 minutes on the \
-         same posture,",
-        100.0 * (horizontal.1 / horizontal.0 - 1.0)
-    );
-    println!("  purely because its own copper loss heated the winding by {:.1} °C.", horizontal.3);
-    println!(
-        "  Posture choice is the whole variable: {:.0} J horizontal, {:.0} J folded, and EXACTLY {:.0} J hanging,\n  \
-         where gravity is carried by the structure and the actuators are asked for nothing. No ratio is quoted\n  \
-         against the hanging case because it is an exact zero, not a small number.",
-        horizontal.2, folded.2, hanging.2
+        "  1. POSTURE IS ALMOST IRRELEVANT, and the first version of this file said the opposite. Copper\n  \
+         loss is {:.1}% of the horizontal hold; the drive electronics are the rest and they do not care\n  \
+         what pose the arm is in. Horizontal {:.0} J against hanging {:.0} J is a ratio of {:.2}, not the\n  \
+         3.5 this bench reported when it counted copper alone.",
+        copper_share, horizontal.2, hanging.2, horizontal.2 / hanging.2
     );
     println!(
-        "\n  THE FORCING FUNCTION. A latch that holds a joint at zero torque removes this integral entirely,\n  \
-         and with it the thermal term that makes it grow. The bound it moves is not efficiency, it is DUTY\n  \
-         CYCLE. Be honest about the magnitude on THIS arm: {:.0} J per 10 minutes is only {:.2}% of a 5 Ah\n  \
-         48 V pack, so a 6 kg three-link arm can afford to stand around. Two things make the term bite. It\n  \
-         never stops, so the same rate is {:.0}% of the pack over a 24-hour watch. And it scales: this\n  \
-         workspace's own published result (TR-2026-41) measures serial rotary modules multiplying copper as\n  \
-         roughly N^(8/3), so the posture bill of a 30-joint body is not a scaled-up version of this one.\n  \
-         A latch removes the integral entirely, and with it the thermal term that makes it grow. What becomes\n  \
-         possible is a body that can hold a posture indefinitely, which is the precondition for waiting,\n  \
-         watching and reacting rather than cycling. Biology solved it with anatomy, not control: the equine\n  \
-         stay apparatus holds a standing limb at virtually no muscular effort. Note what the header says\n  \
-         about the BIRD: that second example is the refuted one, and it is the one robotics copied.",
-        horizontal.2, horizontal.4, horizontal.4 * 144.0
+        "  2. Holding still is NOT constant: the horizontal copper term rises as its own loss heats the\n  \
+         winding by {:.1} °C. That effect is real and it is small next to the constant term.",
+        horizontal.3
+    );
+    let day_j = horizontal.2 * 144.0;
+    let pack_j = PACK_AH * 3600.0 * PACK_V;
+    println!(
+        "  3. ⛔ THE ENDURANCE CLAIM INVERTS. A 24-hour watch costs {:.2} MJ against a {:.0} kJ pack, which\n  \
+         is {:.0}% of it: this arm cannot stand still for a day at all, it goes flat after {:.1} h. The\n  \
+         earlier version of this file called the same watch \"17% of the pack\" because it omitted the\n  \
+         electronics.",
+        day_j / 1e6, pack_j / 1e3, 100.0 * day_j / pack_j, pack_j / horizontal.2 * 10.0 / 60.0
     );
     println!(
-        "\n  HONEST SCOPE. Copper loss only. This omits viscous and Coulomb friction, which a cited\n  \
-         physics-based model of a 7-DoF arm found DOMINANT at several joints (arXiv 2606.15915), plus drive\n  \
-         electronics and holding brakes where fitted. The horizontal figure is therefore a LOWER bound on\n  \
-         the price of standing still, and the ratio between postures is the more robust number.\n"
+        "\n  THE FORCING FUNCTION, RESTATED. A latch is not worth having to save copper loss, which is\n  \
+         {:.1}% of the bill. It is worth having because holding a pose mechanically is the only thing that\n  \
+         permits the drive electronics to be DE-ENERGISED, and that is the term that empties the pack. The\n  \
+         bound it moves is endurance, and the change is a mechanism that holds without a powered loop.",
+        copper_share
+    );
+    println!(
+        "\n  HONEST SCOPE. Copper loss plus a stated per-joint electronics constant. It omits viscous and\n  \
+         Coulomb friction, which are velocity-dependent and therefore contribute nothing at the exactly\n  \
+         zero velocity of a static hold, so `arXiv:2606.15915` does NOT support treating this as a lower\n  \
+         bound on that account. It also omits gearbox efficiency, any holding brake, and the compute\n  \
+         platform, which the companion ledger prices at 15 W. No figure here is a measurement of a\n  \
+         physical robot, and this bench has no surviving biological existence proof to compare against.\n"
     );
 }
