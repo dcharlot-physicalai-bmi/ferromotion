@@ -795,7 +795,11 @@ mod tests {
         let back = printed.to_robot().expect("the printed string is a valid sequence");
         assert_eq!(back.dof(), 7);
         for q in &PANDA_Q {
-            assert!(iso_gap(&back.fk(q), &panda.fk(q)) < 1e-14, "Panda round trip at {q:?}: {:e}", iso_gap(&back.fk(q), &panda.fk(q)));
+            // ⛔ The module doc says "bit-identical on the Panda" and this asserted `< 1e-14`. Measured:
+            // the gap is exactly 0 at all three poses, and structurally so — every Panda joint is
+            // axis-aligned, so the canonical decomposition reproduces the same factors. The doc's own
+            // separate figure for the non-axis-aligned arm (8.9e-16) is the case that is NOT exact.
+            assert_eq!(iso_gap(&back.fk(q), &panda.fk(q)), 0.0, "the Panda round trip must be bit-identical at {q:?}, not merely close");
         }
         // every joint factor is preceded only by constants since the previous joint factor
         let mut run = 0;

@@ -114,7 +114,9 @@ mod tests {
         let prev = vec![9.0; 6]; // irrelevant when nothing is frozen
         let plain = sample_field(&v, &a0, 8, Integrator::Heun);
         let rtc = sample_rtc(&v, &a0, &prev, 3, 2, 0, 0, 8, Integrator::Heun);
-        assert!(plain.iter().zip(&rtc).all(|(p, r)| (p - r).abs() < 1e-15), "RTC(0,0) must equal naive: {plain:?} vs {rtc:?}");
+        // ⛔ The test is NAMED `..._bit_identically_...` and asserted `< 1e-15`. Measured: it IS exact, so
+        // the tolerance was strictly weaker than both the name and the module doc.
+        assert_eq!(plain, rtc, "RTC(0,0) must equal naive bit-identically: {plain:?} vs {rtc:?}");
     }
 
     #[test]

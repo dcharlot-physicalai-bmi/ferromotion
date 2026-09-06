@@ -7,8 +7,14 @@
 //! real-time SLAM/VIO backend that stays fast as the graph grows.
 //!
 //! This implements that incremental-QR core: add rows online, read off the current least-squares estimate
-//! by back-substitution, and track the residual — all bit-for-bit consistent with a batch normal-equations
-//! solve (the oracle). (iSAM2's Bayes tree adds fluid relinearization + incremental variable reordering on
+//! by back-substitution, and track the residual — agreeing with a batch normal-equations solve (the oracle)
+//! to within **35 ulp**, measured.
+//!
+//! ⛔ **This said "bit-for-bit consistent" while the test asserted a `1e-9` norm and compared no bits.**
+//! Measured on the 40-row, 6-unknown fixture: the residual norm is 3.4e-16 and the worst component is 35
+//! ulp apart, so the two are not bit-identical and could not be — streaming Givens rotations and a batch
+//! normal-equations solve do not associate the same way. The test bounds the ulp now, which a
+//! reassociation that stays inside 1e-9 no longer slips past. (iSAM2's Bayes tree adds fluid relinearization + incremental variable reordering on
 //! top; scoped out here, as IMU propagation is for [`crate::Msckf`].) Pure `nalgebra` → WASM-clean.
 
 use nalgebra::{DMatrix, DVector};
@@ -127,6 +133,12 @@ mod tests {
         let x_inc = isam.solve();
         let x_batch = batch_solve(&a, &b);
         assert!((&x_inc - &x_batch).norm() < 1e-9, "incremental vs batch: {}", (&x_inc - &x_batch).norm());
+        // ⛔ AND IN ULP: the module doc claimed bit-for-bit consistency and a 1e-9 norm is a very wide band
+        // on a solution of this magnitude. Measured: worst 35 ulp, so NOT bit-identical, and 128 leaves
+        // room for a reordering without leaving the claim unfalsifiable.
+        let ulps = x_inc.iter().zip(x_batch.iter()).map(|(a, b)| crate::aba::tests::ulps_between(*a, *b)).max().unwrap_or(0);
+        eprintln!("  iSAM vs the batch solve: norm {:.3e}, worst {ulps} ulp (bound 128, NOT bit-identical)", (&x_inc - &x_batch).norm());
+        assert!(ulps <= 128, "incremental and batch are {ulps} ulp apart, which is past what Givens reordering explains");
     }
 
     #[test]

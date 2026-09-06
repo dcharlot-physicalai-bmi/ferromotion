@@ -518,8 +518,11 @@ mod tests {
         eprintln!("frozen at zero latency: {frozen}");
         eprintln!("   first chunk {first:?}, second {second:?}, plain sample {plain:?}");
         assert_eq!(frozen, 0, "zero measured latency must freeze nothing");
-        assert!(second.iter().zip(&plain).all(|(a, b)| (a - b).abs() < 1e-15), "and the chunk must be bit-identical to naive");
-        assert!(first.iter().zip(&plain).all(|(a, b)| (a - b).abs() < 1e-15), "as must the first");
+        // ⛔ These asserted `< 1e-15` under the word "bit-identical", the same gap `aba.rs` and `crba.rs`
+        // carried. Measured: both ARE bit-identical, so the claim is right and the test was the weak part.
+        // `assert_eq!` on `Vec<f64>` compares the values exactly, which is what the doc says.
+        assert_eq!(second, plain, "the chunk must be bit-identical to naive, not merely close");
+        assert_eq!(first, plain, "as must the first");
     }
 
     /// **Latency beyond the margin is reported, not absorbed.** The stream stays intact; the stability claim does not,
