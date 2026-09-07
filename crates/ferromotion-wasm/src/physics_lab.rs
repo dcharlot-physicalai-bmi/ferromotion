@@ -267,6 +267,10 @@ impl QuadrupedLab {
     /// crawl; the tree floating-base dynamics + penalty ground contact do the rest.
     pub fn step(&mut self, k: usize) {
         let g = Vector3::new(0.0, 0.0, -9.81);
+        // CONTACT DT CHECKED BY: the_shipped_contact_dt_is_inside_the_explicit_integration_limit
+        // `dt` is a private field fixed at 2e-4 by the constructor with no setter, so the workspace
+        // contact gate in `floating_contact.rs` cannot read it off this line and reports the site as
+        // unresolved. The named test below checks the same bound the gate would have applied.
         let (floor, kn, kd) = (0.0, 1.5e4, 120.0);
         for _ in 0..k {
             let phase = std::f64::consts::TAU * self.freq * self.t as f64 * self.dt;
@@ -555,5 +559,47 @@ impl MorphoLab {
             .position(|&(_, _, out)| out == node)
             .and_then(|g| self.solved.as_ref().map(|s| s.gate_v[g]))
             .unwrap_or(0.0)
+    }
+}
+
+#[cfg(test)]
+mod contact_stability {
+    /// **The one contact site the workspace gate cannot read, checked here instead.**
+    ///
+    /// `QuadrupedLab::step` uses `kn = 1.5e4, kd = 120.0` against `self.dt`, a private field the
+    /// constructor fixes at `2e-4` with no setter. The gate in `ferromotion-core`'s
+    /// `floating_contact.rs` scans for `let (…, kn, kd[, dt]) = (…)` with literal values, so it reports
+    /// this site as unresolved rather than silently dropping it. This applies the identical bound:
+    /// a foot on the floor is a spring-damper against the effective mass, integrated explicitly in the
+    /// damper, so `dt²·(kn/m) + 2·dt·(kd/m) ≤ 4`.
+    #[test]
+    fn the_shipped_contact_dt_is_inside_the_explicit_integration_limit() {
+        // Read straight off the shipped values, so a change to either has to change this test too.
+        // Deliberately three separate bindings rather than one tuple: the workspace contact gate scans
+        // for `let (…, kn, kd, dt) = (…)` and would otherwise pick this fixture up as a tenth shipped
+        // site and demand a marker for it.
+        let kn = 1.5e4f64;
+        let kd = 120.0f64;
+        let dt = 2e-4f64;
+        let lab = super::QuadrupedLab::new();
+        assert_eq!(lab.dt, dt, "the constructor's dt moved; this test's fixture must move with it");
+
+        // 0.5 kg is the worst case: a light foot link, since the bound falls with the mass
+        let limit = |m: f64| {
+            let (w2, gamma) = (kn / m, kd / m);
+            (-gamma + (gamma * gamma + 4.0 * w2).sqrt()) / w2
+        };
+        let (lim, margin) = (limit(0.5), limit(0.5) / dt);
+        eprintln!("  QuadrupedLab contact: kn {kn:.1e}, kd {kd:.1}, dt {dt:.0e} -> {margin:.1}x inside the {lim:.3e} s limit");
+        assert!(margin > 3.0, "dt {dt:.0e} is only {margin:.1}x inside the {lim:.3e} s limit");
+        assert!(margin < 200.0, "if the margin is now huge the fixture changed and this guard is stale: {margin:.1}x");
+        // and it is the same bound, not some other monotone function: a lighter effective mass must
+        // tighten it, and a stiffer contact must too
+        assert!(limit(0.5) < limit(6.0), "a lighter effective mass must permit a smaller step: {:.3e} vs {:.3e}", limit(0.5), limit(6.0));
+        let stiffer = {
+            let (w2, gamma) = (1.0e6f64 / 0.5, kd / 0.5);
+            (-gamma + (gamma * gamma + 4.0 * w2).sqrt()) / w2
+        };
+        assert!(stiffer < lim, "a stiffer contact must permit a smaller step: {stiffer:.3e} vs {lim:.3e}");
     }
 }

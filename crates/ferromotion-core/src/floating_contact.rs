@@ -379,6 +379,13 @@ mod tests {
     /// the workspace, resolves a nearby literal `dt` when the binding does not carry one, and checks the
     /// margin at every site it finds. It also asserts the subject count, so a refactor that changes the
     /// binding shape shows up as a shrinking scan rather than as a quietly narrower gate.
+    ///
+    /// A site whose `dt` is NOT a literal — a struct field, a parameter — must carry
+    /// `CONTACT DT CHECKED BY: <test fn>` within the six lines above it, and this gate verifies that test
+    /// exists in that file. ⛔ **A tolerated unresolved COUNT was the first version of that rule and it was
+    /// the wrong guard: it let the next unreadable site in for free.** The scan does not distinguish
+    /// shipped code from test fixtures, which errs toward more coverage; a test that deliberately probes
+    /// an unstable configuration would need to avoid the tuple shape or carry a marker.
     #[test]
     fn the_shipped_contact_parameters_stay_inside_the_explicit_integration_limit() {
         let limit = |kn: f64, kd: f64, m: f64| {
@@ -413,7 +420,7 @@ mod tests {
 
         let num = |t: &str| t.trim().parse::<f64>().ok();
         let mut sites: Vec<(String, f64, f64, f64)> = Vec::new();
-        let mut unresolved: Vec<String> = Vec::new();
+        let mut unresolved: Vec<(String, usize)> = Vec::new();
         for f in &files {
             let text = std::fs::read_to_string(f).expect("readable");
             let rel = f.strip_prefix(&root).unwrap_or(f).display().to_string();
@@ -431,7 +438,7 @@ mod tests {
                 }
                 let at = |want: &str| names.iter().position(|n| *n == want).and_then(|i| num(values[i]));
                 let (Some(kn), Some(kd)) = (at("kn"), at("kd")) else {
-                    unresolved.push(format!("{rel}:{} kn/kd are not literals", ln + 1));
+                    unresolved.push((rel.clone(), ln + 1));
                     continue;
                 };
                 // dt from the same binding, else the nearest literal `let dt = …;` within three lines
@@ -444,7 +451,7 @@ mod tests {
                 });
                 match dt {
                     Some(dt) => sites.push((format!("{rel}:{}", ln + 1), kn, kd, dt)),
-                    None => unresolved.push(format!("{rel}:{} no literal dt within three lines", ln + 1)),
+                    None => unresolved.push((rel.clone(), ln + 1)),
                 }
             }
         }
@@ -457,13 +464,29 @@ mod tests {
              binding shape changed and this gate is now watching less than it claims. Sites: {sites:#?}",
             sites.len()
         );
-        // exactly one site is legitimately unresolvable: physics_lab's dt is a runtime field, not a literal
-        for u in &unresolved {
-            eprintln!("    unresolved: {u}");
+        // ---- an unreadable site must NAME the test that checks it instead ----
+        // A tolerated count was the wrong guard: it let the next unreadable site in for free. A site whose
+        // `dt` is not a literal (a struct field, a parameter) has to carry
+        // `CONTACT DT CHECKED BY: <test fn>` in the three lines above it, and the gate verifies that test
+        // exists in the same file. Same shape as `stability_bounds_are_tested_from_outside`'s CROSSED BY:.
+        let mut holes = Vec::new();
+        for (rel, ln) in &unresolved {
+            let f = root.join(rel);
+            let text = std::fs::read_to_string(&f).expect("readable");
+            let lines: Vec<&str> = text.lines().collect();
+            let lo = ln.saturating_sub(6);
+            let block = lines[lo..(*ln).min(lines.len())].join("\n");
+            match block.split("CONTACT DT CHECKED BY:").nth(1).and_then(|r| r.split_whitespace().next()) {
+                Some(test_fn) if text.contains(&format!("fn {}(", test_fn.trim_end_matches(&['`', ',', '.'][..]))) => {
+                    eprintln!("    unreadable dt at {rel}:{ln} -> checked by {test_fn}");
+                }
+                Some(test_fn) => holes.push(format!("{rel}:{ln} names `{test_fn}`, which does not exist in that file")),
+                None => holes.push(format!("{rel}:{ln} has no `CONTACT DT CHECKED BY:` marker")),
+            }
         }
         assert!(
-            unresolved.len() <= 1,
-            "a new contact site the scan cannot read is a hole in this gate, not something to ignore: {unresolved:#?}"
+            holes.is_empty(),
+            "a contact site whose dt this gate cannot read must name the test that checks it: {holes:#?}"
         );
 
         // ---- the check itself, at every site found ----
