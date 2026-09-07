@@ -21,6 +21,12 @@
 //! transforms), [`tree_from_urdf`] for a branched tree such as a hand, and `closed_loop` for linkages
 //! that are not serial chains.
 //!
+//! Every one of those formats points at geometry it does not carry. [`from_obj`], [`from_stl`] (both
+//! encodings, dispatched on content rather than extension) and [`scale_mesh`] read it, and
+//! [`solid_inertia`] integrates a mesh and a density into the [`LinkInertia`] the dynamics already
+//! take — so a description carrying meshes produces a simulable body with no hand-typed inertia
+//! tensor. Byte slices, not paths: no asset is vendored and nothing reads the filesystem.
+//!
 //! ⛔ A URDF is not an actuator model. Reflected rotor inertia, viscous damping and Coulomb friction
 //! are read from the model and applied *inside* RNEA — see [`identify_actuator`] and
 //! [`actuator_plausibility`], and the section below `## A URDF is not an actuator model` in this
@@ -236,6 +242,7 @@ mod manipulability;
 mod marginalize;
 mod mestimator;
 mod mesh3;
+mod mesh_io;
 mod modal;
 mod occupancy;
 mod numerics;
@@ -318,6 +325,7 @@ pub use cfd_contact::{rollout_impulse, CfdContact};
 pub use bit_star::BitStar;
 pub use bvh::{Aabb, Bvh};
 pub use mesh3::{convex_hull_3d, TriMesh3};
+pub use mesh_io::{from_obj, from_stl, from_stl_ascii, from_stl_binary, scale_mesh, second_moment, solid_inertia};
 pub use bspline::BSpline;
 pub use bundle::{BundleAdjustment, Camera, Observation};
 pub use camera::{calibrate, PinholeCamera};
