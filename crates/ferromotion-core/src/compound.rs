@@ -31,12 +31,35 @@
 //!
 //! Convex parts, supplied by the caller or taken as the hull of each of several meshes. **This module
 //! does not decompose a concave mesh into convex parts** — that is approximate convex decomposition
-//! (the V-HACD/CoACD operation) and it is a module of its own, not a function here. Until it exists,
-//! a caller with one concave mesh has three honest options, in order of preference: use the
-//! `<collision>` primitives the description already declares (see
+//! (the V-HACD/CoACD operation). A caller with one concave mesh has three honest options, in order of
+//! preference: use the `<collision>` primitives the description already declares (see
 //! [`primitive_mesh`](crate::primitive_mesh)), supply the part meshes separately if the exporter wrote
 //! them that way, or accept the convex hull and know what it costs — which is the number this
 //! module's tests print.
+//!
+//! # ⛔ A cheap decomposition was attempted twice and MEASURED to fail. Both results, so the next
+//! attempt does not repeat them
+//!
+//! The tempting shortcut is to partition the triangle list and hull each group: no mesh surgery, so no
+//! part can come out unclosed. It does not work, and the reason is structural rather than a tuning
+//! problem. Measured on a U-shaped bracket of three boxes, with a probe in the mouth of the channel:
+//!
+//! | attempt | what it did | outcome |
+//! |---|---|---|
+//! | k-means over triangle centroids | grouped triangles near each other **on the surface** | the parts' volume sum came out **worse than not decomposing**: against a single hull at 1.64x the mesh's own volume integral, k-means gave 3.00x at two parts, 2.41x at three, 2.70x at four, 2.28x at six. A surface-adjacent group wraps around the solid, so its hull spans the whole shape. |
+//! | recursive median split, **solid** parts required | split the triangle list at the median centroid along the longest axis | **the channel never opened.** Swept 1, 2, 3, 4, 6, 8, 12, 16 and 24 parts: the excluded fraction of the hull's interior rose 0% → 38.3% and saturated, and the probe was reported INTERSECTING at every single count. Demanding a 3-D hull of both halves refuses exactly the split that separates two facing walls, because each wall's inner face is a flat patch. |
+//! | the same, **flat** parts allowed | let a part be a convex polygon, which GJK handles exactly | the channel opens — but the parts degenerate into a **hollow shell**. 28 of 32 parts came out flat for the U, and a *convex cube* at 12 parts reported 100% of its hull interior excluded, meaning the collider fills nothing. A shallow contact works and any penetration passes straight through. |
+//!
+//! **The lesson is that a surface partition is not a solid decomposition.** V-HACD and CoACD voxelise
+//! the *interior* and merge voxel clusters, which is why they work; CoACD then searches cut planes
+//! against a collision-aware concavity objective with Monte Carlo tree search. Neither is a
+//! triangle-list partition, and no amount of choosing the split better makes one into the other. That
+//! is the work, and it is a module of its own with a volumetric representation at its centre — not a
+//! function here.
+//!
+//! Nothing was shipped from either attempt. The one piece worth keeping is
+//! [`try_convex_hull_3d`](crate::try_convex_hull_3d), which came out of needing a hull that refuses a
+//! degenerate part instead of panicking.
 
 use crate::gjk::{gjk, ConvexPoints, GjkResult, Support};
 use crate::mesh3::{try_convex_hull_3d, TriMesh3};
