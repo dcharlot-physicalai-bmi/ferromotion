@@ -57,19 +57,40 @@ impl TriMesh3 {
 }
 
 /// Incremental 3-D convex hull of a point set. Returns a closed, outward-wound triangle mesh over a
-/// subset of the input vertices. Assumes the points are not all coplanar.
+/// subset of the input vertices.
+///
+/// ⛔ **This PANICS on degenerate input** — fewer than four points, all points equal, all collinear,
+/// or all coplanar — and it is public. Prefer [`try_convex_hull_3d`], which returns `None` for each of
+/// those and for a non-finite coordinate. This one is kept for callers that have already established
+/// their point set is a solid, and it delegates, so the two can never disagree.
+///
+/// # Panics
+///
+/// If [`try_convex_hull_3d`] would return `None`.
 pub fn convex_hull_3d(points: &[Vector3<f64>]) -> TriMesh3 {
+    try_convex_hull_3d(points).expect("convex_hull_3d: the point set is degenerate or non-finite; use try_convex_hull_3d")
+}
+
+/// **The convex hull, refusing what it cannot hull.** `None` for fewer than four points, for a
+/// non-finite coordinate, and for a point set that is degenerate — all equal, collinear, or coplanar —
+/// because a flat point set has no 3-D hull and any answer for it would be a lie with a volume.
+///
+/// A degenerate part is a real case, not a hypothetical: a mesh exported as a single flat plate, or a
+/// decomposition that produced a sliver, arrives here looking like data.
+pub fn try_convex_hull_3d(points: &[Vector3<f64>]) -> Option<TriMesh3> {
     let n = points.len();
-    assert!(n >= 4, "need at least 4 points for a 3-D hull");
+    if n < 4 || !points.iter().all(|p| p.iter().all(|c| c.is_finite())) {
+        return None;
+    }
     let eps = 1e-9;
 
     // seed: find 4 affinely-independent points
     let p0 = 0;
-    let p1 = (1..n).find(|&i| (points[i] - points[p0]).norm() > eps).expect("degenerate: all points equal");
+    let p1 = (1..n).find(|&i| (points[i] - points[p0]).norm() > eps)?;
     let e1 = points[p1] - points[p0];
-    let p2 = (0..n).find(|&i| (points[i] - points[p0]).cross(&e1).norm() > eps).expect("degenerate: collinear");
+    let p2 = (0..n).find(|&i| (points[i] - points[p0]).cross(&e1).norm() > eps)?;
     let nrm = (points[p1] - points[p0]).cross(&(points[p2] - points[p0]));
-    let p3 = (0..n).find(|&i| (points[i] - points[p0]).dot(&nrm).abs() > eps).expect("degenerate: coplanar");
+    let p3 = (0..n).find(|&i| (points[i] - points[p0]).dot(&nrm).abs() > eps)?;
 
     // initial tetrahedron faces, oriented outward
     let mut faces: Vec<[usize; 3]> = Vec::new();
@@ -142,9 +163,11 @@ pub fn convex_hull_3d(points: &[Vector3<f64>]) -> TriMesh3 {
             });
         }
     }
-    let tris = faces.iter().map(|f| [remap[&f[0]], remap[&f[1]], remap[&f[2]]]).collect();
+    let tris: Vec<[usize; 3]> = faces.iter().map(|f| [remap[&f[0]], remap[&f[1]], remap[&f[2]]]).collect();
     verts = used;
-    TriMesh3 { verts, tris }
+    // A hull with no faces, or fewer than four vertices, is not a solid — refuse rather than return an
+    // object whose volume is zero and whose support function is a point.
+    (tris.len() >= 4 && verts.len() >= 4).then_some(TriMesh3 { verts, tris })
 }
 
 #[cfg(test)]

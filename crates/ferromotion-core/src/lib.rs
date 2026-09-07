@@ -89,7 +89,13 @@
 //! # Collision geometry
 //!
 //! [`gjk`] and [`epa`] (narrowphase distance and penetration depth, with conservative-advancement
-//! CCD), [`Bvh`] (AABB broadphase), [`SdfScene`] and [`Esdf`] and [`CspaceField`] (signed-distance
+//! CCD) over the [`gjk::Support`] trait, so a ball, an oriented box or an arbitrary
+//! [`gjk::ConvexPoints`] set all answer the same query. A link is not convex,
+//! so [`CompoundHull`] carries it as a SET of convex parts: [`compound_distance`] gives the closest
+//! pair a planner wants and [`compound_contacts`] gives **every** pair within a margin, which is the
+//! constraint set a solver needs — one closest pair loses a simultaneous contact and the body sinks
+//! through the other. [`try_convex_hull_3d`] hulls a loaded mesh into a part, refusing a degenerate
+//! one rather than panicking. Also [`Bvh`] (AABB broadphase), [`SdfScene`] and [`Esdf`] and [`CspaceField`] (signed-distance
 //! representations, including a composite configuration-space field), [`FociPlan`] (field-overlap
 //! collision integral), `dcol` (differentiable collision between convex primitives), [`OccupancyGrid`]
 //! grids from range sensors, and [`SphereCollisionCost`] for the sphere-model robot representation.
@@ -250,6 +256,7 @@ mod manipulability;
 mod marginalize;
 mod mestimator;
 mod mesh3;
+mod compound;
 mod link_geometry;
 mod mesh_io;
 mod modal;
@@ -333,9 +340,10 @@ pub use apriltag::{decode_payload, tag_pose};
 pub use cfd_contact::{rollout_impulse, CfdContact};
 pub use bit_star::BitStar;
 pub use bvh::{Aabb, Bvh};
-pub use mesh3::{convex_hull_3d, TriMesh3};
+pub use mesh3::{convex_hull_3d, try_convex_hull_3d, TriMesh3};
 pub use mesh_io::{from_obj, from_stl, from_stl_ascii, from_stl_binary, scale_mesh, second_moment, solid_inertia};
 pub use link_geometry::{geometry_from_urdf, inertia_of_parts, primitive_link_inertia, primitive_mesh, resolve_uri, transform_mesh, GeomRole, GeometryRef, LinkGeometry};
+pub use compound::{compound_contacts, compound_distance, CompoundContact, CompoundHull};
 pub use bspline::BSpline;
 pub use bundle::{BundleAdjustment, Camera, Observation};
 pub use camera::{calibrate, PinholeCamera};
