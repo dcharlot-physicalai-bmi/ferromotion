@@ -21,9 +21,11 @@
 //! transforms), [`tree_from_urdf`] for a branched tree such as a hand, and `closed_loop` for linkages
 //! that are not serial chains.
 //!
-//! Every one of those formats points at geometry it does not carry. [`geometry_from_urdf`] and
-//! [`geometry_from_mjcf`] surface it — every shape with its origin, scale and [`GeomRole`], with
-//! MJCF's half-extents converted to URDF's full ones and its `fromto` form resolved to a pose — and
+//! Every one of those formats points at geometry it does not carry. [`geometry_from_urdf`],
+//! [`geometry_from_mjcf`] and [`geometry_from_sdf`] surface it — every shape with its origin, scale
+//! and [`GeomRole`], with MJCF's half-extents converted to URDF's full ones and its `fromto` form
+//! resolved to a pose. Each also reports **which links state no usable mass**, because all three
+//! loaders substitute a silent zero for one they could have computed. And
 //! [`resolve_uri`] expands a `package://`, `model://` or `file://` URI against a caller-supplied
 //! package table. [`from_obj`] and [`from_stl`] (both encodings, dispatched on content rather than
 //! extension) read the bytes; [`scale_mesh`] applies the description's scale; [`solid_inertia`]
@@ -496,7 +498,7 @@ pub use paden_kahan::{rotate_about_axis, subproblem1, subproblem2, subproblem3};
 pub use screw::{ad, adjoint, exp_se3, exp_so3, hat3, log_se3, log_so3 as screw_log_so3, poe_fk, pose, revolute_axis, rot_of, sclerp, trans_of, vee3};
 pub use spline_se3::SplineSE3;
 pub use sdf::{op_intersect, op_smooth_union, op_subtract, op_union, Sdf, SdfScene};
-pub use sdformat::from_sdf;
+pub use sdformat::{from_sdf, geometry_from_sdf};
 pub use sensor_render::{raymarch, DepthCamera, DepthImage, Lidar, LidarScan, RayHit};
 pub use sdp::{project_psd, solve_sdp, SdpProblem, SdpSolution};
 pub use sgm::{census5x5, cost_volume, disparity_map, StereoParams};

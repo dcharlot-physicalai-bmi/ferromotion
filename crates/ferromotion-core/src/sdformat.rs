@@ -4,6 +4,13 @@
 //! base to tip: link inertials (`mass`, COM `pose`, the six inertia products) and joints
 //! (`revolute`/`prismatic`/`fixed`, parent/child, `pose`, `axis`). Joint `<pose>` is taken as the
 //! parent→joint transform (the common `relative_to` = parent case). Pure `nalgebra` → WASM-clean.
+//!
+//! ⛔ **TWO SILENT PATHS TO A MASSLESS LINK.** A link with no `<inertial>` gets a zero inertia, and so
+//! does one whose `<inertial>` omits `<mass>` — the second through this file's own
+//! `text_f64("mass", 0.0)` default, which a check for the element's presence alone would miss. Both
+//! turn a link into a body that simulates and is wrong. [`geometry_from_sdf`] reports the names by
+//! **both** routes and returns the geometry needed to compute the inertia with
+//! [`primitive_link_inertia`](crate::primitive_link_inertia).
 
 use crate::{Iso, Joint, JointKind, LinkInertia, Robot};
 use nalgebra::{Matrix3, Translation3, Unit, UnitQuaternion, Vector3};
@@ -98,6 +105,101 @@ fn pose_iso(node: Option<&Node>) -> Iso {
     let v: Vec<f64> = txt.split_whitespace().filter_map(|x| x.parse().ok()).collect();
     let g = |i: usize| *v.get(i).unwrap_or(&0.0);
     Iso::from_parts(Translation3::new(g(0), g(1), g(2)), UnitQuaternion::from_euler_angles(g(3), g(4), g(5)))
+}
+
+/// **The geometry an SDFormat model declares, and which links state no mass.**
+///
+/// ⛔ **A link with no `<inertial>` gets a ZERO inertia from [`from_sdf`], and so does one whose
+/// `<inertial>` omits `<mass>`** — the latter through a `text_f64("mass", 0.0)` default. Both are
+/// silent, and both turn a link into a massless body that simulates and is wrong. This function is how
+/// a caller finds out, and how it gets the geometry to compute the inertia itself with
+/// [`primitive_link_inertia`](crate::primitive_link_inertia).
+///
+/// SDF states sizes as **full extents**, like URDF and unlike MJCF, so nothing is halved or doubled
+/// here. Its `<pose>` is `x y z roll pitch yaw`, six numbers of element text.
+///
+/// Supported: `<box><size>`, `<sphere><radius>`, `<cylinder><radius><length>`,
+/// `<capsule><radius><length>` and `<mesh><uri>` with an optional `<scale>`. `<plane>`, `<heightmap>`
+/// and `<polyline>` are reported as unsupported rather than approximated. A `model://` URI resolves
+/// through [`resolve_uri`](crate::resolve_uri), the same table URDF's `package://` uses.
+///
+/// Returns the shapes paired with the names of links that carry no usable mass, in model order.
+pub fn geometry_from_sdf(xml: &str) -> Result<(Vec<crate::GeometryRef>, Vec<String>), String> {
+    let root = parse(xml)?;
+    let model = root
+        .child("sdf")
+        .and_then(|s| s.child("model"))
+        .or_else(|| root.child("model"))
+        .ok_or("no <model>")?;
+
+    let mut out = Vec::new();
+    let mut massless = Vec::new();
+    for link in model.children_named("link") {
+        let name = link.attr("name").ok_or("link without name")?.to_string();
+        // ⛔ BOTH ways a link ends up massless, not just the missing-<inertial> one: an `<inertial>`
+        // that omits `<mass>` reads 0.0 through the loader's own default, and that is the case a check
+        // for the element's presence alone would miss.
+        let mass = link.child("inertial").map(|i| i.text_f64("mass", 0.0)).unwrap_or(0.0);
+        if !(mass.is_finite() && mass > 0.0) {
+            massless.push(name.clone());
+        }
+        for (role, tag) in [(crate::GeomRole::Collision, "collision"), (crate::GeomRole::Visual, "visual")] {
+            for c in link.children_named(tag) {
+                let geo = c.child("geometry").ok_or_else(|| format!("<{tag}> in link '{name}' has no <geometry>"))?;
+                let geometry = sdf_geom(geo, &name)?;
+                out.push(crate::GeometryRef { link: name.clone(), role, origin: pose_iso(c.child("pose")), geometry });
+            }
+        }
+    }
+    Ok((out, massless))
+}
+
+/// One `<geometry>` as a [`crate::LinkGeometry`]. SDF's extents are already full, so nothing is scaled.
+fn sdf_geom(geo: &Node, link: &str) -> Result<crate::LinkGeometry, String> {
+    use crate::LinkGeometry as LG;
+    if let Some(b) = geo.child("box") {
+        let txt = b.child("size").map(|n| n.text.trim().to_string()).unwrap_or_default();
+        let v: Vec<f64> = txt.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+        if v.len() != 3 {
+            return Err(format!("<box><size> in link '{link}' needs 3 numbers, got '{txt}'"));
+        }
+        return Ok(LG::Box { size: Vector3::new(v[0], v[1], v[2]) });
+    }
+    if let Some(sp) = geo.child("sphere") {
+        return Ok(LG::Sphere { radius: sp.text_f64("radius", f64::NAN) });
+    }
+    if let Some(c) = geo.child("cylinder") {
+        return Ok(LG::Cylinder { radius: c.text_f64("radius", f64::NAN), length: c.text_f64("length", f64::NAN) });
+    }
+    if let Some(c) = geo.child("capsule") {
+        return Ok(LG::Capsule { radius: c.text_f64("radius", f64::NAN), length: c.text_f64("length", f64::NAN) });
+    }
+    if let Some(m) = geo.child("mesh") {
+        let uri = m.child("uri").map(|n| n.text.trim().to_string()).unwrap_or_default();
+        if uri.is_empty() {
+            return Err(format!("<mesh> in link '{link}' has no <uri>"));
+        }
+        // an absent <scale> is unity, and a partial one is an error rather than a padded guess
+        let scale = match m.child("scale").map(|n| n.text.trim().to_string()) {
+            None => Vector3::new(1.0, 1.0, 1.0),
+            Some(t) => {
+                let v: Vec<f64> = t.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+                if v.len() != 3 {
+                    return Err(format!("<mesh><scale> in link '{link}' needs 3 numbers, got '{t}'"));
+                }
+                Vector3::new(v[0], v[1], v[2])
+            }
+        };
+        return Ok(LG::Mesh { uri, scale });
+    }
+    let named: Vec<&str> = geo.children_named("plane").map(|_| "plane")
+        .chain(geo.children_named("heightmap").map(|_| "heightmap"))
+        .chain(geo.children_named("polyline").map(|_| "polyline"))
+        .collect();
+    Err(format!(
+        "<geometry> in link '{link}' declares {}, which is outside this subset: a plane is not a solid, and a heightmap or polyline is not a primitive this crate generates",
+        if named.is_empty() { "no shape this crate reads".to_string() } else { named.join(", ") }
+    ))
 }
 
 /// Load a serial chain from `base` link to `tip` link. Returns the `Robot` and per-actuated-link
@@ -200,6 +302,171 @@ pub fn from_sdf(xml: &str, base: &str, tip: &str) -> Result<(Robot, Vec<LinkIner
 
 #[cfg(test)]
 mod verification {
+    /// SDF states FULL extents, like URDF and unlike MJCF — so nothing is halved, and this asserts
+    /// that against the closed form so the convention cannot drift.
+    #[test]
+    fn sdf_sizes_are_full_extents_and_every_shape_converts() {
+        let xml = r#"<sdf version="1.9"><model name="g">
+          <link name="base">
+            <inertial><mass>1.0</mass><inertia><ixx>0.01</ixx><iyy>0.01</iyy><izz>0.01</izz></inertia></inertial>
+            <collision name="c"><pose>0 0 0.05 0 0 0</pose>
+              <geometry><box><size>0.2 0.4 0.1</size></box></geometry></collision>
+          </link>
+          <link name="l1">
+            <inertial><mass>2.0</mass><inertia><ixx>0.01</ixx><iyy>0.01</iyy><izz>0.01</izz></inertia></inertial>
+            <collision name="c"><geometry><cylinder><radius>0.03</radius><length>0.30</length></cylinder></geometry></collision>
+            <collision name="c2"><geometry><capsule><radius>0.02</radius><length>0.2</length></capsule></geometry></collision>
+            <visual name="v"><geometry><sphere><radius>0.05</radius></sphere></geometry></visual>
+          </link>
+          <joint name="j1" type="revolute"><parent>base</parent><child>l1</child>
+            <pose>0 0 0.1 0 0 0</pose><axis><xyz>0 0 1</xyz></axis></joint>
+        </model></sdf>"#;
+        let (geo, massless) = geometry_from_sdf(xml).expect("parses");
+        assert!(massless.is_empty(), "both links state a positive mass, got {massless:?}");
+        assert_eq!(geo.len(), 4);
+
+        // a FULL extent: 0.2 × 0.4 × 0.1 stays exactly that
+        assert_eq!(geo[0].geometry, crate::LinkGeometry::Box { size: Vector3::new(0.2, 0.4, 0.1) });
+        let m = crate::primitive_mesh(&geo[0].geometry, 8).expect("generates");
+        assert!((m.volume() / (0.2 * 0.4 * 0.1) - 1.0).abs() < 1e-14, "volume {}", m.volume());
+        assert!((geo[0].origin.translation.vector - Vector3::new(0.0, 0.0, 0.05)).norm() < 1e-15, "the pose must be carried");
+
+        assert_eq!(geo[1].geometry, crate::LinkGeometry::Cylinder { radius: 0.03, length: 0.30 }, "length is a length, not a half-length");
+        assert_eq!(geo[2].geometry, crate::LinkGeometry::Capsule { radius: 0.02, length: 0.2 });
+        assert_eq!(geo[3].geometry, crate::LinkGeometry::Sphere { radius: 0.05 });
+        // both collisions precede the visual for the same link, so a role filter is meaningful
+        assert_eq!(geo[1].role, crate::GeomRole::Collision);
+        assert_eq!(geo[3].role, crate::GeomRole::Visual);
+
+        // and the same box read as a HALF extent, the MJCF convention, would be 8x smaller — asserted
+        // so a future change that applies MJCF's rule here is caught
+        let as_half = crate::primitive_mesh(&crate::LinkGeometry::Box { size: Vector3::new(0.4, 0.8, 0.2) }, 8).expect("generates");
+        assert!((as_half.volume() / m.volume() - 8.0).abs() < 1e-12, "SDF is full-extent; doubling would be 8x");
+        eprintln!("  SDF box <size>0.2 0.4 0.1</size> -> {:.6} m³ (MJCF's half-extent rule would give {:.6})", m.volume(), as_half.volume());
+    }
+
+    /// **The two ways an SDF link ends up massless, both silent.** A missing `<inertial>`, and an
+    /// `<inertial>` that omits `<mass>` — the second reads 0.0 through the loader's own `text_f64`
+    /// default, and a check for the element's presence alone would miss it.
+    #[test]
+    fn both_silent_paths_to_a_massless_link_are_reported() {
+        let xml = r#"<sdf version="1.9"><model name="g">
+          <link name="base">
+            <inertial><mass>1.0</mass><inertia><ixx>0.01</ixx><iyy>0.01</iyy><izz>0.01</izz></inertia></inertial>
+            <collision name="c"><geometry><box><size>0.1 0.1 0.1</size></box></geometry></collision>
+          </link>
+          <link name="no_inertial">
+            <collision name="c"><geometry><box><size>0.16 0.16 0.08</size></box></geometry></collision>
+          </link>
+          <link name="no_mass">
+            <inertial><inertia><ixx>0.01</ixx><iyy>0.01</iyy><izz>0.01</izz></inertia></inertial>
+            <collision name="c"><geometry><sphere><radius>0.05</radius></sphere></geometry></collision>
+          </link>
+          <joint name="j1" type="revolute"><parent>base</parent><child>no_inertial</child>
+            <pose>0 0 0.1 0 0 0</pose><axis><xyz>0 0 1</xyz></axis></joint>
+          <joint name="j2" type="revolute"><parent>no_inertial</parent><child>no_mass</child>
+            <pose>0 0 0.1 0 0 0</pose><axis><xyz>0 1 0</xyz></axis></joint>
+        </model></sdf>"#;
+
+        // what the loader produces: two massless links, and nothing said so
+        let (_, inertias) = from_sdf(xml, "base", "no_mass").expect("loads");
+        assert_eq!(inertias.len(), 2, "two actuated joints");
+        assert!(inertias.iter().all(|li| li.mass == 0.0), "both actuated links are massless: {:?}", inertias.iter().map(|l| l.mass).collect::<Vec<_>>());
+
+        // and what this adds: both names, by both routes
+        let (geo, massless) = geometry_from_sdf(xml).expect("parses");
+        assert_eq!(massless, vec!["no_inertial".to_string(), "no_mass".to_string()], "BOTH silent paths, not just the missing element");
+        assert!(!massless.contains(&"base".to_string()), "and not the link that states a mass");
+
+        // the geometry is enough to compute what the loader could not
+        let (li, skipped) = crate::primitive_link_inertia(&geo, "no_inertial", 2700.0, 32);
+        let li = li.expect("its box is enough");
+        assert_eq!(skipped, 0);
+        let want = 2700.0 * 0.16 * 0.16 * 0.08;
+        assert!((li.mass - want).abs() < 1e-9, "inferred {} vs {want}", li.mass);
+        eprintln!("  no_inertial: loader 0.0000 kg, inferred {:.4} kg; no_mass caught by the <mass> default, not the element check", li.mass);
+    }
+
+    /// Mesh URIs, the scale default, and `model://` resolving through the same table URDF uses.
+    #[test]
+    fn sdf_mesh_uris_carry_their_scale_and_resolve() {
+        let xml = r#"<sdf version="1.9"><model name="g">
+          <link name="base">
+            <inertial><mass>1.0</mass><inertia><ixx>0.01</ixx><iyy>0.01</iyy><izz>0.01</izz></inertia></inertial>
+            <collision name="c"><geometry><mesh><uri>model://arm/meshes/l1.stl</uri>
+              <scale>0.001 0.001 0.001</scale></mesh></geometry></collision>
+            <visual name="v"><geometry><mesh><uri>meshes/plain.obj</uri></mesh></geometry></visual>
+          </link>
+        </model></sdf>"#;
+        let (geo, _) = geometry_from_sdf(xml).expect("parses");
+        assert_eq!(geo.len(), 2);
+        assert_eq!(
+            geo[0].geometry,
+            crate::LinkGeometry::Mesh { uri: "model://arm/meshes/l1.stl".into(), scale: Vector3::new(0.001, 0.001, 0.001) }
+        );
+        assert_eq!(
+            geo[1].geometry,
+            crate::LinkGeometry::Mesh { uri: "meshes/plain.obj".into(), scale: Vector3::new(1.0, 1.0, 1.0) },
+            "an absent scale is unity, not zero"
+        );
+        // and the URI resolves through the same table URDF's package:// uses
+        match &geo[0].geometry {
+            crate::LinkGeometry::Mesh { uri, .. } => assert_eq!(
+                crate::resolve_uri(uri, &[("arm", "/opt/models/arm")]).as_deref(),
+                Some("/opt/models/arm/meshes/l1.stl")
+            ),
+            other => panic!("expected a mesh, got {other:?}"),
+        }
+        eprintln!("  model://arm/meshes/l1.stl -> {:?}", crate::resolve_uri("model://arm/meshes/l1.stl", &[("arm", "/opt/models/arm")]));
+    }
+
+    /// Refusals. Each is a real authoring case, and each must fail loudly rather than yield a shape
+    /// that is quietly the wrong size or a NaN that propagates into a mass.
+    #[test]
+    fn sdf_geometry_refusals() {
+        let ok = r#"<sdf version="1.9"><model name="g"><link name="base">
+          <inertial><mass>1.0</mass><inertia><ixx>0.01</ixx><iyy>0.01</iyy><izz>0.01</izz></inertia></inertial>
+          <collision name="c"><geometry><box><size>0.1 0.1 0.1</size></box></geometry></collision>
+        </link></model></sdf>"#;
+        assert!(geometry_from_sdf(ok).is_ok(), "control");
+
+        for (label, frag) in [
+            ("a box with two numbers", "<geometry><box><size>0.1 0.2</size></box></geometry>"),
+            ("a box with no size", "<geometry><box/></geometry>"),
+            ("a plane", "<geometry><plane><normal>0 0 1</normal></plane></geometry>"),
+            ("a heightmap", "<geometry><heightmap><uri>h.png</uri></heightmap></geometry>"),
+            ("a polyline", "<geometry><polyline><height>1</height></polyline></geometry>"),
+            ("an empty geometry", "<geometry/>"),
+            ("a mesh with no uri", "<geometry><mesh><scale>1 1 1</scale></mesh></geometry>"),
+            ("a mesh scale of two numbers", "<geometry><mesh><uri>a.stl</uri><scale>1 1</scale></mesh></geometry>"),
+        ] {
+            let bad = ok.replace("<geometry><box><size>0.1 0.1 0.1</size></box></geometry>", frag);
+            assert!(geometry_from_sdf(&bad).is_err(), "{label} must be refused, got Ok");
+        }
+        // a collision with no <geometry> at all
+        let no_geo = ok.replace("<geometry><box><size>0.1 0.1 0.1</size></box></geometry>", "");
+        assert!(geometry_from_sdf(&no_geo).is_err(), "a <collision> with no <geometry> must be refused");
+
+        // ⛔ a shape whose dimension is MISSING reads NaN, and `primitive_mesh` must refuse it rather
+        // than generate a body with a NaN mass. This is the path that would otherwise reach the
+        // dynamics as a plausible-looking robot.
+        let nan_cyl = ok.replace(
+            "<geometry><box><size>0.1 0.1 0.1</size></box></geometry>",
+            "<geometry><cylinder><radius>0.03</radius></cylinder></geometry>",
+        );
+        let (geo, _) = geometry_from_sdf(&nan_cyl).expect("a cylinder with no <length> still parses");
+        assert!(
+            crate::primitive_mesh(&geo[0].geometry, 16).is_none(),
+            "a cylinder with no <length> reads NaN and must be refused downstream, not meshed"
+        );
+        let (li, skipped) = crate::primitive_link_inertia(&geo, "base", 1000.0, 16);
+        assert!(li.is_none() && skipped == 1, "and it must count as an unusable shape, got {li:?} / {skipped}");
+        eprintln!("  a cylinder with no <length>: parses, then refused by primitive_mesh rather than meshed with NaN");
+
+        assert!(geometry_from_sdf("<notsdf/>").is_err(), "no <model>");
+        assert!(geometry_from_sdf(r#"<sdf><model name="e"/></sdf>"#).is_ok_and(|(g, m)| g.is_empty() && m.is_empty()), "an empty model is empty, not an error");
+    }
+
     use super::*;
     use crate::{gravity_vector, mass_matrix};
 
