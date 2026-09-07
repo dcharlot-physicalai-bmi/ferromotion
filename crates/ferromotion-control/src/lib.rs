@@ -1,8 +1,113 @@
-//! ferromotion-control — control schemes for physical AI, in Rust.
+//! **ferromotion-control — the controller, estimator, and actuator-physics layer, in pure Rust.**
 //!
-//! The first batch of the control corpus. The model-based controllers build directly on
-//! `ferromotion-core`'s dynamics (mass matrix, RNEA bias, Jacobians), so they compose with the rest of
-//! the toolkit and stay WASM-clean. See `CONTROL.md` for the full roadmap of methods being ported.
+//! 110 modules that all build on `ferromotion-core`'s dynamics — mass matrix, RNEA bias, Jacobians,
+//! contact — so a controller, the plant it controls, and the estimator watching it share one model.
+//! No BLAS, no Python, WASM-clean, so the same loop runs on the robot and in a browser tab.
+//!
+//! ⛔ **This doc block read "the first batch of the control corpus" for 110 modules.** It was written
+//! when there were a handful and never grew with them, and it is the first thing a docs.rs visitor
+//! reads. The map below is organised by what you are trying to do.
+//!
+//! # Track a reference
+//!
+//! [`Pid`], [`ComputedTorque`], [`CartesianImpedance`], [`Admittance`] (and hybrid force/position),
+//! [`SlidingMode`] (robust to matched disturbance), [`Lqr`], [`Hinf`] (the robust-control reference
+//! point), [`EsAttitude`] (error-state control on a matrix Lie group), and `geometric_se3` for
+//! coordinate-free tracking on SE(3).
+//!
+//! # Solve for a whole body
+//!
+//! `wbc` (acceleration-level QP), `osc` (operational-space control), `hqp` (strict task priority),
+//! [`PlacoSolver`] (a weighted task stack as one QP), and [`ReluQp`] as the QP solver, over a shared box-constrained backend. [`MomentumObserver`] estimates external torque without needing `q̈`.
+//!
+//! # Optimise a trajectory
+//!
+//! Gradient-based: [`IlqrProblem`], `fddp`, `boxddp`, `proxddp` (augmented-Lagrangian constrained
+//! DDP), `dircon` (Hermite–Simpson collocation), [`ScvxProblem`] (successive convexification),
+//! [`CovarianceSteering`]. Sampling-based: [`Mppi`], [`Cem`], [`Icem`], [`DialMpc`],
+//! [`TrajectoryBundle`]. Contact-aware: [`C3`] (consensus complementarity control), [`SmoothedContact`] and [`PusherSlider`] (contact
+//! trust region on a smoothed quasi-dynamic model), [`FootstepPlanner`]. Game-theoretic: [`AlGames`],
+//! [`DpilqrResult`]. Time parameterisation: [`ToppPath`], `frenet`, [`QuadState`] (differential flatness
+//! and minimum-snap).
+//!
+//! # Predict and constrain
+//!
+//! [`LinearMpc`], [`TubeMpc`] (a disturbance-invariant tube), [`SrbdMpc`] (single-rigid-body convex
+//! MPC), [`CentroidalMpc`], [`TinyMpc`] (embedded), [`DiffMpc`] and [`diff_eq_qp`] (differentiate the
+//! *solution* of the optimisation, not just its objective).
+//!
+//! ⛔ An MPC is not stable because it optimises. `terminal` carries the four terminal ingredients that
+//! make a receding-horizon optimiser a stabilising controller, and `hybrid_terminal` carries them for
+//! a system with contact.
+//!
+//! # Walk and run
+//!
+//! [`Slip`] (spring-loaded inverted pendulum, plus a Raibert hopper), [`Alip`] (angular-momentum
+//! templates), [`DcmPlan`] (divergent component of motion, with footstep planning), [`ZmpPreview`]
+//! and [`capture_point`], [`CaptureParams`] (N-step capturability in closed form), [`HzdReduction`]
+//! (hybrid zero dynamics), [`CompassGait`] (the smallest biped on which a certificate is real),
+//! [`CpgNetwork`] (central pattern generators), and `task_suite` for a locomotion suite plus what a suite
+//! score can actually support.
+//!
+//! # Estimate state
+//!
+//! [`KalmanFilter`], [`Ekf`], [`Ukf`], [`InEkf`] (Barrau–Bonnabel invariant observer), [`Msckf`]
+//! (visual-inertial), [`ParticleFilter`], `mhe` (moving-horizon, optimisation-based), [`RtsSmoother`],
+//! [`ImuPreintegrator`] (on-manifold, with leg-odometry bias correction), [`Madgwick`],
+//! [`ComplementaryFilter`], [`AlphaBeta`], [`davenport_q_method`] and [`triad`] (attitude from vector observations),
+//! [`Koopman`] (data-driven linearisation).
+//!
+//! # Stay safe, and prove it
+//!
+//! [`CbfFilter`] (minimally correct a nominal control), [`Ccm`] (control contraction metrics — a
+//! *certificate* of exponential tracking), [`ResClf`], `hj` (Hamilton–Jacobi reachability by solving
+//! the PDE), [`Zonotope`] (guaranteed forward-reachable sets without an SDP), `qp_certificate`
+//! (global certificates for whole-body QP stacks), `envelope` (turning a measured discrepancy into a
+//! certified operating envelope), `smoothing_tube` (certifying a policy designed on a smoothed model
+//! against the nonsmooth dynamics it will actually meet), and `funnel_algebra` for composing basins.
+//!
+//! # The actuator is physics, not a gain
+//!
+//! This is where a simulation result stops transferring, so the layer is explicit. [`SeaJoint`]
+//! (series-elastic transmission), [`Pmsm`] and [`PiCurrent`] (field-oriented control: the layer
+//! between a commanded torque and the currents that produce it), [`MotorThermal`] (winding
+//! temperature, the limit that actually bounds torque), [`Battery`] (torque fades as the pack
+//! empties), [`LuGre`] and [`Stribeck`] (what a joint resists with, below and around breakaway),
+//! [`Backlash`] (the gap a geared joint traverses before it transmits anything), [`Rotor`]
+//! (rotordynamics), [`rainflow`] and [`SnCurve`] (what a duty cycle costs the hardware, which a reward function cannot
+//! see), and the soft actuators [`HillMuscle`], [`Mckibben`], [`Sma`], [`Piezo`], [`Cdpr`].
+//!
+//! # Joules, latency, and the other budgets a controller spends
+//!
+//! [`sensing_power_floor`] and [`SensingBudget`] turn a plant's own delay margin into the minimum
+//! sensing watts an accuracy target costs; [`delay_margin_seconds`] measures the margin.
+//! [`EmbodiedActuator`] and [`OwnedCapability`] price what it cost to *build* an actuator and to
+//! *carry* a sensor, which turns `E_task` from a rate into a crossover. `hierarchy` designs a
+//! dual-rate stack to a loss budget, `iss` prices a bounded per-step error as it propagates,
+//! `metrology` prices the measurement itself, `reliability` explains why a 100-step task of
+//! 99%-reliable skills fails most of the time, and `regret` measures closed-loop regret with the
+//! variance reduction that makes it measurable.
+//!
+//! # Many robots, and vehicles that are not arms
+//!
+//! [`orca_velocity`] (reciprocal collision avoidance), `swarm` (consensus and formation control),
+//! `coverage` (Lloyd's algorithm), `assignment` (Hungarian). [`DiffDrive`] and `path_tracking` for
+//! wheeled vehicles, [`MarineCraft`] (Fossen dynamics with line-of-sight guidance), [`QuadState`] for
+//! quadrotors, [`Cw`] (Clohessy–Wiltshire rendezvous).
+//!
+//! # Learn, and meet a learned policy
+//!
+//! [`Dmp`] (learning from demonstration), [`RmpArm`] (Riemannian motion policies),
+//! `geometric_fabric`, `learned_vc` (a learned virtual constraint), `lq_regret` (what a generative
+//! policy's sampling error costs a closed loop), `decomposition` (where to cut a long task into
+//! skills), `sensorimotor` (perception and action closed on each other), and [`batch_rollout`] /
+//! `gpu` for the batched data-parallel rollouts an on-device RL loop needs.
+//!
+//! # What this crate does not do
+//!
+//! It does not own the model — that is `ferromotion-core`. It does not train a network — that is
+//! `ferromotion-learn`. It does not run a learned policy — that is `ferromotion-policy`. Nothing here
+//! reads a file path or requires a GPU.
 
 use nalgebra::{DVector, Vector3};
 use ferromotion_core::{gravity_vector, inverse_dynamics, mass_matrix, LinkInertia, Robot};

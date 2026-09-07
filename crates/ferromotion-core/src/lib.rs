@@ -1,12 +1,161 @@
-//! ferromotion-core — robot kinematic optimization in Rust.
+//! **ferromotion-core — the model-based substrate for physical-AI motion, in pure Rust.**
 //!
-//! A revolute/prismatic kinematic chain, forward kinematics on SE(3), an analytic geometric
-//! Jacobian, a composable [`Cost`] trait, and a Levenberg–Marquardt solver. Load real robots
-//! from URDF (parsed from memory, so it works in the browser too). Pure `nalgebra` +
-//! `urdf-rs` — compiles clean to `wasm32-unknown-unknown`.
+//! 150 modules over one shared [`Robot`]: load a real robot, differentiate its dynamics, resolve its
+//! contacts, plan and optimise its motion, estimate its state, and check that the answer obeys the
+//! physics. Pure `nalgebra` and `urdf-rs`, no BLAS, no Python, no GPU required — and it compiles clean
+//! to `wasm32-unknown-unknown`, so the same code runs on the robot, on a laptop, and in a browser tab.
 //!
-//! This mirrors PyRoki's spine: a `Robot`, a set of composable costs (pose, joint-limit,
-//! posture, …), and a nonlinear-least-squares solve. IK is `solve` over a `PoseCost`.
+//! ⛔ **This doc block read "robot kinematic optimization in Rust — a kinematic chain, forward
+//! kinematics, a Jacobian, and a Levenberg–Marquardt solver" for 150 modules**, and closed by
+//! describing the crate as a mirror of another project's spine. That was written when the crate had
+//! about six modules and never grew with it. It is the first thing every docs.rs visitor reads, so it
+//! was the single largest gap between what this crate does and what a reader could discover. The map
+//! below is organised by what you are trying to do.
+//!
+//! # Load a robot
+//!
+//! [`from_urdf_str`] and [`from_urdf_full`] (URDF, parsed from a string so it works in the browser),
+//! [`from_mjcf_str`] (MuJoCo XML), [`from_sdf`] (Gazebo SDFormat), [`parse_usda`] / [`robot_from_usda`]
+//! / [`usda_from_robot`] (OpenUSD `UsdPhysics`, read *and* write), [`Robot::from_dh`] (a
+//! Denavit–Hartenberg table straight off a datasheet), [`Ets`] (a robot as a string of elementary
+//! transforms), [`tree_from_urdf`] for a branched tree such as a hand, and `closed_loop` for linkages
+//! that are not serial chains.
+//!
+//! ⛔ A URDF is not an actuator model. Reflected rotor inertia, viscous damping and Coulomb friction
+//! are read from the model and applied *inside* RNEA — see [`identify_actuator`] and
+//! [`actuator_plausibility`], and the section below `## A URDF is not an actuator model` in this
+//! crate's README for why a model without them silently misreports torque.
+//!
+//! # Kinematics and inverse kinematics
+//!
+//! Forward kinematics and analytic geometric Jacobians on SE(3) live on [`Robot`]; `screw` carries the
+//! Lie-group machinery (product of exponentials, adjoints, twists), `paden_kahan` the closed-form
+//! geometric IK subproblems, [`yoshikawa`] and [`manipulability_gradient_analytic`] the manipulability
+//! measures, and `reciprocal` the wrench/twist duality.
+//!
+//! IK comes in four shapes, because they fail differently: [`solve_ik`] (Levenberg–Marquardt over a
+//! composable [`Cost`] stack), [`solve_ik_robust`] (restarts, for when LM stalls in a local minimum),
+//! [`solve_diffik`] (a per-step velocity QP over a task stack), and [`tree_ik`] for a branched tree
+//! with several tips. [`Retargeter`], [`PositionRetargeter`], [`VectorRetargeter`] and
+//! [`DexPilotRetargeter`] map an observed keypoint stream — human demo, teleop, mocap — onto a robot.
+//!
+//! # Dynamics
+//!
+//! [`inverse_dynamics`] (RNEA) and [`mass_matrix`]; [`forward_dynamics`] via the mass-matrix solve and
+//! [`forward_dynamics_aba`] via the O(n) Articulated-Body Algorithm; [`crba`] for the joint-space
+//! inertia directly; [`floating_base_forward_dynamics`] and [`tree_floating_forward_dynamics`] for a
+//! floating base, serial or branched; **analytical** derivatives `∂/∂q, ∂/∂q̇, ∂/∂τ` rather than finite
+//! differences; [`gendyn`] over a generic scalar so the whole pipeline differentiates under an AD tape;
+//! and [`forward_dynamics_in`] for a control loop with a deadline, allocation-free at steady state.
+//!
+//! Beyond rigid bodies: `lgvi` (a Lie-group variational integrator that needs no re-normalisation and
+//! has no gimbal singularity), `rigidbody` (symplectic free rigid body), [`ModalModel`] (reduced-order
+//! deformables), `cosserat` (variable-strain soft rods), `tensegrity` (force-density form-finding).
+//!
+//! # Contact
+//!
+//! The part that decides whether a physical-AI result transfers. Six solvers, because the right one
+//! depends on what you need from it: [`solve_contacts_pgs`] (robust projected Gauss–Seidel),
+//! [`solve_frictional_ipm`] (interior-point, fully differentiable), [`IpcFloor`] (barrier-based, guaranteed
+//! intersection-free), [`HydroContact`] (pressure-field, smooth distributed forces), [`XpbdSolver`]
+//! (position-based, small-steps), and [`AffineContact`] (the penalty contact in closed form, exact to
+//! round-off, which is what the integrators are checked against).
+//!
+//! Applied at the level you need it: [`RobotContactSim`] for an articulated body,
+//! [`floating_contact_step`] for a floating base, [`whole_body_contact_step`] for one hard frictional
+//! non-penetrating solve over a whole body, and `hand_object` for a hand and an object in one solve.
+//!
+//! ⛔ **Gradients through contact are where differentiable simulators go wrong, and this crate measures
+//! it rather than assuming it.** [`ContactLawResidual`] checks the answer against Signorini,
+//! Coulomb and maximum-dissipation — a *solver* residual is not a *law* residual, and this crate has
+//! shipped a solver reporting 9.8e-6 while violating Signorini by 9.8e-3. [`ContactModel`],
+//! [`hybrid_jacobian`] and [`CfdContact`] carry the gradient story, including where it stops being
+//! valid; `adaptive_contact` carries the error decomposition.
+//!
+//! # Collision geometry
+//!
+//! [`gjk`] and [`epa`] (narrowphase distance and penetration depth, with conservative-advancement
+//! CCD), [`Bvh`] (AABB broadphase), [`SdfScene`] and [`Esdf`] and [`CspaceField`] (signed-distance
+//! representations, including a composite configuration-space field), [`FociPlan`] (field-overlap
+//! collision integral), `dcol` (differentiable collision between convex primitives), [`OccupancyGrid`]
+//! grids from range sensors, and [`SphereCollisionCost`] for the sphere-model robot representation.
+//!
+//! # Planning
+//!
+//! Sampling: [`RrtStar`], [`PrmStar`], [`BitStar`]. Optimisation-based: [`Chomp`], [`Gpmp2`],
+//! [`TrajectoryProblem`] (block-tridiagonal trajectory optimisation), [`solve_factor_graph`] (a general
+//! factor graph, for topologies beyond a chain). Convex decomposition: [`Iris`] and [`Gcs`]
+//! (shortest paths through graphs of convex sets). Grids and lattices: [`astar_grid`],
+//! [`hybrid_astar`], [`lattice_astar`], [`LatticeDStarLite`] (incremental replanning when cells flip),
+//! [`bug2`], [`distance_transform_plan`]. Car-like: [`dubins_shortest`], [`reeds_shepp`].
+//! Nonholonomic: `chained_form`, `fourier_steering`, `hall_basis`. And [`plan_arm_reach`] as the bridge
+//! that puts the sampling planners on a [`Robot`].
+//!
+//! Curves and integration: [`BSpline`], [`CatmullRom`], [`SplineSE3`] (continuous-time SE(3)),
+//! [`dopri5_step`] (adaptive Dormand–Prince), [`gauss_legendre`].
+//!
+//! # Estimation and perception
+//!
+//! Factor graphs and smoothing: [`IncrementalLeastSquares`] (incremental QR), [`PoseGraph2D`],
+//! `marginalize` (Schur complement, fixed-lag), [`LegSmoother`]. Robustness: [`gnc_solve`]
+//! (graduated non-convexity), [`ransac`], the `mestimator` kernels. Geometry from images:
+//! [`pnp`], [`decompose_essential`], [`homography_dlt`], [`BundleAdjustment`], [`PinholeCamera`],
+//! `orb`, `sgm`, [`tag_pose`]. Point clouds: [`Icp`], [`KissIcp`],
+//! `teaser`. Averaging on manifolds: [`average_quaternions`], [`rotation_averaging`],
+//! [`translation_averaging`]. Ranging and navigation: [`trilaterate`], [`tdoa_localize`],
+//! `radar_velocity`, [`lla_to_ecef`], `great_circle`. Synthetic sensing:
+//! `sensor_render` gives depth cameras and lidar by sphere tracing over the analytic scene.
+//!
+//! Signals: [`fft`], [`cross_correlation`], [`Biquad`], [`SavGol`], [`hampel_filter`],
+//! [`real_roots`], [`Pca`], [`kmeans`], `running_stats`.
+//!
+//! # Grasping
+//!
+//! [`force_closure_q1`] (a differentiable Ferrari–Canny metric), [`force_closure_q1_spatial`] in the
+//! full six-dimensional wrench space, [`grasp_matrix`], and `grasp_bounds` for how many fingers a hand
+//! actually needs (Carathéodory, Steinitz, and the exceptional surfaces).
+//!
+//! # Hybrid systems, and making a claim checkable
+//!
+//! This is the part that separates a demo from a result, and it is why the crate exists in this shape.
+//!
+//! - **Impacts and orbital stability**: [`plastic_impact`], [`plastic_impact_jacobian`],
+//!   [`saltation_matrix`] (which returns `None` on a grazing contact rather than a wrong number),
+//!   [`poincare_stability`], [`impact_expansion`], [`hybrid_certificate`].
+//! - **Certificates**: [`lyapunov`] and the LMI substrate, [`solve_sdp`].
+//! - **Specification**: [`Stl`] — Signal Temporal Logic with quantitative robustness, so "the task
+//!   succeeded" is a number with a sign rather than an opinion.
+//! - **Partial observability**: [`Belief`], [`expected_information_gain`], [`best_sensing_action`] —
+//!   deciding what to *look at*. A filter answers "where am I"; this answers "which measurement next".
+//! - **Causal sufficiency**: [`Scm`] — why a model that predicts observational data perfectly can be
+//!   wrong about what happens when you *act*.
+//! - **Optimal transport**: [`w2_gaussian`], [`sinkhorn`], [`w1_empirical_1d`], [`kantorovich_dual`],
+//!   [`gromov_wasserstein`], [`jko_step`], [`schrodinger_bridge`], [`distributional_bellman`] — the
+//!   distance a closed loop actually charges for a policy's error, which is not total variation.
+//! - **Thermodynamic floors**: [`landauer_energy`], [`entropy_production`],
+//!   [`bode_sensitivity_integral`], [`max_extractable_work`], [`bits_affordable`] — what a physical
+//!   agent cannot go below, in joules.
+//! - **Score-to-distance bounds**: [`score_to_tv`] and [`flow_matching_w2`], which convert a network's
+//!   training error into a distance on the distribution it induces.
+//!
+//! # Identification and sim-to-real
+//!
+//! [`identify`] (inertial parameters with reported uncertainty and a pseudo-inertia consistency
+//! check), [`identify_actuator`] and [`identify_actuator_with_gain`], [`actuator_plausibility`] (spot
+//! an impossible declared limit from the model alone), [`confounding`] (screen an excitation *before*
+//! running it), and `randomization` for domain randomisation with ranges the data chose.
+//!
+//! # Throughput
+//!
+//! [`gpu`] is the `wgpu` path for batched collision checking, the parallel hot loop of sampling-based
+//! planning. [`forward_dynamics_in`] is the allocation-free CPU path. Both are optional to the rest.
+//!
+//! # What this crate does not do
+//!
+//! It does not render, it does not own a scene graph, and it does not train — training lives in
+//! `ferromotion-learn`, controllers in `ferromotion-control`, and the deformable and fluid domains in
+//! their own crates. Nothing here reads a file path: every loader takes a string, which is what keeps
+//! the wasm target honest.
 
 use nalgebra::{DMatrix, DVector, Isometry3, Translation3, Unit, UnitQuaternion, Vector3, Vector6};
 
