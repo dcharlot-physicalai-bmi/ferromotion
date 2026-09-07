@@ -172,9 +172,11 @@
 //!
 //! [`gpu`] is the `wgpu` path: batched collision checking and six batched articulated-dynamics
 //! kernels, each stepping thousands of environments in one dispatch. `ArticulatedGpu` carries
-//! **per-environment mass properties** — `set_env_inertia` and `set_all_inertia` — so a batch can be
-//! domain-randomised for sim-to-real without leaving the GPU. [`forward_dynamics_in`] is the
-//! allocation-free CPU path. Both are optional to the rest.
+//! **per-environment mass properties AND per-environment ground** — `set_env_inertia`,
+//! `set_all_inertia` and `set_env_contact` — so the two axes a sim-to-real transfer actually
+//! randomises, link mass and contact stiffness/friction, both vary across the batch without leaving
+//! the GPU. Both are read back by `env_inertia_raw` and `env_contact` rather than assumed to land.
+//! [`forward_dynamics_in`] is the allocation-free CPU path. Both are optional to the rest.
 //!
 //! # What this crate does not do
 //!

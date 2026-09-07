@@ -641,6 +641,11 @@ const N: u32 = {N}u;
 // called from four entry points, and threading an env index through all of them would touch every
 // call site for no gain.
 var<private> IBASE: u32 = 0u;
+// The base offset into PRM's per-environment CONTACT tail: floor_z, kn, kd, mu_scale, four floats
+// per environment starting at 13 + 3N. Set alongside IBASE by every entry point. Ground stiffness
+// and friction are randomised as routinely as link mass for locomotion transfer, and both lived in
+// PRM as single scalars shared by the whole batch.
+var<private> CBASE: u32 = 0u;
 @group(0) @binding(2) var<storage, read> PRM: array<f32>;      // [N, n_envs, gx, gy, gz, dt, floor_z, kn, kd, n_contacts]
 @group(0) @binding(3) var<storage, read_write> Q: array<f32>;
 @group(0) @binding(4) var<storage, read_write> QD: array<f32>;
@@ -766,6 +771,7 @@ fn accel(@builtin(global_invocation_id) g: vec3<u32>) {
   let e = g.x; let n_envs = u32(PRM[1]);
   if (e >= n_envs) { return; }
   IBASE = e * N * 13u;
+  CBASE = 13u + 3u*N + e*4u;
   let grav = vec3<f32>(PRM[2], PRM[3], PRM[4]);
   var q: array<f32, N>; var qd: array<f32, N>; var tau: array<f32, N>;
   for (var i = 0u; i < N; i = i + 1u) { q[i] = Q[e*N + i]; qd[i] = QD[e*N + i]; tau[i] = TAU[e*N + i]; }
@@ -778,6 +784,7 @@ fn step(@builtin(global_invocation_id) g: vec3<u32>) {
   let e = g.x; let n_envs = u32(PRM[1]);
   if (e >= n_envs) { return; }
   IBASE = e * N * 13u;
+  CBASE = 13u + 3u*N + e*4u;
   let grav = vec3<f32>(PRM[2], PRM[3], PRM[4]); let dt = PRM[5];
   var q: array<f32, N>; var qd: array<f32, N>; var tau: array<f32, N>;
   for (var i = 0u; i < N; i = i + 1u) { q[i] = Q[e*N + i]; qd[i] = QD[e*N + i]; tau[i] = TAU[e*N + i]; }
@@ -791,7 +798,10 @@ fn step(@builtin(global_invocation_id) g: vec3<u32>) {
 // Penalty ground-contact joint torque: for each contact point below the floor, a spring-damper
 // normal + regularized-Coulomb friction force, mapped to joint space by the point Jacobian Jₚᵀ·f.
 fn contact_torque(q: array<f32, N>, qd: array<f32, N>) -> array<f32, N> {
-  let floor_z = PRM[6]; let kn = PRM[7]; let kd = PRM[8]; let nc = u32(PRM[9]);
+  // Per-environment, always: the tail is initialised to the constructor's values, so a caller that
+  // never randomises sees exactly what it saw before and there is no second code path.
+  let floor_z = PRM[CBASE]; let kn = PRM[CBASE+1u]; let kd = PRM[CBASE+2u]; let mu_scale = PRM[CBASE+3u];
+  let nc = u32(PRM[9]);
   var tc: array<f32, N>;
   for (var i = 0u; i < N; i = i + 1u) { tc[i] = 0.0; }
   if (nc == 0u) { return tc; }
@@ -826,7 +836,7 @@ fn contact_torque(q: array<f32, N>, qd: array<f32, N>) -> array<f32, N> {
     let cb = c*5u;
     let fr = u32(CONTACTS[cb]);
     let off = vec3<f32>(CONTACTS[cb+1u], CONTACTS[cb+2u], CONTACTS[cb+3u]);
-    let mu = CONTACTS[cb+4u];
+    let mu = CONTACTS[cb+4u] * mu_scale;   // the per-contact nominal, scaled per environment
     let p = Rf[fr] * off + ofr[fr];       // contact point in world
     let phi = p.z - floor_z;
     if (phi < 0.0) {
@@ -856,6 +866,7 @@ fn step_contact(@builtin(global_invocation_id) g: vec3<u32>) {
   let e = g.x; let n_envs = u32(PRM[1]);
   if (e >= n_envs) { return; }
   IBASE = e * N * 13u;
+  CBASE = 13u + 3u*N + e*4u;
   let grav = vec3<f32>(PRM[2], PRM[3], PRM[4]); let dt = PRM[5];
   var q: array<f32, N>; var qd: array<f32, N>; var tau: array<f32, N>;
   for (var i = 0u; i < N; i = i + 1u) { q[i] = Q[e*N + i]; qd[i] = QD[e*N + i]; tau[i] = TAU[e*N + i]; }
@@ -877,6 +888,7 @@ fn rollout(@builtin(global_invocation_id) g: vec3<u32>) {
   let e = g.x; let n_envs = u32(PRM[1]);
   if (e >= n_envs) { return; }
   IBASE = e * N * 13u;
+  CBASE = 13u + 3u*N + e*4u;
   let grav = vec3<f32>(PRM[2], PRM[3], PRM[4]); let dt = PRM[5];
   let tau_max = PRM[10]; let effort_w = PRM[11]; let T = u32(PRM[12]);
   var tstar: array<f32, N>; var q: array<f32, N>; var qd: array<f32, N>;
@@ -1022,6 +1034,11 @@ impl ArticulatedGpu {
         // PRM buffer holds the base 10 + the rollout tail [tau_max, effort_w, T, q*(n), q0(n), qd0(n)].
         let mut prm_full = prm.to_vec();
         prm_full.resize(13 + 3 * n, 0.0);
+        // The per-environment CONTACT tail: floor_z, kn, kd, mu_scale per env, initialised to the
+        // constructor's values so an un-randomised batch behaves exactly as it did before.
+        for _ in 0..n_envs.max(1) {
+            prm_full.extend_from_slice(&[floor_z as f32, kn as f32, kd as f32, 1.0]);
+        }
 
         let init = |label, data: &[u8], extra: wgpu::BufferUsages| {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: data, usage: wgpu::BufferUsages::STORAGE | extra })
@@ -1031,7 +1048,9 @@ impl ArticulatedGpu {
         // COPY_SRC as well as COPY_DST: `env_inertia_raw` reads it back, because trusting that an
         // upload landed is how a silently dropped buffer goes unnoticed.
         let inertia_buf = init("art-inertia", bytemuck::cast_slice(&inert), wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC);
-        let prm_buf = init("art-prm", bytemuck::cast_slice(&prm_full), wgpu::BufferUsages::COPY_DST);
+        // COPY_SRC too: `env_contact` reads the per-env tail back, for the same reason
+        // `env_inertia_raw` does — an upload that did not land should be visible, not assumed.
+        let prm_buf = init("art-prm", bytemuck::cast_slice(&prm_full), wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC);
         let contacts_buf = init("art-contacts", bytemuck::cast_slice(&contact_flat), none);
         let policy_buf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("art-policy"), size: (n_envs * poldim * 4).max(4) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let reward_buf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("art-reward"), size: (n_envs * 4).max(4) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
@@ -1227,6 +1246,58 @@ impl ArticulatedGpu {
         }
         self.queue.write_buffer(&self.inertia_buf, 0, bytemuck::cast_slice(&flat));
         true
+    }
+
+    /// **Give one environment its own ground**, for randomising contact alongside mass.
+    ///
+    /// `floor_z` is the plane height, `kn` and `kd` the normal spring and damper, and `mu_scale`
+    /// multiplies the nominal friction coefficient each contact point already carries — a scale rather
+    /// than a replacement, because friction is stated per contact and randomising it means perturbing
+    /// the nominal, not overwriting the geometry's own values.
+    ///
+    /// `false` — and nothing uploaded — if `env` is out of range or any value is non-finite. Negative
+    /// stiffness is a caller's choice and is not refused; it makes contact push the wrong way, which is
+    /// a physics decision rather than an invalid input.
+    ///
+    /// ⛔ **A step at these values is not automatically stable.** The explicit integration limit is
+    /// `dt²·(kn/m) + 2·dt·(kd/m) ≤ 4`, and randomising `kn` upward tightens it — the workspace's
+    /// contact gate in `floating_contact.rs` measures shipped configurations against exactly that
+    /// bound. Randomise stiffness and the batch can contain environments whose `dt` is now too coarse.
+    pub fn set_env_contact(&mut self, env: usize, floor_z: f64, kn: f64, kd: f64, mu_scale: f64) -> bool {
+        if env >= self.n_envs {
+            return false;
+        }
+        let vals = [floor_z as f32, kn as f32, kd as f32, mu_scale as f32];
+        if !vals.iter().all(|v| v.is_finite()) {
+            return false;
+        }
+        let base = 13 + 3 * self.n + env * 4;
+        self.queue.write_buffer(&self.prm_buf, (base * 4) as u64, bytemuck::cast_slice(&vals));
+        true
+    }
+
+    /// Read back one environment's contact parameters as the shader sees them:
+    /// `(floor_z, kn, kd, mu_scale)`. `None` if `env` is out of range.
+    pub fn env_contact(&self, env: usize) -> Option<(f32, f32, f32, f32)> {
+        if env >= self.n_envs {
+            return None;
+        }
+        let base = 13 + 3 * self.n + env * 4;
+        let stage = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("art-prm-stage"),
+            size: 16,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        enc.copy_buffer_to_buffer(&self.prm_buf, (base * 4) as u64, &stage, 0, 16);
+        self.queue.submit(Some(enc.finish()));
+        let slice = stage.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        let v = bytemuck::cast_slice::<u8, f32>(&slice.get_mapped_range().expect("mapped range")).to_vec();
+        stage.unmap();
+        Some((v[0], v[1], v[2], v[3]))
     }
 
     /// Read back what one environment's mass properties currently are, as the shader sees them —
@@ -3341,6 +3412,130 @@ mod verification {
 
     /// The GPU penalty-contact step reproduces the CPU reference, and a robot dropped onto the floor
     /// settles (bounded penetration, comes to rest) — port correctness + a physical invariant.
+    /// **Per-environment GROUND, checked against the CPU contact step for each env's own ground.**
+    ///
+    /// Ground stiffness and friction are randomised as routinely as link mass for locomotion transfer,
+    /// and both lived in PRM as single scalars shared by the whole batch. 256 environments, each with
+    /// its own floor height, normal spring, damper and friction scale, all stepping in one dispatch.
+    #[test]
+    fn gpu_per_env_contact_matches_the_cpu_for_each_envs_own_ground() {
+        let (robot, inertia) = from_urdf_full(ARM3, "base", "tool").unwrap();
+        let n = robot.dof();
+        let g = Vector3::new(0.0, 0.0, -9.81);
+        let dt = 1e-3;
+        let (floor_z, kn, kd) = (0.0, 4.0e3, 40.0);
+        let contacts = vec![
+            (n, Vector3::new(0.2, 0.0, 0.0), 0.6),
+            (n, Vector3::zeros(), 0.6),
+            (n - 1, Vector3::zeros(), 0.6),
+        ];
+        let n_envs = 256usize;
+
+        let mut s = 0x2C3Du64;
+        let mut rng = || {
+            s = s.wrapping_add(0x9E3779B97F4A7C15);
+            let mut z = s;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+            ((z ^ (z >> 31)) as f64) / (u64::MAX as f64)
+        };
+        // states biased downward so contacts actually penetrate; if none did, the whole comparison
+        // would be of the contact-free dynamics and would say nothing about contact at all
+        let q: Vec<f64> = (0..n_envs * n).map(|_| rng() * 3.0 - 1.5).collect();
+        let qd: Vec<f64> = (0..n_envs * n).map(|_| rng() * 1.0 - 0.5).collect();
+        let tau: Vec<f64> = (0..n_envs * n).map(|_| rng() * 2.0 - 1.0).collect();
+
+        // per-env ground. kn is scaled at most 3x, which keeps every environment inside the explicit
+        // integration limit dt²(kn/m) + 2dt(kd/m) ≤ 4 at this dt — the bound `floating_contact.rs`
+        // measures shipped configurations against. Randomising stiffness upward tightens it.
+        let ground: Vec<(f64, f64, f64, f64)> = (0..n_envs)
+            .map(|e| {
+                let f = e as f64 / n_envs as f64;
+                (0.04 * f - 0.02, kn * (0.5 + 2.5 * f), kd * (0.5 + 1.5 * f), 0.3 + 1.7 * f)
+            })
+            .collect();
+
+        let Some(mut gp) = ArticulatedGpu::new(&robot, &inertia, g, dt, n_envs, &contacts, floor_z, kn, kd) else {
+            eprintln!("no GPU — skipping");
+            return;
+        };
+        // before any upload, the tail must already hold the constructor's values — that is what makes
+        // an un-randomised batch behave exactly as it did before this existed
+        let (f0, k0, d0, m0) = gp.env_contact(0).expect("readable");
+        assert!((f0 as f64 - floor_z).abs() < 1e-6 && (k0 as f64 - kn).abs() < 1.0 && (d0 as f64 - kd).abs() < 1e-3, "the tail must start at the constructor's values, got {f0}/{k0}/{d0}");
+        assert!((m0 - 1.0).abs() < 1e-9, "and a friction scale of exactly 1, got {m0}");
+
+        for (e, &(fz, k, d, mu)) in ground.iter().enumerate() {
+            assert!(gp.set_env_contact(e, fz, k, d, mu), "env {e} upload must be accepted");
+        }
+        let (fl, kl, dl, ml) = gp.env_contact(n_envs - 1).expect("readable");
+        assert!((kl as f64 - ground[n_envs - 1].1).abs() < 1.0, "the last env must carry its own kn, got {kl}");
+        assert!((kl - k0).abs() > 0.5 * k0, "the two ends of the batch must differ substantially, {k0} vs {kl}");
+        assert!((ml - m0).abs() > 0.5, "and their friction scales too, {m0} vs {ml}");
+        let _ = (fl, dl);
+
+        let (gq, gqd) = gp.run_contact(&q, &qd, &tau, 1);
+        let mut worst = 0.0f64;
+        let mut worst_env = 0usize;
+        for e in 0..n_envs {
+            let (fz, k, d, mu) = ground[e];
+            // the env's own ground AND its own scaled friction, since mu_scale multiplies the nominal
+            let scaled: Vec<(usize, Vector3<f64>, f64)> = contacts.iter().map(|&(fr, off, m)| (fr, off, m * mu)).collect();
+            let (cq, cqd) = cpu_contact_step(&robot, &inertia, &scaled, fz, k, d, &q[e * n..(e + 1) * n], &qd[e * n..(e + 1) * n], &tau[e * n..(e + 1) * n], dt, g);
+            for i in 0..n {
+                let dd = (gq[e * n + i] - cq[i]).abs().max((gqd[e * n + i] - cqd[i]).abs());
+                if dd > worst {
+                    worst = dd;
+                    worst_env = e;
+                }
+            }
+        }
+        eprintln!("  per-env ground, {n_envs} envs: worst |Δ| {worst:.3e} (env {worst_env})");
+        assert!(worst < 1e-3, "per-env contact diverged from the CPU reference: {worst:.3e} at env {worst_env}");
+
+        // ⛔ THE CONTROL. Against the SHARED ground the same GPU output must disagree badly, or the
+        // per-env tail changed nothing and this test would pass for the implementation it replaces.
+        let mut worst_shared = 0.0f64;
+        for e in 0..n_envs {
+            let (cq, cqd) = cpu_contact_step(&robot, &inertia, &contacts, floor_z, kn, kd, &q[e * n..(e + 1) * n], &qd[e * n..(e + 1) * n], &tau[e * n..(e + 1) * n], dt, g);
+            for i in 0..n {
+                worst_shared = worst_shared.max((gq[e * n + i] - cq[i]).abs()).max((gqd[e * n + i] - cqd[i]).abs());
+            }
+        }
+        eprintln!("  the same GPU output against the SHARED ground: worst |Δ| {worst_shared:.3e} — must be large");
+        assert!(worst_shared > 1e-2, "the randomisation must actually change the contact, got {worst_shared:.3e}");
+
+        // refusals, and a refused upload must leave the tail alone
+        let before = gp.env_contact(5).expect("readable");
+        assert!(!gp.set_env_contact(n_envs, 0.0, kn, kd, 1.0), "an out-of-range env");
+        assert!(!gp.set_env_contact(5, f64::NAN, kn, kd, 1.0), "a non-finite floor");
+        assert!(!gp.set_env_contact(5, 0.0, f64::INFINITY, kd, 1.0), "a non-finite stiffness");
+        assert!(!gp.set_env_contact(5, 0.0, kn, kd, f64::NAN), "a non-finite friction scale");
+        assert_eq!(gp.env_contact(5).expect("readable"), before, "a refused upload must leave the tail exactly as it was");
+        assert!(gp.env_contact(n_envs).is_none(), "an out-of-range read");
+
+        // and the two randomisation axes compose: mass AND ground varied together still match
+        let per_env: Vec<Vec<crate::LinkInertia>> = (0..n_envs)
+            .map(|e| {
+                let f = 0.6 + 0.8 * (e as f64) / (n_envs as f64);
+                inertia.iter().map(|li| crate::LinkInertia { mass: li.mass * f, com: li.com, inertia: li.inertia * f }).collect()
+            })
+            .collect();
+        assert!(gp.set_all_inertia(&per_env), "mass upload accepted");
+        let (bq, bqd) = gp.run_contact(&q, &qd, &tau, 1);
+        let mut worst_both = 0.0f64;
+        for e in 0..n_envs {
+            let (fz, k, d, mu) = ground[e];
+            let scaled: Vec<(usize, Vector3<f64>, f64)> = contacts.iter().map(|&(fr, off, m)| (fr, off, m * mu)).collect();
+            let (cq, cqd) = cpu_contact_step(&robot, &per_env[e], &scaled, fz, k, d, &q[e * n..(e + 1) * n], &qd[e * n..(e + 1) * n], &tau[e * n..(e + 1) * n], dt, g);
+            for i in 0..n {
+                worst_both = worst_both.max((bq[e * n + i] - cq[i]).abs()).max((bqd[e * n + i] - cqd[i]).abs());
+            }
+        }
+        eprintln!("  mass AND ground randomised together: worst |Δ| {worst_both:.3e}");
+        assert!(worst_both < 1e-3, "the two axes must compose: {worst_both:.3e}");
+    }
+
     #[test]
     fn gpu_articulated_contact_matches_cpu() {
         let (robot, inertia) = from_urdf_full(ARM3, "base", "tool").unwrap();
