@@ -167,8 +167,11 @@
 //!
 //! # Throughput
 //!
-//! [`gpu`] is the `wgpu` path for batched collision checking, the parallel hot loop of sampling-based
-//! planning. [`forward_dynamics_in`] is the allocation-free CPU path. Both are optional to the rest.
+//! [`gpu`] is the `wgpu` path: batched collision checking and six batched articulated-dynamics
+//! kernels, each stepping thousands of environments in one dispatch. `ArticulatedGpu` carries
+//! **per-environment mass properties** — `set_env_inertia` and `set_all_inertia` — so a batch can be
+//! domain-randomised for sim-to-real without leaving the GPU. [`forward_dynamics_in`] is the
+//! allocation-free CPU path. Both are optional to the rest.
 //!
 //! # What this crate does not do
 //!

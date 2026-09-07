@@ -633,7 +633,14 @@ fn articulated_wgsl(n: usize) -> String {
     let src = r#"
 const N: u32 = {N}u;
 @group(0) @binding(0) var<storage, read> JOINTS: array<f32>;   // 16 per joint: R_o(9,col-major) p_o(3) axis(3) kind(1)
-@group(0) @binding(1) var<storage, read> INERTIA: array<f32>;  // 13 per link: mass(1) com(3) I(9,col-major)
+@group(0) @binding(1) var<storage, read> INERTIA: array<f32>;  // 13 per link, PER ENV: mass(1) com(3) I(9,col-major)
+
+// The base offset into INERTIA for the environment this invocation is stepping. Every entry point
+// sets it before touching the dynamics; the accessors below read it. A module-private variable
+// rather than a threaded parameter because `rnea` is called from `forward_dynamics` which is
+// called from four entry points, and threading an env index through all of them would touch every
+// call site for no gain.
+var<private> IBASE: u32 = 0u;
 @group(0) @binding(2) var<storage, read> PRM: array<f32>;      // [N, n_envs, gx, gy, gz, dt, floor_z, kn, kd, n_contacts]
 @group(0) @binding(3) var<storage, read_write> Q: array<f32>;
 @group(0) @binding(4) var<storage, read_write> QD: array<f32>;
@@ -651,13 +658,14 @@ fn rot_axis(a: vec3<f32>, t: f32) -> mat3x3<f32> {
     vec3<f32>(x*z*ic + y*s, y*z*ic - x*s, c + z*z*ic));
 }
 fn inertia_mat(i: u32) -> mat3x3<f32> {
-  let b = i*13u + 4u;
+  let b = IBASE + i*13u + 4u;
   return mat3x3<f32>(
     vec3<f32>(INERTIA[b],    INERTIA[b+1u], INERTIA[b+2u]),
     vec3<f32>(INERTIA[b+3u], INERTIA[b+4u], INERTIA[b+5u]),
     vec3<f32>(INERTIA[b+6u], INERTIA[b+7u], INERTIA[b+8u]));
 }
-fn com_of(i: u32) -> vec3<f32> { return vec3<f32>(INERTIA[i*13u+1u], INERTIA[i*13u+2u], INERTIA[i*13u+3u]); }
+fn com_of(i: u32) -> vec3<f32> { let b = IBASE + i*13u; return vec3<f32>(INERTIA[b+1u], INERTIA[b+2u], INERTIA[b+3u]); }
+fn mass_of(i: u32) -> f32 { return INERTIA[IBASE + i*13u]; }
 
 // Recursive Newton-Euler inverse dynamics: joint torques for (qd, qdd) under `grav`, given the
 // per-joint relative transforms rr (frame i→i-1), pp (origin of i in i-1), zz (axis in frame i).
@@ -683,7 +691,7 @@ fn rnea(qd: array<f32, N>, qdd: array<f32, N>, grav: vec3<f32>,
       omegad[i] = rt * pwd;
       vd[i] = base + 2.0 * cross(omega[i], qd[i] * z) + qdd[i] * z;
     }
-    let mass = INERTIA[i*13u];
+    let mass = mass_of(i);
     let com = com_of(i);
     let Im = inertia_mat(i);
     let vdc = vd[i] + cross(omegad[i], com) + cross(omega[i], cross(omega[i], com));
@@ -757,6 +765,7 @@ fn forward_dynamics(q: array<f32, N>, qd: array<f32, N>, tau: array<f32, N>, gra
 fn accel(@builtin(global_invocation_id) g: vec3<u32>) {
   let e = g.x; let n_envs = u32(PRM[1]);
   if (e >= n_envs) { return; }
+  IBASE = e * N * 13u;
   let grav = vec3<f32>(PRM[2], PRM[3], PRM[4]);
   var q: array<f32, N>; var qd: array<f32, N>; var tau: array<f32, N>;
   for (var i = 0u; i < N; i = i + 1u) { q[i] = Q[e*N + i]; qd[i] = QD[e*N + i]; tau[i] = TAU[e*N + i]; }
@@ -768,6 +777,7 @@ fn accel(@builtin(global_invocation_id) g: vec3<u32>) {
 fn step(@builtin(global_invocation_id) g: vec3<u32>) {
   let e = g.x; let n_envs = u32(PRM[1]);
   if (e >= n_envs) { return; }
+  IBASE = e * N * 13u;
   let grav = vec3<f32>(PRM[2], PRM[3], PRM[4]); let dt = PRM[5];
   var q: array<f32, N>; var qd: array<f32, N>; var tau: array<f32, N>;
   for (var i = 0u; i < N; i = i + 1u) { q[i] = Q[e*N + i]; qd[i] = QD[e*N + i]; tau[i] = TAU[e*N + i]; }
@@ -845,6 +855,7 @@ fn contact_torque(q: array<f32, N>, qd: array<f32, N>) -> array<f32, N> {
 fn step_contact(@builtin(global_invocation_id) g: vec3<u32>) {
   let e = g.x; let n_envs = u32(PRM[1]);
   if (e >= n_envs) { return; }
+  IBASE = e * N * 13u;
   let grav = vec3<f32>(PRM[2], PRM[3], PRM[4]); let dt = PRM[5];
   var q: array<f32, N>; var qd: array<f32, N>; var tau: array<f32, N>;
   for (var i = 0u; i < N; i = i + 1u) { q[i] = Q[e*N + i]; qd[i] = QD[e*N + i]; tau[i] = TAU[e*N + i]; }
@@ -865,6 +876,7 @@ fn step_contact(@builtin(global_invocation_id) g: vec3<u32>) {
 fn rollout(@builtin(global_invocation_id) g: vec3<u32>) {
   let e = g.x; let n_envs = u32(PRM[1]);
   if (e >= n_envs) { return; }
+  IBASE = e * N * 13u;
   let grav = vec3<f32>(PRM[2], PRM[3], PRM[4]); let dt = PRM[5];
   let tau_max = PRM[10]; let effort_w = PRM[11]; let T = u32(PRM[12]);
   var tstar: array<f32, N>; var q: array<f32, N>; var qd: array<f32, N>;
@@ -901,6 +913,18 @@ fn rollout(@builtin(global_invocation_id) g: vec3<u32>) {
 /// Batched articulated-body forward dynamics on the GPU — the RNEA/CRBA/Cholesky-solve of the CPU
 /// [`forward_dynamics`](crate::forward_dynamics), one GPU thread per environment. Fixed robot
 /// topology (the RL setting: the same robot across all environments).
+/// Pack one environment's link inertias into the 13-floats-per-link layout the shaders read:
+/// `mass(1) com(3) I(9, column-major)`.
+fn pack_inertia(inertia: &[crate::LinkInertia]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(inertia.len() * 13);
+    for li in inertia {
+        out.push(li.mass as f32);
+        out.extend_from_slice(&[li.com.x as f32, li.com.y as f32, li.com.z as f32]);
+        out.extend(li.inertia.as_slice().iter().map(|&v| v as f32)); // 9, column-major
+    }
+    out
+}
+
 pub struct ArticulatedGpu {
     n: usize,
     n_envs: usize,
@@ -916,6 +940,7 @@ pub struct ArticulatedGpu {
     tau_buf: wgpu::Buffer,
     qdd_buf: wgpu::Buffer,
     prm_buf: wgpu::Buffer,
+    inertia_buf: wgpu::Buffer,
     policy_buf: wgpu::Buffer,
     reward_buf: wgpu::Buffer,
     reward_stage: wgpu::Buffer,
@@ -963,12 +988,18 @@ impl ArticulatedGpu {
                 crate::JointKind::Prismatic => 1.0,
             });
         }
-        let mut inert = Vec::with_capacity(n * 13);
-        for li in inertia {
-            inert.push(li.mass as f32);
-            inert.extend_from_slice(&[li.com.x as f32, li.com.y as f32, li.com.z as f32]);
-            inert.extend(li.inertia.as_slice().iter().map(|&v| v as f32)); // 9, column-major
-        }
+        // ⛔ PER-ENV, not shared. The inertia buffer is `n_envs × n × 13` and every environment gets
+        // its own copy of the model's mass properties, so a caller can vary mass, centre of mass and
+        // the inertia tensor across environments — which is what domain randomisation for sim-to-real
+        // actually varies. It starts as `n_envs` identical copies, so a caller that never randomises
+        // sees exactly the behaviour it saw before.
+        //
+        // Replication rather than a shared buffer with an opt-in expansion: at this scale the memory is
+        // free (3 links × 4096 envs × 13 floats is 639 KB) and the shader needs no branch, so there is
+        // no configuration in which the two paths could disagree. A model large enough for that
+        // tradeoff to invert would want the opt-in form instead.
+        let one_env = pack_inertia(inertia);
+        let inert: Vec<f32> = (0..n_envs.max(1)).flat_map(|_| one_env.iter().copied()).collect();
         let prm = [
             n as f32, n_envs as f32, gravity.x as f32, gravity.y as f32, gravity.z as f32, dt as f32,
             floor_z as f32, kn as f32, kd as f32, n_contacts as f32,
@@ -997,7 +1028,9 @@ impl ArticulatedGpu {
         };
         let none = wgpu::BufferUsages::empty();
         let joints_buf = init("art-joints", bytemuck::cast_slice(&joints), none);
-        let inertia_buf = init("art-inertia", bytemuck::cast_slice(&inert), none);
+        // COPY_SRC as well as COPY_DST: `env_inertia_raw` reads it back, because trusting that an
+        // upload landed is how a silently dropped buffer goes unnoticed.
+        let inertia_buf = init("art-inertia", bytemuck::cast_slice(&inert), wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC);
         let prm_buf = init("art-prm", bytemuck::cast_slice(&prm_full), wgpu::BufferUsages::COPY_DST);
         let contacts_buf = init("art-contacts", bytemuck::cast_slice(&contact_flat), none);
         let policy_buf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("art-policy"), size: (n_envs * poldim * 4).max(4) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
@@ -1037,7 +1070,7 @@ impl ArticulatedGpu {
             ],
         });
 
-        Some(Self { n, n_envs, device, queue, pso_accel, pso_step, pso_step_contact, pso_rollout, bind, q_buf, qd_buf, tau_buf, qdd_buf, prm_buf, policy_buf, reward_buf, reward_stage, stage, base_prm, poldim })
+        Some(Self { n, n_envs, device, queue, pso_accel, pso_step, pso_step_contact, pso_rollout, bind, q_buf, qd_buf, tau_buf, qdd_buf, prm_buf, inertia_buf, policy_buf, reward_buf, reward_stage, stage, base_prm, poldim })
     }
 
     fn read(&self, src: &wgpu::Buffer) -> Vec<f64> {
@@ -1153,6 +1186,75 @@ impl ArticulatedGpu {
         let v: Vec<f32> = bytemuck::cast_slice(&slice.get_mapped_range().expect("mapped")).to_vec();
         self.reward_stage.unmap();
         v.iter().map(|&x| x as f64).collect()
+    }
+
+    /// **Give one environment its own mass properties**, for domain randomisation across the batch.
+    ///
+    /// Every other environment is untouched. `false` — and nothing uploaded — if `env` is out of
+    /// range, if `inertia` is not one entry per joint, or if any value is non-finite. A silently
+    /// ignored randomisation would show up as a policy that transfers worse for no visible reason,
+    /// so the refusal is a return value rather than a clamp.
+    ///
+    /// Masses are not otherwise validated: a zero or negative mass is a caller's choice and the
+    /// Cholesky solve in the shader floors its pivots at `1e-12`, so it will produce a number rather
+    /// than a NaN. If you want it refused, refuse it before calling.
+    pub fn set_env_inertia(&mut self, env: usize, inertia: &[crate::LinkInertia]) -> bool {
+        if env >= self.n_envs || inertia.len() != self.n {
+            return false;
+        }
+        let packed = pack_inertia(inertia);
+        if !packed.iter().all(|v| v.is_finite()) {
+            return false;
+        }
+        let offset = (env * self.n * 13 * 4) as u64;
+        self.queue.write_buffer(&self.inertia_buf, offset, bytemuck::cast_slice(&packed));
+        true
+    }
+
+    /// Give **every** environment its own mass properties in one upload — one `inertia` slice per
+    /// environment, in environment order.
+    ///
+    /// `false` if the outer length is not `n_envs`, if any inner length is not one per joint, or if
+    /// any value is non-finite. Checked in full BEFORE anything is written, so a rejected call leaves
+    /// the batch exactly as it was rather than half-randomised.
+    pub fn set_all_inertia(&mut self, per_env: &[Vec<crate::LinkInertia>]) -> bool {
+        if per_env.len() != self.n_envs || per_env.iter().any(|e| e.len() != self.n) {
+            return false;
+        }
+        let flat: Vec<f32> = per_env.iter().flat_map(|e| pack_inertia(e)).collect();
+        if !flat.iter().all(|v| v.is_finite()) {
+            return false;
+        }
+        self.queue.write_buffer(&self.inertia_buf, 0, bytemuck::cast_slice(&flat));
+        true
+    }
+
+    /// Read back what one environment's mass properties currently are, as the shader sees them —
+    /// `f32`, because that is what the buffer holds. `None` if `env` is out of range.
+    ///
+    /// Exposed because the alternative is trusting that an upload landed, and this workspace has been
+    /// bitten by a buffer whose contents were silently dropped.
+    pub fn env_inertia_raw(&self, env: usize) -> Option<Vec<f32>> {
+        if env >= self.n_envs {
+            return None;
+        }
+        let len = self.n * 13;
+        let bytes = (len * 4) as u64;
+        let stage = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("art-inertia-stage"),
+            size: bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        enc.copy_buffer_to_buffer(&self.inertia_buf, (env * len * 4) as u64, &stage, 0, bytes);
+        self.queue.submit(Some(enc.finish()));
+        let slice = stage.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        let out = bytemuck::cast_slice::<u8, f32>(&slice.get_mapped_range().expect("mapped range")).to_vec();
+        stage.unmap();
+        Some(out)
     }
 
     /// Policy parameter dimension `2n² + n` (a linear feedback `W(n×2n)` + bias `b(n)`).
@@ -3036,6 +3138,111 @@ mod verification {
 
     /// The batched GPU forward dynamics reproduces the CPU `forward_dynamics` per environment (RNEA +
     /// CRBA + Cholesky, f32 vs f64), over a batch of random states — the cross-oracle at RL scale.
+    /// **Per-environment mass properties, checked against the CPU path for EACH env's own mass.**
+    ///
+    /// This is the domain-randomisation capability: 512 environments, every one with a different mass,
+    /// centre of mass and inertia tensor, all stepping in one dispatch. The oracle is the f64 CPU
+    /// `forward_dynamics` called with the SAME per-env inertia — so a shader that ignored the env
+    /// offset and read environment 0's mass for everyone would disagree with 511 of the 512.
+    #[test]
+    fn gpu_per_env_inertia_matches_the_cpu_for_each_envs_own_mass() {
+        let (robot, base_inertia) = from_urdf_full(ARM3, "base", "tool").unwrap();
+        let n = robot.dof();
+        let grav = Vector3::new(0.0, 0.0, -9.81);
+        let n_envs = 512usize;
+
+        let mut s = 0x9A17u64;
+        let mut rng = || {
+            s = s.wrapping_add(0x9E3779B97F4A7C15);
+            let mut z = s;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+            (((z ^ (z >> 31)) as f64) / (u64::MAX as f64)) * 2.0 - 1.0
+        };
+        let q: Vec<f64> = (0..n_envs * n).map(|_| rng() * 1.2).collect();
+        let qd: Vec<f64> = (0..n_envs * n).map(|_| rng() * 0.8).collect();
+        let tau: Vec<f64> = (0..n_envs * n).map(|_| rng() * 2.0).collect();
+
+        // every env gets its own randomised body: mass ×[0.5, 1.5], COM shifted, inertia scaled with it
+        let per_env: Vec<Vec<crate::LinkInertia>> = (0..n_envs)
+            .map(|e| {
+                let f = 0.5 + (e as f64) / (n_envs as f64); // 0.5 .. 1.5, deterministic in the env index
+                base_inertia
+                    .iter()
+                    .map(|li| crate::LinkInertia {
+                        mass: li.mass * f,
+                        com: li.com * (0.8 + 0.4 * f),
+                        inertia: li.inertia * f,
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let Some(mut g) = ArticulatedGpu::new(&robot, &base_inertia, grav, 1e-3, n_envs, &[], 0.0, 0.0, 0.0) else {
+            eprintln!("no GPU — skipping");
+            return;
+        };
+        assert!(g.set_all_inertia(&per_env), "the batch upload must be accepted");
+
+        // the read-back must show env 0 and env 511 carrying DIFFERENT masses, so the upload is
+        // verified rather than trusted — this workspace has been bitten by a silently dropped buffer
+        let raw0 = g.env_inertia_raw(0).expect("env 0 readable");
+        let raw_last = g.env_inertia_raw(n_envs - 1).expect("last env readable");
+        assert_eq!(raw0.len(), n * 13, "13 floats per link");
+        assert!((raw0[0] as f64 - per_env[0][0].mass).abs() < 1e-4, "env 0 mass {} vs {}", raw0[0], per_env[0][0].mass);
+        assert!((raw_last[0] as f64 - per_env[n_envs - 1][0].mass).abs() < 1e-4, "last env mass {} vs {}", raw_last[0], per_env[n_envs - 1][0].mass);
+        assert!(
+            (raw_last[0] - raw0[0]).abs() > 0.5 * raw0[0],
+            "the two ends of the batch must differ substantially, {} vs {}", raw0[0], raw_last[0]
+        );
+
+        let gpu = g.accelerations(&q, &qd, &tau);
+        let mut worst = 0.0f64;
+        let mut worst_env = 0usize;
+        for e in 0..n_envs {
+            let cpu = forward_dynamics(&robot, &per_env[e], &q[e * n..(e + 1) * n], &qd[e * n..(e + 1) * n], &tau[e * n..(e + 1) * n], grav);
+            for i in 0..n {
+                let d = (gpu[e * n + i] - cpu[i]).abs();
+                if d > worst {
+                    worst = d;
+                    worst_env = e;
+                }
+            }
+        }
+        eprintln!("  per-env inertia, {n_envs} envs × {n} DOF: worst |Δqdd| {worst:.3e} rad/s² (env {worst_env})");
+        assert!(worst < 1e-2, "per-env dynamics diverged from the CPU reference: {worst:.3e} at env {worst_env}");
+
+        // ⛔ THE CONTROL THAT MAKES THE ABOVE MEAN SOMETHING: against the SHARED inertia the same
+        // states must disagree badly, or the per-env upload changed nothing and the test would pass
+        // for a shader that ignored the env offset entirely.
+        let mut worst_shared = 0.0f64;
+        for e in 0..n_envs {
+            let shared = forward_dynamics(&robot, &base_inertia, &q[e * n..(e + 1) * n], &qd[e * n..(e + 1) * n], &tau[e * n..(e + 1) * n], grav);
+            for i in 0..n {
+                worst_shared = worst_shared.max((gpu[e * n + i] - shared[i]).abs());
+            }
+        }
+        eprintln!("  same GPU output against the SHARED inertia: worst |Δqdd| {worst_shared:.3e} rad/s² — must be large");
+        assert!(worst_shared > 1.0, "the randomisation must actually change the dynamics, got {worst_shared:.3e}");
+
+        // one env at a time, leaving the rest alone
+        let solo: Vec<crate::LinkInertia> = base_inertia.iter().map(|li| crate::LinkInertia { mass: li.mass * 7.0, ..*li }).collect();
+        assert!(g.set_env_inertia(3, &solo), "a single-env upload must be accepted");
+        let after3 = g.env_inertia_raw(3).expect("readable");
+        let after4 = g.env_inertia_raw(4).expect("readable");
+        assert!((after3[0] as f64 - base_inertia[0].mass * 7.0).abs() < 1e-3, "env 3 must carry the new mass, got {}", after3[0]);
+        assert!((after4[0] as f64 - per_env[4][0].mass).abs() < 1e-4, "env 4 must be UNTOUCHED, got {}", after4[0]);
+
+        // refusals, each checked to leave the buffer alone
+        assert!(!g.set_env_inertia(n_envs, &solo), "an out-of-range env");
+        assert!(!g.set_env_inertia(0, &solo[..n - 1]), "a short inertia slice");
+        let nonfinite: Vec<crate::LinkInertia> = base_inertia.iter().map(|li| crate::LinkInertia { mass: f64::NAN, ..*li }).collect();
+        assert!(!g.set_env_inertia(0, &nonfinite), "a non-finite mass");
+        assert!(!g.set_all_inertia(&per_env[..n_envs - 1]), "a short outer length");
+        let still0 = g.env_inertia_raw(0).expect("readable");
+        assert!((still0[0] - raw0[0]).abs() < 1e-9, "a refused upload must leave the buffer as it was: {} vs {}", still0[0], raw0[0]);
+    }
+
     #[test]
     fn gpu_articulated_matches_cpu() {
         let (robot, inertia) = from_urdf_full(ARM3, "base", "tool").unwrap();
