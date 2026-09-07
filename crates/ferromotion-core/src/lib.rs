@@ -21,8 +21,9 @@
 //! transforms), [`tree_from_urdf`] for a branched tree such as a hand, and `closed_loop` for linkages
 //! that are not serial chains.
 //!
-//! Every one of those formats points at geometry it does not carry. [`geometry_from_urdf`] surfaces
-//! it — every `<visual>` and `<collision>` shape with its origin, scale and [`GeomRole`] — and
+//! Every one of those formats points at geometry it does not carry. [`geometry_from_urdf`] and
+//! [`geometry_from_mjcf`] surface it — every shape with its origin, scale and [`GeomRole`], with
+//! MJCF's half-extents converted to URDF's full ones and its `fromto` form resolved to a pose — and
 //! [`resolve_uri`] expands a `package://`, `model://` or `file://` URI against a caller-supplied
 //! package table. [`from_obj`] and [`from_stl`] (both encodings, dispatched on content rather than
 //! extension) read the bytes; [`scale_mesh`] applies the description's scale; [`solid_inertia`]
@@ -447,7 +448,7 @@ pub use lgvi::LgviBody;
 pub use numerics::{finite_singular_values, finite_svd};
 pub use manipulability::{condition_number, force_ellipsoid_axes, isotropy, manipulability_gradient, manipulability_gradient_analytic, singular_values, yoshikawa};
 pub use modal::{modal_analysis, ModalModel};
-pub use mjcf::{from_mjcf_constrained, from_mjcf_full, from_mjcf_str, to_mjcf};
+pub use mjcf::{from_mjcf_constrained, from_mjcf_full, from_mjcf_str, geometry_from_mjcf, to_mjcf};
 pub use usda::{axis_token, parse_usda, robot_from_usda, usda_from_robot, ParseError, Prim, UsdaStage, Value};
 pub use urdf::from_urdf_full;
 pub use robust::solve_ik_robust;
