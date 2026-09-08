@@ -207,19 +207,29 @@ fn pair_contact(pa: &ConvexPoints, pb: &ConvexPoints, i: usize, j: usize) -> Opt
     }
     let (gap, normal) = if g.intersecting {
         match crate::epa::epa(pa, pb) {
-            Some(p) if p.depth.is_finite() && p.normal.iter().all(|c| c.is_finite()) => (-p.depth, p.normal),
+            // ⛔ **BOTH terms are negated, for two different reasons.** `gap` is `−depth` because a
+            // penetration is a negative gap. `normal` is `−p.normal` because [`Penetration`] points
+            // from `B` toward `A` (the direction `A` must move to get clear) and this struct's
+            // convention is the other way round, `A` toward `B`. Reversing only one of the two would
+            // satisfy the functional test below and still hand a solver the wrong side.
+            Some(p) if p.depth.is_finite() && p.normal.iter().all(|c| c.is_finite()) => (-p.depth, -p.normal),
             // EPA refuses a flat Minkowski difference, which is an exactly-touching pair. A zero gap
             // with no direction is the honest answer; inventing a normal here would put a constraint
             // on an axis nothing measured.
             _ => (0.0, Vector3::zeros()),
         }
     } else {
-        // ⛔ `witness_b − witness_a`, NOT the other way round. Measured on A at the origin and B at
-        // +0.75x overlapping, EPA returns normal (+1,0,0) — it points from A toward B. The first
-        // version of this branch used `witness_a − witness_b` and produced (−1,0,0) for the same body
-        // ordering, so the two regimes disagreed on direction and the module's stated convention was
-        // true of only one of them. A caller mixing a separated and a penetrating pair in one
-        // constraint set would have got contradictory normals.
+        // ⛔ `witness_b − witness_a`, NOT the other way round: that is the A-toward-B direction this
+        // struct documents. The first version used `witness_a − witness_b`, so the two regimes
+        // disagreed on direction and the module's stated convention was true of only one of them. A
+        // caller mixing a separated and a penetrating pair in one constraint set would have got
+        // contradictory normals.
+        //
+        // ⛔ Chasing that disagreement is what turned up the one BELOW it: [`epa`](crate::epa) was
+        // returning the reverse of what [`Penetration`] documents and of what
+        // [`sphere_penetration`](crate::sphere_penetration) returns, and the penetrating branch here
+        // had been written against the reversed behaviour. Both are fixed; the negation above is the
+        // convention change, not a second bug.
         let d = g.witness_b - g.witness_a;
         let nn = d.norm();
         (g.distance, if nn > 1e-12 { d / nn } else { Vector3::zeros() })

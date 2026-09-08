@@ -24,7 +24,14 @@ use nalgebra::{Matrix3, Vector3};
 pub struct Penetration {
     /// Minimum separation distance (penetration depth).
     pub depth: f64,
-    /// Unit contact normal; translating `A` by `+depth·normal` just separates the shapes.
+    /// Unit contact normal, pointing **from `B` toward `A`**: the direction `A` must move to get
+    /// clear. The contract is one statement, and it is what the tests check functionally rather than
+    /// by asserting a sign: **translating `A` by `+depth·normal` brings the pair to exactly
+    /// touching.**
+    ///
+    /// Both routes here honour it. [`epa`] has to negate the face normal it computes to do so, for
+    /// the reason given at that line; the disagreement between the two routes was live until
+    /// 2026-09-08.
     pub normal: Vector3<f64>,
 }
 
@@ -171,6 +178,44 @@ fn make_face(verts: &[Sp], i: usize, j: usize, k: usize) -> Option<Face> {
     Some(Face { idx: [i, j, k], normal: n, dist })
 }
 
+/// **An upper bound on the penetration depth that the geometry itself cannot exceed.**
+///
+/// The true depth is `min over all unit directions d of support_{A⊖B}(d)·d` — that is what "distance
+/// from the origin to the boundary" means. So the minimum over ANY sample of directions is an upper
+/// bound on it, and a claimed depth larger than that bound is definitely wrong. The check is one-sided
+/// by construction: it can reject an over-estimate and can never reject a true answer, whatever
+/// directions are sampled. Six axes and the reverse of the candidate normal cost seven support calls.
+///
+/// # ⛔ Why this is needed: the origin sitting ON the boundary was assumed impossible
+///
+/// [`make_face`] orients every face outward by flipping any whose signed distance comes out negative,
+/// on the stated assumption that the origin is inside. Two shapes exactly TOUCHING put the origin on
+/// the boundary, that assumption is false, a face through the origin gets flipped, and the expansion
+/// then settles on a supporting face somewhere else entirely and reports ITS distance as a depth.
+///
+/// Measured: a tetrahedron whose apex sat exactly on a slab's top face was reported as penetrating by
+/// **1.775 m** along a diagonal normal. The same tetrahedron rotated 90° about the contact normal gave
+/// the correct `0`. An answer that depends on vertex ordering is a degeneracy, not a tolerance.
+///
+/// # Two guards that did not work, so the next attempt does not repeat them
+///
+/// | attempt | why it failed |
+/// |---|---|
+/// | "the origin must be strictly inside the seed simplex" | GJK's termination simplex can legitimately have the origin ON one of its faces while the shapes genuinely overlap — two axis-aligned cubes do exactly that — so it refused a real 0.4 m overlap. |
+/// | "for each seed face through the origin, ask whether the body reaches past it" | incomplete, and provably so: the supporting plane at the origin need not be among the seed's four faces. With the slab as an analytic [`Cuboid`](crate::Cuboid) the seed happened to contain it and the guard fired; with the same slab as a [`ConvexPoints`](crate::ConvexPoints) hull — which is what the compound collider uses — the support tie-break moved the seed, its faces came out tilted by 0.012 rad from the true normal, the body reached 4.9e-2 past every one of them, and the 1.775 sailed through. |
+///
+/// The lesson is that the seed cannot answer a question about `A ⊖ B`; only the support function can.
+fn depth_upper_bound<A: Support, B: Support>(a: &A, b: &B, nf: &Vector3<f64>) -> f64 {
+    let mut bound = f64::INFINITY;
+    for d in [Vector3::x(), -Vector3::x(), Vector3::y(), -Vector3::y(), Vector3::z(), -Vector3::z(), -nf] {
+        let e = support(a, b, &d).v.dot(&d);
+        if e.is_finite() {
+            bound = bound.min(e);
+        }
+    }
+    bound
+}
+
 /// **EPA** penetration depth and contact normal for two convex shapes, or `None` if they are disjoint.
 pub fn epa<A: Support, B: Support>(a: &A, b: &B) -> Option<Penetration> {
     let mut verts = enclosing_tetra(a, b)?;
@@ -195,7 +240,28 @@ pub fn epa<A: Support, B: Support>(a: &A, b: &B) -> Option<Penetration> {
         let p = support(a, b, &normal);
         let pd = p.v.dot(&normal);
         if pd - dist < 1e-7 {
-            return Some(Penetration { depth: dist, normal });
+            // ⛔ VERIFY before returning: see `depth_upper_bound`. The expansion can settle on a
+            // supporting face that is not the closest one when the origin lies on the boundary, and
+            // there is no way to tell from the polytope alone.
+            let scale = verts.iter().map(|s| s.v.norm()).fold(0.0f64, f64::max).max(1.0);
+            if dist > depth_upper_bound(a, b, &normal) + 8.0 * f64::EPSILON * scale {
+                return None;
+            }
+            // ⛔ **NEGATED, and that is the whole point of this line.** `normal` here is the OUTWARD
+            // face normal of the closest face of the Minkowski difference `A ⊖ B`, so the closest
+            // boundary point to the origin is `+dist·normal` and shifting the set by `−dist·normal`
+            // is what puts the origin on the boundary — i.e. translating `A` by `−dist·normal` is
+            // what separates the shapes. That is the OPPOSITE of what [`Penetration`] documents and
+            // of what [`sphere_penetration`] returns, and the disagreement shipped: measured on two
+            // unit cubes, `A` at the origin and `B` at `+0.75x`, this function returned `(+1,0,0)`
+            // while the analytic ball path returned the direction away from `B`. Translating `A` by
+            // `+depth·normal` DOUBLED the overlap, 0.25 → 0.50.
+            //
+            // Neither of this module's own box tests could see it: both assert
+            // `normal.x.abs() > 0.98`, which pins the axis and discards exactly the sign that was
+            // wrong. `the_separating_translation_is_plus_depth_times_normal_on_both_paths` replaces
+            // that with the functional statement, on both paths.
+            return Some(Penetration { depth: dist, normal: -normal });
         }
         // expand: drop faces visible from p, stitch the horizon to the new vertex
         let pi = verts.len();
@@ -267,6 +333,134 @@ mod tests {
         let pen = epa(&cube(0.0), &cube(0.6)).expect("overlapping polytopes penetrate");
         assert!((pen.depth - 0.4).abs() < 1e-2, "polytope depth {} vs 0.4", pen.depth);
         assert!(pen.normal.x.abs() > 0.98, "min-translation axis is x: {:?}", pen.normal);
+    }
+
+    /// **The contract [`Penetration`] states, checked as a translation rather than as a sign, on both
+    /// routes.** `depth` and `normal` exist to tell a caller which way to move `A`; a test that
+    /// asserts `normal.x.abs() > 0.98` has checked the axis and thrown that answer away, which is how
+    /// the polytope route ran with the normal reversed while two tests watched it.
+    ///
+    /// Measured before the fix, `A` a unit cube at the origin and `B` one at `+0.75x`: the polytope
+    /// route returned `(+1,0,0)`, and translating `A` by `+depth·normal` took the overlap from 0.25 to
+    /// 0.50 while the analytic ball route separated correctly. Same struct, opposite meanings.
+    #[test]
+    fn the_separating_translation_is_plus_depth_times_normal_on_both_paths() {
+        // ---- the polytope route ----
+        let cube = |c: Vector3<f64>| ConvexPoints {
+            pts: (0..8)
+                .map(|i| c + Vector3::new(if i & 1 == 0 { -0.5 } else { 0.5 }, if i & 2 == 0 { -0.5 } else { 0.5 }, if i & 4 == 0 { -0.5 } else { 0.5 }))
+                .collect(),
+        };
+        let shift = |p: &ConvexPoints, t: Vector3<f64>| ConvexPoints { pts: p.pts.iter().map(|q| q + t).collect() };
+        // Off-axis on purpose: the deepest axis is still x, but a fixture centred on x would let a
+        // normal that is right only up to a permutation of the axes pass.
+        let (a, b) = (cube(Vector3::zeros()), cube(Vector3::new(0.75, 0.13, -0.09)));
+        let pen = epa(&a, &b).expect("overlapping cubes penetrate");
+        let depth_after = |t: Vector3<f64>| epa(&shift(&a, t), &b).map(|q| q.depth).unwrap_or(0.0);
+        let (sep, into) = (depth_after(pen.depth * pen.normal), depth_after(-pen.depth * pen.normal));
+        eprintln!(
+            "  polytope: depth {:.4} normal {:?} -> after +depth·n depth {:.3e}, after −depth·n depth {:.4}",
+            pen.depth, pen.normal.as_slice(), sep, into
+        );
+        assert!((pen.normal.norm() - 1.0).abs() < 1e-9, "the normal must be a unit vector, got {}", pen.normal.norm());
+        assert!(sep < 1e-6, "+depth·normal must bring the pair to touching, got depth {sep:.3e}");
+        // the opposite translation must go DEEPER, which is what pins the direction rather than the
+        // axis. Before the fix this was the branch that measured ~0.
+        assert!(into > pen.depth * 1.5, "−depth·normal must deepen the overlap past {:.4}, got {into:.4}", pen.depth);
+
+        // ---- the analytic ball route, same statement ----
+        let (ra, rb) = (1.0, 1.0);
+        let cb = Vector3::new(1.2, 0.4, 0.3);
+        let ball = |c: Vector3<f64>, r: f64| Ball { center: c, radius: r };
+        let q = sphere_penetration(&ball(Vector3::zeros(), ra), &ball(cb, rb)).expect("overlapping balls penetrate");
+        let gap_after = |t: Vector3<f64>| (cb - t).norm() - (ra + rb);
+        let (bsep, binto) = (gap_after(q.depth * q.normal), gap_after(-q.depth * q.normal));
+        eprintln!("  ball:     depth {:.4} normal {:?} -> after +depth·n gap {:+.3e}, after −depth·n gap {:+.4}", q.depth, q.normal.as_slice(), bsep, binto);
+        assert!(bsep.abs() < 1e-12, "+depth·normal must bring the balls to touching, got gap {bsep:+.3e}");
+        assert!(binto < -q.depth * 1.5, "−depth·normal must deepen the overlap, got gap {binto:+.4}");
+
+        // ---- and the two routes must now AGREE on direction for the same body ordering ----
+        // A ball pair and a cube pair, both A at the origin with B along +x, must give normals on the
+        // same side. This is the cross-route assertion that did not exist and would have failed.
+        let axis_poly = epa(&cube(Vector3::zeros()), &cube(Vector3::new(0.75, 0.0, 0.0))).expect("cubes").normal;
+        let axis_ball = sphere_penetration(&ball(Vector3::zeros(), 1.0), &ball(Vector3::new(1.5, 0.0, 0.0), 1.0)).expect("balls").normal;
+        eprintln!("  cross-route, B along +x: polytope normal {:?}, ball normal {:?}", axis_poly.as_slice(), axis_ball.as_slice());
+        assert!(axis_poly.dot(&axis_ball) > 0.999, "the two routes must point the same way: {:?} vs {:?}", axis_poly.as_slice(), axis_ball.as_slice());
+        assert!(axis_poly.x < -0.999, "B is at +x, so the direction A must move to get clear is −x, got {:?}", axis_poly.as_slice());
+    }
+
+    /// **Exactly touching is not PENETRATION — whatever the vertex ordering, and on both support paths.**
+    ///
+    /// The regression for [`depth_upper_bound`]. A tetrahedron whose apex sat exactly on a slab's top
+    /// face was reported as penetrating by **1.775 m** along a diagonal normal.
+    ///
+    /// ⛔ The slab is checked BOTH as an analytic [`Cuboid`] and as a [`ConvexPoints`] hull of the same
+    /// eight corners, because the two differ in how a flat face's support ties are broken, that moves
+    /// the seed simplex, and it decided whether the bug appeared. A guard built against the analytic box
+    /// alone was measured to pass every test here while the point-set path — the one the compound
+    /// collider actually uses — still returned the 1.775.
+    ///
+    /// ⛔ The property asserted is **not** `is_none()`. Depending on orientation the expansion either
+    /// trips the bound and refuses, or converges to a depth of exactly zero with the correct normal.
+    /// Both are honest descriptions of a touching pair; a positive depth is not.
+    #[test]
+    fn an_exactly_touching_pair_never_reports_a_penetration() {
+        let analytic = Cuboid { center: Vector3::new(0.0, 0.0, -0.5), half: Vector3::new(2.0, 2.0, 0.5), rot: Matrix3::identity() };
+        let hull = ConvexPoints {
+            pts: (0..8)
+                .map(|i| Vector3::new(if i & 1 == 0 { -2.0 } else { 2.0 }, if i & 2 == 0 { -2.0 } else { 2.0 }, if i & 4 == 0 { -1.0 } else { 0.0 }))
+                .collect(),
+        };
+        let spike = |apex: Vector3<f64>, phase: f64| ConvexPoints {
+            pts: core::iter::once(apex)
+                .chain((0..3).map(|k| {
+                    let a = phase + k as f64 * core::f64::consts::TAU / 3.0;
+                    apex + Vector3::new(0.03 * a.cos(), 0.03 * a.sin(), 0.05)
+                }))
+                .collect(),
+        };
+        let phases = [0.0f64, 0.7, core::f64::consts::FRAC_PI_2, 1.4, 2.9, 4.1];
+
+        let mut lines = Vec::new();
+        for phase in phases {
+            let tip = spike(Vector3::zeros(), phase);
+            let (ca, ch) = (epa(&tip, &analytic), epa(&tip, &hull));
+            for (which, got) in [("analytic Cuboid", ca), ("ConvexPoints hull", ch)] {
+                if let Some(p) = got {
+                    assert!(
+                        p.depth <= 1e-12,
+                        "phase {phase}, B as {which}: an apex exactly on the surface is touching, so the depth must be zero or absent, got {} (the shipped bug reported 1.775)",
+                        p.depth
+                    );
+                }
+            }
+            lines.push((
+                (phase * 100.0).round() / 100.0,
+                ca.map(|p| p.depth == 0.0),
+                ch.map(|p| p.depth == 0.0),
+            ));
+        }
+        eprintln!("  touching, (phase, analytic, hull) as Some(depth==0)/None: {lines:?}");
+        // both outcomes must occur, or the sweep is exercising one branch of the guard only
+        assert!(lines.iter().any(|l| l.2.is_none()), "some orientation must trip the bound outright");
+        assert!(lines.iter().any(|l| l.2 == Some(true)), "some orientation must converge to an exact zero");
+
+        // ---- and no GENUINE penetration may be refused, on either path ----
+        // The bound is one-sided by construction, so the floor is set only by the arithmetic: measured,
+        // both paths report down to 1e-17 and the point-set path refuses 1e-18, which is below the
+        // resolution of the coordinates it is differencing. Stated, not assumed.
+        let mut worst = 0.0f64;
+        for e in 3..18 {
+            let d = 10f64.powi(-e);
+            let tip = spike(Vector3::new(0.0, 0.0, -d), 0.0);
+            for (which, got) in [("analytic Cuboid", epa(&tip, &analytic)), ("ConvexPoints hull", epa(&tip, &hull))] {
+                let p = got.unwrap_or_else(|| panic!("a penetration of {d:.0e} is real and must be reported, B as {which}"));
+                worst = worst.max((p.depth - d).abs());
+                assert!(p.normal.z > 0.999, "the apex is below the top face, so A must move +z to clear: {:?}", p.normal.as_slice());
+            }
+        }
+        eprintln!("  genuine penetration reported on both paths from 1e-3 down to 1e-17 (worst depth error {worst:.1e})");
+        assert!(worst < 1e-18, "the reported depth must be the real one, worst error {worst:.1e}");
     }
 
     #[test]
