@@ -970,6 +970,54 @@ fn pack_all_floating_bodies(per_env: &[(crate::LinkInertia, Vec<crate::LinkInert
     Some(flat)
 }
 
+/// The fixed PRM header length of the two gait kernels: the per-environment ground tail starts here,
+/// and the shaders' `CBASE` is `GAIT_PRM_HEADER + e*4`. Named so the Rust side and the WGSL cannot
+/// drift apart silently — `new` debug-asserts its header against it.
+const GAIT_PRM_HEADER: usize = 13;
+
+/// **One environment's ground**, written into a per-env tail of a PRM buffer at `slot` floats in.
+///
+/// `floor_z` is the plane height, `kn` and `kd` the normal spring and damper, and `mu_scale`
+/// multiplies the nominal friction each contact point already carries — a scale rather than a
+/// replacement, because friction is stated per contact and randomising it means perturbing the
+/// nominal, not overwriting the geometry's own values.
+///
+/// `false`, and nothing written, if any value is non-finite. Negative stiffness is a caller's choice
+/// and is not refused: it makes contact push the wrong way, which is a physics decision rather than an
+/// invalid input.
+///
+/// ⛔ **A step at these values is not automatically stable.** The explicit integration limit is
+/// `dt²·(kn/m) + 2·dt·(kd/m) ≤ 4`, and randomising `kn` upward tightens it. Randomise stiffness and
+/// the batch can contain environments whose `dt` is now too coarse; `floating_contact.rs` measures
+/// shipped configurations against exactly that bound.
+fn write_env_contact(queue: &wgpu::Queue, buf: &wgpu::Buffer, slot: usize, floor_z: f64, kn: f64, kd: f64, mu_scale: f64) -> bool {
+    let vals = [floor_z as f32, kn as f32, kd as f32, mu_scale as f32];
+    if !vals.iter().all(|v| v.is_finite()) {
+        return false;
+    }
+    queue.write_buffer(buf, (slot * 4) as u64, bytemuck::cast_slice(&vals));
+    true
+}
+
+/// Read one environment's ground back as the shader sees it: `(floor_z, kn, kd, mu_scale)`.
+fn read_env_contact(device: &wgpu::Device, queue: &wgpu::Queue, buf: &wgpu::Buffer, slot: usize, label: &str) -> (f32, f32, f32, f32) {
+    let stage = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: 16,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    enc.copy_buffer_to_buffer(buf, (slot * 4) as u64, &stage, 0, 16);
+    queue.submit(Some(enc.finish()));
+    let sl = stage.slice(..);
+    sl.map_async(wgpu::MapMode::Read, |_| {});
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    let v: Vec<f32> = bytemuck::cast_slice(&sl.get_mapped_range().expect("mapped")).to_vec();
+    stage.unmap();
+    (v[0], v[1], v[2], v[3])
+}
+
 /// Read one environment's slice of a per-env inertia buffer back as the shader sees it — `f32`,
 /// because that is what the buffer holds.
 ///
@@ -1809,12 +1857,30 @@ fn jointP(i: u32, qi: f32) -> vec3<f32> {
   return Ro*(vec3<f32>(JOINTS[jb+12u],JOINTS[jb+13u],JOINTS[jb+14u])*qi) + po;
 }
 fn subspace(i: u32) -> SV { let a=vec3<f32>(JOINTS[i*16u+12u],JOINTS[i*16u+13u],JOINTS[i*16u+14u]); if (JOINTS[i*16u+15u]<0.5){ return SV(a, vec3<f32>(0.0)); } return SV(vec3<f32>(0.0), a); }
-fn linertia(i: u32) -> SM { let mass=INERTIA[i*13u]; let c=vec3<f32>(INERTIA[i*13u+1u],INERTIA[i*13u+2u],INERTIA[i*13u+3u]); let b=i*13u+4u; let I=mat3x3<f32>(vec3<f32>(INERTIA[b],INERTIA[b+1u],INERTIA[b+2u]),vec3<f32>(INERTIA[b+3u],INERTIA[b+4u],INERTIA[b+5u]),vec3<f32>(INERTIA[b+6u],INERTIA[b+7u],INERTIA[b+8u])); return spatial_inertia(mass,c,I); }
+// The base offsets into INERTIA and into PRM's per-environment ground tail for the environment
+// this invocation is stepping. Same device as `ArticulatedGpu`'s pair, set by every entry point.
+//
+// ⛔ Both of the things a locomotion transfer randomises first were batch-global here. The trunk's
+// inertia was thirteen PRM scalars, and the ground — floor height, normal stiffness, damping and a
+// friction scale — was four more. A gait kernel that cannot vary either is a gait kernel that cannot
+// study transfer, which is most of what it is for.
+var<private> IBASE: u32 = 0u;
+var<private> CBASE: u32 = 13u;
+// Body `slot` of this environment: slot 0 is the floating base, slot i+1 is chain link i.
+fn body_inertia(slot: u32) -> SM {
+  let o = IBASE + slot*13u;
+  let mass = INERTIA[o];
+  let c = vec3<f32>(INERTIA[o+1u], INERTIA[o+2u], INERTIA[o+3u]);
+  let b = o + 4u;
+  let I = mat3x3<f32>(vec3<f32>(INERTIA[b],INERTIA[b+1u],INERTIA[b+2u]), vec3<f32>(INERTIA[b+3u],INERTIA[b+4u],INERTIA[b+5u]), vec3<f32>(INERTIA[b+6u],INERTIA[b+7u],INERTIA[b+8u]));
+  return spatial_inertia(mass, c, I);
+}
+fn linertia(i: u32) -> SM { return body_inertia(i + 1u); }
+fn base_inertia() -> SM { return body_inertia(0u); }
 
 fn aba_ext(v0: SV, q: array<f32,N>, qd: array<f32,N>, tau: array<f32,N>, febase: SV, fe: array<SV,N>, grav: vec3<f32>) -> Accel {
   var xm: array<SM,N>; var s: array<SV,N>; var v: array<SV,N>; var c: array<SV,N>; var ia: array<SM,N>; var pa: array<SV,N>;
-  let bmass=PRM[5]; let bcom=vec3<f32>(PRM[6],PRM[7],PRM[8]); let bI=mat3x3<f32>(vec3<f32>(PRM[9],PRM[10],PRM[11]),vec3<f32>(PRM[12],PRM[13],PRM[14]),vec3<f32>(PRM[15],PRM[16],PRM[17]));
-  let ib = spatial_inertia(bmass,bcom,bI);
+  let ib = base_inertia();
   var ia_base = ib;
   var pa_base = svsub(svsub(smv(crf(v0), smv(ib,v0)), grav_wrench(ib,grav,i3())), febase);
   var r_parent = i3();
@@ -1855,7 +1921,7 @@ fn aba_ext(v0: SV, q: array<f32,N>, qd: array<f32,N>, tau: array<f32,N>, febase:
 struct GState { R0: mat3x3<f32>, p0: vec3<f32>, v0: SV, q: array<f32,N>, qd: array<f32,N> }
 fn gait_advance(st: GState, tau: array<f32,N>) -> GState {
   let grav = vec3<f32>(PRM[2],PRM[3],PRM[4]);
-  let floor_z=PRM[18]; let kn=PRM[19]; let kd=PRM[20]; let dt=PRM[21]; let nc=u32(PRM[22]);
+  let floor_z=PRM[CBASE]; let kn=PRM[CBASE+1u]; let kd=PRM[CBASE+2u]; let mu_scale=PRM[CBASE+3u]; let dt=PRM[5]; let nc=u32(PRM[6]);
   let R0 = st.R0; let p0 = st.p0; let v0 = st.v0;
   var q = st.q; var qd = st.qd;
 
@@ -1871,7 +1937,7 @@ fn gait_advance(st: GState, tau: array<f32,N>) -> GState {
   var febase = SV(vec3<f32>(0.0), vec3<f32>(0.0));
   var fe: array<SV,N>; for (var i=0u;i<N;i=i+1u){ fe[i]=SV(vec3<f32>(0.0),vec3<f32>(0.0)); }
   for (var ci=0u; ci<nc; ci=ci+1u){
-    let cb=ci*5u; let fr=u32(CONTACTS[cb]); let off=vec3<f32>(CONTACTS[cb+1u],CONTACTS[cb+2u],CONTACTS[cb+3u]); let mu=CONTACTS[cb+4u];
+    let cb=ci*5u; let fr=u32(CONTACTS[cb]); let off=vec3<f32>(CONTACTS[cb+1u],CONTACTS[cb+2u],CONTACTS[cb+3u]); let mu=CONTACTS[cb+4u] * mu_scale;
     let Rwf = R0 * Rb[fr];
     let pfoot = R0*(Rb[fr]*off + pbf[fr]) + p0;
     let phi = pfoot.z - floor_z;
@@ -1901,6 +1967,8 @@ fn gait_advance(st: GState, tau: array<f32,N>) -> GState {
 fn gait_step(@builtin(global_invocation_id) g: vec3<u32>) {
   let e = g.x; let n_envs = u32(PRM[1]);
   if (e >= n_envs) { return; }
+  IBASE = e * (N + 1u) * 13u;
+  CBASE = 13u + e*4u;
   let pb = e*12u; let vb = e*6u; let sb = e*3u*N;
   var st: GState;
   st.R0 = mat3x3<f32>(vec3<f32>(BASEPOSE[pb],BASEPOSE[pb+1u],BASEPOSE[pb+2u]), vec3<f32>(BASEPOSE[pb+3u],BASEPOSE[pb+4u],BASEPOSE[pb+5u]), vec3<f32>(BASEPOSE[pb+6u],BASEPOSE[pb+7u],BASEPOSE[pb+8u]));
@@ -1919,7 +1987,7 @@ fn gait_step(@builtin(global_invocation_id) g: vec3<u32>) {
 
 // Linear feedback policy → joint torques. Features: [base_z, up-alignment R0[2][2], vertical vel, q, qd].
 fn policy_tau(st: GState, pol: u32) -> array<f32,N> {
-  let in_dim = u32(PRM[27]); let taumax = PRM[25];
+  let in_dim = u32(PRM[11]); let taumax = PRM[9];
   var feat: array<f32, {IN}>;
   feat[0] = st.p0.z; feat[1] = st.R0[2][2]; feat[2] = st.v0.b.z;
   for (var i=0u;i<N;i=i+1u){ feat[3u+i] = st.q[i]; feat[3u+N+i] = st.qd[i]; }
@@ -1935,9 +2003,16 @@ fn policy_tau(st: GState, pol: u32) -> array<f32,N> {
 
 @compute @workgroup_size(64)
 fn gait_rollout(@builtin(global_invocation_id) g: vec3<u32>) {
-  let pol = g.x; let n_policies = u32(PRM[28]);
+  let pol = g.x; let n_policies = u32(PRM[12]);
   if (pol >= n_policies) { return; }
-  let effort_w = PRM[24]; let steps = u32(PRM[26]);
+  // ⛔ The rollout holds the dynamics FIXED at environment 0's body and ground, deliberately. One
+  // thread here is one POLICY, not one environment, and CEM compares the returns those policies
+  // produce — evaluating each against a different randomised body would confound the comparison
+  // with the randomisation and the search would rank luck. Randomised policy search is a different
+  // feature (each policy scored ACROSS envs, then averaged) and it needs its own reward reduction.
+  IBASE = 0u;
+  CBASE = 13u;
+  let effort_w = PRM[8]; let steps = u32(PRM[10]);
   // shared initial state from INIT
   var st: GState;
   st.R0 = mat3x3<f32>(vec3<f32>(INIT[0],INIT[1],INIT[2]), vec3<f32>(INIT[3],INIT[4],INIT[5]), vec3<f32>(INIT[6],INIT[7],INIT[8]));
@@ -1949,7 +2024,7 @@ fn gait_rollout(@builtin(global_invocation_id) g: vec3<u32>) {
     let tau = policy_tau(st, pol);
     st = gait_advance(st, tau);
     // reward: keep the base HIGH (extend the leg against gravity), minus a small effort cost, gated
-    // by staying upright so it can't "win" by toppling. No target height enters the reward (PRM[23] is reserved).
+    // by staying upright so it can't "win" by toppling. No target height enters the reward (PRM[7] is reserved).
     var eff = 0.0; for (var j=0u;j<N;j=j+1u){ eff = eff + tau[j]*tau[j]; }
     reward = reward + st.p0.z * max(st.R0[2][2], 0.0) - effort_w*eff;
   }
@@ -1980,6 +2055,7 @@ pub struct FloatingGaitGpu {
     policy_buf: wgpu::Buffer,
     reward_buf: wgpu::Buffer,
     stage: wgpu::Buffer,
+    inertia_buf: wgpu::Buffer,
 }
 
 impl FloatingGaitGpu {
@@ -1998,22 +2074,27 @@ impl FloatingGaitGpu {
             joints.extend_from_slice(&[a.x as f32, a.y as f32, a.z as f32]);
             joints.push(match j.kind { crate::JointKind::Revolute => 0.0, crate::JointKind::Prismatic => 1.0 });
         }
-        let mut inert = Vec::with_capacity(n * 13);
-        for li in inertia {
-            inert.push(li.mass as f32);
-            inert.extend_from_slice(&[li.com.x as f32, li.com.y as f32, li.com.z as f32]);
-            inert.extend(li.inertia.as_slice().iter().map(|&v| v as f32));
-        }
-        let mut prm = vec![n as f32, n_envs as f32, gravity.x as f32, gravity.y as f32, gravity.z as f32, base.mass as f32, base.com.x as f32, base.com.y as f32, base.com.z as f32];
-        prm.extend(base.inertia.as_slice().iter().map(|&v| v as f32));
-        prm.extend_from_slice(&[floor_z as f32, kn as f32, kd as f32, dt as f32, contacts.len() as f32]);
-        let mut cflat: Vec<f32> = contacts.iter().flat_map(|&(fr, off, mu)| [fr as f32, off.x as f32, off.y as f32, off.z as f32, mu as f32]).collect();
-        if cflat.is_empty() { cflat = vec![0.0; 5]; }
+        // (N+1) bodies per environment, the floating base at slot 0, replicated across the batch.
+        let one_env: Vec<f32> = pack_inertia(core::slice::from_ref(base)).into_iter().chain(pack_inertia(inertia)).collect();
+        let inert: Vec<f32> = (0..n_envs.max(1)).flat_map(|_| one_env.clone()).collect();
 
-        // rollout params (PRM tail 23..28); filled per rollout call. in_dim = 3 + 2n.
+        // PRM is a FIXED 13-float header followed by a per-environment ground tail of four floats.
+        // in_dim = 3 + 2n; the rollout slots are filled per call.
         let in_dim = 3 + 2 * n;
         let policy_dim = n * in_dim + n;
-        prm.extend_from_slice(&[0.0, 0.0, 0.0, 0.0, in_dim as f32, 0.0]);
+        let mut prm = vec![
+            n as f32, n_envs as f32,                                             // 0, 1
+            gravity.x as f32, gravity.y as f32, gravity.z as f32,                // 2..4
+            dt as f32, contacts.len() as f32,                                    // 5, 6
+            0.0, 0.0, 0.0, 0.0,                                                  // 7 reserved, 8 effort_w, 9 taumax, 10 steps
+            in_dim as f32, 0.0,                                                  // 11 in_dim, 12 n_policies
+        ];
+        debug_assert_eq!(prm.len(), GAIT_PRM_HEADER, "the shader's CBASE is this header length");
+        for _ in 0..n_envs.max(1) {
+            prm.extend_from_slice(&[floor_z as f32, kn as f32, kd as f32, 1.0]);
+        }
+        let mut cflat: Vec<f32> = contacts.iter().flat_map(|&(fr, off, mu)| [fr as f32, off.x as f32, off.y as f32, off.z as f32, mu as f32]).collect();
+        if cflat.is_empty() { cflat = vec![0.0; 5]; }
 
         let instance = wgpu::Instance::default();
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
@@ -2026,8 +2107,8 @@ impl FloatingGaitGpu {
         let init = |label, data: &[u8], extra: wgpu::BufferUsages| device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: data, usage: wgpu::BufferUsages::STORAGE | extra });
         let none = wgpu::BufferUsages::empty();
         let joints_buf = init("g-joints", bytemuck::cast_slice(&joints), none);
-        let inertia_buf = init("g-inertia", bytemuck::cast_slice(&inert), none);
-        let prm_buf = init("g-prm", bytemuck::cast_slice(&prm), wgpu::BufferUsages::COPY_DST);
+        let inertia_buf = init("g-inertia", bytemuck::cast_slice(&inert), wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC);
+        let prm_buf = init("g-prm", bytemuck::cast_slice(&prm), wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC);
         let contacts_buf = init("g-contacts", bytemuck::cast_slice(&cflat), none);
         let dyn_buf = |label, elems: usize| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: (elems * 4).max(4) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
         let basepose_buf = dyn_buf("g-basepose", n_envs * 12);
@@ -2061,12 +2142,75 @@ impl FloatingGaitGpu {
                 wgpu::BindGroupEntry { binding: 9, resource: reward_buf.as_entire_binding() },
             ],
         });
-        Some(Self { n, n_envs, policy_dim, base_prm: prm, device, queue, pso, pso_rollout, bind, prm_buf, basepose_buf, v0_buf, qstate_buf, init_buf, policy_buf, reward_buf, stage })
+        // ⛔ `base_prm` is the HEADER ONLY. `rollout_rewards` writes it back to fill its own slots, and
+        // when it held the whole vector that write also restored the ground tail — silently undoing
+        // every `set_env_contact` a caller had made. Keeping the two disjoint is what makes the
+        // randomisation survive a rollout.
+        let base_prm = prm[..GAIT_PRM_HEADER].to_vec();
+        Some(Self { n, n_envs, policy_dim, base_prm, device, queue, pso, pso_rollout, bind, prm_buf, basepose_buf, v0_buf, qstate_buf, init_buf, policy_buf, reward_buf, stage, inertia_buf })
     }
 
     /// Linear-policy parameter count (`n·(3+2n) + n`).
     pub fn policy_dim(&self) -> usize {
         self.policy_dim
+    }
+
+    /// **Give one environment its own bodies**, floating base included. See
+    /// [`pack_floating_bodies`] for what is checked and why the base is not optional.
+    pub fn set_env_inertia(&mut self, env: usize, base: &crate::LinkInertia, links: &[crate::LinkInertia]) -> bool {
+        if env >= self.n_envs {
+            return false;
+        }
+        let Some(packed) = pack_floating_bodies(base, links, self.n) else { return false };
+        self.queue.write_buffer(&self.inertia_buf, (env * (self.n + 1) * 13 * 4) as u64, bytemuck::cast_slice(&packed));
+        true
+    }
+
+    /// Give **every** environment its own bodies in one upload, in environment order. Validated in
+    /// full before anything is written; see [`pack_all_floating_bodies`].
+    pub fn set_all_inertia(&mut self, per_env: &[(crate::LinkInertia, Vec<crate::LinkInertia>)]) -> bool {
+        match pack_all_floating_bodies(per_env, self.n, self.n_envs) {
+            Some(flat) => {
+                self.queue.write_buffer(&self.inertia_buf, 0, bytemuck::cast_slice(&flat));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Read back one environment's bodies as the shader sees them: `(n+1)·13` floats, base first.
+    pub fn env_inertia_raw(&self, env: usize) -> Option<Vec<f32>> {
+        read_env_inertia(&self.device, &self.queue, &self.inertia_buf, env, self.n_envs, (self.n + 1) * 13, "g-inertia-stage")
+    }
+
+    /// **Give one environment its own ground** — floor height, normal spring and damper, and a scale on
+    /// each contact's nominal friction. See [`write_env_contact`] for what is checked, and for the
+    /// stability limit randomising `kn` tightens.
+    ///
+    /// `false`, and nothing uploaded, if `env` is out of range or any value is non-finite.
+    ///
+    /// ⛔ This survives a [`rollout_rewards`](Self::rollout_rewards) call, and that took care rather
+    /// than luck. That call fills its own `PRM` slots by writing `base_prm` back, and `base_prm` used
+    /// to be the WHOLE vector — so had the ground tail simply been appended, every rollout would have
+    /// restored the constructor's ground over it and undone the randomisation silently. This was never
+    /// a shipped bug, because the tail did not exist before this change; it is a trap that was
+    /// available and is now closed by keeping `base_prm` the header alone.
+    /// `gpu_floating_gait_per_env_ground_survives_a_rollout` holds it closed, and the mutation that
+    /// restores the whole vector makes that test fail.
+    pub fn set_env_contact(&mut self, env: usize, floor_z: f64, kn: f64, kd: f64, mu_scale: f64) -> bool {
+        if env >= self.n_envs {
+            return false;
+        }
+        write_env_contact(&self.queue, &self.prm_buf, GAIT_PRM_HEADER + env * 4, floor_z, kn, kd, mu_scale)
+    }
+
+    /// Read back one environment's ground as the shader sees it: `(floor_z, kn, kd, mu_scale)`.
+    /// `None` if `env` is out of range.
+    pub fn env_contact(&self, env: usize) -> Option<(f32, f32, f32, f32)> {
+        if env >= self.n_envs {
+            return None;
+        }
+        Some(read_env_contact(&self.device, &self.queue, &self.prm_buf, GAIT_PRM_HEADER + env * 4, "g-prm-stage"))
     }
 
     /// Batched policy search over floating-base contact rollouts. `policies` packs `n_policies`
@@ -2082,7 +2226,9 @@ impl FloatingGaitGpu {
         self.queue.write_buffer(&self.policy_buf, 0, bytemuck::cast_slice(&f(policies)));
         self.queue.write_buffer(&self.init_buf, 0, bytemuck::cast_slice(&f(init)));
         let mut prm = self.base_prm.clone();
-        prm[24] = effort_w as f32; prm[25] = taumax as f32; prm[26] = steps as f32; prm[28] = n_policies as f32;
+        prm[8] = effort_w as f32; prm[9] = taumax as f32; prm[10] = steps as f32; prm[12] = n_policies as f32;
+        // header only: the per-env ground tail lives past it and must survive this write
+        debug_assert_eq!(prm.len(), GAIT_PRM_HEADER);
         self.queue.write_buffer(&self.prm_buf, 0, bytemuck::cast_slice(&prm));
 
         let mut enc = self.device.create_command_encoder(&Default::default());
@@ -4457,6 +4603,211 @@ mod verification {
       <joint name="j1" type="revolute"><parent link="base"/><child link="l1"/><origin xyz="0 0 0.15" rpy="0 0 0"/><axis xyz="0 1 0"/><limit lower="-2" upper="2" effort="20" velocity="5"/></joint>
       <joint name="j2" type="revolute"><parent link="l1"/><child link="l2"/><origin xyz="0 0 0.2" rpy="0 0 0"/><axis xyz="0 1 0"/><limit lower="-2" upper="2" effort="20" velocity="5"/></joint>
       <joint name="jt" type="fixed"><parent link="l2"/><child link="tip"/><origin xyz="0 0 0.2" rpy="0 0 0"/></joint></robot>"#;
+
+    /// **Per-environment body AND per-environment ground on the gait kernel**, which is the kernel a
+    /// locomotion transfer study actually runs. Both axes were batch-global: the trunk's inertia was
+    /// thirteen `PRM` scalars and the ground was four more, shared by every environment.
+    ///
+    /// Two controls, and the test is mostly about them. The GPU output is compared against each
+    /// environment's own body and ground, and against the SHARED body and ground the kernel used to
+    /// assume; the second must be large or the first proves nothing. And the two axes are randomised
+    /// TOGETHER, so a kernel that reads the right body but everyone's ground — or the reverse — fails.
+    #[test]
+    fn gpu_floating_gait_per_env_body_and_ground_match_the_cpu() {
+        let (robot, inertia) = from_urdf_full(UPARM_G, "base", "tip").unwrap();
+        let n = robot.dof();
+        let nominal_base = LinkInertia { mass: 8.0, com: Vector3::zeros(), inertia: Matrix3::from_diagonal(&Vector3::new(0.06, 0.06, 0.08)) };
+        let g = Vector3::new(0.0, 0.0, -9.81);
+        let (floor_z, kn, kd, dt) = (0.0, 2.0e4, 150.0, 2e-4);
+        let hx = 0.12;
+        let contacts: Vec<crate::FootContact> = vec![
+            (0, Vector3::new(hx, hx, -0.06), 0.9), (0, Vector3::new(-hx, hx, -0.06), 0.9),
+            (0, Vector3::new(hx, -hx, -0.06), 0.9), (0, Vector3::new(-hx, -hx, -0.06), 0.9),
+        ];
+        let n_envs = 128usize;
+        let steps = 30usize;
+
+        let mut s = 0x2B7Eu64;
+        let mut rng = || {
+            s = s.wrapping_add(0x9E3779B97F4A7C15);
+            let mut z = s; z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9); z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+            (((z ^ (z >> 31)) as f64) / (u64::MAX as f64)) * 2.0 - 1.0
+        };
+        let mut base_pose = vec![0.0f64; n_envs * 12];
+        let v0 = vec![0.0f64; n_envs * 6];
+        let mut q = vec![0.0f64; n_envs * n];
+        let mut qd = vec![0.0f64; n_envs * n];
+        let mut tau = vec![0.0f64; n_envs * n];
+        for e in 0..n_envs {
+            let id = Matrix3::<f64>::identity();
+            for (k, &v) in id.as_slice().iter().enumerate() { base_pose[e * 12 + k] = v; }
+            base_pose[e * 12 + 11] = 0.055;
+            for i in 0..n { q[e * n + i] = 0.2 * rng(); qd[e * n + i] = 0.1 * rng(); tau[e * n + i] = 0.5 * rng(); }
+        }
+
+        // trunk and limbs opposite ways; ground kept inside the explicit-integration stability limit
+        // dt²(kn/m) + 2dt(kd/m) <= 4, which randomising kn upward tightens
+        let per_env: Vec<(LinkInertia, Vec<LinkInertia>)> = (0..n_envs)
+            .map(|e| {
+                let t = (e as f64) / (n_envs as f64);
+                let (fb, fl) = (0.7 + 0.6 * t, 1.3 - 0.6 * t);
+                let b = LinkInertia { mass: nominal_base.mass * fb, com: nominal_base.com, inertia: nominal_base.inertia * fb };
+                let l = inertia.iter().map(|li| LinkInertia { mass: li.mass * fl, com: li.com * (0.9 + 0.2 * fl), inertia: li.inertia * fl }).collect();
+                (b, l)
+            })
+            .collect();
+        let ground: Vec<(f64, f64, f64, f64)> = (0..n_envs)
+            .map(|e| {
+                let t = (e as f64) / (n_envs as f64);
+                (-0.004 + 0.008 * t, kn * (0.6 + 0.5 * t), kd * (0.7 + 0.6 * t), 0.4 + 1.1 * t)
+            })
+            .collect();
+
+        let Some(mut gp) = FloatingGaitGpu::new(&robot, &inertia, &nominal_base, &contacts, floor_z, kn, kd, g, dt, n_envs) else {
+            eprintln!("no GPU — skipping");
+            return;
+        };
+        // the shipped defaults must be what the tail already holds, or `new` and the shader disagree
+        let (f0, k0, d0, m0) = gp.env_contact(0).expect("readable");
+        assert!((f0 as f64 - floor_z).abs() < 1e-6 && (k0 as f64 - kn).abs() < 1.0 && (d0 as f64 - kd).abs() < 1e-3 && (m0 - 1.0).abs() < 1e-6,
+            "the tail must start at the constructor's ground, got ({f0}, {k0}, {d0}, {m0})");
+
+        assert!(gp.set_all_inertia(&per_env), "body upload accepted");
+        for (e, &(fz, k, d, mu)) in ground.iter().enumerate() {
+            assert!(gp.set_env_contact(e, fz, k, d, mu), "env {e} ground upload accepted");
+        }
+        let (fl_, kl, dl, ml) = gp.env_contact(n_envs - 1).expect("readable");
+        assert!((fl_ as f64 - ground[n_envs - 1].0).abs() < 1e-6 && (ml as f64 - ground[n_envs - 1].3).abs() < 1e-6,
+            "the last env's ground must have landed, got ({fl_}, {kl}, {dl}, {ml})");
+        let rawl = gp.env_inertia_raw(n_envs - 1).expect("readable");
+        assert!((rawl[0] as f64 - per_env[n_envs - 1].0.mass).abs() < 1e-3, "and its trunk, got {}", rawl[0]);
+
+        let (gbp, gv0, gq, gqd) = gp.run(&base_pose, &v0, &q, &qd, &tau, steps);
+
+        let mut worst = 0.0f64;
+        let mut worst_env = 0usize;
+        let mut worst_shared = 0.0f64;
+        for e in 0..n_envs {
+            let (b_in, l_in) = &per_env[e];
+            let (fz, k, d, mu) = ground[e];
+            let scaled: Vec<crate::FootContact> = contacts.iter().map(|&(fr, off, m)| (fr, off, m * mu)).collect();
+            // per-env reference, and THE CONTROL: the shared body and ground the kernel used to assume
+            let roll = |li: &[LinkInertia], bi: &LinkInertia, cs: &[crate::FootContact], fz: f64, k: f64, d: f64| {
+                let mut base = Isometry3::from_parts(Translation3::new(0.0, 0.0, 0.055), UnitQuaternion::identity());
+                let mut vv = Vector6::zeros();
+                let mut qq = q[e * n..(e + 1) * n].to_vec();
+                let mut qdd = qd[e * n..(e + 1) * n].to_vec();
+                let taue = tau[e * n..(e + 1) * n].to_vec();
+                for _ in 0..steps {
+                    let (bb, v, qn, qdn) = floating_contact_step(&robot, li, bi, base, vv, &qq, &qdd, &taue, cs, fz, k, d, dt, g);
+                    base = bb; vv = v; qq = qn; qdd = qdn;
+                }
+                (base, vv, qq, qdd)
+            };
+            let (cb, cv, cq, cqd) = roll(l_in, b_in, &scaled, fz, k, d);
+            let (sb, sv, sq, sqd) = roll(&inertia, &nominal_base, &contacts, floor_z, kn, kd);
+
+            let mut here = 0.0f64;
+            let r = cb.rotation.to_rotation_matrix();
+            let rs = sb.rotation.to_rotation_matrix();
+            for kk in 0..9 {
+                here = here.max((gbp[e * 12 + kk] - r.matrix().as_slice()[kk]).abs());
+                worst_shared = worst_shared.max((gbp[e * 12 + kk] - rs.matrix().as_slice()[kk]).abs());
+            }
+            for kk in 0..3 {
+                here = here.max((gbp[e * 12 + 9 + kk] - cb.translation.vector[kk]).abs());
+                worst_shared = worst_shared.max((gbp[e * 12 + 9 + kk] - sb.translation.vector[kk]).abs());
+            }
+            for kk in 0..6 {
+                here = here.max((gv0[e * 6 + kk] - cv[kk]).abs());
+                worst_shared = worst_shared.max((gv0[e * 6 + kk] - sv[kk]).abs());
+            }
+            for i in 0..n {
+                here = here.max((gq[e * n + i] - cq[i]).abs()).max((gqd[e * n + i] - cqd[i]).abs());
+                worst_shared = worst_shared.max((gq[e * n + i] - sq[i]).abs()).max((gqd[e * n + i] - sqd[i]).abs());
+            }
+            if here > worst { worst = here; worst_env = e; }
+        }
+        eprintln!("  per-env body AND ground, {n_envs} envs × {steps} steps: worst |Δ| {worst:.3e} (env {worst_env})");
+        eprintln!("  the same GPU output against the SHARED body and ground: worst |Δ| {worst_shared:.3e} — must be large");
+        assert!(worst < 1e-3, "each env must match its own body and ground: {worst:.3e}");
+        assert!(worst_shared > 1e-2, "the control must separate, got {worst_shared:.3e}");
+
+        // refusals
+        let before = gp.env_contact(5).expect("readable");
+        assert!(!gp.set_env_contact(n_envs, 0.0, kn, kd, 1.0), "an out-of-range env");
+        assert!(!gp.set_env_contact(5, f64::NAN, kn, kd, 1.0), "a non-finite floor");
+        assert!(!gp.set_env_contact(5, 0.0, kn, kd, f64::INFINITY), "a non-finite friction scale");
+        assert_eq!(gp.env_contact(5).expect("readable"), before, "a refused upload must change nothing");
+        assert!(gp.env_contact(n_envs).is_none(), "an out-of-range read");
+    }
+
+    /// ⛔ **The per-env ground must survive a rollout.**
+    ///
+    /// `rollout_rewards` fills its own `PRM` slots by writing `base_prm` back, and `base_prm` was the
+    /// WHOLE vector. Appending a per-environment ground tail to that buffer without splitting the two
+    /// would have made every rollout restore the constructor's ground over the caller's randomisation,
+    /// silently. To be exact about it: this was never a shipped defect, because the tail did not exist
+    /// before this change — it is a trap this change had to avoid, and the mutation that puts the whole
+    /// vector back in `base_prm` is what shows the avoidance is load-bearing rather than decorative.
+    ///
+    /// It also pins the deliberate choice at the other end: the rollout evaluates POLICIES and holds
+    /// the dynamics fixed at environment 0's, so randomising environments 1.. must not move a single
+    /// reward. A rollout that indexed by policy would rank luck instead of policies.
+    #[test]
+    fn gpu_floating_gait_per_env_ground_survives_a_rollout() {
+        let (robot, inertia) = from_urdf_full(UPARM_G, "base", "tip").unwrap();
+        let n = robot.dof();
+        let base_inertia = LinkInertia { mass: 8.0, com: Vector3::zeros(), inertia: Matrix3::from_diagonal(&Vector3::new(0.06, 0.06, 0.08)) };
+        let g = Vector3::new(0.0, 0.0, -9.81);
+        let (floor_z, kn, kd, dt) = (0.0, 2.0e4, 150.0, 2e-4);
+        let hx = 0.12;
+        let contacts: Vec<crate::FootContact> = vec![
+            (0, Vector3::new(hx, hx, -0.06), 0.9), (0, Vector3::new(-hx, hx, -0.06), 0.9),
+            (0, Vector3::new(hx, -hx, -0.06), 0.9), (0, Vector3::new(-hx, -hx, -0.06), 0.9),
+        ];
+        let n_envs = 64usize;
+        let Some(mut gp) = FloatingGaitGpu::new(&robot, &inertia, &base_inertia, &contacts, floor_z, kn, kd, g, dt, n_envs) else {
+            eprintln!("no GPU — skipping");
+            return;
+        };
+
+        let odd = (-0.003, kn * 1.7, kd * 0.4, 0.25);
+        assert!(gp.set_env_contact(3, odd.0, odd.1, odd.2, odd.3), "upload accepted");
+        let before = gp.env_contact(3).expect("readable");
+
+        // a rollout, which is what used to clobber it
+        let n_pol = 8usize;
+        let policies = vec![0.0f64; n_pol * gp.policy_dim()];
+        let mut init = vec![0.0f64; 18 + 2 * n];
+        let id = Matrix3::<f64>::identity();
+        for (k, &v) in id.as_slice().iter().enumerate() { init[k] = v; }
+        init[11] = 0.055;
+        let r_env0 = gp.rollout_rewards(&policies, &init, 1e-3, 2.0, 20);
+
+        let after = gp.env_contact(3).expect("readable");
+        eprintln!("  env 3 ground before the rollout {before:?}");
+        eprintln!("  env 3 ground after  the rollout {after:?}   <- the constructor's would be (0, 20000, 150, 1)");
+        assert_eq!(before, after, "a rollout must not touch the per-env ground tail");
+        assert!((after.0 as f64 - odd.0).abs() < 1e-6 && (after.3 as f64 - odd.3).abs() < 1e-6, "and it must still be the odd one");
+
+        // and the rollout itself is pinned to env 0: randomising every OTHER env cannot move a reward
+        for e in 1..n_envs {
+            assert!(gp.set_env_contact(e, 0.05, kn * 0.2, kd * 3.0, 0.05), "env {e} ground");
+        }
+        let per_env: Vec<(LinkInertia, Vec<LinkInertia>)> = (0..n_envs)
+            .map(|e| {
+                if e == 0 { return (base_inertia.clone(), inertia.clone()); }
+                let b = LinkInertia { mass: base_inertia.mass * 4.0, com: base_inertia.com, inertia: base_inertia.inertia * 4.0 };
+                (b, inertia.iter().map(|li| LinkInertia { mass: li.mass * 4.0, com: li.com, inertia: li.inertia * 4.0 }).collect())
+            })
+            .collect();
+        assert!(gp.set_all_inertia(&per_env), "body upload accepted");
+        let r_after = gp.rollout_rewards(&policies, &init, 1e-3, 2.0, 20);
+        let worst: f64 = r_env0.iter().zip(&r_after).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+        eprintln!("  rewards with envs 1.. randomised hard: worst |Δreward| {worst:.3e} over {n_pol} policies — must be 0");
+        assert_eq!(worst, 0.0, "the rollout is pinned to env 0, so nothing else may move a reward: {worst:.3e}");
+    }
 
     /// The GPU floating-base contact step (FK + foot contact + spatial ABA + SE(3) integration)
     /// reproduces the CPU `floating_contact_step` over a multi-step rollout — the port check against
