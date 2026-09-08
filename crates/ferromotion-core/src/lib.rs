@@ -173,7 +173,8 @@
 //!
 //! # Throughput
 //!
-//! [`gpu`] is the `wgpu` path: batched collision checking and six batched articulated-dynamics
+//! `gpu` (behind the `gpu` feature, which is why this is not a link) is the `wgpu` path: batched
+//! collision checking and six batched articulated-dynamics
 //! kernels, each stepping thousands of environments in one dispatch. `ArticulatedGpu` carries
 //! **per-environment mass properties AND per-environment ground** — `set_env_inertia`,
 //! `set_all_inertia` and `set_env_contact` — so the two axes a sim-to-real transfer actually
