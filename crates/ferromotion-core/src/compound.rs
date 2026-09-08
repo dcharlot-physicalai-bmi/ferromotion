@@ -74,9 +74,31 @@ pub struct CompoundHull {
 
 /// One part-pair proximity result, carrying **which** parts realised it — a solver needs the indices
 /// to attach the constraint to the right piece, and a diagnostic needs them to say where.
+///
+/// ⛔ **The first version of this carried `distance` and two witness points and nothing else, and it
+/// was unusable by a solver.** A [`PgsContact`](crate::PgsContact) needs a contact NORMAL and a gap
+/// that goes NEGATIVE on penetration; `distance` is `0` for every intersecting pair, and GJK's witness
+/// points are meaningless once the shapes overlap. So the module's claim to produce "the constraint
+/// set a solver needs" was false for exactly the pairs a solver exists to resolve. `gap` and `normal`
+/// are computed by [`epa`](crate::epa) when the pair intersects and by GJK when it does not.
 #[derive(Clone, Copy, Debug)]
 pub struct CompoundContact {
+    /// GJK distance: `0` when the pair intersects. Kept for a planner, which only wants clearance.
     pub distance: f64,
+    /// **Signed** gap: `+distance` when separated, `−depth` when penetrating. This is what a solver
+    /// takes as `phi`, and the only field of the three that is meaningful in both cases.
+    pub gap: f64,
+    /// Unit contact normal, pointing **from part A toward part B**, in both regimes.
+    ///
+    /// The convention is one statement that holds either way, and it is what the tests check
+    /// functionally rather than by asserting a sign: **translating part A by `gap·normal` brings the
+    /// pair to exactly touching.** A negative `gap` therefore moves A away from B and separates them;
+    /// a positive one moves A toward B and closes the clearance.
+    ///
+    /// Zero only in the degenerate case where neither GJK nor EPA can produce a direction: exactly
+    /// touching, or a pair whose Minkowski difference is flat. A solver must skip a zero normal rather
+    /// than normalise it.
+    pub normal: Vector3<f64>,
     pub intersecting: bool,
     pub witness_a: Vector3<f64>,
     pub witness_b: Vector3<f64>,
@@ -176,6 +198,44 @@ impl CompoundHull {
     }
 }
 
+/// One part pair, resolved to a signed gap and a normal. GJK answers the separated case; EPA answers
+/// the penetrating one, which is the case a solver exists for and the one GJK cannot describe.
+fn pair_contact(pa: &ConvexPoints, pb: &ConvexPoints, i: usize, j: usize) -> Option<CompoundContact> {
+    let g: GjkResult = gjk(pa, pb);
+    if !g.distance.is_finite() {
+        return None;
+    }
+    let (gap, normal) = if g.intersecting {
+        match crate::epa::epa(pa, pb) {
+            Some(p) if p.depth.is_finite() && p.normal.iter().all(|c| c.is_finite()) => (-p.depth, p.normal),
+            // EPA refuses a flat Minkowski difference, which is an exactly-touching pair. A zero gap
+            // with no direction is the honest answer; inventing a normal here would put a constraint
+            // on an axis nothing measured.
+            _ => (0.0, Vector3::zeros()),
+        }
+    } else {
+        // ⛔ `witness_b − witness_a`, NOT the other way round. Measured on A at the origin and B at
+        // +0.75x overlapping, EPA returns normal (+1,0,0) — it points from A toward B. The first
+        // version of this branch used `witness_a − witness_b` and produced (−1,0,0) for the same body
+        // ordering, so the two regimes disagreed on direction and the module's stated convention was
+        // true of only one of them. A caller mixing a separated and a penetrating pair in one
+        // constraint set would have got contradictory normals.
+        let d = g.witness_b - g.witness_a;
+        let nn = d.norm();
+        (g.distance, if nn > 1e-12 { d / nn } else { Vector3::zeros() })
+    };
+    Some(CompoundContact {
+        distance: g.distance,
+        gap,
+        normal,
+        intersecting: g.intersecting,
+        witness_a: g.witness_a,
+        witness_b: g.witness_b,
+        part_a: i,
+        part_b: j,
+    })
+}
+
 /// **The closest pair between two compounds**, over all part pairs. What a planner wants: a single
 /// clearance number, and which pieces set it.
 ///
@@ -185,19 +245,11 @@ pub fn compound_distance(a: &CompoundHull, b: &CompoundHull) -> Option<CompoundC
     let mut best: Option<CompoundContact> = None;
     for (i, pa) in a.parts.iter().enumerate() {
         for (j, pb) in b.parts.iter().enumerate() {
-            let g: GjkResult = gjk(pa, pb);
-            if !g.distance.is_finite() {
-                continue;
-            }
-            let c = CompoundContact {
-                distance: g.distance,
-                intersecting: g.intersecting,
-                witness_a: g.witness_a,
-                witness_b: g.witness_b,
-                part_a: i,
-                part_b: j,
-            };
-            if best.is_none_or(|bc| c.distance < bc.distance) {
+            let Some(c) = pair_contact(pa, pb, i, j) else { continue };
+            // Ordered by the SIGNED gap, so a deeper penetration outranks a shallower one and both
+            // outrank any separation. Ordering by `distance` would make every intersecting pair tie at
+            // zero and pick an arbitrary one.
+            if best.is_none_or(|bc| c.gap < bc.gap) {
                 best = Some(c);
             }
         }
@@ -207,34 +259,33 @@ pub fn compound_distance(a: &CompoundHull, b: &CompoundHull) -> Option<CompoundC
 
 /// **Every part pair within `margin`** — the constraint set a contact solver needs.
 ///
-/// Returned sorted by distance, closest first, so a caller that must truncate drops the least
-/// important. An intersecting pair has distance `0` and is always included when `margin >= 0`.
+/// Returned sorted by **signed gap**, deepest penetration first, so a caller that must truncate drops
+/// the least important. An intersecting pair has a negative gap and is therefore always included for
+/// any `margin >= 0`, and a **negative** margin selects only pairs penetrating deeper than
+/// `|margin|` — the query a diagnostic wants when it is looking for the overlaps that matter.
 ///
 /// ⛔ This is the query that distinguishes a compound from a hull. Taking only
 /// [`compound_distance`]'s answer and handing it to a solver loses every simultaneous contact, and a
 /// body with one of its two supports missing sinks through the other. `margin` should be at least the
 /// solver's own contact-activation distance.
 pub fn compound_contacts(a: &CompoundHull, b: &CompoundHull, margin: f64) -> Vec<CompoundContact> {
-    if !margin.is_finite() || margin < 0.0 {
+    // ⛔ A NEGATIVE margin is meaningful and is accepted, which it was not before `gap` was signed.
+    // `margin = -0.01` selects only pairs penetrating deeper than a centimetre — the query a
+    // diagnostic wants, and the reason a mutation swapping `gap` for `distance` here was invisible:
+    // for margin >= 0 the two are equivalent, because an intersecting pair has distance 0 and a
+    // negative gap. They differ exactly where a negative margin is allowed.
+    if !margin.is_finite() {
         return Vec::new();
     }
     let mut out = Vec::new();
     for (i, pa) in a.parts.iter().enumerate() {
         for (j, pb) in b.parts.iter().enumerate() {
-            let g = gjk(pa, pb);
-            if g.distance.is_finite() && g.distance <= margin {
-                out.push(CompoundContact {
-                    distance: g.distance,
-                    intersecting: g.intersecting,
-                    witness_a: g.witness_a,
-                    witness_b: g.witness_b,
-                    part_a: i,
-                    part_b: j,
-                });
+            if let Some(c) = pair_contact(pa, pb, i, j).filter(|c| c.gap <= margin) {
+                out.push(c);
             }
         }
     }
-    out.sort_by(|x, y| x.distance.total_cmp(&y.distance));
+    out.sort_by(|x, y| x.gap.total_cmp(&y.gap));
     out
 }
 
@@ -565,6 +616,122 @@ mod tests {
         assert!(try_convex_hull_3d(&solid).is_some(), "lifting one point off the plane must yield a hull");
     }
 
+    /// **A penetrating pair must report a NEGATIVE gap and a usable normal**, which is what a solver
+    /// takes and what the first version of this module could not produce. The convention is checked
+    /// FUNCTIONALLY: translating part A by `+gap·normal` must actually separate the pair. That is
+    /// stronger than asserting a sign, because it fails for a normal that points the wrong way, for one
+    /// scaled wrongly, and for a depth that is right in magnitude but measured along the wrong axis.
+    #[test]
+    fn a_penetrating_pair_reports_a_negative_gap_and_a_normal_that_separates_it() {
+        // two unit boxes overlapping by 0.25 along x
+        let a = CompoundHull::from_convex_parts(vec![box_pts(v(0.0, 0.0, 0.0), v(0.5, 0.5, 0.5))]).expect("one");
+        let b = CompoundHull::from_convex_parts(vec![box_pts(v(0.75, 0.0, 0.0), v(0.5, 0.5, 0.5))]).expect("one");
+        let c = compound_distance(&a, &b).expect("pairs");
+
+        assert!(c.intersecting, "these overlap");
+        assert_eq!(c.distance, 0.0, "GJK reports 0 for any intersecting pair, which is why `gap` exists");
+        assert!((c.gap + 0.25).abs() < 1e-6, "the signed gap must be −depth = −0.25, got {:.6}", c.gap);
+        assert!((c.normal.norm() - 1.0).abs() < 1e-9, "the normal must be a unit vector, got {:.6}", c.normal.norm());
+        assert!(c.normal.x.abs() > 0.99, "the overlap is along x, so the normal must be too: {:?}", c.normal);
+
+        // THE FUNCTIONAL CHECK, and it is the SAME statement the separated test makes: translating A
+        // by gap·normal brings the pair to touching. `gap` is negative here, so it moves A away from B
+        // by exactly the depth. One statement covering both regimes is what stops the two branches
+        // drifting to opposite conventions, which is exactly what they had done.
+        let sep = a.transformed(&Iso::from_parts(
+            Translation3::from(c.gap * c.normal),
+            UnitQuaternion::identity(),
+        ));
+        let after = compound_distance(&sep, &b).expect("pairs");
+        eprintln!(
+            "  overlapping boxes: distance {:.3}, gap {:.6}, normal {:?} -> after translating A by gap·normal: gap {:.2e}, intersecting {}",
+            c.distance, c.gap, c.normal, after.gap, after.intersecting
+        );
+        assert!(after.gap.abs() < 1e-6, "after the translation the pair must be exactly touching, got {:.3e}", after.gap);
+
+        // and moving A the WRONG way must drive it deeper, which is what pins the direction
+        let deeper = a.transformed(&Iso::from_parts(
+            Translation3::from(-c.gap * c.normal),
+            UnitQuaternion::identity(),
+        ));
+        let worse = compound_distance(&deeper, &b).expect("pairs");
+        assert!(worse.gap < c.gap - 1e-9, "the opposite translation must deepen the overlap: {:.6} vs {:.6}", worse.gap, c.gap);
+    }
+
+    /// A separated pair keeps GJK's answer, and its normal is the witness axis. The two branches must
+    /// agree at the boundary, which is the only place a two-branch function can be discontinuous.
+    #[test]
+    fn a_separated_pair_reports_a_positive_gap_and_the_two_branches_meet_at_touching() {
+        let a = CompoundHull::from_convex_parts(vec![box_pts(v(0.0, 0.0, 0.0), v(0.5, 0.5, 0.5))]).expect("one");
+        let far = CompoundHull::from_convex_parts(vec![box_pts(v(2.0, 0.0, 0.0), v(0.5, 0.5, 0.5))]).expect("one");
+        let c = compound_distance(&a, &far).expect("pairs");
+        assert!(!c.intersecting);
+        assert!((c.gap - 1.0).abs() < 1e-9, "separated: gap is +distance = 1.0, got {:.6}", c.gap);
+        assert!((c.gap - c.distance).abs() < 1e-15, "gap and distance agree when separated");
+        assert!((c.normal - Vector3::x()).norm() < 1e-6, "the normal points from A toward B, which is +x here, got {:?}", c.normal);
+
+        // THE SHARED FUNCTIONAL PROPERTY, in the separated regime: translating A by gap·normal brings
+        // the pair to touching. The penetrating test checks the same statement, which is what makes it
+        // one convention rather than two that happen to agree on a sign.
+        let closed = a.transformed(&Iso::from_parts(Translation3::from(c.gap * c.normal), UnitQuaternion::identity()));
+        let after = compound_distance(&closed, &far).expect("pairs");
+        assert!(after.gap.abs() < 1e-6, "moving A by gap·normal must close a separation to touching, got {:.3e}", after.gap);
+
+        // walk across the boundary: the gap must be continuous and monotone through zero
+        let mut prev = f64::INFINITY;
+        let mut row = Vec::new();
+        for d in [1.2f64, 1.05, 1.0, 0.95, 0.8] {
+            let b = CompoundHull::from_convex_parts(vec![box_pts(v(d, 0.0, 0.0), v(0.5, 0.5, 0.5))]).expect("one");
+            let g = compound_distance(&a, &b).expect("pairs").gap;
+            row.push((d, (g * 1e6).round() / 1e6));
+            assert!(g < prev + 1e-9, "the gap must fall as the boxes approach: {row:?}");
+            prev = g;
+        }
+        eprintln!("  gap across the touching boundary (centre distance, gap): {row:?}");
+        // exactly touching at 1.0, and the two branches must not disagree there by more than round-off
+        assert!(row[2].1.abs() < 1e-6, "at a centre distance of 1.0 the gap must be ~0, got {}", row[2].1);
+        assert!(row[3].1 < 0.0 && row[4].1 < row[3].1, "past touching the gap must go negative and keep falling: {row:?}");
+    }
+
+    /// **The ordering is by signed gap**, so a deeper penetration outranks a shallower one and both
+    /// outrank any separation. Ordering by `distance` would tie every intersecting pair at zero and
+    /// pick an arbitrary one — which is what the first version did.
+    #[test]
+    fn the_deepest_penetration_outranks_a_shallower_one_and_both_outrank_separation() {
+        let probe = CompoundHull::from_convex_parts(vec![box_pts(v(0.0, 0.0, 0.0), v(0.5, 0.5, 0.5))]).expect("one");
+        let three = CompoundHull::from_convex_parts(vec![
+            box_pts(v(0.0, 3.0, 0.0), v(0.5, 0.5, 0.5)),  // 0: separated by 2.0
+            box_pts(v(0.9, 0.0, 0.0), v(0.5, 0.5, 0.5)),  // 1: overlapping by 0.1
+            box_pts(v(0.0, 0.0, 0.6), v(0.5, 0.5, 0.5)),  // 2: overlapping by 0.4, the deepest
+        ])
+        .expect("three parts");
+
+        let closest = compound_distance(&three, &probe).expect("pairs");
+        assert_eq!(closest.part_a, 2, "the DEEPEST overlap must win, not whichever zero-distance pair came first");
+        assert!((closest.gap + 0.4).abs() < 1e-6, "and its gap is −0.4, got {:.6}", closest.gap);
+
+        let all = compound_contacts(&three, &probe, 0.0);
+        assert_eq!(all.len(), 2, "only the two overlapping pairs have gap <= 0");
+        // ⛔ A NEGATIVE margin selects only the DEEP overlaps, which is a query the signed gap makes
+        // possible and `distance` cannot express — every intersecting pair has distance 0, so a
+        // distance-based margin admits both or neither.
+        let deep = compound_contacts(&three, &probe, -0.2);
+        assert_eq!(deep.len(), 1, "only the 0.4-deep overlap is past a 0.2 penetration threshold, got {}", deep.len());
+        assert_eq!(deep[0].part_a, 2, "and it is the deep one");
+        assert!(compound_contacts(&three, &probe, -0.5).is_empty(), "nothing penetrates deeper than 0.5");
+        eprintln!("  margin -0.2 selects {} of 3 pairs (the deep overlap only); -0.5 selects 0", deep.len());
+        assert_eq!((all[0].part_a, all[1].part_a), (2, 1), "sorted deepest first");
+        assert!(all[0].gap < all[1].gap, "and their gaps are ordered: {:.4} then {:.4}", all[0].gap, all[1].gap);
+        let with_sep = compound_contacts(&three, &probe, 2.5);
+        assert_eq!(with_sep.len(), 3, "a wider margin admits the separated pair too");
+        assert_eq!(with_sep[2].part_a, 0, "and it sorts LAST, because its gap is the largest");
+        eprintln!(
+            "  gaps sorted deepest-first: {:?} from parts {:?}",
+            with_sep.iter().map(|c| (c.gap * 1e4).round() / 1e4).collect::<Vec<_>>(),
+            with_sep.iter().map(|c| c.part_a).collect::<Vec<_>>()
+        );
+    }
+
     /// Refusals. Every one is a real export or decomposition artifact rather than a hypothetical.
     #[test]
     fn degenerate_and_empty_compounds_are_refused() {
@@ -591,8 +758,21 @@ mod tests {
         // margins
         let a = CompoundHull::from_convex_parts(vec![box_pts(v(0.0, 0.0, 0.0), v(0.5, 0.5, 0.5))]).expect("one");
         let b = CompoundHull::from_convex_parts(vec![box_pts(v(3.0, 0.0, 0.0), v(0.5, 0.5, 0.5))]).expect("one");
-        assert!(compound_contacts(&a, &b, -1.0).is_empty(), "a negative margin selects nothing");
+        // a negative margin is no longer a refusal: it selects only pairs penetrating deeper than
+        // |margin|, and these two are 2.0 apart, so nothing qualifies
+        assert!(compound_contacts(&a, &b, -1.0).is_empty(), "separated pairs never satisfy a negative margin");
+        // a NaN margin: every `gap <= NaN` comparison is false, so removing the guard happens to give
+        // the same empty answer. The guard stays because relying on that is relying on NaN ordering,
+        // which is exactly the class of bug this workspace has a gate for — and a NaN margin reaching
+        // a solver as "no contacts" rather than as an error is worth refusing explicitly.
         assert!(compound_contacts(&a, &b, f64::NAN).is_empty(), "a non-finite margin selects nothing");
+        // ⛔ +INFINITY is refused too, and that is the behaviour rather than my first guess. I asserted
+        // it selects everything; `INFINITY.is_finite()` is false, so the guard returns empty. Refusing
+        // non-finite input is this crate's posture and a caller wanting every pair should pass a large
+        // FINITE margin. Asserting the real answer is also what catches the guard's removal, since an
+        // unguarded `gap <= INFINITY` admits all of them.
+        assert!(compound_contacts(&a, &b, f64::INFINITY).is_empty(), "+infinity is non-finite and is refused, not treated as universal");
+        assert_eq!(compound_contacts(&a, &b, 1e9).len(), 1, "a large FINITE margin is how a caller asks for every pair");
         assert!(compound_contacts(&a, &b, 1.0).is_empty(), "2.0 apart is outside a 1.0 margin");
         assert_eq!(compound_contacts(&a, &b, 2.5).len(), 1, "and inside a 2.5 one");
         assert!(compound_distance(&a, &CompoundHull::default()).is_none(), "an empty compound has no closest pair");
