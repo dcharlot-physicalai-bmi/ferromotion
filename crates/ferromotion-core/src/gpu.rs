@@ -1344,12 +1344,23 @@ fn floating_wgsl(n: usize) -> String {
     let src = r#"
 const N: u32 = {N}u;
 @group(0) @binding(0) var<storage, read> JOINTS: array<f32>;   // 16 per joint: R_o(9,col-major) p_o(3) axis(3) kind(1)
-@group(0) @binding(1) var<storage, read> INERTIA: array<f32>;  // 13 per link: mass(1) com(3) I(9,col-major)
-@group(0) @binding(2) var<storage, read> PRM: array<f32>;      // [N, n_envs, gx,gy,gz, base: mass(1) com(3) I(9)]
+@group(0) @binding(1) var<storage, read> INERTIA: array<f32>;  // 13 per body, (N+1) bodies PER ENV: base first, then link i
+@group(0) @binding(2) var<storage, read> PRM: array<f32>;      // [N, n_envs, gx,gy,gz]
 @group(0) @binding(3) var<storage, read> V0: array<f32>;       // 6 per env: base spatial velocity [ang; lin]
 @group(0) @binding(4) var<storage, read> STATE: array<f32>;    // 3N per env: q(N) qd(N) tau(N)
 @group(0) @binding(5) var<storage, read_write> OUT: array<f32>;// (6+N) per env: a0(6) qdd(N)
 @group(0) @binding(6) var<storage, read> FEXT: array<f32>;     // (N+1)*6 per env: base(6) then link i (6 each), spatial [torque; force]
+
+// The base offset into INERTIA for the environment this invocation is stepping, set by `main`
+// before any body's inertia is touched. Same device as `ArticulatedGpu`'s `IBASE`, and for the same
+// reason: `linertia` is reached from several places and threading an env index to all of them would
+// touch every call site for no gain.
+//
+// ⛔ The FLOATING BASE's own inertia lives in this buffer too, at slot 0 of each environment, and it
+// used to be three PRM scalars shared by the whole batch. A locomotion transfer randomises the
+// trunk's mass at least as often as a limb's — it is the largest single mass in the model — so
+// leaving it batch-global made the one body most worth randomising the one body that could not be.
+var<private> IBASE: u32 = 0u;
 
 // spatial vector [angular; linear] and 6x6 spatial matrix as four 3x3 blocks [[tl,tr],[bl,br]]
 struct SV { t: vec3<f32>, b: vec3<f32> }
@@ -1402,22 +1413,24 @@ fn subspace(i: u32) -> SV {
   if (JOINTS[i*16u+15u] < 0.5) { return SV(a, vec3<f32>(0.0)); }
   return SV(vec3<f32>(0.0), a);
 }
-fn linertia(i: u32) -> SM {
-  let mass = INERTIA[i*13u];
-  let c = vec3<f32>(INERTIA[i*13u+1u], INERTIA[i*13u+2u], INERTIA[i*13u+3u]);
-  let b = i*13u + 4u;
+// Body `slot` of this environment: slot 0 is the floating base, slot i+1 is chain link i.
+fn body_inertia(slot: u32) -> SM {
+  let o = IBASE + slot*13u;
+  let mass = INERTIA[o];
+  let c = vec3<f32>(INERTIA[o+1u], INERTIA[o+2u], INERTIA[o+3u]);
+  let b = o + 4u;
   let I = mat3x3<f32>(vec3<f32>(INERTIA[b],INERTIA[b+1u],INERTIA[b+2u]), vec3<f32>(INERTIA[b+3u],INERTIA[b+4u],INERTIA[b+5u]), vec3<f32>(INERTIA[b+6u],INERTIA[b+7u],INERTIA[b+8u]));
   return spatial_inertia(mass, c, I);
 }
+fn linertia(i: u32) -> SM { return body_inertia(i + 1u); }
+fn base_inertia() -> SM { return body_inertia(0u); }
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) g: vec3<u32>) {
   let e = g.x; let n_envs = u32(PRM[1]);
   if (e >= n_envs) { return; }
+  IBASE = e * (N + 1u) * 13u;
   let grav = vec3<f32>(PRM[2], PRM[3], PRM[4]);
-  let bmass = PRM[5];
-  let bcom = vec3<f32>(PRM[6], PRM[7], PRM[8]);
-  let bI = mat3x3<f32>(vec3<f32>(PRM[9],PRM[10],PRM[11]), vec3<f32>(PRM[12],PRM[13],PRM[14]), vec3<f32>(PRM[15],PRM[16],PRM[17]));
   let v0 = SV(vec3<f32>(V0[e*6u], V0[e*6u+1u], V0[e*6u+2u]), vec3<f32>(V0[e*6u+3u], V0[e*6u+4u], V0[e*6u+5u]));
   let sb = e*3u*N;
   var q: array<f32,N>; var qd: array<f32,N>; var tau: array<f32,N>;
@@ -1425,7 +1438,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
 
   var xm: array<SM,N>; var s: array<SV,N>; var v: array<SV,N>; var c: array<SV,N>;
   var ia: array<SM,N>; var pa: array<SV,N>;
-  let ib = spatial_inertia(bmass, bcom, bI);
+  let ib = base_inertia();
   var ia_base = ib;
   let feb = e*6u*(N+1u);
   var pa_base = svsub(svsub(smv(crf(v0), smv(ib, v0)), grav_wrench(ib, grav, i3())), fext_sv(feb));
@@ -1517,6 +1530,7 @@ pub struct FloatingBaseGpu {
     out_buf: wgpu::Buffer,
     out_stage: wgpu::Buffer,
     fext_buf: wgpu::Buffer,
+    inertia_buf: wgpu::Buffer,
 }
 
 impl FloatingBaseGpu {
@@ -1536,14 +1550,12 @@ impl FloatingBaseGpu {
             joints.extend_from_slice(&[a.x as f32, a.y as f32, a.z as f32]);
             joints.push(match j.kind { crate::JointKind::Revolute => 0.0, crate::JointKind::Prismatic => 1.0 });
         }
-        let mut inert = Vec::with_capacity(n * 13);
-        for li in inertia {
-            inert.push(li.mass as f32);
-            inert.extend_from_slice(&[li.com.x as f32, li.com.y as f32, li.com.z as f32]);
-            inert.extend(li.inertia.as_slice().iter().map(|&v| v as f32));
-        }
-        let mut prm = vec![n as f32, n_envs as f32, gravity.x as f32, gravity.y as f32, gravity.z as f32, base.mass as f32, base.com.x as f32, base.com.y as f32, base.com.z as f32];
-        prm.extend(base.inertia.as_slice().iter().map(|&v| v as f32));
+        // (N+1) bodies per environment, the floating base at slot 0, replicated across the batch.
+        // `set_env_inertia` and `set_all_inertia` then overwrite whichever environments the caller
+        // randomises, and the base is randomisable along with everything else.
+        let one_env: Vec<f32> = pack_inertia(core::slice::from_ref(base)).into_iter().chain(pack_inertia(inertia)).collect();
+        let inert: Vec<f32> = (0..n_envs.max(1)).flat_map(|_| one_env.clone()).collect();
+        let prm = vec![n as f32, n_envs as f32, gravity.x as f32, gravity.y as f32, gravity.z as f32];
 
         let instance = wgpu::Instance::default();
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
@@ -1551,7 +1563,13 @@ impl FloatingBaseGpu {
 
         let init = |label, data: &[u8]| device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: data, usage: wgpu::BufferUsages::STORAGE });
         let joints_buf = init("fb-joints", bytemuck::cast_slice(&joints));
-        let inertia_buf = init("fb-inertia", bytemuck::cast_slice(&inert));
+        // COPY_DST so one environment's bodies can be overwritten, COPY_SRC so the upload can be read
+        // back rather than trusted — this workspace has been bitten by a silently dropped buffer.
+        let inertia_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("fb-inertia"),
+            contents: bytemuck::cast_slice(&inert),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+        });
         let prm_buf = init("fb-prm", bytemuck::cast_slice(&prm));
         let v0_buf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("fb-v0"), size: (n_envs * 6 * 4).max(4) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let state_buf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("fb-state"), size: (n_envs * 3 * n * 4).max(4) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
@@ -1579,7 +1597,82 @@ impl FloatingBaseGpu {
             ],
         });
 
-        Some(Self { n, n_envs, device, queue, pso, bind, v0_buf, state_buf, out_buf, out_stage, fext_buf })
+        Some(Self { n, n_envs, device, queue, pso, bind, v0_buf, state_buf, out_buf, out_stage, fext_buf, inertia_buf })
+    }
+
+    /// **Give one environment its own mass properties**, base included, for domain randomisation
+    /// across the batch. Every other environment is untouched.
+    ///
+    /// `base` is the floating root's inertia and `links` one entry per joint. ⛔ Both are taken
+    /// together on purpose: the trunk is the largest single mass in a legged model and the one a
+    /// transfer study perturbs first, and it was the one body the batch could not vary — it lived in
+    /// `PRM` as thirteen scalars shared by every environment. An API that let a caller randomise the
+    /// limbs and silently keep one trunk would be the same trap in a new place.
+    ///
+    /// `false`, and nothing uploaded, if `env` is out of range, if `links` is not one per joint, or if
+    /// any value is non-finite. A randomisation that was quietly dropped shows up only as a policy
+    /// that transfers worse for no visible reason, so the refusal is a return value.
+    ///
+    /// Masses are not otherwise validated: a zero or negative mass is a caller's choice, and the
+    /// shader's Cholesky floors its pivots at `1e-12` so it yields a number rather than a NaN.
+    pub fn set_env_inertia(&mut self, env: usize, base: &crate::LinkInertia, links: &[crate::LinkInertia]) -> bool {
+        if env >= self.n_envs || links.len() != self.n {
+            return false;
+        }
+        let packed: Vec<f32> = pack_inertia(core::slice::from_ref(base)).into_iter().chain(pack_inertia(links)).collect();
+        if !packed.iter().all(|v| v.is_finite()) {
+            return false;
+        }
+        let stride = (self.n + 1) * 13;
+        self.queue.write_buffer(&self.inertia_buf, (env * stride * 4) as u64, bytemuck::cast_slice(&packed));
+        true
+    }
+
+    /// Give **every** environment its own mass properties in one upload, in environment order.
+    ///
+    /// `false` if the outer length is not `n_envs`, if any inner `links` length is not one per joint,
+    /// or if any value is non-finite. Validated in full BEFORE anything is written, so a rejected call
+    /// leaves the batch exactly as it was rather than half-randomised.
+    pub fn set_all_inertia(&mut self, per_env: &[(crate::LinkInertia, Vec<crate::LinkInertia>)]) -> bool {
+        if per_env.len() != self.n_envs || per_env.iter().any(|(_, l)| l.len() != self.n) {
+            return false;
+        }
+        let flat: Vec<f32> = per_env
+            .iter()
+            .flat_map(|(b, l)| pack_inertia(core::slice::from_ref(b)).into_iter().chain(pack_inertia(l)))
+            .collect();
+        if !flat.iter().all(|v| v.is_finite()) {
+            return false;
+        }
+        self.queue.write_buffer(&self.inertia_buf, 0, bytemuck::cast_slice(&flat));
+        true
+    }
+
+    /// Read back one environment's mass properties as the shader sees them — `f32`, because that is
+    /// what the buffer holds, and `(n+1)·13` long with the base first. `None` if `env` is out of range.
+    ///
+    /// Exposed because the alternative is trusting that an upload landed.
+    pub fn env_inertia_raw(&self, env: usize) -> Option<Vec<f32>> {
+        if env >= self.n_envs {
+            return None;
+        }
+        let len = (self.n + 1) * 13;
+        let bytes = (len * 4) as u64;
+        let stage = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fb-inertia-stage"),
+            size: bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        enc.copy_buffer_to_buffer(&self.inertia_buf, (env * len * 4) as u64, &stage, 0, bytes);
+        self.queue.submit(Some(enc.finish()));
+        let slice = stage.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        let out = bytemuck::cast_slice::<u8, f32>(&slice.get_mapped_range().expect("mapped range")).to_vec();
+        stage.unmap();
+        Some(out)
     }
 
     /// Batched floating-base forward dynamics: per env, base spatial acceleration `a0` (6) and joint
@@ -3775,6 +3868,119 @@ mod verification {
         eprintln!("GPU vs CPU floating-base ABA ({n_envs} envs × free-base + {n} DOF): worst a0 {worst_a0:.3e}, worst qdd {worst_qdd:.3e}");
         assert!(worst_a0 < 1e-2, "GPU base acceleration diverged: {worst_a0}");
         assert!(worst_qdd < 1e-2, "GPU joint accelerations diverged: {worst_qdd}");
+    }
+
+    /// **Every environment carries its own body, TRUNK INCLUDED.** The floating-base kernel took one
+    /// inertia set for the whole batch and kept the base's thirteen numbers in `PRM`, so the largest
+    /// single mass in a legged model — the one a transfer study perturbs first — was the one body that
+    /// could not vary across environments.
+    ///
+    /// ⛔ The control is the whole test. Comparing the GPU output against each environment's OWN body
+    /// is only half of it; the same output is also compared against the SHARED body the kernel used to
+    /// assume, and that difference must be large. Without it a kernel that ignored the upload entirely
+    /// would still pass, because the per-env reference and the shared reference would agree wherever
+    /// the randomisation happened to be mild.
+    ///
+    /// The base and the links are randomised by DIFFERENT factors, so an implementation that read the
+    /// base from the right environment but the links from environment 0 — or the reverse — is visible
+    /// too.
+    #[test]
+    fn gpu_floating_base_per_env_inertia_matches_the_cpu_for_each_envs_own_body() {
+        let (robot, inertia) = from_urdf_full(ARM3, "base", "tool").unwrap();
+        let n = robot.dof();
+        let nominal_base = LinkInertia { mass: 5.0, com: Vector3::new(0.0, 0.0, 0.05), inertia: Matrix3::from_diagonal(&Vector3::new(0.08, 0.08, 0.05)) };
+        let g = Vector3::new(0.0, 0.0, -9.81);
+        let n_envs = 256usize;
+
+        let mut s = 0x51D3u64;
+        let mut rng = || {
+            s = s.wrapping_add(0x9E3779B97F4A7C15);
+            let mut z = s;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+            (((z ^ (z >> 31)) as f64) / (u64::MAX as f64)) * 2.0 - 1.0
+        };
+        let v0: Vec<f64> = (0..n_envs * 6).map(|_| rng() * 0.6).collect();
+        let q: Vec<f64> = (0..n_envs * n).map(|_| rng() * 1.3).collect();
+        let qd: Vec<f64> = (0..n_envs * n).map(|_| rng() * 0.8).collect();
+        let tau: Vec<f64> = (0..n_envs * n).map(|_| rng() * 1.5).collect();
+
+        // base scaled one way, links the other, both deterministic in the env index
+        let per_env: Vec<(LinkInertia, Vec<LinkInertia>)> = (0..n_envs)
+            .map(|e| {
+                let t = (e as f64) / (n_envs as f64);
+                let (fb, fl) = (0.5 + 1.0 * t, 1.4 - 0.8 * t);
+                let b = LinkInertia { mass: nominal_base.mass * fb, com: nominal_base.com * (0.7 + 0.6 * fb), inertia: nominal_base.inertia * fb };
+                let l = inertia.iter().map(|li| LinkInertia { mass: li.mass * fl, com: li.com * (0.9 + 0.2 * fl), inertia: li.inertia * fl }).collect();
+                (b, l)
+            })
+            .collect();
+
+        let Some(mut gp) = FloatingBaseGpu::new(&robot, &inertia, &nominal_base, g, n_envs) else {
+            eprintln!("no GPU — skipping");
+            return;
+        };
+        assert!(gp.set_all_inertia(&per_env), "the batch upload must be accepted");
+
+        // read back rather than trust: the two ends of the batch must hold different bodies, and the
+        // base slot must differ from the first link's slot
+        let raw0 = gp.env_inertia_raw(0).expect("env 0 readable");
+        let rawl = gp.env_inertia_raw(n_envs - 1).expect("last env readable");
+        assert_eq!(raw0.len(), (n + 1) * 13, "13 floats per body, base included");
+        assert!((raw0[0] as f64 - per_env[0].0.mass).abs() < 1e-4, "env 0 base mass {} vs {}", raw0[0], per_env[0].0.mass);
+        assert!((raw0[13] as f64 - per_env[0].1[0].mass).abs() < 1e-4, "env 0 link 0 mass {} vs {}", raw0[13], per_env[0].1[0].mass);
+        assert!((rawl[0] - raw0[0]).abs() > 0.3 * raw0[0], "the batch ends must carry different trunks, {} vs {}", raw0[0], rawl[0]);
+        assert!((rawl[13] - raw0[13]).abs() > 0.1 * raw0[13], "and different limbs, {} vs {}", raw0[13], rawl[13]);
+
+        let (a0, qdd) = gp.accelerations(&v0, &q, &qd, &tau);
+
+        let mut worst = 0.0f64;
+        let mut worst_env = 0usize;
+        let mut worst_shared = 0.0f64;
+        for e in 0..n_envs {
+            let v0e = Vector6::from_row_slice(&v0[e * 6..e * 6 + 6]);
+            let (qe, qde, taue) = (&q[e * n..(e + 1) * n], &qd[e * n..(e + 1) * n], &tau[e * n..(e + 1) * n]);
+            let (b, l) = &per_env[e];
+            let (a0c, qddc) = floating_base_forward_dynamics(&robot, l, b, v0e, qe, qde, taue, g);
+            // THE CONTROL: the same GPU output against the body the kernel used to assume
+            let (a0s, qdds) = floating_base_forward_dynamics(&robot, &inertia, &nominal_base, v0e, qe, qde, taue, g);
+            let mut here = 0.0f64;
+            for k in 0..6 {
+                here = here.max((a0[e * 6 + k] - a0c[k]).abs());
+                worst_shared = worst_shared.max((a0[e * 6 + k] - a0s[k]).abs());
+            }
+            for i in 0..n {
+                here = here.max((qdd[e * n + i] - qddc[i]).abs());
+                worst_shared = worst_shared.max((qdd[e * n + i] - qdds[i]).abs());
+            }
+            if here > worst {
+                worst = here;
+                worst_env = e;
+            }
+        }
+        eprintln!("  per-env body (base AND links), {n_envs} envs × free-base + {n} DOF: worst |Δ| {worst:.3e} (env {worst_env})");
+        eprintln!("  the same GPU output against the SHARED body: worst |Δ| {worst_shared:.3e} — must be large");
+        assert!(worst < 1e-2, "each env must match its own body: {worst:.3e}");
+        assert!(worst_shared > 1.0, "the control must separate: if this is small the randomisation did nothing, got {worst_shared:.3e}");
+
+        // one env at a time, leaving its neighbours alone
+        let solo = (nominal_base.clone(), inertia.clone());
+        assert!(gp.set_env_inertia(7, &solo.0, &solo.1), "a single-env upload must be accepted");
+        let a7 = gp.env_inertia_raw(7).expect("readable");
+        let a8 = gp.env_inertia_raw(8).expect("readable");
+        assert!((a7[0] as f64 - nominal_base.mass).abs() < 1e-4, "env 7 took the nominal trunk, got {}", a7[0]);
+        assert!((a8[0] as f64 - per_env[8].0.mass).abs() < 1e-4, "env 8 must be untouched, got {} vs {}", a8[0], per_env[8].0.mass);
+
+        // and the refusals, each of which would otherwise be a silently ignored randomisation
+        let before = gp.env_inertia_raw(9).expect("readable");
+        let mut bad_base = nominal_base.clone();
+        bad_base.mass = f64::NAN;
+        assert!(!gp.set_env_inertia(n_envs, &solo.0, &solo.1), "an out-of-range env");
+        assert!(!gp.set_env_inertia(9, &solo.0, &solo.1[..n - 1]), "a short link slice");
+        assert!(!gp.set_env_inertia(9, &bad_base, &solo.1), "a non-finite BASE mass, which is the new slot");
+        assert!(!gp.set_all_inertia(&per_env[..n_envs - 1]), "a short outer length");
+        assert_eq!(gp.env_inertia_raw(9).expect("readable"), before, "a refused upload must leave the env exactly as it was");
+        assert!(gp.env_inertia_raw(n_envs).is_none(), "an out-of-range read");
     }
 
     /// The batched BRANCHED-tree floating-base ABA reproduces the CPU `tree_floating_forward_dynamics`
