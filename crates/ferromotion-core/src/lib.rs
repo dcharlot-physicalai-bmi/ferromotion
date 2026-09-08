@@ -97,7 +97,10 @@
 //! so [`CompoundHull`] carries it as a SET of convex parts: [`compound_distance`] gives the closest
 //! pair a planner wants and [`compound_contacts`] gives **every** pair within a margin, which is the
 //! constraint set a solver needs — one closest pair loses a simultaneous contact and the body sinks
-//! through the other. [`try_convex_hull_3d`] hulls a loaded mesh into a part, refusing a degenerate
+//! through the other. [`compound_pgs_contacts`] carries that set the rest of the way to
+//! [`solve_contacts_pgs`], building the contact frame and differencing the two bodies' Jacobians
+//! through the [`ContactJacobian`] trait ([`StaticBody`] for a fixed world, [`SerialLinkParts`] for a
+//! chain). [`try_convex_hull_3d`] hulls a loaded mesh into a part, refusing a degenerate
 //! one rather than panicking. Also [`Bvh`] (AABB broadphase), [`SdfScene`] and [`Esdf`] and [`CspaceField`] (signed-distance
 //! representations, including a composite configuration-space field), [`FociPlan`] (field-overlap
 //! collision integral), `dcol` (differentiable collision between convex primitives), [`OccupancyGrid`]
@@ -265,6 +268,7 @@ mod marginalize;
 mod mestimator;
 mod mesh3;
 mod compound;
+mod compound_pgs;
 mod link_geometry;
 mod mesh_io;
 mod modal;
@@ -352,6 +356,7 @@ pub use mesh3::{convex_hull_3d, try_convex_hull_3d, TriMesh3};
 pub use mesh_io::{from_obj, from_stl, from_stl_ascii, from_stl_binary, scale_mesh, second_moment, solid_inertia};
 pub use link_geometry::{geometry_from_urdf, inertia_of_parts, primitive_link_inertia, primitive_mesh, resolve_uri, transform_mesh, GeomRole, GeometryRef, LinkGeometry};
 pub use compound::{compound_contacts, compound_distance, CompoundContact, CompoundHull};
+pub use compound_pgs::{compound_pgs_contacts, CompoundPgs, ContactJacobian, SerialLinkParts, StaticBody};
 pub use bspline::BSpline;
 pub use bundle::{BundleAdjustment, Camera, Observation};
 pub use camera::{calibrate, PinholeCamera};
