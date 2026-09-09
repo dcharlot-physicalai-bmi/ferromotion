@@ -324,11 +324,43 @@ mod tests {
         }
     }
 
+    /// **The strong claim**: the learned `M(q)` matches ferromotion's own recursive-Newton-Euler mass
+    /// matrix. Fully deterministic — `gen_data` seeds 987, `Delan::new` seeds 5 — and measured
+    /// bit-identical across repeat runs.
+    ///
+    /// ⛔ **This test ran nowhere until 2026-09-09.** It is `#[ignore]`d, so `cargo test --workspace`
+    /// skips it, and CI's three `--release -- --ignored` lanes covered `-fluid`, `-fem` and `-tactile`
+    /// but not this crate. Its own reason string said "run explicitly" and nothing did. There is now a
+    /// CI lane for `ferromotion-learn`; see `.github/workflows/ci.yml`.
+    ///
+    /// # The bound, and why it is 0.10 rather than the 0.05 the reason string used to imply
+    ///
+    /// At the fixed operating point (8000 steps) the measured errors are M00 **0.025926**, M01
+    /// 0.006056, M11 0.013127 — bit-identical across repeat runs. The old reason string claimed "~0.05"
+    /// while the assertions allowed `0.15`, so the sentence a reader believes and the number the code
+    /// enforced disagreed by 3x. That much was a real documentation defect.
+    ///
+    /// ⛔ **But tightening to 0.05 would have been wrong, and the sweep is why.** The error is NOT
+    /// monotone in training steps:
+    ///
+    /// | steps | 400 | 1000 | 2000 | 3000 | 5000 | 8000 |
+    /// |---|---|---|---|---|---|---|
+    /// | worst \|ΔM\| | 0.567 | 0.252 | 0.040 | **0.049** | 0.016 | 0.026 |
+    ///
+    /// The descent oscillates through a 0.01–0.05 band on its way down, and at 3000 steps the worst
+    /// term is **0.049213** — 98% of a 0.05 bound. A bound there would sit inside the method's own
+    /// variation, and the first floating-point difference from another architecture would break CI for
+    /// no engineering reason. 0.10 clears the observed band by 2x and the operating point by 3.8x.
+    ///
+    /// ⚠ **And the tightening buys no detection that 0.15 did not already have.** Both bounds catch the
+    /// 400-step (0.567) and 1000-step (0.252) undertrains, and neither is challenged anywhere in
+    /// 2000–8000. Recorded plainly because the honest reason for 0.10 is that it states the measured
+    /// scale of the answer, not that it caught something — and the next person to look at this should
+    /// not tighten it toward 0.05 on the strength of the 8000-step figure alone, which is the trap this
+    /// table exists to close.
     #[test]
-    #[ignore = "slow (~30s): recovers M(q) to within ~0.05 of ferromotion's true mass matrix; run explicitly"]
+    #[ignore = "slow (~40s in release): recovers M(q) to a worst term of 0.026 at 8000 steps, bounded at 0.10 for the oscillation band; release --ignored lane"]
     fn delan_recovers_the_true_mass_matrix() {
-        // The strong claim, verified with enough data + training: the learned M(q) matches ferromotion's own
-        // recursive-Newton–Euler mass matrix.
         let (robot, inertia) = from_urdf_full(URDF, "base", "tool").unwrap();
         let (q, qd, qdd, tau) = gen_data(&robot, &inertia, 200);
         let mut delan = Delan::new(24, 5);
@@ -336,8 +368,16 @@ mod tests {
         let qc = [0.3, 0.7];
         let m_true = mass_matrix(&robot, &inertia, &qc);
         let m_hat = delan.mass(&qc);
-        assert!((m_hat[0] - m_true[(0, 0)]).abs() < 0.15, "M00: {} vs {}", m_hat[0], m_true[(0, 0)]);
-        assert!((m_hat[1] - m_true[(0, 1)]).abs() < 0.15, "M01: {} vs {}", m_hat[1], m_true[(0, 1)]);
-        assert!((m_hat[2] - m_true[(1, 1)]).abs() < 0.15, "M11: {} vs {}", m_hat[2], m_true[(1, 1)]);
+        let (d00, d01, d11) = (
+            (m_hat[0] - m_true[(0, 0)]).abs(),
+            (m_hat[1] - m_true[(0, 1)]).abs(),
+            (m_hat[2] - m_true[(1, 1)]).abs(),
+        );
+        // Printed so the CI lane reports the numbers rather than only that it passed — the whole reason
+        // this test was worth finding is that nobody had ever seen its output.
+        eprintln!("  DeLaN vs true M(q) at q = {qc:?}: |ΔM00| {d00:.6}  |ΔM01| {d01:.6}  |ΔM11| {d11:.6}  (bound 0.10, operating point 0.026)");
+        assert!(d00 < 0.10, "M00: {} vs {} (Δ {d00:.6})", m_hat[0], m_true[(0, 0)]);
+        assert!(d01 < 0.10, "M01: {} vs {} (Δ {d01:.6})", m_hat[1], m_true[(0, 1)]);
+        assert!(d11 < 0.10, "M11: {} vs {} (Δ {d11:.6})", m_hat[2], m_true[(1, 1)]);
     }
 }

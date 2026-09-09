@@ -49,6 +49,15 @@ jobs:
       # against it. Two FEM relaxations, so release only.
       - name: Elastic tactile gel vs a 3D solve (release)
         run: cargo test -p ferromotion-tactile --release -- --ignored
+      # ⛔ ADDED 2026-09-09, and until then `delan_recovers_the_true_mass_matrix` RAN NOWHERE. There are
+      # four #[ignore] tests in the workspace and this lane covered three crates; the fourth is in
+      # ferromotion-learn, its reason string said "run explicitly", and nothing did. `cargo test
+      # --workspace` skips it by definition, so the strongest claim that crate makes — that a learned
+      # Lagrangian recovers the true mass matrix — had no gate at all. It passes at a worst term of
+      # 0.026; its reason string and its assertion had disagreed by 3x, and delan.rs now carries the
+      # training-step sweep that says why the bound is 0.10 and not the 0.05 the string implied.
+      - name: DeLaN recovers the true mass matrix (release)
+        run: cargo test -p ferromotion-learn --release -- --ignored
       # An EXCLUSION, not an enumeration. The enumerated list had silently omitted seven crates that do
       # build for wasm32 — including ferromotion-learn and ferromotion-fem, whose own READMEs advertise
       # "native + wasm32". A list of what to include drifts as crates are added; a list of what to skip
