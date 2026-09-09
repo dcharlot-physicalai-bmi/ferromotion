@@ -330,6 +330,19 @@ impl LbmGpu {
     }
 }
 
+/// Turns a missing adapter into a failure when `FERROMOTION_REQUIRE_GPU=1` is set, so a skipped GPU
+/// test cannot be mistaken for a run. See `ferromotion-core`'s `gpu::skip_without_gpu` for why 28 of
+/// these across four crates were indistinguishable from a real run.
+#[cfg(test)]
+fn skip_without_gpu() {
+    assert!(
+        std::env::var_os("FERROMOTION_REQUIRE_GPU").is_none(),
+        "FERROMOTION_REQUIRE_GPU is set but no GPU adapter was available: this run proved nothing \
+         about the GPU path"
+    );
+    eprintln!("no GPU — skipping");
+}
+
 #[cfg(test)]
 mod verification {
     use super::*;
@@ -340,7 +353,7 @@ mod verification {
     #[test]
     fn gpu_matches_analytic_and_cpu_reference() {
         let Some(g) = LbmGpu::new(32, 32, 0.8, LbmBc::Periodic) else {
-            eprintln!("no GPU — skipping");
+            skip_without_gpu();
             return;
         };
         let n = 32usize;
@@ -395,7 +408,7 @@ mod verification {
         let lid = 0.1;
         let tau = 3.0 * (lid * n as f64 / 100.0) + 0.5;
         let Some(g) = LbmGpu::new(n, n, tau, LbmBc::Cavity { lid_u: lid }) else {
-            eprintln!("no GPU — skipping");
+            skip_without_gpu();
             return;
         };
         g.run((40.0 * n as f64 / lid) as usize);

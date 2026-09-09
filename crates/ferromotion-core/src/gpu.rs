@@ -3536,6 +3536,29 @@ impl FrictionalContactGpu {
     }
 }
 
+/// **A GPU test that skips is a GPU test that PASSED WITHOUT RUNNING.**
+///
+/// ⛔ Twenty-eight tests across four crates guarded themselves with
+/// `let Some(g) = X::new(..) else { eprintln!("no GPU — skipping"); return; }`. Every one of them
+/// PASSES when there is no adapter, so "22 passed" could not be told apart from "22 skipped" — and on
+/// a machine without a GPU that is exactly what it means. CI runs `cargo test --workspace` with no
+/// features, so these never even compile there; every GPU number in this workspace has been produced
+/// by hand on one developer's machine, and nothing recorded whether the hardware was actually reached.
+///
+/// Setting `FERROMOTION_REQUIRE_GPU=1` turns the skip into a failure. A machine that HAS an adapter can
+/// then assert the suite really exercised it, a future self-hosted GPU runner can gate on it, and a
+/// runner without one still passes by default — the skip is correct behaviour, it just must not be
+/// indistinguishable from a run.
+#[cfg(test)]
+fn skip_without_gpu() {
+    assert!(
+        std::env::var_os("FERROMOTION_REQUIRE_GPU").is_none(),
+        "FERROMOTION_REQUIRE_GPU is set but no GPU adapter was available: this run proved nothing \
+         about the GPU path"
+    );
+    eprintln!("no GPU — skipping");
+}
+
 #[cfg(test)]
 mod verification {
     use super::*;
@@ -3580,7 +3603,7 @@ mod verification {
         }
 
         let Some(g) = ClearanceGpu::new(&robot, &scene, link_r, per_link, n) else {
-            eprintln!("no GPU — skipping");
+            skip_without_gpu();
             return;
         };
         let gpu = g.clearances(&cfg);
@@ -3614,7 +3637,7 @@ mod verification {
         let cam = DepthCamera { pose: Isometry3::identity(), fx: 96.0, fy: 96.0, cx: 79.5, cy: 59.5, width: 160, height: 120, far: 8.0 };
 
         let Some(g) = SensorGpu::new(&cam, &scene) else {
-            eprintln!("no GPU — skipping");
+            skip_without_gpu();
             return;
         };
         let (range, seg) = g.render();
@@ -3662,7 +3685,7 @@ mod verification {
         };
 
         let Some(g) = LidarGpu::new(&lidar, &scene) else {
-            eprintln!("no GPU — skipping");
+            skip_without_gpu();
             return;
         };
         let (range, _seg, pts) = g.dense();
@@ -3764,7 +3787,7 @@ mod verification {
             .collect();
 
         let Some(mut g) = ArticulatedGpu::new(&robot, &base_inertia, grav, 1e-3, n_envs, &[], 0.0, 0.0, 0.0) else {
-            eprintln!("no GPU — skipping");
+            skip_without_gpu();
             return;
         };
         assert!(g.set_all_inertia(&per_env), "the batch upload must be accepted");
@@ -3849,7 +3872,7 @@ mod verification {
         let tau: Vec<f64> = (0..n_envs * n).map(|_| rng() * 2.0).collect();
 
         let Some(g) = ArticulatedGpu::new(&robot, &inertia, grav, 1e-3, n_envs, &[], 0.0, 0.0, 0.0) else {
-            eprintln!("no GPU — skipping");
+            skip_without_gpu();
             return;
         };
         let gpu = g.accelerations(&q, &qd, &tau);
@@ -3970,7 +3993,7 @@ mod verification {
             .collect();
 
         let Some(mut gp) = ArticulatedGpu::new(&robot, &inertia, g, dt, n_envs, &contacts, floor_z, kn, kd) else {
-            eprintln!("no GPU — skipping");
+            skip_without_gpu();
             return;
         };
         // before any upload, the tail must already hold the constructor's values — that is what makes
@@ -4079,7 +4102,7 @@ mod verification {
         let tau: Vec<f64> = (0..n_envs * n).map(|_| rng() * 1.0).collect();
 
         let Some(gp) = ArticulatedGpu::new(&robot, &inertia, g, dt, n_envs, &contacts, floor_z, kn, kd) else {
-            eprintln!("no GPU — skipping");
+            skip_without_gpu();
             return;
         };
         // one contact step, GPU vs CPU
@@ -4176,7 +4199,7 @@ mod verification {
         let pop = 256usize;
 
         let Some(gp) = ArticulatedGpu::new(&robot, &inertia, g, dt, pop, &[], 0.0, 0.0, 0.0) else {
-            eprintln!("no GPU — skipping");
+            skip_without_gpu();
             return;
         };
         let dim = gp.policy_dim();
@@ -4269,7 +4292,7 @@ mod verification {
         let tau: Vec<f64> = (0..n_envs * n).map(|_| rng() * 1.5).collect();
 
         let Some(gp) = FloatingBaseGpu::new(&robot, &inertia, &base, g, n_envs) else {
-            eprintln!("no GPU — skipping");
+            skip_without_gpu();
             return;
         };
         let (a0, qdd) = gp.accelerations(&v0, &q, &qd, &tau);
@@ -4338,7 +4361,7 @@ mod verification {
             .collect();
 
         let Some(mut gp) = FloatingBaseGpu::new(&robot, &inertia, &nominal_base, g, n_envs) else {
-            eprintln!("no GPU — skipping");
+            skip_without_gpu();
             return;
         };
         assert!(gp.set_all_inertia(&per_env), "the batch upload must be accepted");
@@ -4432,7 +4455,7 @@ mod verification {
         let fext = vec![0.0f64; n_envs * (n + 1) * 6];
 
         let Some(gp) = TreeFloatingGpu::new(&joints, &inertia, &parent, &base, g, n_envs) else {
-            eprintln!("no GPU — skipping");
+            skip_without_gpu();
             return;
         };
         let (a0, qdd) = gp.accelerations_ext(&v0, &q, &qd, &tau, &fext);
@@ -4501,7 +4524,7 @@ mod verification {
             .collect();
 
         let Some(mut gp) = TreeFloatingGpu::new(&joints, &inertia, &parent, &nominal_base, g, n_envs) else {
-            eprintln!("no GPU — skipping");
+            skip_without_gpu();
             return;
         };
         assert!(gp.set_all_inertia(&per_env), "the batch upload must be accepted");
@@ -4629,7 +4652,7 @@ mod verification {
             .collect();
 
         let Some(mut gp) = TreeGaitGpu::new(&joints, &inertia, &parent, &nominal_base, &contacts, floor, kn, kd, g, dt, n_envs) else {
-            eprintln!("no GPU — skipping");
+            skip_without_gpu();
             return;
         };
         let (f0, k0, d0, m0) = gp.env_contact(0).expect("readable");
@@ -4785,7 +4808,7 @@ mod verification {
         }
 
         let Some(gp) = TreeGaitGpu::new(&joints, &inertia, &parent, &base_inertia, &contacts, floor, kn, kd, g, dt, n_envs) else {
-            eprintln!("no GPU — skipping");
+            skip_without_gpu();
             return;
         };
         let (gbp, gv0, gq, gqd) = gp.run(&base_pose, &v0, &q, &qd, &tau, steps);
@@ -4887,7 +4910,7 @@ mod verification {
         let pop = 512usize;
         let gens = 60usize;
         let Some(gp) = TreeGaitGpu::new(&joints, &inertia, &parent, &base_inertia, &contacts, floor, kn, kd, g, dt, pop) else {
-            eprintln!("no GPU — skipping");
+            skip_without_gpu();
             return;
         };
         let dim = gp.policy_dim();
@@ -4962,7 +4985,7 @@ mod verification {
         let fext: Vec<f64> = (0..n_envs * (n + 1) * 6).map(|_| rng() * 3.0).collect(); // per env: base(6) + links
 
         let Some(gp) = FloatingBaseGpu::new(&robot, &inertia, &base, g, n_envs) else {
-            eprintln!("no GPU — skipping");
+            skip_without_gpu();
             return;
         };
         let (a0, qdd) = gp.accelerations_ext(&v0, &q, &qd, &tau, &fext);
@@ -5057,7 +5080,7 @@ mod verification {
             .collect();
 
         let Some(mut gp) = FloatingGaitGpu::new(&robot, &inertia, &nominal_base, &contacts, floor_z, kn, kd, g, dt, n_envs) else {
-            eprintln!("no GPU — skipping");
+            skip_without_gpu();
             return;
         };
         // the shipped defaults must be what the tail already holds, or `new` and the shader disagree
@@ -5161,7 +5184,7 @@ mod verification {
         ];
         let n_envs = 64usize;
         let Some(mut gp) = FloatingGaitGpu::new(&robot, &inertia, &base_inertia, &contacts, floor_z, kn, kd, g, dt, n_envs) else {
-            eprintln!("no GPU — skipping");
+            skip_without_gpu();
             return;
         };
 
@@ -5240,7 +5263,7 @@ mod verification {
         }
 
         let Some(gp) = FloatingGaitGpu::new(&robot, &inertia, &base_inertia, &contacts, floor_z, kn, kd, g, dt, n_envs) else {
-            eprintln!("no GPU — skipping");
+            skip_without_gpu();
             return;
         };
         let (gbp, gv0, gq, gqd) = gp.run(&base_pose, &v0, &q, &qd, &tau, steps);
@@ -5335,7 +5358,7 @@ mod verification {
         let pop = 256usize;
         let gens = 60usize;
         let Some(gp) = FloatingGaitGpu::new(&robot, &inertia, &base_inertia, &contacts, floor, kn, kd, g, dt, pop) else {
-            eprintln!("no GPU — skipping");
+            skip_without_gpu();
             return;
         };
         let dim = gp.policy_dim();
@@ -5417,7 +5440,7 @@ mod verification {
         let nc = structure.len();
         let (dt, kappa, n_envs) = (0.01, 1e-3, 128usize);
         let Some(mut gpu) = FrictionalContactGpu::new(&structure, dt, kappa, n_envs) else {
-            eprintln!("no GPU adapter; skipping");
+            skip_without_gpu();
             return;
         };
 
@@ -5532,7 +5555,7 @@ mod verification {
         };
         let (dt, kappa, n_envs) = (0.01, 1e-3, 256usize);
         let Some(gpu) = FrictionalContactGpu::new(std::slice::from_ref(&structure), dt, kappa, n_envs) else {
-            eprintln!("no GPU adapter; skipping gpu_frictional_contact_matches_cpu_ipm");
+            skip_without_gpu();
             return;
         };
 
