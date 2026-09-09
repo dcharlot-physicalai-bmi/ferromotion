@@ -1711,10 +1711,26 @@ impl FloatingBaseGpu {
     /// **Give one environment its own mass properties**, base included, for domain randomisation
     /// across the batch. Every other environment is untouched.
     ///
-    /// `false`, and nothing uploaded, if `env` is out of range or [`pack_floating_bodies`] refuses the
-    /// bodies — read that for what is checked and why the base is not optional. A randomisation that
-    /// was quietly dropped shows up only as a policy that transfers worse for no visible reason, so
-    /// the refusal is a return value rather than a clamp.
+    /// `base` is the free root's inertia and `links` one entry per joint.
+    ///
+    /// ⛔ **The base and the links are taken TOGETHER on purpose**, here and on the three other
+    /// floating-base kernels. The root's inertia used to live in `PRM` as thirteen scalars shared by
+    /// the whole batch, which made the trunk — the largest single mass in a legged model, and the one
+    /// a transfer study perturbs first — the one body that could not be randomised across
+    /// environments. An API that let a caller randomise the limbs and silently keep one shared trunk
+    /// would be the same trap moved somewhere new.
+    ///
+    /// `false`, and nothing uploaded, if `env` is out of range, if `links` is not one entry per joint,
+    /// or if any value is non-finite. A randomisation that was quietly dropped shows up only as a
+    /// policy that transfers worse for no visible reason, so the refusal is a return value rather than
+    /// a clamp.
+    ///
+    /// Masses are not otherwise validated: a zero or negative mass is a caller's choice, and the
+    /// shaders' Cholesky floors its pivots at `1e-12` so it yields a number rather than a NaN. Refuse
+    /// it before calling if you want it refused.
+    ///
+    /// The packing and validation are shared with the other kernels through the private
+    /// `pack_floating_bodies`.
     pub fn set_env_inertia(&mut self, env: usize, base: &crate::LinkInertia, links: &[crate::LinkInertia]) -> bool {
         if env >= self.n_envs {
             return false;
@@ -1725,7 +1741,8 @@ impl FloatingBaseGpu {
     }
 
     /// Give **every** environment its own mass properties in one upload, in environment order.
-    /// Validated in full before anything is written; see [`pack_all_floating_bodies`].
+    /// Validated in full BEFORE anything is written, so a rejected call leaves the batch exactly as
+    /// it was rather than half-randomised.
     pub fn set_all_inertia(&mut self, per_env: &[(crate::LinkInertia, Vec<crate::LinkInertia>)]) -> bool {
         match pack_all_floating_bodies(per_env, self.n, self.n_envs) {
             Some(flat) => {
@@ -1737,7 +1754,7 @@ impl FloatingBaseGpu {
     }
 
     /// Read back one environment's mass properties as the shader sees them: `(n+1)·13` floats, the
-    /// base first. `None` if `env` is out of range. See [`read_env_inertia`].
+    /// base first. `None` if `env` is out of range.
     pub fn env_inertia_raw(&self, env: usize) -> Option<Vec<f32>> {
         read_env_inertia(&self.device, &self.queue, &self.inertia_buf, env, self.n_envs, (self.n + 1) * 13, "fb-inertia-stage")
     }
@@ -2156,7 +2173,7 @@ impl FloatingGaitGpu {
     }
 
     /// **Give one environment its own bodies**, floating base included. See
-    /// [`pack_floating_bodies`] for what is checked and why the base is not optional.
+    /// [`FloatingBaseGpu::set_env_inertia`] for what is checked and why the base is not optional.
     pub fn set_env_inertia(&mut self, env: usize, base: &crate::LinkInertia, links: &[crate::LinkInertia]) -> bool {
         if env >= self.n_envs {
             return false;
@@ -2167,7 +2184,7 @@ impl FloatingGaitGpu {
     }
 
     /// Give **every** environment its own bodies in one upload, in environment order. Validated in
-    /// full before anything is written; see [`pack_all_floating_bodies`].
+    /// full BEFORE anything is written, so a rejected call leaves the batch as it was.
     pub fn set_all_inertia(&mut self, per_env: &[(crate::LinkInertia, Vec<crate::LinkInertia>)]) -> bool {
         match pack_all_floating_bodies(per_env, self.n, self.n_envs) {
             Some(flat) => {
@@ -2184,8 +2201,13 @@ impl FloatingGaitGpu {
     }
 
     /// **Give one environment its own ground** — floor height, normal spring and damper, and a scale on
-    /// each contact's nominal friction. See [`write_env_contact`] for what is checked, and for the
-    /// stability limit randomising `kn` tightens.
+    /// each contact's nominal friction — a scale rather than a replacement, because friction is stated
+    /// per contact point and randomising it means perturbing the nominal.
+    ///
+    /// ⛔ **A step at these values is not automatically stable.** The explicit integration limit is
+    /// `dt²·(kn/m) + 2·dt·(kd/m) ≤ 4`, and randomising `kn` upward tightens it, so the batch can end up
+    /// containing environments whose `dt` is now too coarse. `floating_contact.rs` measures shipped
+    /// configurations against exactly that bound.
     ///
     /// `false`, and nothing uploaded, if `env` is out of range or any value is non-finite.
     ///
@@ -2529,8 +2551,8 @@ impl TreeFloatingGpu {
     }
 
     /// **Give one environment its own bodies**, floating base included, for domain randomisation
-    /// across the batch. Every other environment is untouched. See [`pack_floating_bodies`] for what
-    /// is checked and why the base is not optional.
+    /// across the batch. Every other environment is untouched. See
+    /// [`FloatingBaseGpu::set_env_inertia`] for what is checked and why the base is not optional.
     pub fn set_env_inertia(&mut self, env: usize, base: &crate::LinkInertia, links: &[crate::LinkInertia]) -> bool {
         if env >= self.n_envs {
             return false;
@@ -2541,7 +2563,7 @@ impl TreeFloatingGpu {
     }
 
     /// Give **every** environment its own bodies in one upload, in environment order. Validated in
-    /// full before anything is written; see [`pack_all_floating_bodies`].
+    /// full BEFORE anything is written, so a rejected call leaves the batch as it was.
     pub fn set_all_inertia(&mut self, per_env: &[(crate::LinkInertia, Vec<crate::LinkInertia>)]) -> bool {
         match pack_all_floating_bodies(per_env, self.n, self.n_envs) {
             Some(flat) => {
@@ -2553,7 +2575,7 @@ impl TreeFloatingGpu {
     }
 
     /// Read back one environment's bodies as the shader sees them: `(n+1)·13` floats, base first.
-    /// `None` if `env` is out of range. See [`read_env_inertia`].
+    /// `None` if `env` is out of range.
     pub fn env_inertia_raw(&self, env: usize) -> Option<Vec<f32>> {
         read_env_inertia(&self.device, &self.queue, &self.inertia_buf, env, self.n_envs, (self.n + 1) * 13, "t-inertia-stage")
     }
@@ -2963,7 +2985,7 @@ impl TreeGaitGpu {
     }
 
     /// **Give one environment its own bodies**, floating base included. See
-    /// [`pack_floating_bodies`] for what is checked and why the base is not optional.
+    /// [`FloatingBaseGpu::set_env_inertia`] for what is checked and why the base is not optional.
     pub fn set_env_inertia(&mut self, env: usize, base: &crate::LinkInertia, links: &[crate::LinkInertia]) -> bool {
         if env >= self.n_envs {
             return false;
@@ -2974,7 +2996,7 @@ impl TreeGaitGpu {
     }
 
     /// Give **every** environment its own bodies in one upload, in environment order. Validated in
-    /// full before anything is written; see [`pack_all_floating_bodies`].
+    /// full BEFORE anything is written, so a rejected call leaves the batch as it was.
     pub fn set_all_inertia(&mut self, per_env: &[(crate::LinkInertia, Vec<crate::LinkInertia>)]) -> bool {
         match pack_all_floating_bodies(per_env, self.n, self.n_envs) {
             Some(flat) => {
@@ -2991,8 +3013,8 @@ impl TreeGaitGpu {
     }
 
     /// **Give one environment its own terrain** — floor height, normal spring and damper, and a scale
-    /// on each foot's nominal friction. See [`write_env_contact`] for what is checked and for the
-    /// stability limit that randomising `kn` tightens.
+    /// on each foot's nominal friction. See [`FloatingGaitGpu::set_env_contact`] for what is checked
+    /// and for the stability limit that randomising `kn` tightens.
     ///
     /// Survives a [`rollout_rewards`](Self::rollout_rewards) call: the ground tail and the PRM header
     /// that call rewrites are disjoint.
@@ -3121,7 +3143,13 @@ fn frictional_wgsl(nv: usize, nz: usize, nc: usize, normal_idx: &[usize]) -> Str
 struct Prm { n_envs: f32, dt: f32, kappa: f32, pad: f32 };
 @group(0) @binding(0) var<uniform> prm: Prm;
 @group(0) @binding(1) var<storage, read> B: array<f32>;      // NV x NZ, row-major
-@group(0) @binding(2) var<storage, read> E: array<f32>;      // NZ x NZ, row-major
+@group(0) @binding(2) var<storage, read> E: array<f32>;      // n_envs x (NZ x NZ), row-major
+//   ⛔ PER ENVIRONMENT, and only because of `mu`. Every entry of E is structural (±1) except one per
+//   contact — the slack row's coefficient on the normal impulse, which IS the friction coefficient.
+//   The whole matrix is replicated per environment rather than the coefficients being threaded
+//   separately, so the inner matmul below keeps a single flat read with no branch; `set_env_friction`
+//   writes only the `nc` entries that differ. This kernel is documented for a handful of contacts, so
+//   `n_envs · nz²` is small.
 @group(0) @binding(3) var<storage, read> M: array<f32>;      // n_envs x (NV x NV)
 @group(0) @binding(4) var<storage, read> VF: array<f32>;     // n_envs x NV
 @group(0) @binding(5) var<storage, read> PHI: array<f32>;    // n_envs x NC
@@ -3195,6 +3223,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let e = gid.x;
     if (f32(e) >= prm.n_envs) { return; }
 
+    let ebase = e * {NZNZ}u;
+
     var minv: array<f32, {NVNV}>;
     invert_m(e, &minv);
 
@@ -3211,7 +3241,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var mlcp: array<f32, {NZNZ}>;
     for (var i = 0u; i < {NZ}u; i = i + 1u) {
         for (var jc = 0u; jc < {NZ}u; jc = jc + 1u) {
-            var s = E[i * {NZ}u + jc];
+            var s = E[ebase + i * {NZ}u + jc];
             for (var r = 0u; r < {NV}u; r = r + 1u) { s = s + B[r * {NZ}u + i] * tmp[r * {NZ}u + jc]; }
             mlcp[i * {NZ}u + jc] = s;
         }
@@ -3286,6 +3316,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 pub struct FrictionalContactGpu {
     nv: usize,
     nc: usize,
+    nz: usize,
+    /// Flat index within ONE environment's `E` of each contact's friction coefficient. The only
+    /// entries of `E` that are not structural, and the only ones a per-environment upload touches.
+    mu_slots: Vec<usize>,
     n_envs: usize,
     dt: f64,
     kappa: f64,
@@ -3320,6 +3354,7 @@ impl FrictionalContactGpu {
         // B (nv×nz) and E (nz×nz), row-major — the phi-free part of solve_frictional_ipm.
         let mut bmat = vec![0.0f32; nv * nz];
         let mut emat = vec![0.0f32; nz * nz];
+        let mut mu_slots: Vec<usize> = Vec::with_capacity(nc);
         for (i, c) in contacts.iter().enumerate() {
             let d = c.jt.len();
             let ln = starts[i];
@@ -3336,7 +3371,10 @@ impl FrictionalContactGpu {
                 emat[s_idx * nz + bk] = -1.0;
             }
             emat[s_idx * nz + ln] = c.mu as f32;
+            mu_slots.push(s_idx * nz + ln);
         }
+        // one E per environment, replicated; `set_env_friction` overwrites the `mu_slots` entries
+        let emat: Vec<f32> = (0..n_envs.max(1)).flat_map(|_| emat.clone()).collect();
 
         let instance = wgpu::Instance::default();
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
@@ -3344,7 +3382,12 @@ impl FrictionalContactGpu {
 
         let init = |label, data: &[u8]| device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: data, usage: wgpu::BufferUsages::STORAGE });
         let b_buf = init("fr-b", bytemuck::cast_slice(&bmat));
-        let e_buf = init("fr-e", bytemuck::cast_slice(&emat));
+        // COPY_DST so one environment's friction can be overwritten, COPY_SRC so it can be read back
+        let e_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("fr-e"),
+            contents: bytemuck::cast_slice(&emat),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+        });
         let prm = [n_envs as f32, dt as f32, kappa as f32, 0.0f32];
         let prm_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("fr-prm"), contents: bytemuck::cast_slice(&prm), usage: wgpu::BufferUsages::UNIFORM });
         let store_dst = |label, size: usize| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: (size * 4).max(4) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
@@ -3363,7 +3406,85 @@ impl FrictionalContactGpu {
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("fr-layout"), bind_group_layouts: &[Some(&bgl)], immediate_size: 0 });
         let pso = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("frictional"), layout: Some(&layout), module: &shader, entry_point: Some("main"), compilation_options: Default::default(), cache: None });
 
-        Some(Self { nv, nc, n_envs, dt, kappa, device, queue, pso, bgl, b_buf, e_buf, prm_buf, m_buf, vf_buf, phi_buf, vn_buf, staging })
+        Some(Self { nv, nc, nz, mu_slots, n_envs, dt, kappa, device, queue, pso, bgl, b_buf, e_buf, prm_buf, m_buf, vf_buf, phi_buf, vn_buf, staging })
+    }
+
+    /// **Give one environment its own friction coefficients**, one per contact, for domain
+    /// randomisation across the batch. Every other environment is untouched.
+    ///
+    /// The mass matrix, free velocity and gaps were already per-environment here; friction was not.
+    /// It is the one physical property of this kernel's LCP that the batch shared, and it is the
+    /// property a sim-to-real study varies first — a floor's `mu` is the least well known number in
+    /// any contact model.
+    ///
+    /// `false`, and nothing uploaded, if `env` is out of range, if `mus` is not one per contact, or if
+    /// any value is non-finite or NEGATIVE. Unlike the stiffness on the penalty kernels, a negative
+    /// value here is not a physics choice a caller might want: the Coulomb cone is `|λ_t| ≤ μ·λ_n`,
+    /// so `μ < 0` is not an inverted friction law but an empty feasible set, and the interior-point
+    /// solve would report a number for a problem with no solution.
+    ///
+    /// ⛔ Only the contact STRUCTURE stays fixed at construction — the normal and facet directions,
+    /// which is what `B` holds and what the shader's baked `{NZ}`/`{NORMALS}` assume. Changing the
+    /// number of facets means a new solver.
+    pub fn set_env_friction(&mut self, env: usize, mus: &[f64]) -> bool {
+        if env >= self.n_envs || mus.len() != self.nc {
+            return false;
+        }
+        if !mus.iter().all(|m| m.is_finite() && *m >= 0.0) {
+            return false;
+        }
+        let base = env * self.nz * self.nz;
+        for (i, &m) in mus.iter().enumerate() {
+            let v = [m as f32];
+            self.queue.write_buffer(&self.e_buf, ((base + self.mu_slots[i]) * 4) as u64, bytemuck::cast_slice(&v));
+        }
+        true
+    }
+
+    /// Give **every** environment its own friction in one pass, in environment order. Validated in
+    /// full BEFORE anything is written, so a rejected call leaves the batch exactly as it was rather
+    /// than half-randomised.
+    pub fn set_all_friction(&mut self, per_env: &[Vec<f64>]) -> bool {
+        if per_env.len() != self.n_envs || per_env.iter().any(|e| e.len() != self.nc) {
+            return false;
+        }
+        if !per_env.iter().flatten().all(|m| m.is_finite() && *m >= 0.0) {
+            return false;
+        }
+        for (e, mus) in per_env.iter().enumerate() {
+            let base = e * self.nz * self.nz;
+            for (i, &m) in mus.iter().enumerate() {
+                let v = [m as f32];
+                self.queue.write_buffer(&self.e_buf, ((base + self.mu_slots[i]) * 4) as u64, bytemuck::cast_slice(&v));
+            }
+        }
+        true
+    }
+
+    /// Read back one environment's friction coefficients as the shader sees them — `f32`, because
+    /// that is what the buffer holds. `None` if `env` is out of range.
+    ///
+    /// Exposed because the alternative is trusting that an upload landed.
+    pub fn env_friction(&self, env: usize) -> Option<Vec<f32>> {
+        if env >= self.n_envs {
+            return None;
+        }
+        let bytes = (self.nz * self.nz * 4) as u64;
+        let stage = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fr-e-stage"),
+            size: bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        enc.copy_buffer_to_buffer(&self.e_buf, (env * self.nz * self.nz * 4) as u64, &stage, 0, bytes);
+        self.queue.submit(Some(enc.finish()));
+        let sl = stage.slice(..);
+        sl.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        let all: Vec<f32> = bytemuck::cast_slice::<u8, f32>(&sl.get_mapped_range().expect("mapped range")).to_vec();
+        stage.unmap();
+        Some(self.mu_slots.iter().map(|&i| all[i]).collect())
     }
 
     /// Post-contact velocity `v⁺` for each of `n_envs` environments. `m` is the flattened per-env mass
@@ -5263,6 +5384,134 @@ mod verification {
         assert!(port_rel < 2e-2, "GPU rollout reward diverged from the CPU reference: {port_rel}");
         assert!(last_best > first_best + 0.2, "CEM did not improve: {first_best} → {last_best}");
         assert!(learned_cpu > base_reward + 0.02 * base_reward.abs(), "learned policy did not beat do-nothing: {learned_cpu} vs {base_reward}");
+    }
+
+    /// **Per-environment FRICTION on the hard-contact kernel.** The last of the five batched kernels to
+    /// stop sharing a physical property across the batch, and the narrowest gap of the five: the mass
+    /// matrix, the free velocity and the gaps were already per-environment here. Friction was not, and
+    /// a floor's `mu` is the least well known number in any contact model.
+    ///
+    /// TWO contacts, deliberately, and structurally DIFFERENT ones — a `±x ±y` pyramid and the same
+    /// pyramid rotated 45° — carrying different gaps and different coefficients. With one contact the
+    /// slot mapping cannot be wrong in any interesting way, and with two identical contacts swapping
+    /// their coefficients would change nothing; here it does.
+    ///
+    /// ⛔ Two controls, and the friction has to BITE for either to mean anything: the free velocity has
+    /// a large tangential component and the gaps penetrate, so the cone binds and the answer depends on
+    /// `mu`. The GPU output is compared against each environment's own coefficients and against the
+    /// SHARED nominal the kernel used to assume; the second must be large. Judged by the median, the
+    /// statistic `gpu_frictional_contact_matches_cpu_ipm` already uses.
+    #[test]
+    fn gpu_frictional_per_env_friction_matches_the_cpu_for_each_envs_own_mu() {
+        use crate::solve_frictional_ipm;
+        use nalgebra::{DMatrix, DVector};
+        let row = |a: [f64; 3]| DVector::from_row_slice(&a);
+        let r2 = core::f64::consts::FRAC_1_SQRT_2;
+        const NOMINAL: [f64; 2] = [0.6, 0.4];
+        // contact 0: axis-aligned pyramid. contact 1: the same pyramid rotated 45°, so the two are
+        // structurally distinct and a swapped slot is visible.
+        let structure = vec![
+            StFrictionContact { jn: row([0.0, 0.0, 1.0]), jt: vec![row([1.0, 0.0, 0.0]), row([-1.0, 0.0, 0.0]), row([0.0, 1.0, 0.0]), row([0.0, -1.0, 0.0])], phi: 0.0, mu: NOMINAL[0] },
+            StFrictionContact { jn: row([0.0, 0.0, 1.0]), jt: vec![row([r2, r2, 0.0]), row([-r2, -r2, 0.0]), row([r2, -r2, 0.0]), row([-r2, r2, 0.0])], phi: 0.0, mu: NOMINAL[1] },
+        ];
+        let nc = structure.len();
+        let (dt, kappa, n_envs) = (0.01, 1e-3, 128usize);
+        let Some(mut gpu) = FrictionalContactGpu::new(&structure, dt, kappa, n_envs) else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+
+        // the shipped nominal must be what the buffer already holds, or `new` and the shader disagree
+        let start = gpu.env_friction(0).expect("env 0 readable");
+        assert_eq!(start.len(), nc, "one coefficient per contact");
+        for i in 0..nc {
+            assert!((start[i] as f64 - NOMINAL[i]).abs() < 1e-6, "contact {i} must start at {}, got {}", NOMINAL[i], start[i]);
+        }
+
+        // per-env coefficients: the two contacts move in OPPOSITE directions across the batch, so a
+        // uniform scale or a swapped pair cannot reproduce them
+        let per_env: Vec<Vec<f64>> = (0..n_envs)
+            .map(|e| {
+                let t = (e as f64) / (n_envs as f64);
+                vec![0.05 + 1.35 * t, 1.4 - 1.3 * t]
+            })
+            .collect();
+        assert!(gpu.set_all_friction(&per_env), "the batch upload must be accepted");
+
+        let f0 = gpu.env_friction(0).expect("readable");
+        let fl = gpu.env_friction(n_envs - 1).expect("readable");
+        for i in 0..nc {
+            assert!((f0[i] as f64 - per_env[0][i]).abs() < 1e-6, "env 0 contact {i}: {} vs {}", f0[i], per_env[0][i]);
+            assert!((fl[i] as f64 - per_env[n_envs - 1][i]).abs() < 1e-6, "last env contact {i}: {} vs {}", fl[i], per_env[n_envs - 1][i]);
+        }
+        assert!(f0[0] < f0[1] && fl[0] > fl[1], "the two contacts must cross over the batch: {f0:?} then {fl:?}");
+
+        // A free velocity with a big tangential push and penetrating gaps, so the cone BINDS. Friction
+        // that never binds is friction the answer does not depend on, and then no control can separate.
+        let (mut mflat, mut vf, mut phi) = (Vec::new(), Vec::new(), Vec::new());
+        let mut cpu_own: Vec<f64> = Vec::new();
+        let mut cpu_shared: Vec<f64> = Vec::new();
+        for e in 0..n_envs {
+            let t = (e as f64) / (n_envs as f64);
+            let mass = 1.0;
+            let m = DMatrix::from_diagonal(&DVector::from_row_slice(&[mass, mass, mass]));
+            let vfree = DVector::from_row_slice(&[2.0 + 0.5 * t, 0.9 - 0.4 * t, -0.6 - 0.2 * t]);
+            let gaps = [-0.004 - 0.002 * t, -0.001 - 0.003 * t];
+
+            let mut own = structure.clone();
+            let mut shared = structure.clone();
+            for i in 0..nc {
+                own[i].phi = gaps[i];
+                own[i].mu = per_env[e][i];
+                shared[i].phi = gaps[i];
+                shared[i].mu = NOMINAL[i];
+            }
+            cpu_own.extend(solve_frictional_ipm(&m, &vfree, &own, dt, kappa).v_next.iter().copied());
+            cpu_shared.extend(solve_frictional_ipm(&m, &vfree, &shared, dt, kappa).v_next.iter().copied());
+
+            for r in 0..3 {
+                for cc in 0..3 {
+                    mflat.push(m[(r, cc)]);
+                }
+            }
+            vf.extend(vfree.iter().copied());
+            phi.extend_from_slice(&gaps);
+        }
+
+        let gpu_vn = gpu.solve(&mflat, &vf, &phi);
+        assert!(gpu_vn.iter().all(|v| v.is_finite()), "GPU produced non-finite velocities");
+
+        let med = |mut v: Vec<f64>| { v.sort_by(|a, b| a.partial_cmp(b).unwrap()); v[v.len() / 2] };
+        let d_own: Vec<f64> = gpu_vn.iter().zip(&cpu_own).map(|(g, c)| (g - c).abs()).collect();
+        let d_shared: Vec<f64> = gpu_vn.iter().zip(&cpu_shared).map(|(g, c)| (g - c).abs()).collect();
+        let (m_own, m_shared) = (med(d_own.clone()), med(d_shared.clone()));
+        let w_own = d_own.iter().cloned().fold(0.0f64, f64::max);
+        eprintln!("  per-env friction, {n_envs} envs × 2 contacts: median |Δv⁺| {m_own:.3e}, worst {w_own:.3e}");
+        eprintln!("  the same GPU output against the SHARED nominal mu: median |Δv⁺| {m_shared:.3e} — must be large");
+        assert!(m_own < 2e-3, "each env must match its own coefficients (median): {m_own:.3e}");
+        assert!(w_own < 2e-2, "and its worst case: {w_own:.3e}");
+        assert!(m_shared > 1e-2, "the control must separate: if this is small the friction never bit, got {m_shared:.3e}");
+        assert!(m_shared > 100.0 * m_own, "and by a wide margin: {m_shared:.3e} vs {m_own:.3e}");
+
+        // one env at a time, leaving its neighbours alone
+        assert!(gpu.set_env_friction(9, &NOMINAL), "a single-env upload must be accepted");
+        let a9 = gpu.env_friction(9).expect("readable");
+        let a10 = gpu.env_friction(10).expect("readable");
+        assert!((a9[0] as f64 - NOMINAL[0]).abs() < 1e-6, "env 9 took the nominal, got {}", a9[0]);
+        assert!((a10[0] as f64 - per_env[10][0]).abs() < 1e-6, "env 10 must be untouched, got {}", a10[0]);
+
+        // the refusals, each of which would otherwise be a silently ignored randomisation
+        let before = gpu.env_friction(11).expect("readable");
+        assert!(!gpu.set_env_friction(n_envs, &NOMINAL), "an out-of-range env");
+        assert!(!gpu.set_env_friction(11, &NOMINAL[..1]), "a short coefficient slice");
+        assert!(!gpu.set_env_friction(11, &[0.5, f64::NAN]), "a non-finite coefficient");
+        // ⛔ NEGATIVE is refused here, unlike the stiffness on the penalty kernels: `|λ_t| <= mu·λ_n`
+        // with mu < 0 is not an inverted friction law but an EMPTY feasible set, and an interior-point
+        // solve would report a number for a problem with no solution.
+        assert!(!gpu.set_env_friction(11, &[0.5, -0.2]), "a negative coefficient");
+        assert!(!gpu.set_all_friction(&per_env[..n_envs - 1]), "a short outer length");
+        assert_eq!(gpu.env_friction(11).expect("readable"), before, "a refused upload must leave the env exactly as it was");
+        assert!(gpu.env_friction(n_envs).is_none(), "an out-of-range read");
     }
 
     // The GPU interior-point frictional contact solve matches the CPU `solve_frictional_ipm` oracle
