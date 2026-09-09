@@ -3549,6 +3549,10 @@ impl FrictionalContactGpu {
 /// then assert the suite really exercised it, a future self-hosted GPU runner can gate on it, and a
 /// runner without one still passes by default — the skip is correct behaviour, it just must not be
 /// indistinguishable from a run.
+/// ⛔ `var_os(..).is_none()`, NOT `var(..).is_err()`: **set to any value, including empty, means
+/// require**. `var()` returns `Ok("")` for `FERROMOTION_REQUIRE_GPU=`, so `is_err()` would be false
+/// and the guard would silently NOT fire — failing in the direction that hides a skipped run. A
+/// sibling project lost a whole A/B to exactly that empty-string semantics.
 #[cfg(test)]
 fn skip_without_gpu() {
     assert!(

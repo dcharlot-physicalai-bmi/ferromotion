@@ -168,6 +168,10 @@ impl CartpoleGpu {
 /// Turns a missing adapter into a failure when `FERROMOTION_REQUIRE_GPU=1` is set, so a skipped GPU
 /// test cannot be mistaken for a run. See `ferromotion-core`'s `gpu::skip_without_gpu` for why 28 of
 /// these across four crates were indistinguishable from a real run.
+/// ⛔ `var_os(..).is_none()`, NOT `var(..).is_err()`: **set to any value, including empty, means
+/// require**. `var()` returns `Ok("")` for `FERROMOTION_REQUIRE_GPU=`, so `is_err()` would be false
+/// and the guard would silently NOT fire — failing in the direction that hides a skipped run. A
+/// sibling project lost a whole A/B to exactly that empty-string semantics.
 #[cfg(test)]
 fn skip_without_gpu() {
     assert!(
