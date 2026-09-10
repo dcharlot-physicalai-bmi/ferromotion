@@ -407,6 +407,73 @@ fn ur20_rows() -> [DhRow; 6] {
 
 #[cfg(test)]
 mod tests {
+
+    /// **The published reach bounds the table's gross error — and nothing tighter, which is the point.**
+    ///
+    /// Universal Robots publishes a reach for every arm (R500, R850, R1300 on the dimension drawings).
+    /// ⛔ Those are ROUNDED envelope figures, not quantities this table reproduces. Measured
+    /// 2026-09-10, the computed swept radius exceeds the published reach by:
+    ///
+    /// | UR3 | UR5 | UR10 | UR3e | UR5e | UR10e | UR16e | UR20 |
+    /// |---|---|---|---|---|---|---|---|
+    /// | +53.8 | +68.4 | +10.3 | +57.7 | +76.5 | +15.7 | +73.9 | +11.5 mm |
+    ///
+    /// In RELATIVE terms 0.7% to 11.5% — and note the ordering differs from the millimetre column:
+    /// UR5e is the largest absolute excess at +76.5 mm but UR3e is the largest relative one at 11.5%,
+    /// which is the figure a tolerance must be set from. The excess is not a consistent function of
+    /// `d4`, `d5` or `d6`, so there is no
+    /// formula here to assert to a millimetre the way the FANUC's 717 mm and the KR 5 arc's R1412 are
+    /// asserted. Picking a tolerance that made an exact-looking check pass would be inventing the
+    /// number, which is the failure mode this crate's own house rule forbids.
+    ///
+    /// ⭐ What the figures DO support is a bound on GROSS error: a transposed digit or a factor-of-two
+    /// slip in one of the two dominant link lengths. **15%** is set from the measured 11.5% worst case
+    /// (UR3e) with real margin — a first version used 12%, which left 4% of headroom on a figure the
+    /// manufacturer rounds, and that is the same too-tight-bound mistake this workspace has made
+    /// before. The bound states the scale of the answer; it is not tuned to look impressive.
+    #[test]
+    fn the_ur_envelopes_bound_their_published_nominal_reach() {
+        // max over configuration of the horizontal distance from the base axis to the tool flange.
+        // q1 (base yaw) and q6 (flange roll) cannot change that radius, so they are held at zero.
+        fn envelope(r: &Robot) -> f64 {
+            let n = r.dof();
+            let steps = 20;
+            let ang = |i: usize| -PI + TAU * i as f64 / steps as f64;
+            let mut best = 0.0f64;
+            for i2 in 0..steps {
+                for i3 in 0..steps {
+                    for i4 in 0..steps {
+                        let q = [0.0, ang(i2), ang(i3), ang(i4), 0.0, 0.0];
+                        let p = r.frame_pose(&q, n).translation.vector;
+                        best = best.max(p.x.hypot(p.y));
+                    }
+                }
+            }
+            best
+        }
+
+        let arms: [(&str, Robot, f64); 8] = [
+            ("UR3", ur3(), 0.500), ("UR5", ur5(), 0.850), ("UR10", ur10(), 1.300),
+            ("UR3e", ur3e(), 0.500), ("UR5e", ur5e(), 0.850), ("UR10e", ur10e(), 1.300),
+            ("UR16e", ur16e(), 0.900), ("UR20", ur20(), 1.750),
+        ];
+        let mut worst = 0.0f64;
+        let mut rows = Vec::new();
+        for (name, r, nominal) in &arms {
+            let e = envelope(r);
+            let rel = (e - nominal) / nominal;
+            rows.push((*name, (e * 1e4).round() / 1e4, (rel * 1000.0).round() / 10.0));
+            // the envelope must EXCEED the nominal — the flange reaches past the quoted figure, it
+            // never falls short of it — and must not exceed it by more than a gross-error margin
+            assert!(e > *nominal, "{name}: the envelope {e:.4} m must reach at least the published {nominal} m");
+            assert!(rel < 0.15, "{name}: envelope {e:.4} m is {:.1}% past the published {nominal} m, beyond the gross-error bound", rel * 100.0);
+            worst = worst.max(rel);
+        }
+        eprintln!("  UR envelope vs published nominal reach (arm, computed m, excess %): {rows:?}");
+        eprintln!("  worst {:.1}% (UR3e) — the bound is 15%, set from this with margin", worst * 100.0);
+        // and the bound must stay meaningful: if every arm crept toward it, this would say so
+        assert!(worst > 0.005, "the excess collapsed to {:.2}%, so the arms or the definition changed", worst * 100.0);
+    }
     use super::*;
     use nalgebra::{Matrix3, Vector3};
 

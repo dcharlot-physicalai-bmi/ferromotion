@@ -52,8 +52,24 @@ mod geometry_oracles {
         /// one would not be caught by anything here. Sourcing a reach or an envelope figure for these
         /// is real work and the number must never be guessed at.
         TableOnly,
+        /// ⚠ **A published figure exists but is NOMINAL — usable only as a gross-error bound.**
+        ///
+        /// Sourcing one and finding it imprecise is a different state from not finding one, and
+        /// collapsing the two would lose the measurement. Universal Robots publishes a reach for every
+        /// arm (R500, R850, R1300 on the dimension drawings), and those figures are ROUNDED envelope
+        /// numbers, not quantities this table can reproduce: the computed swept radius exceeds the
+        /// published reach by 10.3 to 76.5 mm across the eight arms — 0.7% to 11.5% relatively, whose
+        /// ordering differs from the millimetre one — and the excess is not a consistent function of
+        /// any wrist parameter. Asserting them to a millimetre, the way
+        /// the FANUC and KUKA figures are asserted, would have shipped a test whose tolerance was
+        /// invented to make it pass.
+        ///
+        /// What they DO support is a bound on gross error — a transposed digit or a factor-of-two
+        /// slip in a dominant link length — which `the_ur_envelopes_bound_their_published_nominal_reach`
+        /// asserts at 15%, a threshold set from the measured 11.5% worst case with margin, and stated as such.
+        NominalOnly(&'static str),
     }
-    use Oracle::{Published, TableOnly};
+    use Oracle::{NominalOnly, Published, TableOnly};
 
     /// Every arm this crate ships. The gate below fails if a constructor is added without an entry,
     /// which is the point: the decision gets made once, in the open, rather than defaulting to silence.
@@ -90,17 +106,17 @@ mod geometry_oracles {
         // --- rethink.rs ---
         ("baxter", Published("Williams' stated 0.80764 m, which the table must reproduce and which the doc notes differs from the 0.88664 a naive reading gives")),
         ("sawyer", Published("the source paper's stated q = 0 pose (eq. 101, zero configuration), not a pose recomputed from this table")),
-        // --- ur.rs: the UR article publishes the DH table itself and no pose; no reach or envelope
-        //     figure is recorded in this repo for any of the eight, so none can be asserted here
-        //     without sourcing a number from outside it. ---
-        ("ur3", TableOnly),
-        ("ur5", TableOnly),
-        ("ur10", TableOnly),
-        ("ur3e", TableOnly),
-        ("ur5e", TableOnly),
-        ("ur10e", TableOnly),
-        ("ur16e", TableOnly),
-        ("ur20", TableOnly),
+        // --- ur.rs: the UR article publishes the DH table and no pose. The datasheets DO publish a
+        //     reach per arm, and it was sourced and measured against the tables (2026-09-10) — it is
+        //     nominal, not exact. See `NominalOnly`. ---
+        ("ur3", NominalOnly("UR datasheet reach 500 mm (drawing R500); computed envelope 0.5538 m, +53.8 mm")),
+        ("ur5", NominalOnly("UR datasheet reach 850 mm (drawing R850); computed envelope 0.9184 m, +68.4 mm")),
+        ("ur10", NominalOnly("UR datasheet reach 1300 mm (drawing R1300); computed envelope 1.3103 m, +10.3 mm")),
+        ("ur3e", NominalOnly("UR datasheet reach 500 mm; computed envelope 0.5577 m, +57.7 mm — the largest RELATIVE excess, 11.5%, which is what the 15% bound is set from")),
+        ("ur5e", NominalOnly("UR datasheet reach 850 mm; computed envelope 0.9265 m, +76.5 mm — the largest ABSOLUTE excess")),
+        ("ur10e", NominalOnly("UR datasheet reach 1300 mm; computed envelope 1.3157 m, +15.7 mm")),
+        ("ur16e", NominalOnly("UR datasheet reach 900 mm; computed envelope 0.9740 m, +73.9 mm")),
+        ("ur20", NominalOnly("UR datasheet reach 1750 mm; computed envelope 1.7615 m, +11.5 mm")),
     ];
 
     /// The sources, read at compile time so the enumeration cannot drift from what is shipped.
@@ -155,11 +171,13 @@ mod geometry_oracles {
     #[test]
     fn the_external_geometry_coverage_is_reported_and_does_not_regress() {
         let published: Vec<&str> = ARMS.iter().filter(|(_, o)| matches!(o, Published(_))).map(|(n, _)| *n).collect();
+        let nominal = ARMS.iter().filter(|(_, o)| matches!(o, NominalOnly(_))).count();
         eprintln!(
-            "  geometry oracles: {} of {} arms carry an INDEPENDENT published figure; {} are verified against their own table only",
+            "  geometry oracles: {} of {} arms carry an EXACT independent figure, {} a NOMINAL one (gross-error bound only), {} their own table only",
             published.len(),
             ARMS.len(),
-            ARMS.len() - published.len()
+            nominal,
+            ARMS.len() - published.len() - nominal
         );
         for (n, o) in ARMS.iter() {
             if let Published(cite) = o {
