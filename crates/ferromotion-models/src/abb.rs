@@ -258,8 +258,17 @@ mod tests {
         }
     }
 
-    /// Max over configuration of the horizontal distance from the base axis to the flange: random
-    /// sample, then coordinate refinement. Shared by the reach checks above.
+    /// Max over configuration of the horizontal distance from the base axis to the WRIST — the frame
+    /// `frame_pose(q, dof)` returns, which is the last JOINT frame. Random sample, then coordinate
+    /// refinement.
+    ///
+    /// ⛔ **Not the flange, and the distinction is the finding.** `Robot::from_dh` folds the final DH
+    /// row into `ee_offset`, so `frame_pose(q, dof)` stops one fixed transform short of `fk(q)`.
+    /// Measured: the IRB 120's flange envelope is 0.652006 m, 72 mm beyond the wrist, and the IRB
+    /// 1600's is 1.515 m, 65 mm beyond. ABB's published reach matches the WRIST to microns and the
+    /// flange not at all — so ABB quotes reach to the wrist centre, which is exactly the distinction
+    /// `irb140_zero_pose_matches_the_hand_computed_flange_and_wrist_centre` already draws for the
+    /// IRB 140. An earlier version of this comment said "flange", naming the wrong point.
     fn envelope(r: &Robot) -> f64 {
         let n = r.dof();
         let mut s = 0x1234_5678_9ABC_DEF0u64;

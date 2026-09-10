@@ -83,7 +83,11 @@ mod geometry_oracles {
         ("irb140", Published("ABB drawing: axis-1 to axis-5 = 70 + 380 mm and base-to-axis-2 352 + 360 mm arm, asserted as the wrist centre (0.450, 0, 0.712) m")),
         ("irb120", Published("ABB Product specification 3HAC035960: 580 mm reach; the computed envelope is 0.5800061 m, 6.1 um off")),
         ("irb1600_1_45", Published("ABB's model designation IRB 1600-X/1.45 — the suffix IS the reach in metres; the computed envelope is 1.4499999 m, 0.1 um off")),
-        ("yumi_single_arm", TableOnly), // computed envelope 0.5917 m — source YuMi's published reach to classify
+        // ⚠ The envelopes below are to the WRIST (`frame_pose(q, dof)`), not the flange — `from_dh`
+        //   folds the last DH row into `ee_offset`. Where an arm carries a tool the flange is further
+        //   out, and which one a manufacturer's "reach" means has to be checked per maker: ABB quotes
+        //   the wrist, and the Panda's figure lines up with the flange.
+        ("yumi_single_arm", TableOnly), // wrist envelope 0.5917 m — source YuMi's published reach to classify
         // --- classic.rs ---
         ("puma560", TableOnly), // computed envelope 0.8731 m
         ("puma560_modified", TableOnly), // computed envelope 0.8731 m, identical to the standard-DH table as it must be
@@ -91,8 +95,8 @@ mod geometry_oracles {
         ("two_link_planar", TableOnly), // SYNTHETIC: a textbook construct with chosen link lengths. Reach is L1+L2 BY CONSTRUCTION, so a reach check would be circular. Permanently TableOnly, and correctly so.
         ("three_link_planar", TableOnly), // SYNTHETIC, as above
         // --- franka.rs ---
-        ("panda", TableOnly), // computed envelope 0.8074 m — note Franka quotes 855 mm, which is LARGER, so their figure is measured to a different point; needs care, not a quick assertion
-        ("fr3", TableOnly), // computed envelope 0.8074 m, same caution as the Panda
+        ("panda", TableOnly), // flange envelope 0.857893 m vs Franka's published 855 mm, +2.9 mm (0.34%). ⛔ An earlier note here recorded 0.8074 m and called Franka's figure "measured to a different point" — that was MY measuring point: 0.8074 is the WRIST, and the Panda carries a flange in `ee_offset`. Classify once it is confirmed what Franka's 855 mm is measured to.
+        ("fr3", TableOnly), // flange envelope 0.857893 m, identical to the Panda's as the two share a chain; same note
         // --- kinova.rs ---
         ("gen3_7dof", TableOnly), // computed envelope 0.7355 m
         ("gen3_6dof", Published("Gen3 User Guide Figure 89: the 410 mm link length, which settles a transcription hazard the printed Table 95's column headers create")),

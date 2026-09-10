@@ -433,8 +433,17 @@ mod tests {
     /// before. The bound states the scale of the answer; it is not tuned to look impressive.
     #[test]
     fn the_ur_envelopes_bound_their_published_nominal_reach() {
-        // max over configuration of the horizontal distance from the base axis to the tool flange.
-        // q1 (base yaw) and q6 (flange roll) cannot change that radius, so they are held at zero.
+        // Max over configuration of the horizontal distance from the base axis to the WRIST — the
+        // frame `frame_pose(q, dof)` returns, which is the last JOINT frame.
+        //
+        // ⛔ That is not the flange. `Robot::from_dh` folds the final DH row into `ee_offset`, so
+        // `frame_pose(q, dof)` stops one fixed transform short of what `fk(q)` returns. Measured both
+        // ways: against UR's published reach the wrist is 0.6-11.4% over and the FLANGE is 3.3-20.1%
+        // over, so the wrist is the closer reading and neither is exact — which is the evidence for
+        // calling these figures nominal. An earlier version of this comment said "tool flange", naming
+        // a point the code does not compute.
+        //
+        // q1 (base yaw) and q6 (flange roll) cannot change the radius, so they are held at zero.
         fn envelope(r: &Robot) -> f64 {
             let n = r.dof();
             let steps = 20;
