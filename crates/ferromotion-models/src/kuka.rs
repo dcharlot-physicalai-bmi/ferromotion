@@ -279,6 +279,54 @@ mod tests {
         assert!(r.joints.iter().all(|j| j.effort.is_none()), "no per-axis torque is published, so none may be invented");
     }
 
+
+    /// **THE TABLE AGAINST THE MANUFACTURER, not against itself.**
+    ///
+    /// ⛔ Most geometry tests in this crate are INTERNAL: a known answer hand-computed from the same
+    /// table, a Hessian against finite differences of the same table, a convention swap of the same
+    /// table. A transcription error in a length is invisible to all of them — the Hessian of a mistyped
+    /// arm still matches its own finite differences. The reach is a SECOND number the specification
+    /// publishes, and it constrains the lengths differently from the `q = 0` flange height, so the two
+    /// together pin what neither pins alone: a COMPENSATING error (`d1 + 10 mm`, `d3 − 10 mm`) leaves
+    /// the 1266 mm height exactly right and moves the reach off 800 mm.
+    ///
+    /// ⛔ Read from the SHIPPED ROBOT's frame origins, not by calling `iiwa_rows` with literals. The
+    /// first version of this test did the latter and was vacuous: `iiwa_rows` takes the lengths as
+    /// ARGUMENTS, so re-passing `0.340, 0.400, 0.400` compares literals to literals and cannot see a
+    /// wrong constructor argument at all. Mutating the constructor left it green. At `q = 0` the arm
+    /// stands straight up, so the A2 axis is frame 2 and the A6 axis is frame 6, and the distance
+    /// between them is the reach the specification quotes.
+    #[test]
+    fn iiwa_reach_from_the_shipped_arm_is_the_specifications_800_and_820_mm() {
+        for (name, robot, want) in [
+            ("LBR iiwa 7 R800", kuka_lbr_iiwa_7_r800(), 0.800),
+            ("LBR iiwa 14 R820", kuka_lbr_iiwa_14_r820(), 0.820),
+        ] {
+            let q = [0.0; 7];
+            let a2 = robot.frame_pose(&q, 2).translation.vector;
+            let a6 = robot.frame_pose(&q, 6).translation.vector;
+            let reach = (a6 - a2).norm();
+            assert!(reach > 0.5, "{name}: the reach is a real length, {reach}");
+            assert!((reach - want).abs() < 1e-9, "{name}: A2-to-A6 reach {reach} m vs the specification's {want} m");
+        }
+    }
+
+    /// The KR 5 arc's reach, `a1 + a2 + √(d4² + a3²)` — the same form the FANUC LR Mate check in
+    /// `others.rs` uses, because it is the same wrist-offset geometry.
+    ///
+    /// ⭐ This one has a genuinely independent oracle: the constructor doc derives 1411.5 mm from the
+    /// lengths and notes it "matches the `R1412` in the drawing's top view" — a figure PRINTED on
+    /// KUKA's own drawing rather than recomputed from the table. Tolerance 1 mm, the precision the
+    /// drawing states. Verified to catch a compensating error that leaves both the `q = 0` flange x and
+    /// z untouched: `a3 + 10 mm` with `d1 − 10 mm` gives 1.413482 m and fails here.
+    #[test]
+    fn kr_5_arc_reach_from_the_table_is_the_drawings_r1412() {
+        let rows = kr_5_arc_rows();
+        let reach = rows[0].a + rows[1].a + rows[3].d.hypot(rows[2].a);
+        assert!(reach > 1.0, "the reach is a real length, {reach}");
+        assert!((reach - 1.412).abs() < 1e-3, "reach {reach} m vs the drawing's R1412 = 1.412 m");
+    }
+
     #[test]
     fn iiwa_7_r800_passes_the_hessian_finite_difference_check() {
         assert_hessian_matches_finite_differences(&kuka_lbr_iiwa_7_r800());
