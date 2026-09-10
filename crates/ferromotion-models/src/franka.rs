@@ -148,6 +148,49 @@ pub fn fr3() -> Robot {
 
 #[cfg(test)]
 mod tests {
+
+    /// **Franka publishes the CONFIGURATION of maximum extension, not just its size — and this table
+    /// reproduces it to 5 nanoradians.**
+    ///
+    /// The FCI 'Control Interface Specification and Robot Limits' page this crate already cites for the
+    /// DH table and the joint limits also states:
+    ///
+    /// > The arm reaches its maximum extension when joint 4 is at
+    /// > `q_elbow-flip = -0.467002423653011` rad.
+    ///
+    /// ⭐ **That is a far better oracle than a reach figure**, and finding it was worth more than the
+    /// number I went looking for. A published reach is a rounded scalar — the Universal Robots ones
+    /// miss by up to 11.5% and support only a gross-error bound. This is a fifteen-figure constant, and
+    /// it depends on the link geometry in a way no single length controls: it is the elbow angle that
+    /// maximises reach given the `±0.0825` offsets on joints 4 and 5 against the `0.384` link. A table
+    /// with a mistyped offset would extend furthest at a different angle.
+    ///
+    /// ⛔ Note what this does NOT rest on. Franka's FCI page states no reach in millimetres at all —
+    /// checked 2026-09-10 — so the widely-quoted 855 mm is not sourced from the document this crate
+    /// cites, and the registry still records the Panda's magnitude as unclassified. The ANGLE is
+    /// sourced, exact, and is what is asserted here.
+    ///
+    /// Measured: argmax `q4 = -0.467002428685570` against the published
+    /// `-0.467002423653011`, a difference of **5.0e-9 rad**, which is the resolution of the search's
+    /// own refinement tail. The bound is 1e-6, two hundred times that.
+    #[ignore = "envelope search: seconds per arm in debug; release --ignored lane"]
+    #[test]
+    fn the_arm_reaches_maximum_extension_at_frankas_published_elbow_angle() {
+        /// FCI 'Control Interface Specification and Robot Limits', verbatim.
+        const Q_ELBOW_FLIP: f64 = -0.467_002_423_653_011;
+        for (name, robot) in [("Panda", panda()), ("FR3", fr3())] {
+            let (radius, q) = crate::envelope::flange_argmax(&robot);
+            assert!(radius > 0.5, "{name}: the envelope is a real length, {radius}");
+            // the arm must actually be extended, or "the angle at maximum extension" means nothing
+            assert!(radius > 0.85, "{name}: max extension {radius:.6} m is too small to be the stretched pose");
+            assert!(
+                (q[3] - Q_ELBOW_FLIP).abs() < 1e-6,
+                "{name}: maximum extension is at q4 = {:.15}, Franka publishes {Q_ELBOW_FLIP:.15}, off by {:.3e} rad",
+                q[3],
+                (q[3] - Q_ELBOW_FLIP).abs()
+            );
+        }
+    }
     use super::*;
     use nalgebra::{Matrix3, Vector3};
     use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI};

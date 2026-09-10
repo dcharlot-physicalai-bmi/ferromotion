@@ -48,7 +48,7 @@ pub(crate) mod envelope {
     use ferromotion_core::Robot;
     use std::f64::consts::PI;
 
-    fn search_n(r: &Robot, restarts: usize, point: impl Fn(&Robot, &[f64]) -> f64) -> f64 {
+    fn search_n(r: &Robot, restarts: usize, point: impl Fn(&Robot, &[f64]) -> f64) -> (f64, Vec<f64>) {
         let n = r.dof();
         let mut s = 0xC0FF_EE00_1234_5678u64;
         let mut rnd = || {
@@ -59,13 +59,17 @@ pub(crate) mod envelope {
             ((z ^ (z >> 31)) as f64 / u64::MAX as f64) * 2.0 * PI - PI
         };
         let mut global = 0.0f64;
+        let mut global_q: Vec<f64> = vec![0.0; n];
         for _ in 0..restarts {
             let mut best: Vec<f64> = (0..n).map(|_| rnd()).collect();
             let mut bv = point(r, &best);
             loop {
                 let mut improved = false;
                 for j in 0..n {
-                    for d in [0.4, -0.4, 0.1, -0.1, 0.02, -0.02, 4e-3, -4e-3, 1e-3, -1e-3, 2e-4, -2e-4, 5e-5, -5e-5] {
+                    // ⭐ down to 1e-7: the coarse schedule locates the maximum, the fine tail pins the
+                    // ARGUMENT. `franka::the_arm_reaches_maximum_extension_at_frankas_published_elbow_angle`
+                    // needs the joint angle to nanoradians, not just the radius.
+                    for d in [0.4, -0.4, 0.1, -0.1, 0.02, -0.02, 4e-3, -4e-3, 1e-3, -1e-3, 2e-4, -2e-4, 5e-5, -5e-5, 1e-5, -1e-5, 1e-6, -1e-6, 1e-7, -1e-7] {
                         let mut q = best.clone();
                         q[j] += d;
                         let v = point(r, &q);
@@ -80,9 +84,12 @@ pub(crate) mod envelope {
                     break;
                 }
             }
-            global = global.max(bv);
+            if bv > global {
+                global = bv;
+                global_q = best;
+            }
         }
-        global
+        (global, global_q)
     }
 
     /// Restart count. ⭐ 60 is not a guess: 60, 200 and 2000 restarts agree to 1e-9 on every arm in
@@ -91,7 +98,17 @@ pub(crate) mod envelope {
     const RESTARTS: usize = 60;
 
     fn search(r: &Robot, point: impl Fn(&Robot, &[f64]) -> f64) -> f64 {
-        search_n(r, RESTARTS, point)
+        search_n(r, RESTARTS, point).0
+    }
+
+    /// The flange envelope AND the configuration that achieves it. The argument is the interesting half
+    /// when a manufacturer publishes the POSE of maximum extension rather than its magnitude — Franka
+    /// does, to fifteen figures, and that is a far stronger oracle than a rounded reach number.
+    pub(crate) fn flange_argmax(r: &Robot) -> (f64, Vec<f64>) {
+        search_n(r, RESTARTS, |r, q| {
+            let p = r.fk(q).translation.vector;
+            p.x.hypot(p.y)
+        })
     }
 
     /// To the last JOINT frame — what `frame_pose(q, dof)` returns. ABB and DENSO publish reach here.
@@ -130,11 +147,13 @@ pub(crate) mod envelope {
             let cheap = search_n(r, RESTARTS, |r, q| {
                 let p = r.fk(q).translation.vector;
                 p.x.hypot(p.y)
-            });
+            })
+            .0;
             let dear = search_n(r, 240, |r, q| {
                 let p = r.fk(q).translation.vector;
                 p.x.hypot(p.y)
-            });
+            })
+            .0;
             assert!(
                 (cheap - dear).abs() < 1e-9,
                 "{name}: {RESTARTS} restarts gave {cheap:.9} and 240 gave {dear:.9} — RESTARTS is too low"
@@ -214,8 +233,8 @@ mod geometry_oracles {
         ("two_link_planar", TableOnly), // SYNTHETIC: a textbook construct with chosen link lengths. Reach is L1+L2 BY CONSTRUCTION, so a reach check would be circular. Permanently TableOnly, and correctly so.
         ("three_link_planar", TableOnly), // SYNTHETIC, as above
         // --- franka.rs ---
-        ("panda", TableOnly), // flange envelope 0.857893 m vs Franka's published 855 mm, +2.9 mm (0.34%). ⛔ An earlier note here recorded 0.8074 m and called Franka's figure "measured to a different point" — that was MY measuring point: 0.8074 is the WRIST, and the Panda carries a flange in `ee_offset`. Classify once it is confirmed what Franka's 855 mm is measured to.
-        ("fr3", TableOnly), // flange envelope 0.857893 m, identical to the Panda's as the two share a chain; same note
+        ("panda", Published("Franka FCI spec: maximum extension occurs at q4 = -0.467002423653011 rad; the table's argmax is -0.467002428685570, 5.0e-9 rad off. ⛔ The ANGLE is the oracle, not a reach: the FCI page states no reach in mm at all (checked 2026-09-10), so the widely-quoted 855 mm is not from the document this crate cites. Flange envelope 0.857893 m, recorded but unasserted.")),
+        ("fr3", Published("same FCI elbow-flip angle as the Panda, which the two share along with their chain")),
         // --- kinova.rs ---
         ("gen3_7dof", Published("Kinova spec TS-014: maximum reach 902 mm; the FLANGE envelope is 0.902912 m, 0.9 mm over")),
         ("gen3_6dof", Published("Gen3 User Guide Figure 89: the 410 mm link length, which settles a transcription hazard the printed Table 95's column headers create")),
@@ -225,9 +244,9 @@ mod geometry_oracles {
         ("kuka_lbr_iiwa_14_r820", Published("Spec Fig. 4-4 flange height 1306 mm and the Section 4.3.1 reach of 820 mm")),
         ("kuka_kr_5_arc", Published("R1412 printed on the drawing's top view, asserted as the reach a1 + a2 + hypot(d4, a3)")),
         // --- others.rs ---
-        ("xarm5", TableOnly), // wrist 0.716645 / flange 0.763873 m
-        ("xarm6", TableOnly), // wrist 0.716645 / flange 0.763873 m, identical to the xArm 5 as the two share a chain
-        ("xarm7", TableOnly), // wrist 0.724825 / flange 0.772053 m
+        ("xarm5", TableOnly), // wrist 0.716645 / flange 0.763873 m. ⛔ VERIFIED ABSENCE, not an unchecked one: UFACTORY's own technical specification (docs.xarm.ufactory.cc, read 2026-09-10) publishes a CARTESIAN RANGE of ±700 mm and no reach or working-radius figure. The commonly quoted "700 mm reach" is that operating box, not an envelope — and the computed wrist envelope EXCEEDS it, as a software-limited box should be exceeded by the physical arm.
+        ("xarm6", TableOnly), // wrist 0.716645 / flange 0.763873 m, identical to the xArm 5; same verified absence
+        ("xarm7", TableOnly), // wrist 0.724825 / flange 0.772053 m; same verified absence
         ("lite6", TableOnly), // wrist 0.443661 / flange 0.505161 m
         ("fanuc_lr_mate_200id", Published("LR Mate 200iD data sheet reach 717 mm, asserted to a millimetre")),
         ("denso_vs6556", Published("DENSO WAVE VS-6556 specification: maximum arm reach 653 mm; the WRIST envelope is 0.653423 m, 0.42 mm over")),
@@ -313,8 +332,8 @@ mod geometry_oracles {
             }
         }
         assert!(
-            published.len() >= 13,
-            "external geometry checks must not regress below the 13 recorded on 2026-09-10, got {}",
+            published.len() >= 15,
+            "external geometry checks must not regress below the 15 recorded on 2026-09-10, got {}",
             published.len()
         );
     }
