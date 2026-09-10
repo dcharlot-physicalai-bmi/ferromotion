@@ -431,36 +431,14 @@ mod tests {
     /// (UR3e) with real margin — a first version used 12%, which left 4% of headroom on a figure the
     /// manufacturer rounds, and that is the same too-tight-bound mistake this workspace has made
     /// before. The bound states the scale of the answer; it is not tuned to look impressive.
+    /// ⛔ `#[ignore]`: the envelope search is a random-restart optimisation and costs seconds per arm
+    /// in the debug profile the default lane uses — it took `ferromotion-models` from 1 s to 196 s.
+    /// It runs in the `--release -- --ignored` lane, which `.github/workflows/ci.yml` invokes for this
+    /// crate. An ignored test that no lane runs is worse than no test at all, so the two must never be
+    /// separated.
+    #[ignore = "envelope search: seconds per arm in debug; release --ignored lane"]
     #[test]
     fn the_ur_envelopes_bound_their_published_nominal_reach() {
-        // Max over configuration of the horizontal distance from the base axis to the WRIST — the
-        // frame `frame_pose(q, dof)` returns, which is the last JOINT frame.
-        //
-        // ⛔ That is not the flange. `Robot::from_dh` folds the final DH row into `ee_offset`, so
-        // `frame_pose(q, dof)` stops one fixed transform short of what `fk(q)` returns. Measured both
-        // ways: against UR's published reach the wrist is 0.6-11.4% over and the FLANGE is 3.3-20.1%
-        // over, so the wrist is the closer reading and neither is exact — which is the evidence for
-        // calling these figures nominal. An earlier version of this comment said "tool flange", naming
-        // a point the code does not compute.
-        //
-        // q1 (base yaw) and q6 (flange roll) cannot change the radius, so they are held at zero.
-        fn envelope(r: &Robot) -> f64 {
-            let n = r.dof();
-            let steps = 20;
-            let ang = |i: usize| -PI + TAU * i as f64 / steps as f64;
-            let mut best = 0.0f64;
-            for i2 in 0..steps {
-                for i3 in 0..steps {
-                    for i4 in 0..steps {
-                        let q = [0.0, ang(i2), ang(i3), ang(i4), 0.0, 0.0];
-                        let p = r.frame_pose(&q, n).translation.vector;
-                        best = best.max(p.x.hypot(p.y));
-                    }
-                }
-            }
-            best
-        }
-
         let arms: [(&str, Robot, f64); 8] = [
             ("UR3", ur3(), 0.500), ("UR5", ur5(), 0.850), ("UR10", ur10(), 1.300),
             ("UR3e", ur3e(), 0.500), ("UR5e", ur5e(), 0.850), ("UR10e", ur10e(), 1.300),
@@ -469,7 +447,7 @@ mod tests {
         let mut worst = 0.0f64;
         let mut rows = Vec::new();
         for (name, r, nominal) in &arms {
-            let e = envelope(r);
+            let e = crate::envelope::wrist(r);
             let rel = (e - nominal) / nominal;
             rows.push((*name, (e * 1e4).round() / 1e4, (rel * 1000.0).round() / 10.0));
             // the envelope must EXCEED the nominal — the flange reaches past the quoted figure, it

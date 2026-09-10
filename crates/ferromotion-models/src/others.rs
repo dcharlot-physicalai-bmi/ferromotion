@@ -485,6 +485,23 @@ mod tests {
         assert_known_answer("FANUC LR Mate 200iD", &fanuc_lr_mate_200id(), &[0.0; 6], Vector3::new(0.465, 0.0, 0.695));
     }
 
+    /// **DENSO's published 653 mm, reproduced by the table to under half a millimetre.**
+    ///
+    /// Source: DENSO WAVE VS-6556 product specification — "maximum arm reach 653 mm". Independent of
+    /// this table; every other geometry check on this arm is a hand computation from the same
+    /// drawing-derived rows.
+    ///
+    /// ⛔ Measured to the **WRIST** (`crate::envelope::wrist`, what `frame_pose(q, dof)` returns):
+    /// 0.653423 m, 0.42 mm over. The flange is 0.733423 m, 80 mm further, and matches nothing — DENSO
+    /// quotes reach to the wrist centre as ABB does, where Kinova and Franka quote the flange.
+    #[ignore = "envelope search: seconds per arm in debug; release --ignored lane"]
+    #[test]
+    fn denso_vs6556_wrist_envelope_is_the_published_653_mm_reach() {
+        let e = crate::envelope::wrist(&denso_vs6556());
+        assert!(e > 0.3, "the envelope is a real length, {e}");
+        assert!((e - 0.653).abs() < 1e-3, "wrist envelope {e:.6} m vs DENSO's published 0.653 m, off by {:.2} mm", (e - 0.653).abs() * 1000.0);
+    }
+
     /// The spec's reach check: `a1 + a2 + √(d4² + a3²)` against the data sheet's 717 mm, as a second
     /// independent number from the same drawing.
     #[test]

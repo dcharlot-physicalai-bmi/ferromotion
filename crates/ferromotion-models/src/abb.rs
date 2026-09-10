@@ -237,18 +237,28 @@ mod tests {
     /// its constructor cites. Neither number is recomputed from this table, which is what makes them
     /// an audit of it rather than a restatement.
     ///
-    /// Measured 2026-09-10: 0.5800061 m against 0.580 (6.1 µm) and 1.4499999 m against 1.450 (0.1 µm).
+    /// Measured 2026-09-10 to the WRIST — `crate::envelope::wrist`, the frame `frame_pose(q, dof)`
+    /// returns: 0.5800061 m against 0.580 (6.1 µm) and 1.4499999 m against 1.450 (0.1 µm). ⛔ ABB
+    /// publishes reach to the wrist centre, NOT the flange: the flange envelopes are 0.652006 and
+    /// 1.515 m, 72 and 65 mm further out, and match nothing. Kinova and Franka quote the flange
+    /// instead, so the point has to be checked per manufacturer.
     /// ⭐ That is a different quality of agreement from the Universal Robots figures, which are rounded
     /// envelope numbers and miss by 0.7–11.5% — see `ur::the_ur_envelopes_bound_their_published_nominal_reach`.
     /// The bound here is 1 mm, matching the FANUC LR Mate precedent in `others.rs`, and the measured
     /// error is three orders inside it.
+    /// ⛔ `#[ignore]`: the envelope search is a random-restart optimisation and costs seconds per arm
+    /// in the debug profile the default lane uses — it took `ferromotion-models` from 1 s to 196 s.
+    /// It runs in the `--release -- --ignored` lane, which `.github/workflows/ci.yml` invokes for this
+    /// crate. An ignored test that no lane runs is worse than no test at all, so the two must never be
+    /// separated.
+    #[ignore = "envelope search: seconds per arm in debug; release --ignored lane"]
     #[test]
     fn the_abb_envelopes_are_the_published_reach_to_a_millimetre() {
         for (name, robot, want) in [
             ("IRB 120", irb120(), 0.580),
             ("IRB 1600-X/1.45", irb1600_1_45(), 1.450),
         ] {
-            let e = envelope(&robot);
+            let e = crate::envelope::wrist(&robot);
             assert!(e > 0.3, "{name}: the envelope is a real length, {e}");
             assert!(
                 (e - want).abs() < 1e-3,
@@ -258,61 +268,6 @@ mod tests {
         }
     }
 
-    /// Max over configuration of the horizontal distance from the base axis to the WRIST — the frame
-    /// `frame_pose(q, dof)` returns, which is the last JOINT frame. Random sample, then coordinate
-    /// refinement.
-    ///
-    /// ⛔ **Not the flange, and the distinction is the finding.** `Robot::from_dh` folds the final DH
-    /// row into `ee_offset`, so `frame_pose(q, dof)` stops one fixed transform short of `fk(q)`.
-    /// Measured: the IRB 120's flange envelope is 0.652006 m, 72 mm beyond the wrist, and the IRB
-    /// 1600's is 1.515 m, 65 mm beyond. ABB's published reach matches the WRIST to microns and the
-    /// flange not at all — so ABB quotes reach to the wrist centre, which is exactly the distinction
-    /// `irb140_zero_pose_matches_the_hand_computed_flange_and_wrist_centre` already draws for the
-    /// IRB 140. An earlier version of this comment said "flange", naming the wrong point.
-    fn envelope(r: &Robot) -> f64 {
-        let n = r.dof();
-        let mut s = 0x1234_5678_9ABC_DEF0u64;
-        let mut rnd = || {
-            s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            let mut z = s;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            ((z ^ (z >> 31)) as f64 / u64::MAX as f64) * 2.0 * PI - PI
-        };
-        let rad = |r: &Robot, q: &[f64]| {
-            let p = r.frame_pose(q, n).translation.vector;
-            p.x.hypot(p.y)
-        };
-        let mut best = vec![0.0; n];
-        let mut bv = rad(r, &best);
-        for _ in 0..4000 {
-            let q: Vec<f64> = (0..n).map(|_| rnd()).collect();
-            let v = rad(r, &q);
-            if v > bv {
-                bv = v;
-                best = q;
-            }
-        }
-        for _ in 0..300 {
-            let mut improved = false;
-            for j in 0..n {
-                for d in [0.2, -0.2, 0.05, -0.05, 0.01, -0.01, 0.002, -0.002, 5e-4, -5e-4] {
-                    let mut q = best.clone();
-                    q[j] += d;
-                    let v = rad(r, &q);
-                    if v > bv {
-                        bv = v;
-                        best = q;
-                        improved = true;
-                    }
-                }
-            }
-            if !improved {
-                break;
-            }
-        }
-        bv
-    }
     use super::*;
     use nalgebra::Vector3;
 

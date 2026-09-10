@@ -301,6 +301,25 @@ mod tests {
 
     const Q6: [f64; 6] = [0.0; 6];
 
+    /// **Kinova's published 902 mm, reproduced by the table to under a millimetre.**
+    ///
+    /// Source: KINOVA Gen3 Ultra lightweight robot specification TS-014 — "maximum reach 902 mm". That
+    /// figure is not recomputed from this DH table, which is what makes it an audit of it rather than a
+    /// restatement; every other geometry test on this arm is derived from the table itself.
+    ///
+    /// ⛔ Measured to the **FLANGE** (`crate::envelope::flange`, what `fk(q)` returns), NOT the wrist:
+    /// 0.902912 m, 0.9 mm over. The wrist is 0.735512 m and matches nothing. Kinova and Franka publish
+    /// reach to the flange while ABB and DENSO publish it to the wrist centre, so the point has to be
+    /// established per manufacturer — measuring the wrong one produced a wrong conclusion about Franka
+    /// earlier in this crate's history.
+    #[ignore = "envelope search: seconds per arm in debug; release --ignored lane"]
+    #[test]
+    fn gen3_7dof_flange_envelope_is_the_published_902_mm_reach() {
+        let e = crate::envelope::flange(&gen3_7dof());
+        assert!(e > 0.5, "the envelope is a real length, {e}");
+        assert!((e - 0.902).abs() < 1e-3, "flange envelope {e:.6} m vs Kinova's published 0.902 m, off by {:.2} mm", (e - 0.902).abs() * 1000.0);
+    }
+
     /// **Figure 89 against the table, on the one entry the specification warns about.**
     ///
     /// ⛔ The Gen3 6 DoF carries an explicit transcription hazard, recorded in the constructor doc: in

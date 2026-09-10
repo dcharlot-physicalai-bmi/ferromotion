@@ -26,6 +26,125 @@ pub mod abb;
 pub mod rethink;
 pub mod others;
 
+/// **The working envelope, computed once for the whole crate.**
+///
+/// Max over configuration of the horizontal distance from the base rotation axis to a chosen point:
+/// random restarts followed by coordinate refinement. Verified to converge — 200 restarts and 2000
+/// agree to six decimals on every arm tried — and it deliberately IGNORES joint limits, so every
+/// figure is an upper bound over the unrestricted configuration space. Both facts matter when a number
+/// disagrees with a datasheet: without the first the gap reads as a bad search, without the second as
+/// the limits.
+///
+/// ⛔ **[`wrist`] and [`flange`] are one fixed transform apart and manufacturers disagree about which
+/// they publish.** `Robot::from_dh` folds the final DH row into `ee_offset`, so `frame_pose(q, dof)`
+/// stops short of `fk(q)`. Measured: ABB and DENSO quote reach to the WRIST, Kinova and Franka to the
+/// FLANGE. Always measure both and say which the number is — a test naming the wrong one still passes
+/// and misleads the next reader, which is exactly what happened here once already.
+///
+/// One implementation, reached by every module's tests, because four copies of a search like this is
+/// four chances for one of them to drift into a weaker refinement schedule.
+#[cfg(test)]
+pub(crate) mod envelope {
+    use ferromotion_core::Robot;
+    use std::f64::consts::PI;
+
+    fn search_n(r: &Robot, restarts: usize, point: impl Fn(&Robot, &[f64]) -> f64) -> f64 {
+        let n = r.dof();
+        let mut s = 0xC0FF_EE00_1234_5678u64;
+        let mut rnd = || {
+            s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = s;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            ((z ^ (z >> 31)) as f64 / u64::MAX as f64) * 2.0 * PI - PI
+        };
+        let mut global = 0.0f64;
+        for _ in 0..restarts {
+            let mut best: Vec<f64> = (0..n).map(|_| rnd()).collect();
+            let mut bv = point(r, &best);
+            loop {
+                let mut improved = false;
+                for j in 0..n {
+                    for d in [0.4, -0.4, 0.1, -0.1, 0.02, -0.02, 4e-3, -4e-3, 1e-3, -1e-3, 2e-4, -2e-4, 5e-5, -5e-5] {
+                        let mut q = best.clone();
+                        q[j] += d;
+                        let v = point(r, &q);
+                        if v > bv {
+                            bv = v;
+                            best = q;
+                            improved = true;
+                        }
+                    }
+                }
+                if !improved {
+                    break;
+                }
+            }
+            global = global.max(bv);
+        }
+        global
+    }
+
+    /// Restart count. ⭐ 60 is not a guess: 60, 200 and 2000 restarts agree to 1e-9 on every arm in
+    /// this crate, so the extra work buys nothing but seconds in the debug profile CI uses. The
+    /// convergence check itself lives in `the_envelope_search_has_converged`.
+    const RESTARTS: usize = 60;
+
+    fn search(r: &Robot, point: impl Fn(&Robot, &[f64]) -> f64) -> f64 {
+        search_n(r, RESTARTS, point)
+    }
+
+    /// To the last JOINT frame — what `frame_pose(q, dof)` returns. ABB and DENSO publish reach here.
+    pub(crate) fn wrist(r: &Robot) -> f64 {
+        let n = r.dof();
+        search(r, move |r, q| {
+            let p = r.frame_pose(q, n).translation.vector;
+            p.x.hypot(p.y)
+        })
+    }
+
+    /// To the tool flange — what `fk(q)` returns, one folded transform beyond [`wrist`]. Kinova and
+    /// Franka publish reach here.
+    pub(crate) fn flange(r: &Robot) -> f64 {
+        search(r, |r, q| {
+            let p = r.fk(q).translation.vector;
+            p.x.hypot(p.y)
+        })
+    }
+
+    /// ⛔ **The premise every reach assertion rests on.** If the search returned a local maximum the
+    /// figures would be too small and a correct table would look wrong — which is precisely how the
+    /// Panda's apparent "smaller than published" anomaly could have been misread. Cheap restart counts
+    /// must agree with expensive ones, or `RESTARTS` is set too low.
+    #[ignore = "envelope search: seconds per arm in debug; release --ignored lane"]
+    #[test]
+    fn the_envelope_search_has_converged() {
+        let arms = [
+            ("panda", crate::franka::panda()),
+            ("gen3_7dof", crate::kinova::gen3_7dof()),
+            ("irb120", crate::abb::irb120()),
+            ("denso", crate::others::denso_vs6556()),
+        ];
+        let mut worst = 0.0f64;
+        for (name, r) in &arms {
+            let cheap = search_n(r, RESTARTS, |r, q| {
+                let p = r.fk(q).translation.vector;
+                p.x.hypot(p.y)
+            });
+            let dear = search_n(r, 240, |r, q| {
+                let p = r.fk(q).translation.vector;
+                p.x.hypot(p.y)
+            });
+            assert!(
+                (cheap - dear).abs() < 1e-9,
+                "{name}: {RESTARTS} restarts gave {cheap:.9} and 240 gave {dear:.9} — RESTARTS is too low"
+            );
+            worst = worst.max((cheap - dear).abs());
+        }
+        eprintln!("  envelope search: {RESTARTS} vs 240 restarts agree to {worst:.1e} over {} arms", arms.len());
+    }
+}
+
 /// **What independently pins each arm's geometry — and, honestly, where nothing does.**
 ///
 /// Every arm in this crate is verified against its own table: a known answer, a central-difference
@@ -87,10 +206,10 @@ mod geometry_oracles {
         //   folds the last DH row into `ee_offset`. Where an arm carries a tool the flange is further
         //   out, and which one a manufacturer's "reach" means has to be checked per maker: ABB quotes
         //   the wrist, and the Panda's figure lines up with the flange.
-        ("yumi_single_arm", TableOnly), // wrist envelope 0.5917 m — source YuMi's published reach to classify
+        ("yumi_single_arm", TableOnly), // wrist 0.591656 / flange 0.609656 m
         // --- classic.rs ---
-        ("puma560", TableOnly), // computed envelope 0.8731 m
-        ("puma560_modified", TableOnly), // computed envelope 0.8731 m, identical to the standard-DH table as it must be
+        ("puma560", TableOnly), // wrist 0.873129 / flange 0.929379 m
+        ("puma560_modified", TableOnly), // wrist 0.873129 m, identical to the standard-DH table as it must be
         ("stanford", Published("Paul, 'Robot Manipulators' Table 2.1 p.9 — a source-stated worked example, not a pose recomputed from this table")),
         ("two_link_planar", TableOnly), // SYNTHETIC: a textbook construct with chosen link lengths. Reach is L1+L2 BY CONSTRUCTION, so a reach check would be circular. Permanently TableOnly, and correctly so.
         ("three_link_planar", TableOnly), // SYNTHETIC, as above
@@ -98,20 +217,20 @@ mod geometry_oracles {
         ("panda", TableOnly), // flange envelope 0.857893 m vs Franka's published 855 mm, +2.9 mm (0.34%). ⛔ An earlier note here recorded 0.8074 m and called Franka's figure "measured to a different point" — that was MY measuring point: 0.8074 is the WRIST, and the Panda carries a flange in `ee_offset`. Classify once it is confirmed what Franka's 855 mm is measured to.
         ("fr3", TableOnly), // flange envelope 0.857893 m, identical to the Panda's as the two share a chain; same note
         // --- kinova.rs ---
-        ("gen3_7dof", TableOnly), // computed envelope 0.7355 m
+        ("gen3_7dof", Published("Kinova spec TS-014: maximum reach 902 mm; the FLANGE envelope is 0.902912 m, 0.9 mm over")),
         ("gen3_6dof", Published("Gen3 User Guide Figure 89: the 410 mm link length, which settles a transcription hazard the printed Table 95's column headers create")),
-        ("gen3_lite", TableOnly), // computed envelope 0.5317 m
+        ("gen3_lite", TableOnly), // wrist 0.531722 / flange 0.763551 m — Kinova quotes 760 mm for this arm, which the flange misses by 3.6 mm: closer than nominal, not within a millimetre. Needs the spec read, not a widened tolerance.
         // --- kuka.rs ---
         ("kuka_lbr_iiwa_7_r800", Published("Spec Fig. 4-1 flange height 1266 mm, printed on the drawing, and the Section 4.2.1 reach of 800 mm")),
         ("kuka_lbr_iiwa_14_r820", Published("Spec Fig. 4-4 flange height 1306 mm and the Section 4.3.1 reach of 820 mm")),
         ("kuka_kr_5_arc", Published("R1412 printed on the drawing's top view, asserted as the reach a1 + a2 + hypot(d4, a3)")),
         // --- others.rs ---
-        ("xarm5", TableOnly), // computed envelope 0.7166 m
-        ("xarm6", TableOnly), // computed envelope 0.7166 m
-        ("xarm7", TableOnly), // computed envelope 0.7248 m
-        ("lite6", TableOnly), // computed envelope 0.4437 m
+        ("xarm5", TableOnly), // wrist 0.716645 / flange 0.763873 m
+        ("xarm6", TableOnly), // wrist 0.716645 / flange 0.763873 m, identical to the xArm 5 as the two share a chain
+        ("xarm7", TableOnly), // wrist 0.724825 / flange 0.772053 m
+        ("lite6", TableOnly), // wrist 0.443661 / flange 0.505161 m
         ("fanuc_lr_mate_200id", Published("LR Mate 200iD data sheet reach 717 mm, asserted to a millimetre")),
-        ("denso_vs6556", TableOnly), // computed envelope 0.6534 m
+        ("denso_vs6556", Published("DENSO WAVE VS-6556 specification: maximum arm reach 653 mm; the WRIST envelope is 0.653423 m, 0.42 mm over")),
         // --- rethink.rs ---
         ("baxter", Published("Williams' stated 0.80764 m, which the table must reproduce and which the doc notes differs from the 0.88664 a naive reading gives")),
         ("sawyer", Published("the source paper's stated q = 0 pose (eq. 101, zero configuration), not a pose recomputed from this table")),
@@ -194,8 +313,8 @@ mod geometry_oracles {
             }
         }
         assert!(
-            published.len() >= 11,
-            "external geometry checks must not regress below the 11 recorded on 2026-09-10, got {}",
+            published.len() >= 13,
+            "external geometry checks must not regress below the 13 recorded on 2026-09-10, got {}",
             published.len()
         );
     }

@@ -58,6 +58,13 @@ jobs:
       # training-step sweep that says why the bound is 0.10 and not the 0.05 the string implied.
       - name: DeLaN recovers the true mass matrix (release)
         run: cargo test -p ferromotion-learn --release -- --ignored
+      # ⛔ ADDED 2026-09-10 IN THE SAME COMMIT as the tests it runs. The working-envelope checks — each
+      # DH table against the reach its manufacturer publishes — are a random-restart optimisation and
+      # cost seconds per arm in the debug profile the main lane uses; they took this crate from 1 s to
+      # 196 s before being moved here, where they take 0.5 s. An #[ignore]d test that no lane runs is
+      # worse than no test at all, which is why the lane and the #[ignore] land together.
+      - name: Robot working envelopes vs published reach (release)
+        run: cargo test -p ferromotion-models --release -- --ignored
       # An EXCLUSION, not an enumeration. The enumerated list had silently omitted seven crates that do
       # build for wasm32 — including ferromotion-learn and ferromotion-fem, whose own READMEs advertise
       # "native + wasm32". A list of what to include drifts as crates are added; a list of what to skip
