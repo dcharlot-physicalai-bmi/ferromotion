@@ -301,6 +301,38 @@ mod tests {
 
     const Q6: [f64; 6] = [0.0; 6];
 
+    /// **Figure 89 against the table, on the one entry the specification warns about.**
+    ///
+    /// ⛔ The Gen3 6 DoF carries an explicit transcription hazard, recorded in the constructor doc: in
+    /// the printed Table 95 the column headers read `(α, a, d, θ)` but the numbers under them are in
+    /// the order `(a [mm], d [mm], α, θ)`. Row 2 prints `410.0, −5.38, π, q₂ − π/2`, and it is
+    /// **Figure 89**, not the table, that settles 410 mm as the LINK LENGTH. Read the headers literally
+    /// and 410 becomes a twist angle.
+    ///
+    /// ⛔ The known-answer test cannot defend this. Its expected tip `(0, 0.001, 1.17663)` was
+    /// "computed by hand from the table" — so had the table been transcribed the other way on the day
+    /// it was written, the hand computation would have produced that wrong arm's tip and the test would
+    /// have been green ever since. A golden value derived from the artefact cannot audit the artefact;
+    /// Figure 89 is independent of it.
+    ///
+    /// The second assertion is what makes "410 is *the* link length" meaningful: a 6 DoF spherical
+    /// wrist puts every other `a` at zero, so this is the only one.
+    #[test]
+    fn gen3_6dof_link_length_is_the_410_mm_figure_89_confirms() {
+        let rows = gen3_6dof_rows();
+        assert!(
+            (rows[1].a - 0.410).abs() < 1e-9,
+            "row 2's link length must be the 410 mm Figure 89 confirms, got {} m",
+            rows[1].a
+        );
+        let nonzero: Vec<usize> = (0..rows.len()).filter(|&i| rows[i].a.abs() > 1e-12).collect();
+        assert_eq!(
+            nonzero,
+            vec![1],
+            "a 6 DoF spherical arm carries exactly one link length, on row 2; non-zero `a` on rows {nonzero:?}"
+        );
+    }
+
     /// Hand-computed from Table 95 (not stated by the guide): `(0, 0.001, 1.17663)` m.
     #[test]
     fn gen3_6dof_matches_the_known_answer_computed_by_hand_from_the_table() {
