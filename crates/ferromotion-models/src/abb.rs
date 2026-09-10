@@ -228,6 +228,82 @@ pub fn yumi_single_arm() -> Robot {
 
 #[cfg(test)]
 mod tests {
+
+    /// **The reach ABB publishes, reproduced by the table to microns.**
+    ///
+    /// The IRB 120's 580 mm is from ABB's own product specification (3HAC035960); the IRB 1600's is in
+    /// the model designation itself — ABB's suffix after the slash IS the reach in metres, and this
+    /// crate builds the `IRB 1600-X/1.45` variant from the "Dimensions IRB 1600-X/1.2 (1.45)" drawing
+    /// its constructor cites. Neither number is recomputed from this table, which is what makes them
+    /// an audit of it rather than a restatement.
+    ///
+    /// Measured 2026-09-10: 0.5800061 m against 0.580 (6.1 µm) and 1.4499999 m against 1.450 (0.1 µm).
+    /// ⭐ That is a different quality of agreement from the Universal Robots figures, which are rounded
+    /// envelope numbers and miss by 0.7–11.5% — see `ur::the_ur_envelopes_bound_their_published_nominal_reach`.
+    /// The bound here is 1 mm, matching the FANUC LR Mate precedent in `others.rs`, and the measured
+    /// error is three orders inside it.
+    #[test]
+    fn the_abb_envelopes_are_the_published_reach_to_a_millimetre() {
+        for (name, robot, want) in [
+            ("IRB 120", irb120(), 0.580),
+            ("IRB 1600-X/1.45", irb1600_1_45(), 1.450),
+        ] {
+            let e = envelope(&robot);
+            assert!(e > 0.3, "{name}: the envelope is a real length, {e}");
+            assert!(
+                (e - want).abs() < 1e-3,
+                "{name}: envelope {e:.7} m vs ABB's published {want} m, off by {:.1} mm",
+                (e - want).abs() * 1000.0
+            );
+        }
+    }
+
+    /// Max over configuration of the horizontal distance from the base axis to the flange: random
+    /// sample, then coordinate refinement. Shared by the reach checks above.
+    fn envelope(r: &Robot) -> f64 {
+        let n = r.dof();
+        let mut s = 0x1234_5678_9ABC_DEF0u64;
+        let mut rnd = || {
+            s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = s;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            ((z ^ (z >> 31)) as f64 / u64::MAX as f64) * 2.0 * PI - PI
+        };
+        let rad = |r: &Robot, q: &[f64]| {
+            let p = r.frame_pose(q, n).translation.vector;
+            p.x.hypot(p.y)
+        };
+        let mut best = vec![0.0; n];
+        let mut bv = rad(r, &best);
+        for _ in 0..4000 {
+            let q: Vec<f64> = (0..n).map(|_| rnd()).collect();
+            let v = rad(r, &q);
+            if v > bv {
+                bv = v;
+                best = q;
+            }
+        }
+        for _ in 0..300 {
+            let mut improved = false;
+            for j in 0..n {
+                for d in [0.2, -0.2, 0.05, -0.05, 0.01, -0.01, 0.002, -0.002, 5e-4, -5e-4] {
+                    let mut q = best.clone();
+                    q[j] += d;
+                    let v = rad(r, &q);
+                    if v > bv {
+                        bv = v;
+                        best = q;
+                        improved = true;
+                    }
+                }
+            }
+            if !improved {
+                break;
+            }
+        }
+        bv
+    }
     use super::*;
     use nalgebra::Vector3;
 

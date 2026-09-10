@@ -51,6 +51,11 @@ mod geometry_oracles {
         /// convention-swap mutation, which catches a great deal, but a transcription error made on day
         /// one would not be caught by anything here. Sourcing a reach or an envelope figure for these
         /// is real work and the number must never be guessed at.
+        ///
+        /// ⭐ Each entry below carries its COMPUTED envelope, so the remaining work is only to source
+        /// the manufacturer's figure and compare — the measurement half is done. Two of them are
+        /// marked SYNTHETIC: textbook constructs whose reach is `L1 + L2` by construction, where a
+        /// reach check would be circular and `TableOnly` is the permanently correct answer.
         TableOnly,
         /// ⚠ **A published figure exists but is NOMINAL — usable only as a gross-error bound.**
         ///
@@ -76,33 +81,33 @@ mod geometry_oracles {
     const ARMS: &[(&str, Oracle)] = &[
         // --- abb.rs ---
         ("irb140", Published("ABB drawing: axis-1 to axis-5 = 70 + 380 mm and base-to-axis-2 352 + 360 mm arm, asserted as the wrist centre (0.450, 0, 0.712) m")),
-        ("irb120", TableOnly),
-        ("irb1600_1_45", TableOnly),
-        ("yumi_single_arm", TableOnly),
+        ("irb120", Published("ABB Product specification 3HAC035960: 580 mm reach; the computed envelope is 0.5800061 m, 6.1 um off")),
+        ("irb1600_1_45", Published("ABB's model designation IRB 1600-X/1.45 — the suffix IS the reach in metres; the computed envelope is 1.4499999 m, 0.1 um off")),
+        ("yumi_single_arm", TableOnly), // computed envelope 0.5917 m — source YuMi's published reach to classify
         // --- classic.rs ---
-        ("puma560", TableOnly),
-        ("puma560_modified", TableOnly),
+        ("puma560", TableOnly), // computed envelope 0.8731 m
+        ("puma560_modified", TableOnly), // computed envelope 0.8731 m, identical to the standard-DH table as it must be
         ("stanford", Published("Paul, 'Robot Manipulators' Table 2.1 p.9 — a source-stated worked example, not a pose recomputed from this table")),
-        ("two_link_planar", TableOnly),
-        ("three_link_planar", TableOnly),
+        ("two_link_planar", TableOnly), // SYNTHETIC: a textbook construct with chosen link lengths. Reach is L1+L2 BY CONSTRUCTION, so a reach check would be circular. Permanently TableOnly, and correctly so.
+        ("three_link_planar", TableOnly), // SYNTHETIC, as above
         // --- franka.rs ---
-        ("panda", TableOnly),
-        ("fr3", TableOnly),
+        ("panda", TableOnly), // computed envelope 0.8074 m — note Franka quotes 855 mm, which is LARGER, so their figure is measured to a different point; needs care, not a quick assertion
+        ("fr3", TableOnly), // computed envelope 0.8074 m, same caution as the Panda
         // --- kinova.rs ---
-        ("gen3_7dof", TableOnly),
+        ("gen3_7dof", TableOnly), // computed envelope 0.7355 m
         ("gen3_6dof", Published("Gen3 User Guide Figure 89: the 410 mm link length, which settles a transcription hazard the printed Table 95's column headers create")),
-        ("gen3_lite", TableOnly),
+        ("gen3_lite", TableOnly), // computed envelope 0.5317 m
         // --- kuka.rs ---
         ("kuka_lbr_iiwa_7_r800", Published("Spec Fig. 4-1 flange height 1266 mm, printed on the drawing, and the Section 4.2.1 reach of 800 mm")),
         ("kuka_lbr_iiwa_14_r820", Published("Spec Fig. 4-4 flange height 1306 mm and the Section 4.3.1 reach of 820 mm")),
         ("kuka_kr_5_arc", Published("R1412 printed on the drawing's top view, asserted as the reach a1 + a2 + hypot(d4, a3)")),
         // --- others.rs ---
-        ("xarm5", TableOnly),
-        ("xarm6", TableOnly),
-        ("xarm7", TableOnly),
-        ("lite6", TableOnly),
+        ("xarm5", TableOnly), // computed envelope 0.7166 m
+        ("xarm6", TableOnly), // computed envelope 0.7166 m
+        ("xarm7", TableOnly), // computed envelope 0.7248 m
+        ("lite6", TableOnly), // computed envelope 0.4437 m
         ("fanuc_lr_mate_200id", Published("LR Mate 200iD data sheet reach 717 mm, asserted to a millimetre")),
-        ("denso_vs6556", TableOnly),
+        ("denso_vs6556", TableOnly), // computed envelope 0.6534 m
         // --- rethink.rs ---
         ("baxter", Published("Williams' stated 0.80764 m, which the table must reproduce and which the doc notes differs from the 0.88664 a naive reading gives")),
         ("sawyer", Published("the source paper's stated q = 0 pose (eq. 101, zero configuration), not a pose recomputed from this table")),
@@ -185,8 +190,8 @@ mod geometry_oracles {
             }
         }
         assert!(
-            published.len() >= 9,
-            "external geometry checks must not regress below the 9 recorded on 2026-09-10, got {}",
+            published.len() >= 11,
+            "external geometry checks must not regress below the 11 recorded on 2026-09-10, got {}",
             published.len()
         );
     }
