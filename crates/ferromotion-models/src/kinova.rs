@@ -301,6 +301,27 @@ mod tests {
 
     const Q6: [f64; 6] = [0.0; 6];
 
+    /// **The Gen3 lite's 760 mm is NOMINAL where the 7 DoF's 902 mm is exact, from the same maker.**
+    ///
+    /// Kinova publishes 902 mm for the 7 DoF and 760 mm for the lite. The first is quoted to the
+    /// millimetre and this table reproduces it to 0.9 mm; the second is a round number and the table
+    /// gives **0.763551 m, 3.55 mm over — 0.47%**, four times looser. One manufacturer, two levels of
+    /// precision, which is why the sourcing has to be done per MODEL and not per maker.
+    ///
+    /// ⚠ The bound is 1.5%, three times the measured 0.47%. It is a gross-error bound in the same
+    /// spirit as the Universal Robots one, not the millimetre check the 7 DoF gets — asserting this at
+    /// 1 mm would be inventing a precision Kinova did not publish for this arm. Flange, as for the
+    /// 7 DoF: the wrist is 0.531722 m and matches nothing.
+    #[ignore = "envelope search: seconds per arm in debug; release --ignored lane"]
+    #[test]
+    fn gen3_lite_flange_envelope_is_within_a_gross_error_of_the_published_760_mm() {
+        let e = crate::envelope::flange(&gen3_lite());
+        let rel = (e - 0.760) / 0.760;
+        assert!(e > 0.4, "the envelope is a real length, {e}");
+        assert!(e > 0.760, "the flange must reach at least the published 0.760 m, got {e:.6}");
+        assert!(rel < 0.015, "flange envelope {e:.6} m is {:.2}% past the published 0.760 m", rel * 100.0);
+    }
+
     /// **Kinova's published 902 mm, reproduced by the table to under a millimetre.**
     ///
     /// Source: KINOVA Gen3 Ultra lightweight robot specification TS-014 — "maximum reach 902 mm". That

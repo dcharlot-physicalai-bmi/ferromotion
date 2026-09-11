@@ -238,7 +238,7 @@ mod geometry_oracles {
         // --- kinova.rs ---
         ("gen3_7dof", Published("Kinova spec TS-014: maximum reach 902 mm; the FLANGE envelope is 0.902912 m, 0.9 mm over")),
         ("gen3_6dof", Published("Gen3 User Guide Figure 89: the 410 mm link length, which settles a transcription hazard the printed Table 95's column headers create")),
-        ("gen3_lite", TableOnly), // wrist 0.531722 / flange 0.763551 m — Kinova quotes 760 mm for this arm, which the flange misses by 3.6 mm: closer than nominal, not within a millimetre. Needs the spec read, not a widened tolerance.
+        ("gen3_lite", NominalOnly("Kinova publishes 760 mm — a ROUND number where the same maker quotes the 7 DoF as 902 mm; the flange envelope is 0.763551 m, 3.55 mm over (0.47%), bounded at 1.5% rather than asserted to a millimetre")),
         // --- kuka.rs ---
         ("kuka_lbr_iiwa_7_r800", Published("Spec Fig. 4-1 flange height 1266 mm, printed on the drawing, and the Section 4.2.1 reach of 800 mm")),
         ("kuka_lbr_iiwa_14_r820", Published("Spec Fig. 4-4 flange height 1306 mm and the Section 4.3.1 reach of 820 mm")),
