@@ -270,6 +270,7 @@ mod mestimator;
 mod mesh3;
 mod compound;
 mod compound_pgs;
+pub mod voxel;
 mod link_geometry;
 mod mesh_io;
 mod modal;
