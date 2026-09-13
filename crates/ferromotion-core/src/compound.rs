@@ -145,6 +145,39 @@ impl CompoundHull {
         Self::from_meshes(core::slice::from_ref(mesh))
     }
 
+    /// **The decomposition of each mesh**, several parts per mesh — the constructor to reach for when
+    /// a link's `<collision>` block names one file and that file is not convex.
+    ///
+    /// ⛔ [`Self::from_meshes`] hulls. For a bracket, a gripper finger, a channel or a shell that is
+    /// not a loss you can accept: the hull fills the very space the part exists to leave empty.
+    /// Measured on the U-bracket this module's failure table is written against, a probe in the mouth
+    /// of the channel is **0.380 m inside** the hull and **0.314 m clear** of the decomposition.
+    ///
+    /// Returns one [`AcdReport`](crate::AcdReport) per mesh, in order, so a caller can see what it got — how many parts
+    /// each cost and how much slack is left.
+    ///
+    /// ⚠ `None` if ANY mesh fails to decompose, which for an unsealed mesh it will
+    /// ([`SolidVoxels::leaked`](crate::voxel::SolidVoxels)). **There is deliberately no silent
+    /// fallback to a hull.** A caller that would rather have the hull than nothing should call
+    /// [`Self::from_meshes`] itself, so that the loss appears at the call site — the same reason
+    /// [`Self::from_mesh_hull`] is named separately from [`Self::from_meshes`].
+    pub fn from_meshes_decomposed(
+        meshes: &[TriMesh3],
+        opts: &crate::acd::AcdOptions,
+    ) -> Option<(CompoundHull, Vec<crate::acd::AcdReport>)> {
+        if meshes.is_empty() {
+            return None;
+        }
+        let mut parts = Vec::new();
+        let mut reports = Vec::with_capacity(meshes.len());
+        for m in meshes {
+            let (c, r) = crate::acd::convex_decompose(m, opts)?;
+            parts.extend(c.parts);
+            reports.push(r);
+        }
+        Self::from_convex_parts(parts).map(|c| (c, reports))
+    }
+
     /// A compound from the shapes a robot description declares, generated rather than loaded. Each
     /// primitive is already convex, so its generated vertices are used directly and nothing is hulled.
     /// Mesh references are skipped and counted, the same contract
@@ -792,5 +825,68 @@ mod tests {
         assert!(compound_contacts(&a, &b, 1.0).is_empty(), "2.0 apart is outside a 1.0 margin");
         assert_eq!(compound_contacts(&a, &b, 2.5).len(), 1, "and inside a 2.5 one");
         assert!(compound_distance(&a, &CompoundHull::default()).is_none(), "an empty compound has no closest pair");
+    }
+
+    /// ⭐ **The constructor that closes the failure table at the top of this module.**
+    ///
+    /// Same bracket, same probe. [`CompoundHull::from_meshes`] gives one part and swallows the
+    /// channel; [`CompoundHull::from_meshes_decomposed`] gives the three boxes the bracket is made of
+    /// and leaves the mouth open.
+    ///
+    /// ⛔ The last assertion is the one that matters for a caller's trust: an unsealed mesh returns
+    /// `None`. A silent fallback to the hull would put the loss back where nobody can see it.
+    #[test]
+    fn a_link_declared_as_one_concave_mesh_gets_its_channel_back() {
+        use crate::acd::AcdOptions;
+        use crate::link_geometry::{primitive_mesh, LinkGeometry};
+
+        let mut bracket = TriMesh3 { verts: Vec::new(), tris: Vec::new() };
+        for (g, at) in [
+            (LinkGeometry::Box { size: v(1.2, 0.8, 0.4) }, v(0.0, 0.0, 0.0)),
+            (LinkGeometry::Box { size: v(0.2, 0.8, 1.0) }, v(-0.5, 0.0, 0.5)),
+            (LinkGeometry::Box { size: v(0.2, 0.8, 1.0) }, v(0.5, 0.0, 0.5)),
+        ] {
+            let m = primitive_mesh(&g, 24).expect("a primitive meshes");
+            let base = bracket.verts.len();
+            bracket.verts.extend(m.verts.iter().map(|q| q + at));
+            bracket.tris.extend(m.tris.iter().map(|t| [t[0] + base, t[1] + base, t[2] + base]));
+        }
+        let pad = primitive_mesh(&LinkGeometry::Box { size: v(0.3, 0.3, 0.3) }, 24).expect("meshes");
+        let probe = CompoundHull::from_convex_parts(vec![box_pts(v(0.0, 0.0, 0.7), v(0.08, 0.08, 0.08))])
+            .expect("a probe");
+
+        let hulled = CompoundHull::from_meshes(&[bracket.clone()]).expect("the bracket hulls");
+        assert_eq!(hulled.n_parts(), 1, "the control is one part, or nothing below is a comparison");
+        let hc = compound_distance(&hulled, &probe).expect("hull vs probe");
+        assert!(hc.intersecting, "the hull must swallow the mouth, or the probe is in the wrong place");
+
+        let opts = AcdOptions::default();
+        let (split, reports) =
+            CompoundHull::from_meshes_decomposed(&[bracket.clone(), pad], &opts).expect("both decompose");
+        assert_eq!(reports.len(), 2, "one report per mesh, in order");
+        assert!(reports[0].parts >= 2, "the bracket is concave; {} part(s) is not a decomposition", reports[0].parts);
+        assert_eq!(reports[1].parts, 1, "the pad is a box and must stay one part");
+        assert_eq!(split.n_parts(), reports.iter().map(|r| r.parts).sum::<usize>(), "every part must reach the compound");
+
+        let sc = compound_distance(&split, &probe).expect("parts vs probe");
+        eprintln!(
+            "  one concave mesh: hull {} part, gap {:+.4} m | decomposed {} parts, gap {:+.4} m",
+            hulled.n_parts(), hc.gap, reports[0].parts, sc.gap
+        );
+        assert!(!sc.intersecting && sc.gap > 0.0, "the mouth must be free once decomposed, got {:+.4}", sc.gap);
+
+        // ⛔ and an unsealed mesh is refused, not quietly hulled.
+        //
+        // ⚠ A standalone box, not the bracket: dropping the bracket's last two triangles removes a
+        // face of a WALL where it is buried inside the slab, and an exterior flood fill cannot reach
+        // an internal hole — so that mesh voxelises correctly and does not leak. A hole only matters
+        // when it is exposed.
+        let mut holed = primitive_mesh(&LinkGeometry::Box { size: v(0.5, 0.5, 0.5) }, 24).expect("meshes");
+        let n = holed.tris.len();
+        holed.tris.truncate(n - 2);
+        assert!(
+            CompoundHull::from_meshes_decomposed(&[holed], &opts).is_none(),
+            "an unsealed mesh must be refused; falling back to the hull would hide the loss"
+        );
     }
 }
