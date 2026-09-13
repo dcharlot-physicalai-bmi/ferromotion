@@ -776,4 +776,121 @@ mod tests {
         assert_eq!(unmapped.contacts.len(), 1, "the pair is still found");
         assert!(unmapped.contacts[0].j.amax() == 0.0, "an unmapped part cannot move, so its Jacobian is zero");
     }
+
+    /// ⭐⭐ **The chain, end to end: mesh → voxels → decomposition → contacts → solver.**
+    ///
+    /// [`convex_decompose`](crate::convex_decompose) says it closes the chain to this module. That was
+    /// an unverified claim until this test, and the way to verify it is not to check that a contact
+    /// exists — it is to put a body somewhere the two representations DISAGREE and ask the solver what
+    /// happens.
+    ///
+    /// The place is the mouth of the U-bracket. A body resting on the channel floor is supported from
+    /// BELOW by the slab. The bracket's convex hull has no channel: the same body is 0.4 m inside it,
+    /// and the nearest escape is sideways through a `y` face, so the hull's answer is a shove in `y`
+    /// while the body keeps falling at full gravity.
+    ///
+    /// ⛔ The hull arm is the control and it is load-bearing. Without it, "the body rests" is also what
+    /// you would see from a decomposition that had simply filled the channel with a part — the body
+    /// would rest on a lie. The control proves the mouth is somewhere the hull is WRONG.
+    #[test]
+    fn a_body_rests_on_the_floor_of_a_decomposed_channel_where_the_hull_shoves_it_sideways() {
+        use crate::acd::{convex_decompose, AcdOptions};
+        use crate::link_geometry::{primitive_mesh, LinkGeometry};
+        use crate::voxel::SolidVoxels;
+
+        let mut mesh = crate::mesh3::TriMesh3 { verts: Vec::new(), tris: Vec::new() };
+        for (g, at) in [
+            (LinkGeometry::Box { size: Vector3::new(1.2, 0.8, 0.4) }, Vector3::zeros()),
+            (LinkGeometry::Box { size: Vector3::new(0.2, 0.8, 1.0) }, Vector3::new(-0.5, 0.0, 0.5)),
+            (LinkGeometry::Box { size: Vector3::new(0.2, 0.8, 1.0) }, Vector3::new(0.5, 0.0, 0.5)),
+        ] {
+            let m = primitive_mesh(&g, 24).expect("a primitive meshes");
+            let base = mesh.verts.len();
+            mesh.verts.extend(m.verts.iter().map(|q| q + at));
+            mesh.tris.extend(m.tris.iter().map(|t| [t[0] + base, t[1] + base, t[2] + base]));
+        }
+        let opts = AcdOptions::default();
+        let (parts, rep) = convex_decompose(&mesh, &opts).expect("the bracket decomposes");
+        let hull = CompoundHull::from_mesh_hull(&mesh).expect("the bracket hulls");
+
+        // ⛔ The floor is read from the voxelisation, not assumed to be the slab's nominal 0.2 m. The
+        // parts are hulls over CELL CORNERS, so the channel floor is a cell boundary and the fixture
+        // must sit on the one the decomposition actually produced, or the penetration is not `pen`.
+        let v = SolidVoxels::from_mesh(&mesh, opts.resolution).expect("voxelises");
+        let ci = |a: usize, x: f64| ((x - v.origin[a]) / v.cell).round() as usize;
+        let (i, j) = (ci(0, 0.0), ci(1, 0.0));
+        let top = (0..v.dims[2]).filter(|&k| v.get(i, j, k)).max().expect("a column under the channel");
+        let floor = v.origin.z + (top as f64 + 0.5) * v.cell;
+
+        let pen = 1e-3;
+        let apex = Vector3::new(0.0, 0.0, floor - pen);
+        let body = spike(apex, Vector3::z());
+        let q = [apex.x, apex.y, apex.z];
+
+        let (robot, inertia) = slider();
+        let stab = PgsStabilization { slop: 0.0, erp: 0.0, max_correction: 0.0 };
+        let mm = mass_matrix(&robot, &inertia, &q);
+        let qdd = forward_dynamics(&robot, &inertia, &q, &[0.0; 3], &[0.0; 3], Vector3::new(0.0, 0.0, -G));
+        let v_free = DVector::from_iterator(3, qdd.iter().map(|a| a * DT));
+        assert!((v_free[2] + G * DT).abs() < 1e-12, "free fall for one step is −g·dt on z");
+
+        let step = |against: &CompoundHull| {
+            let set = compound_pgs_contacts(
+                &body,
+                &SerialLinkParts { robot: &robot, q: &q, frames: &[3] },
+                against,
+                &StaticBody { nv: 3 },
+                1e-4,
+                0.6,
+            )
+            .expect("the bodies agree on nv");
+            let res = solve_contacts_pgs_with(&mm, &v_free, &set.contacts, DT, 60, None, stab);
+            (set, Vector3::new(res.v_next[0], res.v_next[1], res.v_next[2]))
+        };
+
+        let (dset, dv) = step(&parts);
+        let (hset, hv) = step(&hull);
+        eprintln!(
+            "  floor at z = {floor:+.4}, body apex {:+.4}\n  \
+             decomposed ({} parts): {} contact(s), deepest gap {:+.5} m, v_next {:?}\n  \
+             single hull  (1 part): {} contact(s), deepest gap {:+.5} m, v_next {:?}",
+            apex.z, rep.parts, dset.contacts.len(),
+            dset.geometry.iter().map(|g| g.gap).fold(f64::INFINITY, f64::min), dv,
+            hset.contacts.len(),
+            hset.geometry.iter().map(|g| g.gap).fold(f64::INFINITY, f64::min), hv,
+        );
+
+        // the control first: the hull has the body deep inside and pushes it out of a SIDE face
+        let hg = hset.geometry.iter().map(|g| g.gap).fold(f64::INFINITY, f64::min);
+        assert!(hg < -0.1, "the control needs the body deep inside the hull, got a gap of {hg:+.4} m");
+        assert!(
+            hset.geometry.iter().all(|g| g.normal.z.abs() < 0.5),
+            "the control needs the hull's escape to be SIDEWAYS, got a normal with z = {:?}",
+            hset.geometry.iter().map(|g| g.normal.z).collect::<Vec<_>>()
+        );
+        assert!(
+            (hv.z + G * DT).abs() < 1e-9,
+            "under the hull the body is unsupported and must still fall at −g·dt = {:.6}, got {:.6}",
+            -G * DT,
+            hv.z
+        );
+
+        // and the decomposition: supported from below, at the penetration the fixture was built for
+        assert!(!dset.contacts.is_empty(), "the decomposition must produce a contact at the floor");
+        let floor_row = dset
+            .geometry
+            .iter()
+            .find(|g| g.normal.z < -0.99)
+            .expect("one contact normal must point from the body DOWN into the slab");
+        assert!(
+            (floor_row.gap + pen).abs() < 1e-6,
+            "the fixture penetrates the floor by {pen}, got {:+.6}",
+            floor_row.gap
+        );
+        assert!(
+            dv.z.abs() < 1e-9,
+            "resting on the slab, the vertical velocity after one step must be 0, got {:.9}",
+            dv.z
+        );
+    }
 }
