@@ -271,6 +271,7 @@ mod mesh3;
 mod compound;
 mod compound_pgs;
 pub mod voxel;
+pub mod acd;
 mod link_geometry;
 mod mesh_io;
 mod modal;

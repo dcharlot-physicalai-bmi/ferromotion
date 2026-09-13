@@ -57,6 +57,12 @@
 //! is the work, and it is a module of its own with a volumetric representation at its centre — not a
 //! function here.
 //!
+//! ✅ **That module now exists: [`convex_decompose`](crate::acd::convex_decompose).** It voxelises the
+//! interior with [`SolidVoxels`](crate::voxel::SolidVoxels) and splits cells, not triangles. On the
+//! same bracket with the same probe it returns the three boxes the bracket is made of — `1.000x` its
+//! own volume where a single hull is `1.53x`, and the probe `0.314 m` CLEAR where the hull has it
+//! `0.380 m` inside. Prefer it to [`CompoundHull::from_mesh_hull`] for any concave mesh.
+//!
 //! Nothing was shipped from either attempt. The one piece worth keeping is
 //! [`try_convex_hull_3d`](crate::try_convex_hull_3d), which came out of needing a hull that refuses a
 //! degenerate part instead of panicking.
