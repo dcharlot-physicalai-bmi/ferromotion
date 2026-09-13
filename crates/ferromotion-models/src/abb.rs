@@ -456,4 +456,45 @@ mod tests {
     fn yumi_read_as_modified_dh_is_a_different_arm() {
         swap_moves("YuMi", &yumi_rows(), DhConvention::Standard, Iso::identity(), 0.6328);
     }
+
+    /// **ABB's 559 mm for the YuMi is a bound on this table, not a millimetre check of it.**
+    ///
+    /// The IRB 140, 120 and 1600 reproduce ABB's published reach to microns, so the maker is capable of
+    /// exactness and this crate normally demands it. The YuMi does not get that treatment, for three
+    /// reasons that are all about the DOCUMENT rather than the table:
+    ///
+    /// 1. ⛔ **ABB's specification prints no arm link lengths.** Searched for the source paper's
+    ///    Fig. 1(b) dimensions in 3HAC052982-001 Rev V — `251.5`, `166` and `40.5` mm appear nowhere in
+    ///    it (read 2026-09-13). The only geometry it publishes is the 0.559 m reach and a working-range
+    ///    drawing whose extents are measured from the TORSO.
+    /// 2. ⚠ **It states no reference points for that 0.559 m.** For the IRB 140 the same maker gives the
+    ///    axis-to-axis breakdown that fixes them; here it gives a single number.
+    /// 3. ⚠ **This model is ONE ARM, based at the paper's arm-base frame.** YuMi's arms mount on an
+    ///    angled dual-arm torso, so ABB's origin need not be this one. The paper's mapping onto ABB's
+    ///    joint numbering is provisional for the same reason, and the limits ride on that mapping.
+    ///
+    /// So this is a gross-error bound in the spirit of the Universal Robots and Gen3 lite ones, set at
+    /// 10% against a measured 5.84%. ⭐ It is still worth having: it is the difference between "a figure
+    /// exists, it is 0.559 m, and the table sits 5.84% above it" and "nothing was found" — two states
+    /// this crate deliberately keeps apart.
+    ///
+    /// ⚠ **And here is exactly what it catches, measured rather than assumed.** Lengthening the upper
+    /// arm `e` and re-running: `+10 mm` survives, `+20 mm` survives, `+25 mm` fires. The published
+    /// figure sits 32.7 mm below the envelope, so the bound has about 23 mm of headroom and that is the
+    /// error it can see. It is a check against a transposed digit or a wrong unit, **not** against a
+    /// millimetre transcription slip — no bound built on this document could be.
+    #[ignore = "envelope search: seconds per arm in debug; release --ignored lane"]
+    #[test]
+    fn the_yumi_wrist_envelope_is_within_a_gross_error_of_abbs_published_559_mm() {
+        let r = yumi_single_arm();
+        let w = crate::envelope::wrist(&r);
+        let f = crate::envelope::flange(&r);
+        let rel = (w - 0.559) / 0.559;
+        eprintln!("  YuMi: wrist {w:.6} m, flange {f:.6} m, against ABB's published 0.559 m ({:+.2}% at the wrist)", rel * 100.0);
+        assert!(w > 0.3, "the envelope is a real length, got {w}");
+        // ⛔ ABB quotes reach to the WRIST — the convention this crate records for ABB and DENSO, and
+        // the reason the flange figure is printed but not asserted.
+        assert!(w > 0.559, "the wrist must reach at least the published 0.559 m, got {w:.6}");
+        assert!(rel < 0.10, "wrist envelope {w:.6} m is {:.2}% past the published 0.559 m", rel * 100.0);
+    }
 }

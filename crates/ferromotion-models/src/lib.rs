@@ -225,10 +225,10 @@ mod geometry_oracles {
         //   folds the last DH row into `ee_offset`. Where an arm carries a tool the flange is further
         //   out, and which one a manufacturer's "reach" means has to be checked per maker: ABB quotes
         //   the wrist, and the Panda's figure lines up with the flange.
-        ("yumi_single_arm", TableOnly), // wrist 0.591656 / flange 0.609656 m
+        ("yumi_single_arm", NominalOnly("ABB Product specification IRB 14000 (YuMi) 3HAC052982-001 Rev V §1.1.2 publishes a reach of 0.559 m (read 2026-09-13); the WRIST envelope is 0.591656 m, +5.84%. ⚠ Bounded, not asserted to a millimetre — ABB's document states no reference points for that figure, prints no arm link lengths at all, and this model's base frame is the source paper's arm-base frame, which need not be where ABB measures from on an angled dual-arm torso")),
         // --- classic.rs ---
-        ("puma560", TableOnly), // wrist 0.873129 / flange 0.929379 m
-        ("puma560_modified", TableOnly), // wrist 0.873129 m, identical to the standard-DH table as it must be
+        ("puma560", TableOnly), // wrist 0.873129 / flange 0.929379 m. ⛔ CIRCULARITY, not an unchecked absence: the widely quoted 864 mm reach is a₂ + d₄ = 431.8 + 431.8 = 863.6 mm — two links of exactly 17.000 in — so it restates this table's own lengths and cannot audit them. This review located no Unimation working-envelope drawing for the 560 (archive.org holds the 700 Series manual, not the 560; searched 2026-09-13).
+        ("puma560_modified", TableOnly), // wrist 0.873129 m, identical to the standard-DH table as it must be; same circularity as `puma560` above
         ("stanford", Published("Paul, 'Robot Manipulators' Table 2.1 p.9 — a source-stated worked example, not a pose recomputed from this table")),
         ("two_link_planar", TableOnly), // SYNTHETIC: a textbook construct with chosen link lengths. Reach is L1+L2 BY CONSTRUCTION, so a reach check would be circular. Permanently TableOnly, and correctly so.
         ("three_link_planar", TableOnly), // SYNTHETIC, as above
@@ -247,7 +247,7 @@ mod geometry_oracles {
         ("xarm5", TableOnly), // wrist 0.716645 / flange 0.763873 m. ⛔ VERIFIED ABSENCE, not an unchecked one: UFACTORY's own technical specification (docs.xarm.ufactory.cc, read 2026-09-10) publishes a CARTESIAN RANGE of ±700 mm and no reach or working-radius figure. The commonly quoted "700 mm reach" is that operating box, not an envelope — and the computed wrist envelope EXCEEDS it, as a software-limited box should be exceeded by the physical arm.
         ("xarm6", TableOnly), // wrist 0.716645 / flange 0.763873 m, identical to the xArm 5; same verified absence
         ("xarm7", TableOnly), // wrist 0.724825 / flange 0.772053 m; same verified absence
-        ("lite6", TableOnly), // wrist 0.443661 / flange 0.505161 m
+        ("lite6", TableOnly), // wrist 0.443661 / flange 0.505161 m. ⛔ VERIFIED ABSENCE, the same one as the xArms: UFACTORY's Lite6 Hardware Manual V2.6.0 §8 Technical Specifications (read 2026-09-13) lists a CARTESIAN RANGE of X ±440 mm, Y ±440 mm, Z −165..683.5 mm and has NO reach or working-radius row. The commonly quoted "440 mm reach" is that operating box; the computed wrist envelope exceeds it by 3.7 mm, as a software-limited box should be exceeded by the physical arm.
         ("fanuc_lr_mate_200id", Published("LR Mate 200iD data sheet reach 717 mm, asserted to a millimetre")),
         ("denso_vs6556", Published("DENSO WAVE VS-6556 specification: maximum arm reach 653 mm; the WRIST envelope is 0.653423 m, 0.42 mm over")),
         // --- rethink.rs ---
@@ -335,6 +335,14 @@ mod geometry_oracles {
             published.len() >= 15,
             "external geometry checks must not regress below the 15 recorded on 2026-09-10, got {}",
             published.len()
+        );
+        // ⭐ A second ratchet, on the weaker tier. Without it an EXACT entry could be quietly demoted
+        // to NOMINAL and then dropped, and the floor above would never notice — it counts only the
+        // strong tier. Set to today's count, so it fires on the first regression rather than on the
+        // tenth.
+        assert!(
+            nominal >= 10,
+            "nominal geometry checks must not regress below the 10 recorded on 2026-09-13, got {nominal}"
         );
     }
 }
