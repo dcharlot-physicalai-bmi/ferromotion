@@ -26,18 +26,20 @@
 //!
 //! # What it measured on 2026-09-14 (MuJoCo 3.13.0, Menagerie at 2026-09-04, 204 compilable models)
 //!
-//! * kinematics: **203 of 204 models exact** — 4,056 bodies, 3,848 joints, 961 sites, worst error 1.7e-15 m.
-//!   The one refusal is `<attach>` (procedural model composition).
-//! * inertia: 2,873 of 3,267 jointed bodies with a stated `<inertial>` agree to 1e-9 relative; **every** body
-//!   outside that tolerance (worst 1.4e-6) states a `fullinertia`, which MuJoCo eigendecomposes into a principal
-//!   frame with an iterative solver — the difference is that solver's precision, not this loader's. 500 bodies
-//!   state no `<inertial>` and MuJoCo infers theirs from geoms; this loader does not yet, which is what blocks
-//!   the dynamics comparison on 37 models.
-//! * dynamics, XML inertials: 61 of 69 fixed-base models within 1e-8 relative on `M`, bias and `qacc`; the
-//!   other 8 are the Franka family, at 1e-8…1.4e-7, downstream of the `fullinertia` difference above. The
-//!   hinge/slide block of `M` matched on all 95 ball/free-jointed models.
-//! * dynamics, **with MuJoCo's own processed inertials substituted: 164 of 164 models, worst relative
-//!   error 2.9e-15 on `M`, 1.6e-15 on the bias, 5.2e-14 on `qacc`.** The tree ABA, RNEA and CRBA here are the
+//! * kinematics: **201 of 204 models exact** — 3,979 bodies, 3,804 joints, 959 sites, worst error 1.7e-15 m.
+//!   The three refusals: `<attach>` (procedural composition) and one OBJ with a 215-vertex face, whose
+//!   ear-clipping triangulation is not reproduced (two models share it).
+//! * inertia, stated: 2,873 of 3,267 jointed bodies with an `<inertial>` agree to 1e-9 relative; **every** body
+//!   outside that tolerance (worst 1.4e-6) states a `fullinertia`, which MuJoCo eigendecomposes with its
+//!   Jacobi solver — that solver's precision, not this loader's.
+//! * inertia, inferred from geoms by MuJoCo's own rules (density × volume, `legacy` mesh volumes, mesh fitting,
+//!   its Jacobi solver ported): **257 of 259 jointed bodies within 1e-5 relative**, worst 2.7e-5 (a fruit-fly
+//!   abdomen segment at 1e-13 kg·m²).
+//! * dynamics, XML inertials: 84 of 92 fixed-base models within 1e-8 relative on `M`, bias and `qacc`; the
+//!   other 8 are the Franka family at 1e-8…1.4e-7, downstream of the `fullinertia` difference above. The
+//!   hinge/slide block of `M` matched on 106 of 109 ball/free-jointed models, the other three at ≤1.3e-7.
+//! * dynamics, **with MuJoCo's own processed inertials substituted: 201 of 201 models, worst relative
+//!   error 2.9e-15 on `M`, 8.9e-15 on the bias, 1.5e-13 on `qacc`.** The tree ABA, RNEA and CRBA here are the
 //!   same algorithms MuJoCo runs, to round-off, on every Menagerie model MuJoCo compiles.
 //!
 //! Each oracle file reads: `model <rel> …`, `body <name> <parent> <mass>`, `joint <name> <type> <body>
@@ -53,6 +55,7 @@ use std::path::Path;
 const KIN_TOL: f64 = 1e-9;
 const INERTIA_TOL: f64 = 1e-9;
 const DYN_TOL: f64 = 1e-8;
+const INFERRED_TOL: f64 = 1e-5;
 
 struct Oracle {
     rel: String,
@@ -139,8 +142,10 @@ fn quat_dist(p: &nalgebra::Isometry3<f64>, x: &[f64]) -> f64 {
 
 struct Report {
     kin: Result<(f64, f64), String>,
-    /// bodies compared, bodies exact, worst relative error
+    /// stated <inertial>: bodies compared, bodies exact, worst relative error, its body
     inertia: (usize, usize, f64, String),
+    /// inferred from geoms: the same four, at the looser tolerance MuJoCo's eigen-solver leaves
+    inferred: (usize, usize, f64, String),
     /// `Err` = skipped with reason; `Ok((what, worst_m, worst_bias, worst_qacc))`
     dyn_: Result<(String, f64, f64, f64), String>,
     /// the same three, with MuJoCo's processed inertials substituted for the XML's
@@ -148,7 +153,7 @@ struct Report {
 }
 
 fn compare(t: &MjcfTree, o: &Oracle) -> Report {
-    let mut rep = Report { kin: Err(String::new()), inertia: (0, 0, 0.0, String::new()), dyn_: Err(String::new()), dyn_mj: None };
+    let mut rep = Report { kin: Err(String::new()), inertia: (0, 0, 0.0, String::new()), inferred: (0, 0, 0.0, String::new()), dyn_: Err(String::new()), dyn_mj: None };
     // --- addresses: MuJoCo's joints and ours must agree name-for-name
     let by_name: HashMap<&str, (usize, usize)> = o.joints.iter().map(|(n, _, qa, da)| (n.as_str(), (*qa, *da))).collect();
     let mut qadr = Vec::with_capacity(t.joints.len());
@@ -217,10 +222,11 @@ fn compare(t: &MjcfTree, o: &Oracle) -> Report {
     // --- inertia, per jointed body that states an <inertial> and carries no welded child
     let jointed: HashSet<&String> = t.tree.link_names.keys().collect();
     let welded_into: HashSet<usize> = t.body_frames.iter().filter(|(name, _)| !jointed.contains(name)).map(|(_, (idx, _))| *idx).collect();
-    let no_inertial: HashSet<&String> = t.no_inertial.iter().collect();
+    let inferred: HashSet<&String> = t.inferred_from_geoms.iter().collect();
     let (mut compared, mut exact, mut worst_rel, mut worst_name) = (0usize, 0usize, 0.0f64, String::new());
+    let (mut inf_compared, mut inf_close, mut inf_worst, mut inf_worst_name) = (0usize, 0usize, 0.0f64, String::new());
     for (name, idx) in &t.tree.link_names {
-        if no_inertial.contains(name) || welded_into.contains(idx) {
+        if welded_into.contains(idx) {
             continue;
         }
         let Some(mi) = o.inertials.get(name) else { continue };
@@ -235,6 +241,18 @@ fn compare(t: &MjcfTree, o: &Oracle) -> Report {
         let e_com = (ours.com - com.coords).norm() / (com.coords.norm() + 1e-3);
         let e_ten = (ours.inertia - tensor).norm() / (tensor.norm() + 1e-12);
         let e = e_mass.max(e_com).max(e_ten);
+        if inferred.contains(name) {
+            // MuJoCo's mesh inertia goes through its iterative eigen-solver twice; 1e-5 is that solver's precision
+            inf_compared += 1;
+            if e <= INFERRED_TOL {
+                inf_close += 1;
+            }
+            if e > inf_worst {
+                inf_worst = e;
+                inf_worst_name = name.clone();
+            }
+            continue;
+        }
         compared += 1;
         if e <= INERTIA_TOL {
             exact += 1;
@@ -245,12 +263,13 @@ fn compare(t: &MjcfTree, o: &Oracle) -> Report {
         }
     }
     rep.inertia = (compared, exact, worst_rel, worst_name);
+    rep.inferred = (inf_compared, inf_close, inf_worst, inf_worst_name);
 
     // --- dynamics
     // a world-fixed body's mass never enters the equations of motion, so only bodies riding on a joint can block
-    let massive_uninferred: Vec<&String> = t.no_inertial.iter().filter(|b| t.body_frames.contains_key(*b) && o.bodies.iter().any(|(n, m)| n == *b && *m > 1e-12)).collect();
+    let massive_uninferred: Vec<&String> = t.no_inertial.iter().filter(|b| !inferred.contains(*b) && t.body_frames.contains_key(*b) && o.bodies.iter().any(|(n, m)| n == *b && *m > 1e-12)).collect();
     if !massive_uninferred.is_empty() {
-        rep.dyn_ = Err(format!("{} bodies need geom-inferred inertia (e.g. '{}')", massive_uninferred.len(), massive_uninferred[0]));
+        rep.dyn_ = Err(format!("{} bodies MuJoCo weighs and this loader could not (e.g. '{}')", massive_uninferred.len(), massive_uninferred[0]));
         return rep;
     }
     if rep.kin.is_err() {
@@ -392,6 +411,7 @@ fn main() {
     let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
     let (mut bodies_ok, mut sites_ok, mut joints_ok) = (0usize, 0usize, 0usize);
     let (mut in_cmp, mut in_exact, mut in_worst) = (0usize, 0usize, 0.0f64);
+    let (mut inf_cmp, mut inf_ok, mut inf_worst) = (0usize, 0usize, 0.0f64);
     let (mut dyn_full, mut dyn_full_ok, mut dyn_block, mut dyn_block_ok) = (0usize, 0usize, 0usize, 0usize);
     let mut dyn_skipped: BTreeMap<String, usize> = BTreeMap::new();
     let (mut worst_m, mut worst_b, mut worst_a) = (0.0f64, 0.0f64, 0.0f64);
@@ -403,7 +423,7 @@ fn main() {
         let model = root.join(&o.rel);
         let dir = model.parent().unwrap().to_path_buf();
         let xml = std::fs::read_to_string(&model).unwrap();
-        let resolve = |p: &str| std::fs::read_to_string(dir.join(p)).ok();
+        let resolve = |p: &str| std::fs::read(dir.join(p)).ok();
         let t = match tree_from_mjcf(&xml, &resolve) {
             Ok(t) => t,
             Err(e) => {
@@ -433,7 +453,14 @@ fn main() {
         in_cmp += c;
         in_exact += e;
         in_worst = in_worst.max(*w);
-        let inertia = if c == e { format!("inertia {e}/{c}") } else { format!("INERTIA {e}/{c} worst '{wn}' {w:.1e}") };
+        let (ic, ie, iw, iwn) = &r.inferred;
+        inf_cmp += ic;
+        inf_ok += ie;
+        inf_worst = inf_worst.max(*iw);
+        let mut inertia = if c == e { format!("inertia {e}/{c}") } else { format!("INERTIA {e}/{c} worst '{wn}' {w:.1e}") };
+        if *ic > 0 {
+            inertia += &if ic == ie { format!(" inferred {ie}/{ic} ({iw:.0e})") } else { format!(" INFERRED {ie}/{ic} worst '{iwn}' {iw:.1e}") };
+        }
         let dynamics = match &r.dyn_ {
             Ok((what, m, b, a)) => {
                 let ok = *m <= DYN_TOL && *b <= DYN_TOL && *a <= DYN_TOL;
@@ -471,7 +498,8 @@ fn main() {
     }
     println!();
     println!("kinematics: {} oracle models, {kin_ok} exact ({bodies_ok} bodies, {joints_ok} joints, {sites_ok} sites), {kin_bad} mismatched, {refused} refused", files.len());
-    println!("inertia:    {in_exact}/{in_cmp} jointed bodies with a stated <inertial> match MuJoCo (worst rel {in_worst:.1e}); {no_inertial_bodies} bodies state none");
+    println!("inertia:    {in_exact}/{in_cmp} jointed bodies with a stated <inertial> match MuJoCo to 1e-9 (worst rel {in_worst:.1e})");
+    println!("            {inf_ok}/{inf_cmp} jointed bodies inferred from geoms match MuJoCo to 1e-5 (worst rel {inf_worst:.1e}); {no_inertial_bodies} bodies state no <inertial>");
     println!("dynamics:   fixed-base M+bias+qacc {dyn_full_ok}/{dyn_full} models; hinge/slide M block on ball/free models {dyn_block_ok}/{dyn_block}; worst rel M {worst_m:.1e} bias {worst_b:.1e} qacc {worst_a:.1e}");
     println!("            with MuJoCo's own processed inertials substituted: {mj_ok}/{mj_n} models; worst rel M {mj_wm:.1e} bias {mj_wb:.1e} qacc {mj_wa:.1e}");
     if !dyn_skipped.is_empty() {
