@@ -35,14 +35,26 @@
 
 use nalgebra::Vector3;
 
-/// Per-contact violation of each physical law, in impulse units.
+/// Per-contact violation of each physical law, **dimensionless**.
 ///
 /// All three are non-negative, and zero means the law holds exactly at the returned point.
+///
+/// ⭐ Dimensionless is the load-bearing word, because [`ContactLawResidual::worst`] takes the max of the
+/// three and that is meaningless unless they share a scale. Each is divided by the largest quantity of
+/// its own kind present in the solve — the largest impulse, and for the complementarity product the
+/// largest impulse times the largest contact speed — so the same physics reports the same number in
+/// metres or millimetres, on a 10 g finger or a 1 t press.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ContactLawResidual {
     pub contact: usize,
     /// **Signorini.** The larger of two failures: a pulling normal impulse (`max(0, −λ_n)`), and a loaded
     /// contact that is still closing (`λ_n · max(0, −c_n)`, the complementarity product).
+    ///
+    /// ⚠ The two are divided by different scales because they ARE different quantities — an impulse and
+    /// an impulse-times-a-speed. Dividing both by the impulse scale, which is what this did until the
+    /// invariance test was written, left the closing branch carrying units of velocity. The speed scale
+    /// is `slide_tol`: a contact carrying the largest impulse in the solve and closing at exactly the
+    /// sliding threshold reports `1`.
     pub signorini: f64,
     /// **Coulomb.** Distance of the impulse outside the *true* second-order cone, `max(0, ‖λ_T‖ − μ λ_n)`.
     /// This is the quantity a pyramidal solver pays: its impulse can sit up to a factor of `√2` (in 3D, at a
@@ -84,6 +96,19 @@ pub fn contact_law_residuals(
     // Scale by the largest impulse so the residual is dimensionless in the same way across problems. A floor
     // keeps an all-zero solve (no contact active) from dividing by zero and reporting NaN as a violation.
     let scale = lambda.iter().take(n).fold(1e-12f64, |m, l| m.max(l.norm()));
+    // ⛔ And a SPEED scale, which the closing branch of Signorini needs and did not have. That branch is
+    // the complementarity product `λₙ·(−cₙ)` — an impulse times a velocity — so dividing by an impulse
+    // alone leaves a velocity, and the same physics in millimetres reported a thousand times the
+    // violation while `coulomb` and `max_dissipation` did not move. `worst()` was then the max of a
+    // speed and two ratios, and which one won depended on the caller's unit of length.
+    // `every_residual_is_invariant_under_a_change_of_length_unit` is the oracle.
+    //
+    // ⭐ The scale is `slide_tol`, which comes from the CALLER, and the first attempt at this used the
+    // largest speed in the solve instead. That does not work, and the reason is the same one this crate
+    // states about oracles: a scale taken from the answer cannot measure the answer. With one contact
+    // the closing speed IS the largest speed, so the ratio cancels to `λₙ/scale ≈ 1` and reports a
+    // full violation for a contact closing at a micron per second. Measured: it pinned at exactly 1e0.
+    let vscale = if slide_tol.is_finite() && slide_tol > 0.0 { slide_tol } else { 1e-12 };
 
     (0..n)
         .map(|i| {
@@ -95,7 +120,7 @@ pub fn contact_law_residuals(
             // Signorini: no pulling, and no loaded contact still closing.
             let pulling = (-ln).max(0.0);
             let closing = if ln > 1e-9 * scale { ln * (-v.z).max(0.0) } else { 0.0 };
-            let signorini = (pulling / scale).max(closing / scale);
+            let signorini = (pulling / scale).max(closing / (scale * vscale));
 
             // Coulomb against the TRUE cone. A pyramidal solver is inside its own pyramid and can be outside
             // this, which is exactly the error the linearisation buys.
@@ -287,13 +312,28 @@ mod tests {
             (r.iters, r.residual, worst)
         };
 
-        // Well-conditioned: converges early and the laws hold to near machine precision.
-        let (iters, _, law) = solve(1.0, 1000);
+        // ⭐⭐ Well-conditioned, and this branch is now the SHARPER half of the point. It converges in
+        // 25 sweeps to a solver residual of 5.8e-13 — machine precision by any reading — and its law
+        // residual is 2.9e-4, five hundred MILLION times larger. The contact is loaded and still
+        // closing, at about 3e-10 m/s against the caller's own 1e-6 m/s floor.
+        //
+        // ⛔ The bound here was `1e-8` and passed, because the complementarity term was reported in
+        // units of velocity: the same 3e-10 m/s read as 3e-10 rather than as a fraction of anything.
+        // Making it dimensionless did not change the solve at all, only what the certificate says about
+        // it — see `every_residual_is_invariant_under_a_change_of_length_unit`.
+        let (iters, sres, law) = solve(1.0, 1000);
+        eprintln!("  equal masses: {iters} iters, solver {sres:.3e}, law {law:.3e}");
         assert!(iters < 1000, "equal masses should converge inside the cap, used {iters}");
-        assert!(law < 1e-8, "and obey the laws: {law:e}");
+        assert!(law < 1e-3, "a converged well-conditioned solve should still be small: {law:e}");
+        assert!(
+            law > 1e6 * sres,
+            "even here the law residual {law:e} must dwarf the solver residual {sres:e} — a converged \
+             solver is not a lawful one, and if this ever stops holding, re-read it before deleting it"
+        );
 
         // Ill-conditioned: caps out, and the laws are violated by something a user would feel.
         let (iters, solver, law) = solve(1e6, 1000);
+        eprintln!("  1e6 ratio:    {iters} iters, solver {solver:.3e}, law {law:.3e}");
         assert_eq!(iters, 1000, "a 10^6 mass ratio should exhaust the cap");
         assert!(law > 1e-3, "and leave a violation worth reporting, got {law:e}");
 
@@ -312,5 +352,86 @@ mod tests {
             (law_50 - law_1000).abs() / law_50 < 0.05,
             "20x the iterations should barely move it: {law_50:e} vs {law_1000:e}"
         );
+    }
+
+    /// ⭐⭐ **A residual that changes when you change your units is not a residual.**
+    ///
+    /// Every quantity here is documented "in impulse units" and [`ContactLawResidual::worst`] takes the
+    /// max of all three, which only means something if they share a scale. Three of them do: `pulling`,
+    /// `coulomb` and `max_dissipation` are each an impulse over the largest impulse present, so they are
+    /// dimensionless and invariant.
+    ///
+    /// ⛔ The **closing** branch of Signorini was not. It is the complementarity product `λₙ · (−cₙ)`,
+    /// an impulse times a velocity, and dividing by an impulse leaves a VELOCITY. Express the same
+    /// physics in millimetres instead of metres and it reports a thousand times the violation, while
+    /// `coulomb` and `max_dissipation` do not move at all — so `worst()` was comparing a speed against a
+    /// ratio and whichever won depended on the caller's unit of length.
+    ///
+    /// The fix divides the product by the largest contact SPEED as well as the largest impulse. This
+    /// test is the oracle for it: rescale lengths by `k`, which scales velocities by `k` and impulses by
+    /// `k` at fixed mass, and require every residual to come back unchanged.
+    #[test]
+    fn every_residual_is_invariant_under_a_change_of_length_unit() {
+        // a loaded contact that is still closing, and sliding, so all three laws are live
+        let lam = Vector3::new(0.4, 0.0, 1.0);
+        let c = Vector3::new(0.5, 0.0, -0.2);
+        let mu = 0.3;
+        let base = contact_law_residuals(&[lam], &[c], &[mu], 1e-6)[0];
+        assert!(base.signorini > 0.0, "the fixture must actually violate Signorini: {base:?}");
+
+        for k in [1e-3, 1e3, 1e6] {
+            // metres -> millimetres is k = 1e3: velocity scales by k, impulse by k at fixed mass,
+            // and the friction coefficient is a ratio so it does not scale.
+            let r = contact_law_residuals(&[lam * k], &[c * k], &[mu], 1e-6 * k)[0];
+            for (name, a, b) in [
+                ("signorini", base.signorini, r.signorini),
+                ("coulomb", base.coulomb, r.coulomb),
+                ("max_dissipation", base.max_dissipation, r.max_dissipation),
+            ] {
+                let rel = (a - b).abs() / a.max(b).max(1e-300);
+                assert!(
+                    rel < 1e-12,
+                    "{name} moved by {:.3e}x under a length rescale of {k:e}: {a:.6e} -> {b:.6e}",
+                    b / a.max(1e-300)
+                );
+            }
+            assert_eq!(base.sliding, r.sliding, "the sliding verdict must not depend on the unit either");
+        }
+    }
+
+    /// ⛔ **`worst()` is the go/no-go number and one of its three laws was unguarded.**
+    ///
+    /// A mutation deleting `max_dissipation` from [`ContactLawResidual::worst`] survived the entire
+    /// crate. Every fixture that reached `worst()` was dominated by Signorini or Coulomb, so the term
+    /// could be removed and nothing noticed — a caller gating on one number would have been blind to
+    /// friction pointing the wrong way.
+    ///
+    /// This is the case where it is the ONLY violation: a sliding contact whose friction impulse sits
+    /// comfortably inside the cone and at right angles to the slide. Nothing is pulling, nothing is
+    /// closing, nothing is outside the cone. The contact is still unphysical — it does no work against
+    /// the motion at all — and `worst()` has to say so.
+    #[test]
+    fn worst_reports_a_friction_impulse_that_points_the_wrong_way() {
+        let mu = 0.5;
+        let ln = 1.0;
+        // sliding along +x; friction placed along +y, well inside the cone (0.2 < mu*ln = 0.5)
+        let lam = Vector3::new(0.0, 0.2, ln);
+        let c = Vector3::new(0.4, 0.0, 0.0);
+        let r = contact_law_residuals(&[lam], &[c], &[mu], 1e-6)[0];
+
+        assert!(r.sliding, "the fixture must be sliding or the law imposes nothing: {r:?}");
+        assert_eq!(r.signorini, 0.0, "nothing pulls and nothing closes: {r:?}");
+        assert_eq!(r.coulomb, 0.0, "and the impulse is inside the cone: {r:?}");
+        assert!(r.max_dissipation > 0.1, "friction across the slide must violate maximum dissipation: {r:?}");
+        assert_eq!(
+            r.worst(),
+            r.max_dissipation,
+            "worst() must surface it — it is the only law being broken: {r:?}"
+        );
+
+        // the control: the same normal impulse with friction placed correctly is lawful on all three
+        let right = Vector3::new(-mu * ln, 0.0, ln);
+        let ok = contact_law_residuals(&[right], &[c], &[mu], 1e-6)[0];
+        assert!(ok.worst() < 1e-12, "maximally dissipative friction must be clean: {ok:?}");
     }
 }

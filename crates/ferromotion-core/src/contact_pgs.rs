@@ -88,6 +88,30 @@ pub struct PgsResult {
     /// Largest impulse change in the final sweep: how converged the answer is.
     pub residual: f64,
     /// Worst violation of the cone and complementarity conditions at the returned point.
+    ///
+    /// ⛔ **Read this before gating on it. It is not a law residual, for two separate reasons.**
+    ///
+    /// *It mixes units.* Three terms go into the max: no-pulling and the friction cone are each an
+    /// impulse divided by the largest impulse, so they are ratios; the complementarity term is
+    /// `max(0, −uₙ)` in **metres per second**. A real violation therefore enters the max already scaled
+    /// by the caller's unit of length. Measured on a four-corner box stopped at five sweeps, a contact
+    /// loaded and still closing at **2.15 times** the `slide_tol` a caller would call negligible shows
+    /// up here as `3.4e-6` — a factor of 625,000.
+    ///
+    /// *It checks three laws, not four.* **Maximum dissipation** — that a sliding contact's friction
+    /// must be the uniquely maximally-dissipative `−μ λₙ ĉ_T` — is never tested. An impulse inside the
+    /// cone pointing the wrong way along the slide scores zero here.
+    ///
+    /// ⚠ And the complementarity term is measured against the gap-STABILISED normal velocity, so with
+    /// [`PgsStabilization`] active a solve can pass it while the true velocity is still closing. That
+    /// is by design — the bias is what the solver steers toward — but it is one more reason this and a
+    /// law residual are different quantities.
+    ///
+    /// ⭐ No reference speed is invented here to fix the first problem, because this solver has no
+    /// principled one to offer. [`crate::contact_law_residuals`] takes the caller's `slide_tol` and is
+    /// dimensionless in all four laws; use it when the question is whether the ANSWER is physical
+    /// rather than whether this solver is satisfied with it. See
+    /// `the_law_pgs_does_not_check_is_the_one_that_dominates_before_it_converges`.
     pub violation: f64,
     pub iters: usize,
 }
@@ -316,5 +340,116 @@ mod tests {
         assert!(r.v_next.iter().all(|x| x.is_finite()), "diverged");
         assert!(r.v_next.norm() <= vf.norm() + 1e-9, "gained speed from redundant contacts");
         assert!(r.violation < 1e-6, "violation {}", r.violation);
+    }
+
+    /// ⭐⭐ **`violation` says 3.4e-6 about a solve that is violating complementarity by 2.15x the
+    /// caller's own noise floor.**
+    ///
+    /// [`PgsResult::violation`] maxes three terms, and **two are dimensionless while the third is a raw
+    /// velocity**: no-pulling and the cone are each an impulse over the largest impulse, but the
+    /// complementarity term is `max(0, −uₙ)` in metres per second. A genuine violation therefore enters
+    /// the max already divided by whatever the caller's unit of length happens to be, and reads as
+    /// negligible next to two ratios.
+    ///
+    /// ⛔ It also never checks the fourth law at all — **maximum dissipation**, that a sliding contact's
+    /// friction must be the uniquely maximally-dissipative `−μ λₙ ĉ_T`.
+    ///
+    /// Measured on a 6-dof box on four corners, μ = 0.8, sliding at 2 m/s:
+    ///
+    /// | sweeps | `residual` | `violation` | Signorini | Coulomb | max dissipation |
+    /// |---|---|---|---|---|---|
+    /// | 200 | 9.7e-13 | **3.0e-13** | 4.5e-8 | 0 | 4.6e-14 |
+    /// | 5 | 2.0e-4 | **3.4e-6** | **2.15** | 0 | 2.3e-5 |
+    ///
+    /// At five sweeps the contact carries the largest impulse in the solve and is still closing at
+    /// 2.15 times the `slide_tol` the caller declared negligible. `violation` prints `3.4e-6` for that —
+    /// **a factor of 625,000** — because 2.15e-6 m/s is what the same fact looks like before it is
+    /// divided by a reference speed.
+    ///
+    /// ⭐ The 200-sweep row is the control, and it is what stops this being alarmism: converged, PGS is
+    /// lawful, and its own number agrees. The gap is a statement about **stopping early**, not about the
+    /// method.
+    ///
+    /// ⛔ The fixture had to be built to make PGS work for its answer. The first version used one contact
+    /// with an identity mass matrix and every number came out exactly `0` — Gauss-Seidel solves a
+    /// decoupled contact in a single sweep, so a lone contact cannot exhibit the coupling error PGS
+    /// makes. It takes several contacts sharing one body's inertia.
+    #[test]
+    fn the_law_pgs_does_not_check_is_the_one_that_dominates_before_it_converges() {
+        use crate::contact_law_residuals;
+        let (mass, h) = (4.0_f64, 0.5_f64);
+        let i_box = mass * (8.0 * h * h) / 12.0;
+        let mut m = DMatrix::<f64>::zeros(6, 6);
+        for k in 0..3 {
+            m[(k, k)] = mass;
+            m[(3 + k, 3 + k)] = i_box;
+        }
+        let corners = [
+            Vector3::new(h, h, -h),
+            Vector3::new(-h, h, -h),
+            Vector3::new(-h, -h, -h),
+            Vector3::new(h, -h, -h),
+        ];
+        let mu = 0.8;
+        let cs: Vec<PgsContact> = corners
+            .iter()
+            .map(|p| {
+                let mut j = DMatrix::<f64>::zeros(3, 6);
+                for k in 0..3 {
+                    j[(k, k)] = 1.0;
+                }
+                // the corner's linear velocity is v + omega x p = v - skew(p) omega
+                let sk = [[0.0, -p.z, p.y], [p.z, 0.0, -p.x], [-p.y, p.x, 0.0]];
+                for r in 0..3 {
+                    for c in 0..3 {
+                        j[(r, 3 + c)] = -sk[r][c];
+                    }
+                }
+                PgsContact { j, phi: 0.0, mu }
+            })
+            .collect();
+        let dt = 1e-3;
+        let v_free = DVector::from_vec(vec![2.0, 0.0, -9.81 * dt, 0.0, 0.0, 0.0]);
+        let mus = vec![mu; cs.len()];
+
+        let measure = |iters: usize| {
+            let r = solve_contacts_pgs(&m, &v_free, &cs, dt, iters, None);
+            let cv: Vec<Vector3<f64>> = cs
+                .iter()
+                .map(|c| {
+                    let u = &c.j * &r.v_next;
+                    Vector3::new(u[0], u[1], u[2])
+                })
+                .collect();
+            let laws = contact_law_residuals(&r.lambda, &cv, &mus, 1e-6);
+            let worst = laws.iter().fold((0.0f64, 0.0f64, 0.0f64), |a, l| {
+                (a.0.max(l.signorini), a.1.max(l.coulomb), a.2.max(l.max_dissipation))
+            });
+            (r.residual, r.violation, worst)
+        };
+
+        let (_, v200, (s200, c200, d200)) = measure(200);
+        let (r5, v5, (s5, c5, d5)) = measure(5);
+        eprintln!("  200 sweeps: violation {v200:.2e} | sig {s200:.2e} coul {c200:.2e} maxdiss {d200:.2e}");
+        eprintln!("    5 sweeps: violation {v5:.2e} (resid {r5:.2e}) | sig {s5:.2e} coul {c5:.2e} maxdiss {d5:.2e}");
+
+        // the control: converged, PGS obeys all four laws, so the gap below is about STOPPING EARLY
+        assert!(
+            s200 < 1e-6 && c200 < 1e-9 && d200 < 1e-9,
+            "converged, PGS must be lawful: sig {s200:e} coul {c200:e} maxdiss {d200:e}"
+        );
+        assert!(v200 < 1e-9, "and its own violation must agree there: {v200:e}");
+
+        // ⛔ the finding. Stopped early, the contact is loaded and closing at more than the caller's own
+        // negligible speed, and `violation` reports a number five orders smaller for the same fact.
+        assert!(s5 > 1.0, "five sweeps should leave a complementarity violation above slide_tol, got {s5:e}");
+        assert!(
+            s5 > 1e4 * v5,
+            "the dimensionless Signorini residual {s5:e} must dwarf the reported violation {v5:e} — if \
+             it stops doing so, `violation` has been made dimensionless and this test should be re-read"
+        );
+        // and the fourth law, which `violation` does not check at all, is also live
+        assert!(d5 > 1e-6, "five sweeps should leave a real maximum-dissipation error, got {d5:e}");
+        assert!(c5 < 1e-12, "PGS projects on the TRUE cone, so Coulomb stays clean even early: {c5:e}");
     }
 }
