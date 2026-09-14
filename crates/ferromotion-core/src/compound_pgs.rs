@@ -893,4 +893,138 @@ mod tests {
             dv.z
         );
     }
+
+    /// ⭐⭐ **Is the answer this chain produces PHYSICAL?** Nothing asked until now.
+    ///
+    /// `a_body_rests_on_the_floor_of_a_decomposed_channel_where_the_hull_shoves_it_sideways` shows the
+    /// chain puts the body in the right place. That is a different question from whether the impulses it
+    /// got there with obey Signorini, Coulomb and maximum dissipation — see
+    /// [`crate::contact_law_residuals`], and the measurement on [`crate::PgsResult::violation`] showing
+    /// a solver's own number can be five orders out from the law.
+    ///
+    /// The fixture is a block wedged in the U-bracket's channel, touching the slab below and a wall
+    /// beside it. That is **two simultaneous contacts, on two different parts of the decomposition, with
+    /// perpendicular normals** — the case the whole compound path exists for, and one a single hull
+    /// cannot produce at all because it has no channel to wedge anything into. A tangential drive along
+    /// `y` makes both contacts slide, so maximum dissipation binds rather than being vacuously zero.
+    #[test]
+    fn the_decomposed_collider_feeds_the_solver_a_physically_lawful_answer() {
+        use crate::acd::{convex_decompose, AcdOptions};
+        use crate::contact_law_residuals;
+        use crate::link_geometry::{primitive_mesh, LinkGeometry};
+        use crate::voxel::SolidVoxels;
+
+        let mut mesh = crate::mesh3::TriMesh3 { verts: Vec::new(), tris: Vec::new() };
+        for (g, at) in [
+            (LinkGeometry::Box { size: Vector3::new(1.2, 0.8, 0.4) }, Vector3::zeros()),
+            (LinkGeometry::Box { size: Vector3::new(0.2, 0.8, 1.0) }, Vector3::new(-0.5, 0.0, 0.5)),
+            (LinkGeometry::Box { size: Vector3::new(0.2, 0.8, 1.0) }, Vector3::new(0.5, 0.0, 0.5)),
+        ] {
+            let m = primitive_mesh(&g, 24).expect("a primitive meshes");
+            let base = mesh.verts.len();
+            mesh.verts.extend(m.verts.iter().map(|q| q + at));
+            mesh.tris.extend(m.tris.iter().map(|t| [t[0] + base, t[1] + base, t[2] + base]));
+        }
+        let opts = AcdOptions::default();
+        let (bracket, rep) = convex_decompose(&mesh, &opts).expect("decomposes");
+
+        // ⛔ The channel's floor AND its left wall's inner face, both read from the voxelisation rather
+        // than assumed to be the nominal 0.2 and −0.4: the parts are hulls over CELL CORNERS, so both
+        // surfaces are cell boundaries.
+        //
+        // ⚠ The first version of this fixture laid a plate across the two WALL TOPS. It produced two
+        // contacts and every residual came out exactly `0` — because both normals are `+z` and this body
+        // is a three-prismatic slider, so the two Jacobians are identical and the pair is one constraint
+        // wearing two hats. A fixture where everything is zero is a statement about the fixture.
+        let v = SolidVoxels::from_mesh(&mesh, opts.resolution).expect("voxelises");
+        let ci = |a: usize, x: f64| ((x - v.origin[a]) / v.cell).round() as usize;
+        let j = ci(1, 0.0);
+        let k_mid = ci(2, 0.5); // well above the slab, between the walls
+        let floor = {
+            let i = ci(0, 0.0);
+            let k = (0..v.dims[2]).filter(|&k| v.get(i, j, k)).max().expect("a column under the channel");
+            v.origin.z + (k as f64 + 0.5) * v.cell
+        };
+        let inner_x = {
+            let i0 = ci(0, 0.0);
+            let i = (0..i0).filter(|&i| v.get(i, j, k_mid)).max().expect("a left wall at mid height");
+            v.origin.x + (i as f64 + 0.5) * v.cell
+        };
+
+        let pen = 1e-3;
+        let (hx, hy, hz) = (0.15, 0.2, 0.15);
+        let centre = Vector3::new(inner_x - pen + hx, 0.0, floor - pen + hz);
+        let plate = CompoundHull::from_convex_parts(vec![box_pts(centre, Vector3::new(hx, hy, hz))])
+            .expect("a block wedged in the channel");
+
+        let (robot, inertia) = slider();
+        let q = [centre.x, centre.y, centre.z];
+        let mu = 0.6;
+        let set = compound_pgs_contacts(
+            &plate,
+            &SerialLinkParts { robot: &robot, q: &q, frames: &[3] },
+            &bracket,
+            &StaticBody { nv: 3 },
+            1e-4,
+            mu,
+        )
+        .expect("the bodies agree on nv");
+
+        let stab = PgsStabilization { slop: 0.0, erp: 0.0, max_correction: 0.0 };
+        let mm = mass_matrix(&robot, &inertia, &q);
+        let qdd = forward_dynamics(&robot, &inertia, &q, &[0.0; 3], &[0.0; 3], Vector3::new(0.0, 0.0, -G));
+        // a tangential drive along y, so BOTH contacts slide and maximum dissipation actually binds
+        let mut v_free = DVector::from_iterator(3, qdd.iter().map(|a| a * DT));
+        v_free[1] += 2.0;
+        let res = solve_contacts_pgs_with(&mm, &v_free, &set.contacts, DT, 400, None, stab);
+
+        let cv: Vec<Vector3<f64>> = set
+            .contacts
+            .iter()
+            .map(|c| {
+                let u = &c.j * &res.v_next;
+                Vector3::new(u[0], u[1], u[2])
+            })
+            .collect();
+        let mus = vec![mu; set.contacts.len()];
+        let laws = contact_law_residuals(&res.lambda, &cv, &mus, 1e-6);
+        let worst = laws.iter().map(crate::ContactLawResidual::worst).fold(0.0f64, f64::max);
+        eprintln!(
+            "  block wedged in a {}-part decomposition: {} contact(s), {} skipped; solver resid {:.2e}, violation {:.2e}; WORST LAW {worst:.3e}",
+            rep.parts, set.contacts.len(), set.skipped, res.residual, res.violation
+        );
+        for l in &laws {
+            eprintln!("    contact {}: sig {:.2e} coul {:.2e} maxdiss {:.2e} (sliding {})", l.contact, l.signorini, l.coulomb, l.max_dissipation, l.sliding);
+        }
+
+        // ⛔ the fixture must actually exercise the compound path, or the law check below is about one
+        // contact and says nothing the single-hull case would not
+        assert!(
+            set.contacts.len() >= 2,
+            "a block wedged against the floor and a wall must produce a contact for each, got {}",
+            set.contacts.len()
+        );
+        // ⛔ and they must genuinely compete: two parallel normals on a translational body are one
+        // constraint, which is how the first fixture came out all zeros
+        let worst_dot = set
+            .geometry
+            .iter()
+            .flat_map(|a| set.geometry.iter().map(move |b| (a, b)))
+            .filter(|(a, b)| !core::ptr::eq(*a, *b))
+            .map(|(a, b)| a.normal.dot(&b.normal).abs())
+            .fold(1.0f64, f64::min);
+        assert!(
+            worst_dot < 0.5,
+            "the contact normals must not be parallel or the pair is one constraint: worst |dot| {worst_dot:.3}"
+        );
+        assert_eq!(set.skipped, 0, "every pair inside the margin must have produced a constraint");
+        assert!(
+            set.geometry.iter().map(|g| g.part_b).collect::<std::collections::HashSet<_>>().len() >= 2,
+            "the contacts must land on DIFFERENT parts of the decomposition: {:?}",
+            set.geometry.iter().map(|g| g.part_b).collect::<Vec<_>>()
+        );
+        assert!(res.v_next[2].abs() < 1e-9, "the block is supported and must not fall: {}", res.v_next[2]);
+        assert!(laws.iter().any(|l| l.sliding), "the drive must make at least one contact slide, or maximum dissipation is vacuous here");
+        assert!(worst < 1e-6, "the chain produced an unphysical answer: worst law residual {worst:e}");
+    }
 }
