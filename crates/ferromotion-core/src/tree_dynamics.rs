@@ -159,6 +159,146 @@ pub fn tree_floating_mass_matrix(joints: &[Joint], inertia: &[LinkInertia], pare
     h
 }
 
+/// **Fixed-base forward dynamics for a kinematic tree** — the ABA with the root welded to the world.
+///
+/// [`tree_floating_forward_dynamics`] treats `parent = -1` as a free 6-DoF base and inverts its articulated
+/// inertia; an arm bolted to a table has no such base, and feeding it a fictitious heavy one is a numerical
+/// hack. This is the same three passes with the base velocity and acceleration held at zero and nothing
+/// folded into a base. Gravity enters per body as a wrench, as in the floating version, so the two share
+/// every helper. The actuator terms (armature, damping, smoothed Coulomb friction) are applied exactly as
+/// in [`crate::forward_dynamics_aba`], which this reduces to on a chain — that reduction is the test.
+///
+/// This is the function the MJCF tree loader's models run under, and it is measured against MuJoCo's
+/// `mj_forward` on every fixed-base Menagerie model by the `menagerie_parity` example.
+pub fn tree_forward_dynamics(joints: &[Joint], inertia: &[LinkInertia], parent: &[isize], q: &[f64], qd: &[f64], tau: &[f64], gravity: Vector3<f64>) -> Vec<f64> {
+    let n = joints.len();
+    let (mut xm, mut s) = (vec![Matrix6::zeros(); n], vec![Vector6::zeros(); n]);
+    let (mut v, mut c) = (vec![Vector6::zeros(); n], vec![Vector6::zeros(); n]);
+    let (mut ia, mut pa) = (Vec::with_capacity(n), vec![Vector6::zeros(); n]);
+    let mut r_frames = vec![Matrix3::<f64>::identity(); n];
+    for i in 0..n {
+        let a = joints[i].transform(q[i]);
+        let r = *a.rotation.to_rotation_matrix().matrix();
+        let x = motion_transform(r, a.translation.vector);
+        let si = motion_subspace(joints[i].kind, joints[i].axis.into_inner());
+        let v_parent = if parent[i] < 0 { Vector6::zeros() } else { v[parent[i] as usize] };
+        v[i] = x * v_parent + si * qd[i];
+        c[i] = crm(v[i]) * (si * qd[i]);
+        let ii = spatial_inertia(&inertia[i]);
+        let r_bparent = if parent[i] < 0 { Matrix3::identity() } else { r_frames[parent[i] as usize] };
+        let r_bi = r.transpose() * r_bparent;
+        pa[i] = crf(v[i]) * (ii * v[i]) - gravity_wrench(&ii, gravity, &r_bi);
+        ia.push(ii);
+        xm[i] = x;
+        s[i] = si;
+        r_frames[i] = r_bi;
+    }
+    let (mut u, mut d, mut uu) = (vec![Vector6::zeros(); n], vec![0.0; n], vec![0.0; n]);
+    for i in (0..n).rev() {
+        u[i] = ia[i] * s[i];
+        d[i] = s[i].dot(&u[i]) + joints[i].armature.unwrap_or(0.0);
+        uu[i] = tau[i]
+            - s[i].dot(&pa[i])
+            - joints[i].damping.unwrap_or(0.0) * qd[i]
+            - joints[i].friction.unwrap_or(0.0) * (qd[i] / crate::COULOMB_SMOOTHING).tanh();
+        if parent[i] >= 0 {
+            let ia_bar = ia[i] - u[i] * u[i].transpose() / d[i];
+            let pa_bar = pa[i] + ia_bar * c[i] + u[i] * (uu[i] / d[i]);
+            let p = parent[i] as usize;
+            ia[p] += xm[i].transpose() * ia_bar * xm[i];
+            pa[p] += xm[i].transpose() * pa_bar;
+        }
+    }
+    let mut qdd = vec![0.0; n];
+    let mut a = vec![Vector6::zeros(); n];
+    for i in 0..n {
+        let a_parent = if parent[i] < 0 { Vector6::zeros() } else { a[parent[i] as usize] };
+        let a_prime = xm[i] * a_parent + c[i];
+        qdd[i] = (uu[i] - u[i].dot(&a_prime)) / d[i];
+        a[i] = a_prime + s[i] * qdd[i];
+    }
+    qdd
+}
+
+/// **Fixed-base inverse dynamics for a kinematic tree** — the recursive Newton–Euler algorithm on a tree:
+/// the generalized force `τ` that produces `q̈` at `(q, q̇)` under `gravity`, actuator terms included
+/// (`+J_a·q̈ + b·q̇ + f·tanh(q̇/ε)`, the same convention as [`crate::inverse_dynamics`]).
+///
+/// With `q̈ = 0` this is the bias force — Coriolis, centrifugal and gravity — which is what MuJoCo reports
+/// as `qfrc_bias`, and the oracle it is measured against. On a chain it reduces to the serial RNEA.
+pub fn tree_inverse_dynamics(joints: &[Joint], inertia: &[LinkInertia], parent: &[isize], q: &[f64], qd: &[f64], qdd: &[f64], gravity: Vector3<f64>) -> Vec<f64> {
+    let n = joints.len();
+    let (mut xm, mut s) = (vec![Matrix6::zeros(); n], vec![Vector6::zeros(); n]);
+    let (mut v, mut a) = (vec![Vector6::zeros(); n], vec![Vector6::zeros(); n]);
+    let mut f = vec![Vector6::zeros(); n];
+    let mut r_frames = vec![Matrix3::<f64>::identity(); n];
+    for i in 0..n {
+        let t = joints[i].transform(q[i]);
+        let r = *t.rotation.to_rotation_matrix().matrix();
+        let x = motion_transform(r, t.translation.vector);
+        let si = motion_subspace(joints[i].kind, joints[i].axis.into_inner());
+        let (v_parent, a_parent) = if parent[i] < 0 { (Vector6::zeros(), Vector6::zeros()) } else { (v[parent[i] as usize], a[parent[i] as usize]) };
+        v[i] = x * v_parent + si * qd[i];
+        a[i] = x * a_parent + si * qdd[i] + crm(v[i]) * (si * qd[i]);
+        let ii = spatial_inertia(&inertia[i]);
+        let r_bparent = if parent[i] < 0 { Matrix3::identity() } else { r_frames[parent[i] as usize] };
+        let r_bi = r.transpose() * r_bparent;
+        f[i] = ii * a[i] + crf(v[i]) * (ii * v[i]) - gravity_wrench(&ii, gravity, &r_bi);
+        xm[i] = x;
+        s[i] = si;
+        r_frames[i] = r_bi;
+    }
+    let mut tau = vec![0.0; n];
+    for i in (0..n).rev() {
+        tau[i] = s[i].dot(&f[i])
+            + joints[i].armature.unwrap_or(0.0) * qdd[i]
+            + joints[i].damping.unwrap_or(0.0) * qd[i]
+            + joints[i].friction.unwrap_or(0.0) * (qd[i] / crate::COULOMB_SMOOTHING).tanh();
+        if parent[i] >= 0 {
+            let p = parent[i] as usize;
+            let fi = xm[i].transpose() * f[i];
+            f[p] += fi;
+        }
+    }
+    tau
+}
+
+/// **Fixed-base joint-space inertia matrix of a kinematic tree**, `n×n`, by the composite-rigid-body
+/// algorithm — the joint block of [`tree_floating_mass_matrix`] without the base rows, with each joint's
+/// armature on the diagonal so that `M·q̈ + tree_inverse_dynamics(q, q̇, 0) == tree_inverse_dynamics(q, q̇, q̈)`.
+pub fn tree_mass_matrix(joints: &[Joint], inertia: &[LinkInertia], parent: &[isize], q: &[f64]) -> DMatrix<f64> {
+    let n = joints.len();
+    let (mut xm, mut s) = (vec![Matrix6::zeros(); n], vec![Vector6::zeros(); n]);
+    for i in 0..n {
+        let a = joints[i].transform(q[i]);
+        let r = *a.rotation.to_rotation_matrix().matrix();
+        xm[i] = motion_transform(r, a.translation.vector);
+        s[i] = motion_subspace(joints[i].kind, joints[i].axis.into_inner());
+    }
+    let mut ic: Vec<Matrix6<f64>> = (0..n).map(|i| spatial_inertia(&inertia[i])).collect();
+    for i in (0..n).rev() {
+        if parent[i] >= 0 {
+            let contrib = xm[i].transpose() * ic[i] * xm[i];
+            ic[parent[i] as usize] += contrib;
+        }
+    }
+    let mut h = DMatrix::zeros(n, n);
+    for i in 0..n {
+        let mut fi = ic[i] * s[i];
+        h[(i, i)] = s[i].dot(&fi) + joints[i].armature.unwrap_or(0.0);
+        let mut j = i;
+        while parent[j] >= 0 {
+            fi = xm[j].transpose() * fi;
+            let p = parent[j] as usize;
+            let hij = fi.dot(&s[p]);
+            h[(i, p)] = hij;
+            h[(p, i)] = hij;
+            j = p;
+        }
+    }
+    h
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,6 +315,65 @@ mod tests {
       <joint name="j2" type="revolute"><parent link="l1"/><child link="l2"/><origin xyz="0 0 0.2" rpy="0 0 0"/><axis xyz="0 1 0"/><limit lower="-3" upper="3" effort="10" velocity="3"/></joint>
       <joint name="j3" type="revolute"><parent link="l2"/><child link="l3"/><origin xyz="0.3 0 0" rpy="0 0 0"/><axis xyz="0 1 0"/><limit lower="-3" upper="3" effort="10" velocity="3"/></joint>
       <joint name="jt" type="fixed"><parent link="l3"/><child link="tool"/><origin xyz="0.2 0 0" rpy="0 0 0"/></joint></robot>"#;
+
+
+    /// The three fixed-base tree routines reduce to the serial ones on a chain, and agree with each other on a
+    /// branched tree: `M·q̈ + bias == τ` and `ABA(τ) == q̈`. The chain fixture carries armature, damping and
+    /// friction for the reason `tree_reduces_to_serial_chain` states.
+    #[test]
+    fn fixed_base_tree_reduces_to_serial_and_is_self_consistent() {
+        use crate::{forward_dynamics_aba, inverse_dynamics, mass_matrix};
+        let (mut robot, inertia) = from_urdf_full(ARM, "base", "tool").unwrap();
+        for (i, j) in robot.joints.iter_mut().enumerate() {
+            *j = j.clone().with_armature(0.011 + 0.002 * i as f64).with_damping(0.64).with_friction(0.08);
+        }
+        let n = robot.dof();
+        let g = Vector3::new(0.0, 0.0, -9.81);
+        let parent: Vec<isize> = (0..n).map(|i| i as isize - 1).collect();
+        let mut sd = 0x99u64;
+        let mut rng = || {
+            sd = sd.wrapping_add(0x9E3779B97F4A7C15);
+            let mut z = sd; z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9); z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+            (((z ^ (z >> 31)) as f64) / (u64::MAX as f64)) * 2.0 - 1.0
+        };
+        let q: Vec<f64> = (0..n).map(|_| 1.3 * rng()).collect();
+        let qd: Vec<f64> = (0..n).map(|_| 0.8 * rng()).collect();
+        let tau: Vec<f64> = (0..n).map(|_| 1.5 * rng()).collect();
+        let qdd: Vec<f64> = (0..n).map(|_| 2.0 * rng()).collect();
+
+        let a_t = tree_forward_dynamics(&robot.joints, &inertia, &parent, &q, &qd, &tau, g);
+        let a_s = forward_dynamics_aba(&robot, &inertia, &q, &qd, &tau, g);
+        let t_t = tree_inverse_dynamics(&robot.joints, &inertia, &parent, &q, &qd, &qdd, g);
+        let t_s = inverse_dynamics(&robot, &inertia, &q, &qd, &qdd, g);
+        let m_t = tree_mass_matrix(&robot.joints, &inertia, &parent, &q);
+        let m_s = mass_matrix(&robot, &inertia, &q);
+        let worst = |a: &[f64], b: &[f64]| a.iter().zip(b).fold(0.0f64, |m, (x, y)| m.max((x - y).abs()));
+        assert!(worst(&a_t, &a_s) < 1e-11, "ABA chain reduction: {:?} vs {:?}", a_t, a_s);
+        assert!(worst(&t_t, &t_s) < 1e-11, "RNEA chain reduction: {:?} vs {:?}", t_t, t_s);
+        assert!((&m_t - &m_s).amax() < 1e-11, "CRBA chain reduction");
+
+        // a branched tree: the same arm twice off the base, parent = [-1,0,1,-1,3,4]
+        let joints: Vec<Joint> = robot.joints.iter().chain(robot.joints.iter()).cloned().collect();
+        let inert: Vec<LinkInertia> = inertia.iter().chain(inertia.iter()).cloned().collect();
+        let parent: Vec<isize> = vec![-1, 0, 1, -1, 3, 4];
+        let q: Vec<f64> = (0..6).map(|_| 1.3 * rng()).collect();
+        let qd: Vec<f64> = (0..6).map(|_| 0.8 * rng()).collect();
+        let tau: Vec<f64> = (0..6).map(|_| 1.5 * rng()).collect();
+        let qdd = tree_forward_dynamics(&joints, &inert, &parent, &q, &qd, &tau, g);
+        let back = tree_inverse_dynamics(&joints, &inert, &parent, &q, &qd, &qdd, g);
+        assert!(worst(&back, &tau) < 1e-9, "RNEA(ABA(τ)) != τ on the branched tree: {:?} vs {:?}", back, tau);
+        let m = tree_mass_matrix(&joints, &inert, &parent, &q);
+        let bias = tree_inverse_dynamics(&joints, &inert, &parent, &q, &qd, &[0.0; 6], g);
+        let lhs = &m * nalgebra::DVector::from_vec(qdd.clone()) + nalgebra::DVector::from_vec(bias);
+        assert!((lhs - nalgebra::DVector::from_vec(tau.clone())).amax() < 1e-9, "M·q̈ + bias != τ on the branched tree");
+        assert!((&m - m.transpose()).amax() < 1e-12, "M is not symmetric");
+        // the two legs do not couple through a fixed base: the cross block is exactly zero
+        for i in 0..3 {
+            for j in 3..6 {
+                assert_eq!(m[(i, j)], 0.0, "fixed base couples the legs at ({i},{j})");
+            }
+        }
+    }
 
     fn base_body() -> LinkInertia {
         LinkInertia { mass: 5.0, com: Vector3::new(0.0, 0.0, 0.05), inertia: Matrix3::from_diagonal(&Vector3::new(0.08, 0.08, 0.05)) }

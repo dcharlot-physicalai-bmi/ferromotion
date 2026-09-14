@@ -31,25 +31,25 @@ use nalgebra::{Matrix3, Translation3, Unit, UnitQuaternion, Vector3};
 // ---------------------------------------------------------------------------------------------
 
 #[derive(Debug)]
-struct El {
-    name: String,
-    attrs: Vec<(String, String)>,
-    children: Vec<El>,
+pub(crate) struct El {
+    pub(crate) name: String,
+    pub(crate) attrs: Vec<(String, String)>,
+    pub(crate) children: Vec<El>,
 }
 
 impl El {
-    fn attr(&self, k: &str) -> Option<&str> {
+    pub(crate) fn attr(&self, k: &str) -> Option<&str> {
         self.attrs.iter().find(|(a, _)| a == k).map(|(_, v)| v.as_str())
     }
-    fn child(&self, name: &str) -> Option<&El> {
+    pub(crate) fn child(&self, name: &str) -> Option<&El> {
         self.children.iter().find(|c| c.name == name)
     }
-    fn children_named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a El> {
+    pub(crate) fn children_named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a El> {
         self.children.iter().filter(move |c| c.name == name)
     }
 }
 
-fn parse_xml(s: &str) -> Result<El, String> {
+pub(crate) fn parse_xml(s: &str) -> Result<El, String> {
     let b = s.as_bytes();
     let mut i = 0usize;
     let mut stack: Vec<El> = vec![El { name: String::new(), attrs: vec![], children: vec![] }];
@@ -130,11 +130,11 @@ fn parse_xml(s: &str) -> Result<El, String> {
 // MJCF semantics.
 // ---------------------------------------------------------------------------------------------
 
-fn floats(s: &str) -> Result<Vec<f64>, String> {
+pub(crate) fn floats(s: &str) -> Result<Vec<f64>, String> {
     s.split_whitespace().map(|t| t.parse::<f64>().map_err(|e| format!("bad number '{t}': {e}"))).collect()
 }
 
-fn vec3(s: &str) -> Result<Vector3<f64>, String> {
+pub(crate) fn vec3(s: &str) -> Result<Vector3<f64>, String> {
     let v = floats(s)?;
     if v.len() != 3 {
         return Err(format!("expected 3 numbers, got '{s}'"));
