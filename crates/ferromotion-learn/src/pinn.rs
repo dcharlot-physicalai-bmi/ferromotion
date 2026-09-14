@@ -13,6 +13,15 @@
 //!
 //! Verified against the closed form: trained to solve the harmonic oscillator `u'' + ω²u = 0`, `u(0)=1`,
 //! `u'(0)=0`, the network reproduces `cos(ωt)` across the domain.
+//!
+//! ⚠ **Scope.** This is the *teaching* PINN — one equation, one net, CPU, no GPU, WASM-clean — written to
+//! show the jet-through-the-tape mechanism in a hundred lines. It is not the library. The physics-informed
+//! **training recipe** a working PINN needs — Fourier features against spectral bias, gradient-norm loss
+//! balancing, causal training in time, residual-based adaptive collocation, strong-Wolfe L-BFGS, inverse
+//! problems with a trained coefficient, physics-informed DeepONet — lives in Ferric's `ferric_tensor::sciml`
+//! (GPU-native, same fabric as the LLM runtime), where each piece ships with an oracle in which the vanilla
+//! loss measurably fails and the technique measurably fixes it. Reach for that when the problem is real;
+//! reach for this to understand why it works.
 
 use crate::autodiff::{Tape, Var};
 
