@@ -513,4 +513,121 @@ mod tests {
         assert!(limit(1.0e6, 150.0, 0.5) < limit(2.0e4, 150.0, 0.5), "a stiffer contact must permit a smaller step");
         assert!(limit(2.0e4, 150.0, 0.1) < limit(2.0e4, 150.0, 6.0), "a lighter effective mass must too");
     }
+
+    /// ⛔⛔ **A contact may only push, and nothing in this crate was checking that here.**
+    ///
+    /// The penalty normal is `max(0, −kₙφ − k_d ż)`, and removing that clamp from **both** sites in this
+    /// module broke none of the 809 tests in the crate. A spring–dashpot with an unclamped damper pulls
+    /// whenever a penetrating contact separates faster than `kₙ|φ|/k_d` — here `2e4 · 1e-4 / 150`, about
+    /// **1.33 cm/s** — so feet would stick to the floor on lift-off, and the quadruped fixtures never
+    /// separate fast enough to show it.
+    ///
+    /// ⭐ The oracle needs no force accessor, which this API does not offer: **a separating contact must
+    /// do nothing at all**, so the body must be in free flight. One step, and the vertical velocity has
+    /// to be exactly `v₀ + g·dt`.
+    #[test]
+    fn a_penetrating_foot_that_is_separating_leaves_the_body_in_free_flight() {
+        let (robot, inertia) = from_urdf_full(UPARM, "base", "tip").unwrap();
+        let base_inertia = LinkInertia {
+            mass: 8.0,
+            com: Vector3::zeros(),
+            inertia: nalgebra::Matrix3::from_diagonal(&Vector3::new(0.06, 0.06, 0.08)),
+        };
+        let g = Vector3::new(0.0, 0.0, -9.81);
+        let (floor_z, kn, kd, dt) = (0.0, 2.0e4, 150.0, 2e-4);
+        let pen = 1e-4;
+        let contacts = vec![(0usize, Vector3::new(0.0, 0.0, -0.06), 0.9)];
+        let base = Isometry3::translation(0.0, 0.0, 0.06 - pen); // the foot is `pen` below the floor
+        let q = vec![0.2, -0.3];
+        let qd = vec![0.0; robot.dof()];
+        let tau = vec![0.0; robot.dof()];
+
+        // the speed above which an UNCLAMPED dashpot would pull instead of push
+        let pull_speed = kn * pen / kd;
+        let step = |vz: f64| {
+            let mut v0 = Vector6::zeros();
+            v0[5] = vz;
+            let (_, v, _, _) = floating_contact_step(
+                &robot, &inertia, &base_inertia, base, v0, &q, &qd, &tau, &contacts, floor_z, kn, kd, dt, g,
+            );
+            v[5]
+        };
+
+        // ⭐ the control first: at rest the same penetrating foot must PUSH, or "does nothing" below is
+        // a statement about a contact that was never active
+        let resting = step(0.0);
+        assert!(
+            resting > g.z * dt + 1e-9,
+            "a penetrating foot at rest must push: got {resting:.9}, free flight is {:.9}",
+            g.z * dt
+        );
+
+        // and separating well past the pull threshold, it must do nothing
+        let vz = 10.0 * pull_speed;
+        let got = step(vz);
+        let free = vz + g.z * dt;
+        eprintln!(
+            "  pull threshold {pull_speed:.4} m/s; separating at {vz:.4} m/s -> {got:.12}, free flight {free:.12} (at rest: {resting:.9})"
+        );
+        assert!(
+            (got - free).abs() < 1e-12,
+            "a separating foot must not be felt at all: {got:.12} against free flight {free:.12}"
+        );
+    }
+
+    /// ⛔ **The same law, at the other site.** [`tree_floating_contact_step`] carries its own copy of the
+    /// penalty normal, and removing the clamp there ALONE survived the crate even after
+    /// `a_penetrating_foot_that_is_separating_leaves_the_body_in_free_flight` was added — that test
+    /// drives the serial path and cannot reach this one.
+    ///
+    /// ⚠ Two copies of a physical law is the thing to notice here. A single test per module is not
+    /// coverage when the module states the law twice.
+    #[test]
+    fn a_separating_foot_on_the_branched_path_is_also_not_felt() {
+        let (joints, inertia, parent, contacts) = quadruped();
+        let n = joints.len();
+        let base_inertia = LinkInertia {
+            mass: 8.0,
+            com: Vector3::zeros(),
+            inertia: nalgebra::Matrix3::from_diagonal(&Vector3::new(0.08, 0.08, 0.12)),
+        };
+        let g = Vector3::new(0.0, 0.0, -9.81);
+        let (floor_z, kn, kd, dt) = (0.0, 1.5e4, 120.0, 2e-4);
+        let pen = 1e-4;
+        // legs straight down at q = 0 reach 0.6 m, so this puts every foot `pen` under the floor
+        let base = Isometry3::translation(0.0, 0.0, 0.6 - pen);
+        let q = vec![0.0; n];
+        let qd = vec![0.0; n];
+        let tau = vec![0.0; n];
+        for &(body, off, _) in &contacts {
+            let ft = base * frame_from_tree(&joints, &parent, &q, body) * Point3::from(off);
+            assert!(
+                (ft.coords.z - (floor_z - pen)).abs() < 1e-12,
+                "every foot must start exactly {pen} under the floor, got {}",
+                ft.coords.z
+            );
+        }
+
+        let pull_speed = kn * pen / kd;
+        let step = |vz: f64| {
+            let mut v0 = Vector6::zeros();
+            v0[5] = vz;
+            let (_, v, _, _) = tree_floating_contact_step(
+                &joints, &inertia, &parent, &base_inertia, base, v0, &q, &qd, &tau, &contacts, floor_z, kn, kd, dt, g,
+            );
+            v[5]
+        };
+
+        let resting = step(0.0);
+        assert!(resting > g.z * dt + 1e-9, "penetrating feet at rest must push: {resting:.9}");
+
+        let vz = 10.0 * pull_speed;
+        let got = step(vz);
+        let free = vz + g.z * dt;
+        eprintln!("  tree path: pull threshold {pull_speed:.4} m/s; separating at {vz:.4} -> {got:.12}, free flight {free:.12}");
+        assert!(
+            (got - free).abs() < 1e-12,
+            "a separating foot must not be felt on the branched path either: {got:.12} against {free:.12}"
+        );
+    }
 }
