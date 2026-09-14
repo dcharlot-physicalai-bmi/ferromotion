@@ -346,6 +346,7 @@ mod transport;
 pub mod transport_geometry;
 mod mjcf;
 mod mjcf_tree;
+mod mujoco_contact;
 mod usda;
 mod urdf;
 mod xcorr;
@@ -467,6 +468,7 @@ pub use manipulability::{condition_number, force_ellipsoid_axes, isotropy, manip
 pub use modal::{modal_analysis, ModalModel};
 pub use mjcf::{from_mjcf_constrained, from_mjcf_full, from_mjcf_str, geometry_from_mjcf, to_mjcf};
 pub use mjcf_tree::{tree_from_mjcf, tree_from_mjcf_str, MjcfJoint, MjcfJointKind, MjcfTree};
+pub use mujoco_contact::{mujoco_diag_approx, mujoco_impedance, mujoco_kbip, solve_contacts_mujoco, InvWeight, MjContact, MjContactSolve, SolImp, SolRef};
 pub use usda::{axis_token, parse_usda, robot_from_usda, usda_from_robot, ParseError, Prim, UsdaStage, Value};
 pub use urdf::from_urdf_full;
 pub use robust::solve_ik_robust;
