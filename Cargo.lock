@@ -1257,7 +1257,7 @@ dependencies = [
 
 [[package]]
 name = "ferromotion"
-version = "0.72.0"
+version = "0.73.0"
 dependencies = [
  "ferromotion-circuit",
  "ferromotion-cloth",
@@ -1279,7 +1279,7 @@ dependencies = [
 
 [[package]]
 name = "ferromotion-bench"
-version = "0.72.0"
+version = "0.73.0"
 dependencies = [
  "ferromotion-cloth",
  "ferromotion-control",
@@ -1290,21 +1290,21 @@ dependencies = [
 
 [[package]]
 name = "ferromotion-circuit"
-version = "0.72.0"
+version = "0.73.0"
 dependencies = [
  "nalgebra",
 ]
 
 [[package]]
 name = "ferromotion-cloth"
-version = "0.72.0"
+version = "0.73.0"
 dependencies = [
  "nalgebra",
 ]
 
 [[package]]
 name = "ferromotion-control"
-version = "0.72.0"
+version = "0.73.0"
 dependencies = [
  "bytemuck",
  "clarabel",
@@ -1316,7 +1316,7 @@ dependencies = [
 
 [[package]]
 name = "ferromotion-core"
-version = "0.72.0"
+version = "0.73.0"
 dependencies = [
  "bytemuck",
  "clarabel",
@@ -1329,7 +1329,7 @@ dependencies = [
 
 [[package]]
 name = "ferromotion-coupled"
-version = "0.72.0"
+version = "0.73.0"
 dependencies = [
  "ferromotion-dem",
  "ferromotion-fem",
@@ -1338,14 +1338,14 @@ dependencies = [
 
 [[package]]
 name = "ferromotion-dem"
-version = "0.72.0"
+version = "0.73.0"
 dependencies = [
  "nalgebra",
 ]
 
 [[package]]
 name = "ferromotion-fem"
-version = "0.72.0"
+version = "0.73.0"
 dependencies = [
  "bytemuck",
  "nalgebra",
@@ -1355,7 +1355,7 @@ dependencies = [
 
 [[package]]
 name = "ferromotion-fluid"
-version = "0.72.0"
+version = "0.73.0"
 dependencies = [
  "bytemuck",
  "faer",
@@ -1367,7 +1367,7 @@ dependencies = [
 
 [[package]]
 name = "ferromotion-learn"
-version = "0.72.0"
+version = "0.73.0"
 dependencies = [
  "ferromotion-core",
  "ferromotion-policy",
@@ -1376,7 +1376,7 @@ dependencies = [
 
 [[package]]
 name = "ferromotion-models"
-version = "0.72.0"
+version = "0.73.0"
 dependencies = [
  "ferromotion-core",
  "nalgebra",
@@ -1384,14 +1384,14 @@ dependencies = [
 
 [[package]]
 name = "ferromotion-mpm"
-version = "0.72.0"
+version = "0.73.0"
 dependencies = [
  "nalgebra",
 ]
 
 [[package]]
 name = "ferromotion-policy"
-version = "0.72.0"
+version = "0.73.0"
 dependencies = [
  "ferromotion-core",
  "nalgebra",
@@ -1401,18 +1401,18 @@ dependencies = [
 
 [[package]]
 name = "ferromotion-rod"
-version = "0.72.0"
+version = "0.73.0"
 dependencies = [
  "nalgebra",
 ]
 
 [[package]]
 name = "ferromotion-ruckig"
-version = "0.72.0"
+version = "0.73.0"
 
 [[package]]
 name = "ferromotion-tactile"
-version = "0.72.0"
+version = "0.73.0"
 dependencies = [
  "ferromotion-fem",
  "nalgebra",
@@ -1420,7 +1420,7 @@ dependencies = [
 
 [[package]]
 name = "ferromotion-viz"
-version = "0.72.0"
+version = "0.73.0"
 dependencies = [
  "ferromotion-core",
  "ferromotion-ruckig",
@@ -1430,7 +1430,7 @@ dependencies = [
 
 [[package]]
 name = "ferromotion-wasm"
-version = "0.72.0"
+version = "0.73.0"
 dependencies = [
  "ferromotion-bench",
  "ferromotion-circuit",
