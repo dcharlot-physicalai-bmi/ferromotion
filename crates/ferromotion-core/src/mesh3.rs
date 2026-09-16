@@ -83,91 +83,197 @@ pub fn try_convex_hull_3d(points: &[Vector3<f64>]) -> Option<TriMesh3> {
         return None;
     }
     let eps = 1e-9;
+    // every coordinate was just checked finite, so `total_cmp` orders these the way `partial_cmp` would;
+    // it is used because it cannot panic, not to define an order for a `NaN`
 
-    // seed: find 4 affinely-independent points
-    let p0 = 0;
-    let p1 = (1..n).find(|&i| (points[i] - points[p0]).norm() > eps)?;
+    // seed: four affinely-independent points, each the most extreme available so a thin part still seeds
+    // (the refusals are the same as testing any point: the extreme one passes iff some point passes)
+    let p0 = (0..n).min_by(|&a, &b| points[a].x.total_cmp(&points[b].x)).unwrap();
+    let p1 = (0..n).max_by(|&a, &b| (points[a] - points[p0]).norm().total_cmp(&(points[b] - points[p0]).norm())).unwrap();
+    if (points[p1] - points[p0]).norm() <= eps {
+        return None;
+    }
     let e1 = points[p1] - points[p0];
-    let p2 = (0..n).find(|&i| (points[i] - points[p0]).cross(&e1).norm() > eps)?;
-    let nrm = (points[p1] - points[p0]).cross(&(points[p2] - points[p0]));
-    let p3 = (0..n).find(|&i| (points[i] - points[p0]).dot(&nrm).abs() > eps)?;
+    let p2 = (0..n).max_by(|&a, &b| (points[a] - points[p0]).cross(&e1).norm().total_cmp(&(points[b] - points[p0]).cross(&e1).norm())).unwrap();
+    if (points[p2] - points[p0]).cross(&e1).norm() <= eps {
+        return None;
+    }
+    let nrm = e1.cross(&(points[p2] - points[p0]));
+    let p3 = (0..n).max_by(|&a, &b| (points[a] - points[p0]).dot(&nrm).abs().total_cmp(&(points[b] - points[p0]).dot(&nrm).abs())).unwrap();
+    if (points[p3] - points[p0]).dot(&nrm).abs() <= eps {
+        return None;
+    }
 
-    // initial tetrahedron faces, oriented outward
-    let mut faces: Vec<[usize; 3]> = Vec::new();
-    let add_face = |faces: &mut Vec<[usize; 3]>, a: usize, b: usize, c: usize, inside: Vector3<f64>| {
-        let n = (points[b] - points[a]).cross(&(points[c] - points[a]));
-        if n.dot(&(inside - points[a])) > 0.0 {
-            faces.push([a, c, b]); // flip so the normal points away from `inside`
-        } else {
-            faces.push([a, b, c]);
-        }
+    // Quickhull: every live face keeps the points outside it; the farthest one is added, the faces it sees
+    // (found by walking neighbours through a directed-edge table, so the cost is the visible patch, not
+    // the hull) are replaced through their horizon, and their outside points are handed to the new faces.
+    //
+    // ⛔ Handing a deleted face's points to the NEW faces alone loses points, and a lost point is a hole in
+    // the hull, not a rounding error: a point can lie outside two faces at once, be booked against the one
+    // that is deleted, and be visible from none of the cone's new faces. Measured on Menagerie that left a
+    // vertex 5.4 cm outside the hull of a 4 cm part. So the pass below runs to a FIXPOINT: after the queue
+    // drains, every point is re-tested against every surviving face, and any point still outside re-enters.
+    // The first pass builds essentially the whole hull, the second finds what it dropped, the third confirms
+    // nothing is left — and the loop cannot end while a point lies outside. The hull only ever grows, so a
+    // point found inside it is inside for good and is never re-tested: that makes the re-tests amortize to a
+    // single sweep of points against faces rather than one per pass.
+    // ⛔ The plane normal is stored NORMALIZED. With the raw cross product the visibility test scales with
+    // twice the triangle's area, so on a finely tessellated part — where facets are square millimetres —
+    // a facet is blind to points a real distance outside it, and the "hull" it returns cuts through the
+    // mesh. `eps` is a distance in metres only once the normal is a unit vector.
+    struct Face {
+        v: [usize; 3],
+        n: Vector3<f64>,
+        d: f64,
+        outside: Vec<usize>,
+        alive: bool,
+    }
+    let make = |a: usize, b: usize, c: usize| -> Face {
+        let raw = (points[b] - points[a]).cross(&(points[c] - points[a]));
+        let l = raw.norm();
+        let n = if l > 0.0 { raw / l } else { raw };
+        Face { v: [a, b, c], n, d: n.dot(&points[a]), outside: Vec::new(), alive: true }
     };
+    let height = |f: &Face, i: usize| f.n.dot(&points[i]) - f.d;
+    let mut faces: Vec<Face> = Vec::new();
+    use std::collections::HashMap;
+    // owner of each directed edge (a, b) among the live faces; the twin (b, a) belongs to the neighbour
+    let mut owner: HashMap<(usize, usize), usize> = HashMap::new();
     let centroid = (points[p0] + points[p1] + points[p2] + points[p3]) / 4.0;
-    add_face(&mut faces, p0, p1, p2, centroid);
-    add_face(&mut faces, p0, p1, p3, centroid);
-    add_face(&mut faces, p0, p2, p3, centroid);
-    add_face(&mut faces, p1, p2, p3, centroid);
-
-    let face_normal = |f: &[usize; 3]| (points[f[1]] - points[f[0]]).cross(&(points[f[2]] - points[f[0]]));
-    let visible = |f: &[usize; 3], p: Vector3<f64>| face_normal(f).dot(&(p - points[f[0]])) > eps;
-
-    for (i, &p) in points.iter().enumerate() {
-        if faces.iter().flatten().any(|&v| v == i) {
-            continue;
+    for (a, b, c) in [(p0, p1, p2), (p0, p1, p3), (p0, p2, p3), (p1, p2, p3)] {
+        let f = make(a, b, c);
+        // orient outward, away from the tetrahedron's centroid
+        let f = if f.n.dot(&(centroid - points[a])) > 0.0 { make(a, c, b) } else { f };
+        let v = f.v;
+        faces.push(f);
+        for k in 0..3 {
+            owner.insert((v[k], v[(k + 1) % 3]), faces.len() - 1);
         }
-        // faces visible from p
-        let vis: Vec<usize> = (0..faces.len()).filter(|&fi| visible(&faces[fi], p)).collect();
-        if vis.is_empty() {
-            continue; // inside the current hull
-        }
-        // horizon: edges on exactly one visible face
-        use std::collections::HashMap;
-        let mut edge_count: HashMap<(usize, usize), i32> = HashMap::new();
-        for &fi in &vis {
-            let f = faces[fi];
-            for k in 0..3 {
-                let (a, b) = (f[k], f[(k + 1) % 3]);
-                *edge_count.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+    }
+    use std::collections::HashSet;
+    let mut work: Vec<usize> = Vec::new();
+    // a point that has become a hull vertex is on the hull and never outside it again
+    let mut settled = vec![false; n];
+    for i in [p0, p1, p2, p3] {
+        settled[i] = true;
+    }
+    loop {
+        // (re)book every point that still lies outside the hull against the face it is farthest outside of
+        let live: Vec<usize> = (0..faces.len()).filter(|&i| faces[i].alive).collect();
+        let mut any = false;
+        for i in 0..n {
+            if settled[i] {
+                continue;
+            }
+            let mut best: Option<(usize, f64)> = None;
+            for &k in &live {
+                let h = height(&faces[k], i);
+                if h > eps && best.map(|(_, b)| h > b).unwrap_or(true) {
+                    best = Some((k, h));
+                }
+            }
+            match best {
+                Some((k, _)) => {
+                    faces[k].outside.push(i);
+                    any = true;
+                }
+                None => settled[i] = true,
             }
         }
-        // collect horizon edges *with orientation* from their (single) visible face
+        if !any {
+            break;
+        }
+        work.clear();
+        work.extend(live);
+        run_queue(&mut faces, &mut owner, &mut work, &mut settled, points, eps);
+        for f in faces.iter_mut() {
+            f.outside.clear();
+        }
+    }
+
+    // compact to used vertices
+    let mut remap: HashMap<usize, usize> = HashMap::new();
+    let mut used = Vec::new();
+    let mut tris: Vec<[usize; 3]> = Vec::new();
+    for f in faces.iter().filter(|f| f.alive) {
+        let mut t = [0usize; 3];
+        for (k, &v) in f.v.iter().enumerate() {
+            t[k] = *remap.entry(v).or_insert_with(|| {
+                used.push(points[v]);
+                used.len() - 1
+            });
+        }
+        tris.push(t);
+    }
+    // A hull with no faces, or fewer than four vertices, is not a solid — refuse rather than return an
+    // object whose volume is zero and whose support function is a point.
+    return (tris.len() >= 4 && used.len() >= 4).then_some(TriMesh3 { verts: used, tris });
+
+    /// Drain the queue: each face with points outside it grows the hull by its farthest one.
+    fn run_queue(faces: &mut Vec<Face>, owner: &mut HashMap<(usize, usize), usize>, work: &mut Vec<usize>, settled: &mut [bool], points: &[Vector3<f64>], eps: f64) {
+    let make = |a: usize, b: usize, c: usize| -> Face {
+        let raw = (points[b] - points[a]).cross(&(points[c] - points[a]));
+        let l = raw.norm();
+        let n = if l > 0.0 { raw / l } else { raw };
+        Face { v: [a, b, c], n, d: n.dot(&points[a]), outside: Vec::new(), alive: true }
+    };
+    let height = |f: &Face, i: usize| f.n.dot(&points[i]) - f.d;
+    while let Some(fi) = work.pop() {
+        if !faces[fi].alive || faces[fi].outside.is_empty() {
+            continue;
+        }
+        let p = *faces[fi].outside.iter().max_by(|&&a, &&b| height(&faces[fi], a).total_cmp(&height(&faces[fi], b))).unwrap();
+        settled[p] = true;
+        // the faces that see p: flood from this one across shared edges
+        let mut vis: Vec<usize> = vec![fi];
+        let mut seen: HashSet<usize> = HashSet::from([fi]);
+        let mut stack = vec![fi];
+        while let Some(k) = stack.pop() {
+            let v = faces[k].v;
+            for e in 0..3 {
+                if let Some(&nb) = owner.get(&(v[(e + 1) % 3], v[e])).filter(|&&nb| seen.insert(nb) && height(&faces[nb], p) > eps) {
+                    vis.push(nb);
+                    stack.push(nb);
+                }
+            }
+        }
+        let visset: HashSet<usize> = vis.iter().copied().collect();
+        // horizon: directed edges of visible faces whose twin belongs to a face that does not see p
         let mut horizon: Vec<(usize, usize)> = Vec::new();
-        for &fi in &vis {
-            let f = faces[fi];
-            for k in 0..3 {
-                let (a, b) = (f[k], f[(k + 1) % 3]);
-                if edge_count[&(a.min(b), a.max(b))] == 1 {
+        for &k in &vis {
+            let v = faces[k].v;
+            for e in 0..3 {
+                let (a, b) = (v[e], v[(e + 1) % 3]);
+                if owner.get(&(b, a)).map(|nb| !visset.contains(nb)).unwrap_or(true) {
                     horizon.push((a, b));
                 }
             }
         }
-        // remove visible faces
-        let visset: std::collections::HashSet<usize> = vis.into_iter().collect();
-        faces = faces.iter().enumerate().filter(|(fi, _)| !visset.contains(fi)).map(|(_, f)| *f).collect();
-        // add new faces from p to each horizon edge (orientation inherited → outward)
+        let mut orphans: Vec<usize> = Vec::new();
+        for &k in &vis {
+            faces[k].alive = false;
+            let v = faces[k].v;
+            for e in 0..3 {
+                owner.remove(&(v[e], v[(e + 1) % 3]));
+            }
+            orphans.extend(faces[k].outside.drain(..).filter(|&i| i != p));
+        }
+        let first_new = faces.len();
         for (a, b) in horizon {
-            faces.push([a, b, i]);
+            faces.push(make(a, b, p));
+            let idx = faces.len() - 1;
+            owner.insert((a, b), idx);
+            owner.insert((b, p), idx);
+            owner.insert((p, a), idx);
         }
-    }
-
-    let mut verts = points.to_vec();
-    // compact to used vertices
-    use std::collections::HashMap;
-    let mut remap: HashMap<usize, usize> = HashMap::new();
-    let mut used = Vec::new();
-    for f in &faces {
-        for &v in f {
-            remap.entry(v).or_insert_with(|| {
-                used.push(verts[v]);
-                used.len() - 1
-            });
+        for i in orphans {
+            if let Some(f) = faces[first_new..].iter_mut().find(|f| height(f, i) > eps) {
+                f.outside.push(i);
+            }
         }
+        work.extend(first_new..faces.len());
     }
-    let tris: Vec<[usize; 3]> = faces.iter().map(|f| [remap[&f[0]], remap[&f[1]], remap[&f[2]]]).collect();
-    verts = used;
-    // A hull with no faces, or fewer than four vertices, is not a solid — refuse rather than return an
-    // object whose volume is zero and whose support function is a point.
-    (tris.len() >= 4 && verts.len() >= 4).then_some(TriMesh3 { verts, tris })
+    }
 }
 
 #[cfg(test)]
