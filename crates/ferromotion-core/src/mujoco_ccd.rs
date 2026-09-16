@@ -2012,6 +2012,40 @@ mod tests {
         check_set(&c, -0.005000002980232357, [0.0, 0.0, -1.0], &[[0.030000000000000002, 0.040000000000000015, 1.0725000014901163]], 1e-9);
     }
 
+    /// The guard on the inversion fix: a clip that writes nothing must SAY so, because the caller's
+    /// edge-on-face branch swaps the witness points and swapping EPA's pair inverts the contact normal.
+    #[test]
+    fn a_clip_that_produces_nothing_reports_it() {
+        let mut st = CcdStatus {
+            separated: false,
+            dist: vec![-1.0],
+            x1: vec![Vector3::new(0.0, 0.0, 1.0)],
+            x2: vec![Vector3::new(0.0, 0.0, -1.0)],
+            gjk_iterations: 0,
+            epa_iterations: 0,
+            epa_status: 0,
+            simplex: [Vertex::default(); 4],
+            nsimplex: 4,
+            tolerance: 1e-6,
+            max_iterations: 35,
+            max_contacts: 4,
+            dist_cutoff: 0.0,
+        };
+        let (x1, x2) = (st.x1[0], st.x2[0]);
+        // a unit square in the z = 0 plane, wound so its side planes face inward for n = +z (the winding
+        // `boxFace` and `meshFace` produce), and an edge that sits far outside its prism
+        let face1 = [Vector3::new(-1.0, 1.0, 0.0), Vector3::new(1.0, 1.0, 0.0), Vector3::new(1.0, -1.0, 0.0), Vector3::new(-1.0, -1.0, 0.0)];
+        let far = [Vector3::new(50.0, 50.0, -1.0), Vector3::new(60.0, 50.0, -1.0)];
+        let n = Vector3::z();
+        assert!(!polygon_clip(&mut st, &face1, &far, &n, &(-n)), "a clip with nothing inside must report false");
+        assert_eq!((st.x1[0], st.x2[0]), (x1, x2), "and must leave EPA's witness pair untouched");
+
+        // the same edge over the square does produce points, and says so
+        let over = [Vector3::new(-0.5, 0.0, -0.1), Vector3::new(0.5, 0.0, -0.1)];
+        assert!(polygon_clip(&mut st, &face1, &over, &n, &(-n)), "a clip with points inside must report true");
+        assert_eq!(st.x1.len(), 2, "an edge clipped against a face gives its two ends");
+    }
+
     #[test]
     fn a_tilted_box_mesh_on_a_plane_yields_mujocos_two_face_corners() {
         let (hull, com, r) = mujoco_mesh(BOXMESH);

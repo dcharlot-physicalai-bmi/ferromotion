@@ -323,6 +323,13 @@ static void run(const char* label, mjCCDObj* o1, mjCCDObj* o2, int multiccd) {
   printf("=== %s: ncon=%d\n", label, n);
   for (int i = 0; i < n; i++) printf("  dist=%.17g pos=[%.17g, %.17g, %.17g] normal=[%.17g, %.17g, %.17g]\n", con[i].dist, con[i].pos[0], con[i].pos[1], con[i].pos[2], con[i].normal[0], con[i].normal[1], con[i].normal[2]);
 }
+// same, but taking the rotation matrix directly — Menagerie poses come out of the oracle as geom_xmat
+static void init_mat(mjCCDObj* o, int type, const double size[3], const double pos[3], const double mat[9], double margin) {
+  double q[4] = {1, 0, 0, 0};
+  init(o, type, size, pos, q, margin);
+  memcpy(o->mat, mat, 9 * sizeof(double));
+}
+
 int main(void) {
   const double id[4] = {1,0,0,0};
   mjCCDObj a, b;
@@ -331,5 +338,21 @@ int main(void) {
   { double s[3] = {0.04, 0.1, 0}, p[3] = {0.04, 0.02, 1.18}, q[4] = {0.7071068, 0, 0.7071068, 0}; init(&a, mjGEOM_CAPSULE, s, p, q, 0); init(&b, mjGEOM_BOX, bx, bp, id, 0); run("capsule on box", &a, &b, 1); }
   { double s[3] = {0.05, 0.2, 0}, p1[3] = {0, 0, 1}, p2[3] = {0.02, 0.01, 1.095}, q[4] = {0.7071068, 0, 0.7071068, 0}; init(&a, mjGEOM_CYLINDER, s, p1, id, 0); init(&b, mjGEOM_CYLINDER, s, p2, q, 0); run("cylinder-cylinder crossed", &a, &b, 1); }
   { double s[3] = {0.06, 0.04, 0.03}, p[3] = {0.03, 0.02, 1.175}, q[4] = {0.9238795, 0, 0.3826834, 0}; init(&a, mjGEOM_ELLIPSOID, s, p, q, 0); init(&b, mjGEOM_BOX, bx, bp, id, 0); run("ellipsoid on box", &a, &b, 1); }
+
+  // fourier_n1/n1.xml geoms 1 and 16 at MuJoCo's own geom_xpos/geom_xmat: two cylinders overlapping by
+  // 31 micrometres, where this port and the arm64 wheel report opposite normals at identical depth
+  {
+    double s1[3] = {0.065, 0.0675, 0}, p1[3] = {0.08539340246023025, 0.032896559837938814, 0.6641187211978501};
+    double m1[9] = {-0.49418139395483024, -0.8109762031412986, 0.31321294323093446,
+                     0.6602653884717504, -0.11574723429074663, 0.7420594279033802,
+                    -0.5655390054232421, 0.5735156281153694, 0.592659647396652};
+    double s2[3] = {0.06, 0.095, 0}, p2[3] = {0.04788949966356997, 0.23417202888574384, 0.6552473273724194};
+    double m2[9] = {-0.6018919636550226, -0.46927452071099596, 0.6461481937597335,
+                    -0.1511126975750603, -0.7275770566496756, -0.6691760450498682,
+                     0.7841498687872679, -0.5004128803782532, 0.3670094446093328};
+    init_mat(&a, mjGEOM_CYLINDER, s1, p1, m1, 0);
+    init_mat(&b, mjGEOM_CYLINDER, s2, p2, m2, 0);
+    run("fourier_n1 geom1 vs geom16 (31 um overlap)", &a, &b, 1);
+  }
   return 0;
 }

@@ -9,7 +9,7 @@
 //! The poses are MuJoCo's own `geom_xpos`/`geom_xmat` for the sample in question, so the only thing under
 //! test is the pair routine.
 
-use ferromotion_core::{collide_pair_with, tree_from_mjcf, CollideOptions, CollisionGeom, GeomPose, GeomType};
+use ferromotion_core::{ccd, collide_pair_with, tree_from_mjcf, CcdConfig, CcdObj, CollideOptions, CollisionGeom, GeomPose, GeomType};
 use nalgebra::{Matrix3, Vector3};
 
 fn geom_type(s: &str) -> GeomType {
@@ -54,6 +54,17 @@ fn main() {
     // MULTICCD=0 takes the single-contact path, which isolates GJK/EPA from the multi-contact clipping
     let opts = CollideOptions { multiccd: std::env::var("MULTICCD").map(|v| v != "0").unwrap_or(true), ..Default::default() };
     println!("multiccd: {}", opts.multiccd);
+    // the raw CCD, before the pair dispatcher and the multi-contact stage
+    {
+        let mut o1 = CcdObj::new(g1.kind, g1.pose, g1.size, g1.hull, 0.0);
+        let mut o2 = CcdObj::new(g2.kind, g2.pose, g2.size, g2.hull, 0.0);
+        let cfg = CcdConfig { max_iterations: 35, tolerance: 1e-6, max_contacts: 1, dist_cutoff: 0.0 };
+        let st = ccd(&cfg, &mut o1, &mut o2);
+        println!("raw ccd: epa_status={} separated={} dist={:?}", st.epa_status, st.separated, st.dist);
+        for (a, b) in st.x1.iter().zip(&st.x2) {
+            println!("   x1={:?} x2={:?}  x1-x2={:?}", a.as_slice(), b.as_slice(), (a - b).normalize().as_slice());
+        }
+    }
     match collide_pair_with(&opts, 0.0, &g1, &g2) {
         Ok(cs) => {
             println!("{} contacts:", cs.len());
