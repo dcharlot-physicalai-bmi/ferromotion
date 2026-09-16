@@ -305,6 +305,185 @@ pub fn mujoco_constraint_update(contacts: &[ConeContact], d: &[f64], jar: &[f64]
     ConstraintUpdate { force, state, cost }
 }
 
+/// **The constraint cost's Hessian in `jar`**, block-diagonal by contact, `nefc × nefc`.
+///
+/// A satisfied row contributes nothing and a quadratic row contributes `D`; an elliptic contact on the cone
+/// contributes `mjContact.H` — MuJoCo's `flg_coneHessian` branch of `mj_constraintUpdate`, the second
+/// derivative of the cone's radial projection, pre- and post-multiplied by `diag(mu, friction)`.
+pub fn mujoco_constraint_hessian(contacts: &[ConeContact], d: &[f64], jar: &[f64]) -> DMatrix<f64> {
+    let n = d.len().min(jar.len());
+    let mut h = DMatrix::zeros(n, n);
+    let u = mujoco_constraint_update(contacts, d, jar);
+    let mut i = 0;
+    for c in contacts {
+        let rows = mujoco_cone_rows(c.cone, c.condim);
+        if i + rows > n {
+            break;
+        }
+        if c.cone != Cone::Elliptic || c.condim == 1 {
+            for k in i..i + rows {
+                if u.state[k] == ConstraintState::Quadratic {
+                    h[(k, k)] = d[k];
+                }
+            }
+            i += rows;
+            continue;
+        }
+        let dim = c.condim;
+        match u.state[i] {
+            ConstraintState::Satisfied => {}
+            ConstraintState::Cone => {
+                let mu = c.mu;
+                let mut uu = [0.0f64; 6];
+                uu[0] = jar[i] * mu;
+                for j in 1..dim {
+                    uu[j] = jar[i + j] * c.friction[j - 1];
+                }
+                let (nn, t) = (uu[0], uu[1..dim].iter().map(|x| x * x).sum::<f64>().sqrt());
+                let dm = d[i] / (mu * mu * (1.0 + mu * mu));
+                let mut b = vec![0.0f64; dim * dim];
+                // first row: (1, −mu/T · U)
+                b[0] = 1.0;
+                for j in 1..dim {
+                    b[j] = -mu / t * uu[j];
+                }
+                // upper block: mu·N/T³ · UUᵀ, then (mu² − mu·N/T) on its diagonal
+                let scl = mu * nn / (t * t * t);
+                for k in 1..dim {
+                    for j in k..dim {
+                        b[k * dim + j] = scl * uu[j] * uu[k];
+                    }
+                }
+                let scl = mu * mu - mu * nn / t;
+                for j in 1..dim {
+                    b[j * (dim + 1)] += scl;
+                }
+                // pre- and post-multiply by diag(mu, friction) and scale by Dm
+                for k in 0..dim {
+                    let sk = dm * if k == 0 { mu } else { c.friction[k - 1] };
+                    for j in k..dim {
+                        b[k * dim + j] *= sk * if j == 0 { mu } else { c.friction[j - 1] };
+                    }
+                }
+                for k in 0..dim {
+                    for j in k..dim {
+                        h[(i + k, i + j)] = b[k * dim + j];
+                        h[(i + j, i + k)] = b[k * dim + j];
+                    }
+                }
+            }
+            _ => {
+                for k in i..i + dim {
+                    h[(k, k)] = d[k];
+                }
+            }
+        }
+        i += dim;
+    }
+    h
+}
+
+/// What [`solve_constraints_newton`] produces.
+#[derive(Clone, Debug)]
+pub struct NewtonSolve {
+    /// `qacc` at the minimum.
+    pub qacc: DVector<f64>,
+    /// `efc_force` there.
+    pub force: Vec<f64>,
+    /// `efc_state` there.
+    pub state: Vec<ConstraintState>,
+    /// The objective `½(a−a₀)ᵀM(a−a₀) + s_hat(jar)` at the minimum.
+    pub cost: f64,
+    pub iterations: usize,
+    /// `‖M(a−a₀) − Jᵀf‖` at exit, MuJoCo's own measure of how solved the problem is.
+    pub grad_norm: f64,
+}
+
+/// **Solve MuJoCo's constraint problem in the primal, over acceleration**, which is the only formulation
+/// that expresses the elliptic cone.
+///
+/// Minimise `½(a − a_smooth)ᵀ M (a − a_smooth) + s_hat(J·a − a_ref)` by Newton with a backtracking line
+/// search. `s_hat` is [`mujoco_constraint_update`]'s cost, so the pyramidal and frictionless rows are the
+/// same box-shaped problem the dual solver handles and the elliptic rows are second-order cones.
+///
+/// The objective is strictly convex (`M` is positive definite and `s_hat` is convex), so its minimiser is
+/// unique: a tightly converged solve reproduces MuJoCo's `qacc` whatever path it took to get there. That is
+/// what this is checked against — MuJoCo's returned `qacc`, not its iteration sequence.
+///
+/// `jac` is `nefc × nv`, `d` is `efc_D` and `aref` is `efc_aref`, both in row order; `contacts` describes the
+/// rows in the same order. Dense throughout, like the rest of this module.
+pub fn solve_constraints_newton(
+    m: &DMatrix<f64>,
+    a_smooth: &DVector<f64>,
+    jac: &DMatrix<f64>,
+    aref: &[f64],
+    d: &[f64],
+    contacts: &[ConeContact],
+    tol: f64,
+    max_iter: usize,
+) -> Result<NewtonSolve, String> {
+    let nv = m.nrows();
+    let nefc = jac.nrows();
+    if m.ncols() != nv || a_smooth.len() != nv || jac.ncols() != nv {
+        return Err("mass matrix, a_smooth and Jacobian disagree on nv".into());
+    }
+    if aref.len() != nefc || d.len() != nefc {
+        return Err("aref and D must have one entry per constraint row".into());
+    }
+    let arefv = DVector::from_row_slice(aref);
+    let objective = |a: &DVector<f64>| -> (f64, ConstraintUpdate, Vec<f64>) {
+        let jar: Vec<f64> = (jac * a - &arefv).iter().copied().collect();
+        let u = mujoco_constraint_update(contacts, d, &jar);
+        let da = a - a_smooth;
+        (0.5 * (da.transpose() * m * &da)[(0, 0)] + u.cost, u, jar)
+    };
+    let mut a = a_smooth.clone();
+    let (mut cost, mut u, mut jar) = objective(&a);
+    let mut iterations = 0;
+    let mut grad_norm = f64::INFINITY;
+    for _ in 0..max_iter {
+        let f = DVector::from_row_slice(&u.force);
+        let grad = m * (&a - a_smooth) - jac.transpose() * &f;
+        grad_norm = grad.norm();
+        if grad_norm <= tol {
+            break;
+        }
+        let h = mujoco_constraint_hessian(contacts, d, &jar);
+        let hess = m + jac.transpose() * h * jac;
+        // a strictly convex objective has a positive-definite Hessian; a Cholesky that fails means the
+        // active set has left it singular, so fall back to the steepest descent direction rather than stop
+        let dir = match hess.cholesky() {
+            Some(c) => -c.solve(&grad),
+            None => -grad.clone(),
+        };
+        // backtracking line search; the direction is a descent direction, so some step decreases the cost
+        let slope = grad.dot(&dir);
+        if slope >= 0.0 {
+            break;
+        }
+        let mut step = 1.0;
+        let mut improved = false;
+        for _ in 0..60 {
+            let trial = &a + &dir * step;
+            let (c2, u2, jar2) = objective(&trial);
+            if c2 <= cost + 1e-4 * step * slope {
+                a = trial;
+                cost = c2;
+                u = u2;
+                jar = jar2;
+                improved = true;
+                break;
+            }
+            step *= 0.5;
+        }
+        iterations += 1;
+        if !improved {
+            break;
+        }
+    }
+    Ok(NewtonSolve { qacc: a, force: u.force, state: u.state, cost, iterations, grad_norm })
+}
+
 /// One contact between two bodies, as MuJoCo's `mjContact` carries it into the constraint solver.
 #[derive(Clone, Debug)]
 pub struct MjContact {
@@ -470,6 +649,99 @@ mod cone_tests {
     //! branch's. These tests pin the re-evaluated state; pinning the leftover would have had this port
     //! "corrected" into disagreeing with MuJoCo's own function.
     use super::*;
+    use crate::mujoco_cone_cases::CASES;
+    use nalgebra::{DMatrix, DVector};
+
+    fn mat(rows: &[&[f64]]) -> DMatrix<f64> {
+        let flat: Vec<f64> = rows.iter().flat_map(|r| r.iter().copied()).collect();
+        DMatrix::from_row_slice(rows.len(), rows[0].len(), &flat)
+    }
+
+    /// **Every case the cone probe recorded, solved from `qacc_smooth` and compared with MuJoCo's `qacc`.**
+    /// The objective is strictly convex, so its minimiser is unique and this compares the answer rather than
+    /// the path — which is the only fair comparison against a different solver (MuJoCo runs Newton with an
+    /// exact line search on the cone cost; this runs Newton with a backtracking one).
+    #[test]
+    fn the_primal_solve_reaches_mujocos_qacc_on_every_probed_case() {
+        let mut worst: f64 = 0.0;
+        let mut worst_label = "";
+        for case in CASES {
+            let cone = if case.elliptic { Cone::Elliptic } else { Cone::Pyramidal };
+            let contacts: Vec<ConeContact> = case
+                .condim
+                .iter()
+                .zip(case.mu)
+                .zip(case.friction)
+                .map(|((&condim, &mu), &friction)| ConeContact { cone, condim, mu, friction })
+                .collect();
+            let rows: usize = contacts.iter().map(|c| mujoco_cone_rows(c.cone, c.condim)).sum();
+            assert_eq!(rows, case.jac.len(), "{}: row count", case.label);
+            let sol = solve_constraints_newton(
+                &mat(case.m),
+                &DVector::from_row_slice(case.qacc_smooth),
+                &mat(case.jac),
+                case.aref,
+                case.d,
+                &contacts,
+                1e-10,
+                200,
+            )
+            .expect("well-formed");
+            let want = DVector::from_row_slice(case.qacc);
+            let scale = want.norm().max(1.0);
+            let err = (&sol.qacc - &want).norm() / scale;
+            if err > worst {
+                worst = err;
+                worst_label = case.label;
+            }
+            if err >= 1e-6 {
+                // A disagreement is only ours if our answer is WORSE. The objective is strictly convex, so
+                // the lower cost is the more converged point, whichever solver found it.
+                let cost_at = |a: &DVector<f64>| {
+                    let jar: Vec<f64> = (mat(case.jac) * a - DVector::from_row_slice(case.aref)).iter().copied().collect();
+                    let da = a - DVector::from_row_slice(case.qacc_smooth);
+                    0.5 * (da.transpose() * mat(case.m) * &da)[(0, 0)] + mujoco_constraint_update(&contacts, case.d, &jar).cost
+                };
+                let (ours, theirs) = (cost_at(&sol.qacc), cost_at(&want));
+                assert!(
+                    ours <= theirs,
+                    "{}: qacc off by {err:.2e} relative AND our cost {ours} is worse than MuJoCo's {theirs}\n  ours   {:?}\n  MuJoCo {:?}",
+                    case.label,
+                    sol.qacc.as_slice(),
+                    want.as_slice()
+                );
+                eprintln!("  {}: {err:.2e} from MuJoCo's qacc, at a LOWER cost ({ours} vs {theirs}) — MuJoCo stopped first", case.label);
+            }
+        }
+        assert!(CASES.len() >= 13, "the fixture should cover every probed case, found {}", CASES.len());
+        eprintln!("worst relative qacc error {worst:.2e} ({worst_label}) over {} cases", CASES.len());
+    }
+
+    /// The cone Hessian is the second derivative of the cost, so a central difference of the gradient must
+    /// reproduce it — the check that catches a transcription error in a formula no oracle exposes directly.
+    #[test]
+    fn the_cone_hessian_is_the_costs_second_derivative() {
+        let c = ConeContact { cone: Cone::Elliptic, condim: 6, mu: 0.8, friction: [0.8, 0.8, 0.01, 0.002, 0.002] };
+        let d = [79.58701389094136, 79.58701389094136, 79.58701389094136, 0.012435470920459588, 0.0004974188368183835, 0.0004974188368183835];
+        let jar = [-0.3972220425962476, 0.7496758282083924, -1.3419316951191433, 69.46476424999835, 289.898727631373, 136.62338661644037];
+        assert_eq!(mujoco_constraint_update(&[c], &d, &jar).state[0], ConstraintState::Cone, "the fixture must be on the cone");
+        let h = mujoco_constraint_hessian(&[c], &d, &jar);
+        // gradient of the cost in jar is −force
+        let grad = |x: &[f64]| -> Vec<f64> { mujoco_constraint_update(&[c], &d, x).force.iter().map(|f| -f).collect() };
+        for k in 0..6 {
+            let step = 1e-6 * jar[k].abs().max(1.0);
+            let (mut lo, mut hi) = (jar, jar);
+            lo[k] -= step;
+            hi[k] += step;
+            let (gl, gh) = (grad(&lo), grad(&hi));
+            for j in 0..6 {
+                let fd = (gh[j] - gl[j]) / (2.0 * step);
+                let want = h[(j, k)];
+                assert!((fd - want).abs() < 1e-4 * want.abs().max(1e-3), "H[{j},{k}] = {want} but the finite difference says {fd}");
+            }
+        }
+    }
+
 
     fn check(u: &ConstraintUpdate, force: &[f64], state: ConstraintState, cost: f64) {
         assert_eq!(u.state, vec![state; force.len()], "state");

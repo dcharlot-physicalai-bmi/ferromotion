@@ -347,6 +347,8 @@ pub mod transport_geometry;
 mod mjcf;
 mod mjcf_tree;
 mod mujoco_ccd;
+#[cfg(test)]
+mod mujoco_cone_cases;
 mod mujoco_collision;
 mod mujoco_contact;
 mod mujoco_hull;
@@ -474,7 +476,7 @@ pub use mjcf_tree::{tree_from_mjcf, tree_from_mjcf_str, MjcfContactPair, MjcfJoi
 pub use mujoco_collision::{box_box, can_collide, capsule_box, capsule_capsule, collide_pair, collide_pair_with, contact_param, filter_body_pair, make_frame, margin_and_gap, plane_box, plane_capsule, plane_cylinder, plane_sphere, set_contact, sphere_box, sphere_capsule, sphere_cylinder, sphere_sphere, CollideOptions, CollisionGeom, ContactRecord, GeomParams, GeomPose, GeomType, PairParams, PreContact};
 pub use mujoco_ccd::{ccd, convex_pair, max_contacts, plane_convex, CcdConfig, CcdObj, CcdStatus};
 pub use mujoco_hull::{HullPolygon, MeshHull};
-pub use mujoco_contact::{mujoco_cone_adjust, mujoco_cone_rows, mujoco_constraint_update, mujoco_diag_approx, mujoco_impedance, mujoco_kbip, solve_contacts_mujoco, Cone, ConeContact, ConstraintState, ConstraintUpdate, InvWeight, MjContact, MjContactSolve, SolImp, SolRef};
+pub use mujoco_contact::{mujoco_cone_adjust, mujoco_cone_rows, mujoco_constraint_hessian, mujoco_constraint_update, solve_constraints_newton, NewtonSolve, mujoco_diag_approx, mujoco_impedance, mujoco_kbip, solve_contacts_mujoco, Cone, ConeContact, ConstraintState, ConstraintUpdate, InvWeight, MjContact, MjContactSolve, SolImp, SolRef};
 pub use usda::{axis_token, parse_usda, robot_from_usda, usda_from_robot, ParseError, Prim, UsdaStage, Value};
 pub use urdf::from_urdf_full;
 pub use robust::solve_ik_robust;
