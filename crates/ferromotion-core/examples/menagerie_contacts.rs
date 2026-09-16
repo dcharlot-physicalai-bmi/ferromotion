@@ -410,6 +410,12 @@ fn main() {
                                 t.pair_worst_depth = t.pair_worst_depth.max(dd);
                                 t.pair_worst_normal = t.pair_worst_normal.max(dn);
                             }
+                            if (dn > 1e-3 || dd > 1e-5) && model_notes.len() < max_notes {
+                                model_notes.push(format!(
+                                    "PAIR {}–{} ({}): deepest MuJoCo {d} along {n:?}, ours {d2} along {n2:?}",
+                                    o.geoms[k.0].name, o.geoms[k.1].name, pair_key(&o.geoms[k.0].ty, &o.geoms[k.1].ty)
+                                ));
+                            }
                         }
                         None => {
                             tally.pair_only_mujoco += 1;

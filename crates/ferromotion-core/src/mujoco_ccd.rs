@@ -1083,10 +1083,12 @@ fn witness_on_face(v: &V3, p: &V3, n: &V3, dir: &V3) -> (V3, V3, f64) {
 
 /// `polygonClip`: clip `face2` against the prism of `face1`, keep points below `face1`'s plane, reduce to
 /// the four of largest area when only four are wanted.
-fn polygon_clip(st: &mut CcdStatus, face1: &[V3], face2: &[V3], n: &V3, dir: &V3) {
+///
+/// Returns whether it produced witness points; `false` leaves `st` holding EPA's single pair untouched.
+fn polygon_clip(st: &mut CcdStatus, face1: &[V3], face2: &[V3], n: &V3, dir: &V3) -> bool {
     let nface1 = face1.len();
     if nface1 < 3 {
-        return;
+        return false;
     }
     let mut pn = Vec::with_capacity(nface1);
     let mut pd = Vec::with_capacity(nface1);
@@ -1127,7 +1129,7 @@ fn polygon_clip(st: &mut CcdStatus, face1: &[V3], face2: &[V3], n: &V3, dir: &V3
     }
     let polygon: Vec<V3> = polygon.into_iter().filter(|p| (p - face1[0]).dot(n) <= 0.0).collect();
     if polygon.is_empty() {
-        return;
+        return false;
     }
     st.x1.clear();
     st.x2.clear();
@@ -1140,7 +1142,7 @@ fn polygon_clip(st: &mut CcdStatus, face1: &[V3], face2: &[V3], n: &V3, dir: &V3
             st.x2.push(w2);
             st.dist.push(d);
         }
-        return;
+        return true;
     }
     if face2.len() == 2 && polygon.len() > 2 {
         let (mut best1, mut best2, mut dd) = (0, 1, 0.0);
@@ -1160,7 +1162,7 @@ fn polygon_clip(st: &mut CcdStatus, face1: &[V3], face2: &[V3], n: &V3, dir: &V3
             st.x2.push(w2);
             st.dist.push(d);
         }
-        return;
+        return true;
     }
     for p in polygon.iter().take(MAXCONPAIR) {
         let (w1, w2, d) = witness_on_face(p, &face1[0], n, dir);
@@ -1168,6 +1170,7 @@ fn polygon_clip(st: &mut CcdStatus, face1: &[V3], face2: &[V3], n: &V3, dir: &V3
         st.x2.push(w2);
         st.dist.push(d);
     }
+    true
 }
 
 fn globalcoord(pose: &GeomPose, l: V3, with_pos: bool) -> V3 {
@@ -1481,10 +1484,20 @@ fn multicontact(pt: &Polytope, fi: usize, st: &mut CcdStatus, o1: &CcdObj, o2: &
     let face1: Vec<V3> = if edgecon1 { vec![v1[0], e1[i].1] } else { face_vertices(o1, if edgecon2 { n1[j].1 } else { n1[i].1 }) };
     let face2: Vec<V3> = if edgecon2 { vec![v2[0], e2[i].1] } else { face_vertices(o2, n2[j].1) };
     if edgecon1 {
+        // the faces go in reversed, so the witness points come out belonging to the other geom — but ONLY
+        // if the clip produced any.
+        //
+        // ⛔ MuJoCo swaps `status->nx` pairs unconditionally here, and when the clip produces nothing that
+        // count is still the 1 left by EPA: it swaps EPA's witness pair, which inverts the contact normal.
+        // Measured on Menagerie, that is one pair of 2,805 (a cylinder against a hand-link mesh in
+        // `unitree_g1/g1_with_hands.xml`) whose depth is right to 9e-6 m and whose normal points exactly
+        // backwards — a contact that would pull the two bodies together. This port swaps only what the clip
+        // actually wrote, and otherwise leaves EPA's pair alone, which is where the correct normal already is.
         let wit_dir = -n2[j].0;
         let nrm = n2[j].0;
-        polygon_clip(st, &face2, &face1, &nrm, &wit_dir);
-        std::mem::swap(&mut st.x1, &mut st.x2);
+        if polygon_clip(st, &face2, &face1, &nrm, &wit_dir) {
+            std::mem::swap(&mut st.x1, &mut st.x2);
+        }
         return;
     }
     if edgecon2 {
