@@ -140,6 +140,171 @@ pub fn mujoco_diag_approx(a: InvWeight, b: InvWeight, condim: usize, friction: &
     }
 }
 
+/// `mjtCone`: which friction cone the constraint rows model. MJCF `<option cone>`, default pyramidal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cone {
+    /// `2·(condim−1)` non-negative rows on opposing pyramid edges — a linearisation, and a box-constrained
+    /// problem any projected solver can take.
+    Pyramidal,
+    /// `condim` rows, the contact frame itself, constrained to a second-order cone. Exact, and not a box.
+    Elliptic,
+}
+
+/// How many constraint rows a contact of this condim occupies under this cone.
+pub fn mujoco_cone_rows(cone: Cone, condim: usize) -> usize {
+    match (cone, condim) {
+        (_, 1) => 1,
+        (Cone::Pyramidal, d) => 2 * (d - 1),
+        (Cone::Elliptic, d) => d,
+    }
+}
+
+/// **The regularisation MuJoCo puts on a frictional contact's rows**, applied to `r` in place, returning the
+/// contact's `mu` — the coefficient of the REGULARIZED cone, which is what the solver's projection uses and
+/// what `mjContact.mu` reports. Not `friction[0]`: `<option impratio>` trades normal stiffness against
+/// frictional stiffness by scaling the friction rows' `R` down, and `mu` follows so the cone the solver sees
+/// is the one the model asked for.
+///
+/// In MuJoCo's order (`mj_makeImpedance`): the friction rows take `R[1] = R[0]/impratio`, then
+/// `mu = friction[0]·√(R[1]/R[0])`; under the elliptic cone the remaining rows are scaled so that
+/// `R[j]·μ_j² = R[1]·μ_1²`, which is what makes an anisotropic `friction` an ellipse rather than a circle;
+/// under the pyramidal cone every row instead takes one common `R = 2μ²R[0]`, the value at which the
+/// pyramid's friction impedance matches the ellipse's.
+pub fn mujoco_cone_adjust(r: &mut [f64], cone: Cone, condim: usize, friction: &[f64], impratio: f64) -> f64 {
+    if condim == 1 || r.len() < 2 {
+        return 0.0;
+    }
+    r[1] = r[0] / impratio.max(MINVAL);
+    let mu = friction[0] * (r[1] / r[0]).sqrt();
+    match cone {
+        Cone::Elliptic => {
+            for j in 1..condim - 1 {
+                r[j + 1] = r[1] * friction[0] * friction[0] / (friction[j] * friction[j]);
+            }
+        }
+        Cone::Pyramidal => {
+            let rpy = 2.0 * mu * mu * r[0];
+            for v in r.iter_mut().take(2 * (condim - 1)) {
+                *v = rpy;
+            }
+        }
+    }
+    mu
+}
+
+/// `mjtConstraintState`: the zone the constraint update put a row in. Every row of an elliptic contact
+/// carries the same state, because the cone is one constraint on the whole contact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConstraintState {
+    /// The constraint is not active and exerts no force.
+    Satisfied,
+    /// Inside the quadratic region: `force = −D·jar`.
+    Quadratic,
+    /// At the negative friction-loss limit.
+    LinearNeg,
+    /// At the positive friction-loss limit.
+    LinearPos,
+    /// On the elliptic cone's surface, where the force is the projection onto the dual cone.
+    Cone,
+}
+
+/// One contact as the constraint update sees it: how many rows it owns and, for the elliptic cone, the
+/// regularized `mu` and the friction coefficients that shape the ellipse.
+#[derive(Clone, Copy, Debug)]
+pub struct ConeContact {
+    pub cone: Cone,
+    pub condim: usize,
+    /// `mjContact.mu`, from [`mujoco_cone_adjust`].
+    pub mu: f64,
+    /// `mjContact.friction`, MuJoCo's unpacked 5-vector `(slide, slide, spin, roll, roll)`.
+    pub friction: [f64; 5],
+}
+
+/// What [`mujoco_constraint_update`] produces.
+#[derive(Clone, Debug)]
+pub struct ConstraintUpdate {
+    /// `efc_force`.
+    pub force: Vec<f64>,
+    /// `efc_state`.
+    pub state: Vec<ConstraintState>,
+    /// `s_hat(jar)`, the constraint part of the cost MuJoCo's solvers minimise over `qacc`.
+    pub cost: f64,
+}
+
+/// **`mj_constraintUpdate` for contact rows**: given `jar = J·qacc − a_ref`, the force each row exerts, the
+/// zone it is in, and the cost. This is the function MuJoCo's own solvers evaluate at every trial `qacc`;
+/// the pyramidal branch is a per-row clamp at zero, and the elliptic branch is the part a box-constrained
+/// solver cannot express.
+///
+/// The elliptic branch maps the contact's `jar` into the regular dual cone with `diag(mu, friction)`, splits
+/// it into normal `N` and tangential norm `T`, and takes one of three zones: above the cone (`N ≥ μT`) the
+/// contact is satisfied and exerts nothing; below its polar (`μN + T ≤ 0`) it is fully quadratic; between
+/// them the force is the projection onto the cone's surface, radial in the tangential plane.
+///
+/// `d` is `efc_D` (`1/R`) for every row, in order; `contacts` are in the same row order.
+pub fn mujoco_constraint_update(contacts: &[ConeContact], d: &[f64], jar: &[f64]) -> ConstraintUpdate {
+    let n = d.len().min(jar.len());
+    let mut force: Vec<f64> = (0..n).map(|i| -d[i] * jar[i]).collect();
+    let mut state = vec![ConstraintState::Quadratic; n];
+    let mut cost = 0.0;
+    let mut i = 0;
+    for c in contacts {
+        let rows = mujoco_cone_rows(c.cone, c.condim);
+        if i + rows > n {
+            break;
+        }
+        if c.cone != Cone::Elliptic || c.condim == 1 {
+            // every row is its own non-negative constraint
+            for k in i..i + rows {
+                if jar[k] >= 0.0 {
+                    force[k] = 0.0;
+                    state[k] = ConstraintState::Satisfied;
+                } else {
+                    cost += 0.5 * d[k] * jar[k] * jar[k];
+                    state[k] = ConstraintState::Quadratic;
+                }
+            }
+            i += rows;
+            continue;
+        }
+        let dim = c.condim;
+        let mu = c.mu;
+        // map into the regular dual cone: diag(mu, friction)
+        let mut u = [0.0f64; 6];
+        u[0] = jar[i] * mu;
+        for j in 1..dim {
+            u[j] = jar[i + j] * c.friction[j - 1];
+        }
+        let nn = u[0];
+        let t = u[1..dim].iter().map(|x| x * x).sum::<f64>().sqrt();
+        let zone = if nn >= mu * t || (t <= 0.0 && nn >= 0.0) {
+            for f in force.iter_mut().skip(i).take(dim) {
+                *f = 0.0;
+            }
+            ConstraintState::Satisfied
+        } else if mu * nn + t <= 0.0 || (t <= 0.0 && nn < 0.0) {
+            for k in i..i + dim {
+                cost += 0.5 * d[k] * jar[k] * jar[k];
+            }
+            ConstraintState::Quadratic
+        } else {
+            let dm = d[i] / (mu * mu * (1.0 + mu * mu));
+            let nmt = nn - mu * t;
+            cost += 0.5 * dm * nmt * nmt;
+            force[i] = -dm * nmt * mu;
+            for j in 1..dim {
+                force[i + j] = -force[i] / t * u[j] * c.friction[j - 1];
+            }
+            ConstraintState::Cone
+        };
+        for st in state.iter_mut().skip(i).take(dim) {
+            *st = zone;
+        }
+        i += dim;
+    }
+    ConstraintUpdate { force, state, cost }
+}
+
 /// One contact between two bodies, as MuJoCo's `mjContact` carries it into the constraint solver.
 #[derive(Clone, Debug)]
 pub struct MjContact {
@@ -291,6 +456,128 @@ pub fn solve_contacts_mujoco(m: &DMatrix<f64>, a0: &DVector<f64>, qvel: &DVector
     let force = DVector::from_vec(f.clone());
     let qacc = a0 + &minv_jt * &force;
     Ok(MjContactSolve { jac, r, aref, kbip: kb, force: f, qacc, residual })
+}
+
+#[cfg(test)]
+mod cone_tests {
+    //! Every number is MuJoCo 3.13.0's, from `scripts/mujoco_cone_probe.py`: `efc_R`, `efc_D`, `mjContact.mu`,
+    //! and — at `jar = J·qacc − a_ref` for the `qacc` MuJoCo returned — its own `mj_constraintUpdate`'s
+    //! `efc_force`, `efc_state` and cost, for a ball and a box on a plane under both cones at condim 1/3/4/6.
+    //!
+    //! ⛔ The `efc_state` left in `mjData` by `mj_forward` is STALE: it is the Newton solver's last internal
+    //! evaluation, not the state at the `qacc` it returned, and it disagrees on 15 of the probe's 76 rows.
+    //! A sliding elliptic contact is left reading `cone` while its own `efc_force` is exactly the quadratic
+    //! branch's. These tests pin the re-evaluated state; pinning the leftover would have had this port
+    //! "corrected" into disagreeing with MuJoCo's own function.
+    use super::*;
+
+    fn check(u: &ConstraintUpdate, force: &[f64], state: ConstraintState, cost: f64) {
+        assert_eq!(u.state, vec![state; force.len()], "state");
+        for (got, want) in u.force.iter().zip(force) {
+            assert!((got - want).abs() < 1e-8 * want.abs().max(1.0), "force {got} vs MuJoCo {want}");
+        }
+        assert!((u.cost - cost).abs() < 1e-8 * cost.abs().max(1.0), "cost {} vs MuJoCo {cost}", u.cost);
+    }
+
+    #[test]
+    fn the_cones_regularisation_and_mu_are_mujocos() {
+        // elliptic, condim 6, anisotropic friction (0.8 slide, 0.01 spin, 0.002 roll), impratio 1
+        let base = 0.012564863928307538;
+        let fri = [0.8, 0.8, 0.01, 0.002, 0.002];
+        let mut r = [base; 6];
+        let mu = mujoco_cone_adjust(&mut r, Cone::Elliptic, 6, &fri, 1.0);
+        assert_eq!(mu, 0.8);
+        let want = [0.012564863928307538, 0.012564863928307538, 0.012564863928307536, 80.41512914116824, 2010.3782285292061, 2010.3782285292061];
+        for (got, w) in r.iter().zip(want) {
+            assert_eq!(*got, w, "R {got} vs MuJoCo {w}");
+        }
+
+        // elliptic, condim 3, impratio 3: the friction rows soften and mu follows
+        let mut r = [base; 3];
+        let mu = mujoco_cone_adjust(&mut r, Cone::Elliptic, 3, &[1.0, 1.0, 0.005, 0.0001, 0.0001], 3.0);
+        assert_eq!(mu, 0.5773502691896258);
+        assert_eq!(r, [0.012564863928307538, 0.004188287976102513, 0.004188287976102513]);
+
+        // pyramidal, same model: every row takes one common R = 2μ²R₀, on a base that already carries the
+        // pyramid's own diagApprox (here 2× the elliptic one, since friction[0] = 1)
+        let mut r = [2.0 * base; 4];
+        let mu = mujoco_cone_adjust(&mut r, Cone::Pyramidal, 3, &[1.0, 1.0, 0.005, 0.0001, 0.0001], 3.0);
+        assert_eq!(mu, 0.5773502691896258);
+        assert_eq!(r, [0.016753151904410055; 4]);
+    }
+
+    #[test]
+    fn an_elliptic_contact_with_no_tangential_drive_is_quadratic() {
+        // a ball resting on the floor: T = 0 and N < 0, the bottom zone, where the elliptic cone reduces to
+        // the same quadratic a frictionless row would give
+        let c = ConeContact { cone: Cone::Elliptic, condim: 3, mu: 1.0, friction: [1.0, 1.0, 0.005, 0.0001, 0.0001] };
+        let jar = [-1.148394736842107, 0.0, 0.0];
+        let u = mujoco_constraint_update(&[c], &[79.58701389094136; 3], &jar);
+        check(&u, &[91.39730787333673, 0.0, 0.0], ConstraintState::Quadratic, 52.48009366163878);
+    }
+
+    #[test]
+    fn a_sliding_elliptic_contact_stays_in_the_quadratic_zone_when_the_cone_is_not_reached() {
+        // sliding at 0.4, 0.2 m/s: μN + T is still negative, so MuJoCo is in the bottom zone — and its own
+        // efc_force is −D·jar, while the efc_state field left behind says `cone`
+        let c = ConeContact { cone: Cone::Elliptic, condim: 3, mu: 1.0, friction: [1.0, 1.0, 0.005, 0.0001, 0.0001] };
+        let jar = [-1.148394736842107, 0.3231176817316097, -0.6462353634632123];
+        let u = mujoco_constraint_update(&[c], &[79.58701389094136; 3], &jar);
+        check(&u, &[91.39730787333673, -25.715971424382392, 51.43194284876422], ConstraintState::Quadratic, 73.25330633694531);
+    }
+
+    #[test]
+    fn condim_six_with_anisotropic_friction_lands_on_mujocos_ellipse() {
+        // the case a pyramidal cone cannot express: five friction rows with three different coefficients, so
+        // the cone's cross-section is an ellipsoid and every row's force is radial within it
+        let c = ConeContact { cone: Cone::Elliptic, condim: 6, mu: 0.8, friction: [0.8, 0.8, 0.01, 0.002, 0.002] };
+        let d = [79.58701389094136, 79.58701389094136, 79.58701389094136, 0.012435470920459588, 0.0004974188368183835, 0.0004974188368183835];
+        let jar = [-0.3972220425962476, 0.7496758282083924, -1.3419316951191433, 69.46476424999835, 289.898727631373, 136.62338661644037];
+        let u = mujoco_constraint_update(&[c], &d, &jar);
+        check(
+            &u,
+            &[94.54386359548204, -29.24686952427194, 52.35236314265267, -0.4234386259260889, -0.0706858046443038, -0.03331278510643513],
+            ConstraintState::Cone,
+            92.09548391605598,
+        );
+    }
+
+    #[test]
+    fn a_pyramidal_contact_clamps_each_row_at_zero() {
+        // the same ball, pyramidal, impratio 3: four rows that each stand alone, all pressed into contact
+        let c = ConeContact { cone: Cone::Pyramidal, condim: 3, mu: 0.5773502691896258, friction: [1.0, 1.0, 0.005, 0.0001, 0.0001] };
+        let u = mujoco_constraint_update(&[c], &[59.690260418206; 4], &[-0.39599818511796414; 4]);
+        check(&u, &[23.637234794828228; 4], ConstraintState::Quadratic, 18.72060415991834);
+    }
+
+    #[test]
+    fn a_contact_the_solver_has_satisfied_exerts_nothing() {
+        // jar ≥ 0 on a pyramidal row, and N ≥ μT on an elliptic contact, are both "no force"
+        let c = ConeContact { cone: Cone::Pyramidal, condim: 3, mu: 0.5, friction: [1.0, 1.0, 0.005, 0.0001, 0.0001] };
+        let u = mujoco_constraint_update(&[c], &[10.0; 4], &[1.0, 2.0, 0.0, -1.0]);
+        assert_eq!(u.state, vec![ConstraintState::Satisfied, ConstraintState::Satisfied, ConstraintState::Satisfied, ConstraintState::Quadratic]);
+        assert_eq!(&u.force[..3], &[0.0, 0.0, 0.0]);
+        assert_eq!(u.force[3], 10.0);
+        assert_eq!(u.cost, 5.0);
+
+        let c = ConeContact { cone: Cone::Elliptic, condim: 3, mu: 1.0, friction: [1.0, 1.0, 0.005, 0.0001, 0.0001] };
+        let u = mujoco_constraint_update(&[c], &[10.0; 3], &[5.0, 1.0, 1.0]);
+        assert_eq!(u.state, vec![ConstraintState::Satisfied; 3]);
+        assert_eq!(u.force, vec![0.0; 3]);
+        assert_eq!(u.cost, 0.0);
+    }
+
+    #[test]
+    fn the_row_count_follows_the_cone_and_the_condim() {
+        assert_eq!(mujoco_cone_rows(Cone::Pyramidal, 1), 1);
+        assert_eq!(mujoco_cone_rows(Cone::Elliptic, 1), 1);
+        assert_eq!(mujoco_cone_rows(Cone::Pyramidal, 3), 4);
+        assert_eq!(mujoco_cone_rows(Cone::Elliptic, 3), 3);
+        assert_eq!(mujoco_cone_rows(Cone::Pyramidal, 4), 6);
+        assert_eq!(mujoco_cone_rows(Cone::Elliptic, 4), 4);
+        assert_eq!(mujoco_cone_rows(Cone::Pyramidal, 6), 10);
+        assert_eq!(mujoco_cone_rows(Cone::Elliptic, 6), 6);
+    }
 }
 
 #[cfg(test)]
