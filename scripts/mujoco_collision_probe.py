@@ -38,3 +38,11 @@ run("box-box face", world(body("a", geom("b1", "box", "0.2 0.3 0.15"), "0 0 1"),
 run("box-box edge", world(body("a", geom("b1", "box", "0.2 0.3 0.15"), "0 0 1"), body("b", geom("b2", "box", "0.1 0.1 0.1"), "0.25 0.0 1.2", "0.9238795 0 0.3826834 0")))
 run("param mixing: solmix + friction max + condim max + margin/gap", world('<geom name="floor" type="plane" size="1 1 0.1" friction="0.3" solref="0.05 0.8" solimp="0.8 0.9 0.002 0.4 3" solmix="2" condim="3"/>', body("b", geom("s", "sphere", "0.1", 'friction="0.7" solref="0.01 1.2" solimp="0.95 0.99 0.005 0.6 1" solmix="0.5" condim="4" margin="0.01" gap="0.002"'), "0 0 0.105")))
 run("param mixing: priority wins", world('<geom name="floor" type="plane" size="1 1 0.1" friction="0.3" priority="1" solref="0.05 0.8" condim="1"/>', body("b", geom("s", "sphere", "0.1", 'friction="0.7" solref="0.01 1.2" condim="6"'), "0 0 0.095")))
+
+# capsule–box: MuJoCo's dedicated `mjraw_CapsuleBox` (segment-to-box closest feature, then one or two
+# sphere–box contacts)
+run("capsule-box end on face", world(body("a", geom("c", "capsule", "0.04 0.1"), "0.05 0.02 1.27", "0.9659258 0.2588190 0 0"), body("b", geom("bx", "box", "0.2 0.3 0.15"), "0 0 1")))
+run("capsule-box lying on face", world(body("a", geom("c", "capsule", "0.04 0.1"), "0.04 0.02 1.18", "0.7071068 0 0.7071068 0"), body("b", geom("bx", "box", "0.2 0.3 0.15"), "0 0 1")))
+run("capsule-box across an edge", world(body("a", geom("c", "capsule", "0.04 0.15"), "0.2 0.1 1.17", "0.7071068 0.7071068 0 0"), body("b", geom("bx", "box", "0.2 0.3 0.15"), "0 0 1")))
+run("capsule-box at a corner", world(body("a", geom("c", "capsule", "0.04 0.1"), "0.21 0.31 1.15", "0.8804762 0.2798481 0.3647052 0.1159170"), body("b", geom("bx", "box", "0.2 0.3 0.15"), "0 0 1")))
+run("capsule-box separated", world(body("a", geom("c", "capsule", "0.04 0.1"), "0.05 0.02 1.4", "0.7071068 0 0.7071068 0"), body("b", geom("bx", "box", "0.2 0.3 0.15"), "0 0 1")))

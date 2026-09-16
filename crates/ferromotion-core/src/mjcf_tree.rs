@@ -71,7 +71,7 @@ use crate::kinematic_tree::KinematicTree;
 use crate::mjcf::{floats, parse_xml, vec3, El};
 use crate::{Iso, Joint};
 use nalgebra::{Matrix3, Translation3, Unit, UnitQuaternion, Vector3};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// The MuJoCo joint kinds this loader carries, each as one or more single-DoF tree joints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,6 +145,38 @@ pub struct MjcfTree {
     pub inferred_from_geoms: Vec<String>,
     /// `<compiler angle>` as the radians-per-unit factor that was applied: `1` for radian, `π/180` for degree.
     pub angle_scale: f64,
+    /// Each body's MJCF parent body (`world` for the children of the worldbody) — what MuJoCo's contact
+    /// filtering reads through `body_parentid` and `body_weldid`.
+    pub body_parent: BTreeMap<String, String>,
+    /// Hull data for every mesh a collidable mesh geom (`contype` or `conaffinity` non-zero) references, as
+    /// MuJoCo stores the mesh: `f32` vertices centred at the mesh's CoM in its principal frame. A mesh geom's
+    /// `geom_xmat` already includes that frame, so these vertices go straight under the geom's world pose.
+    pub mesh_hulls: BTreeMap<String, crate::mujoco_hull::MeshHull>,
+    /// The same meshes before centring and rotation: after `scale`/`refpos`/`refquat`, `f32` vertices, in
+    /// the mesh file's own frame — for placing them under a frame chosen elsewhere (MuJoCo's `mesh_pos`,
+    /// `mesh_quat` when comparing against it).
+    pub mesh_raw: BTreeMap<String, crate::TriMesh3>,
+    /// `<contact><exclude body1 body2/>`, in file order.
+    pub contact_excludes: Vec<(String, String)>,
+    /// `<contact><pair/>` entries with their parameters resolved (defaults classes applied).
+    pub contact_pairs: Vec<MjcfContactPair>,
+}
+
+/// An explicit `<contact><pair>`: the two geoms and the contact parameters MuJoCo uses for that pair
+/// instead of mixing the geoms' own (`mj_collideGeomPair`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MjcfContactPair {
+    pub geom1: String,
+    pub geom2: String,
+    pub condim: usize,
+    /// `(slide1, slide2, spin, roll1, roll2)`
+    pub friction: [f64; 5],
+    pub solref: [f64; 2],
+    pub solreffriction: [f64; 2],
+    pub solimp: [f64; 5],
+    pub margin: f64,
+    pub gap: f64,
+    pub adhesion: f64,
 }
 
 impl MjcfTree {
@@ -336,7 +368,7 @@ fn compiler(root: &El) -> Result<Compiler, String> {
 /// 3,449 meshes: pyramids from the area-weighted face centroid with **absolute** volumes, so a mesh that is
 /// not watertight still gets a positive mass — and a concave one gets more than its true volume.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MeshInertia {
+pub(crate) enum MeshInertia {
     Legacy,
     Exact,
     Shell,
@@ -369,7 +401,7 @@ struct MeshAsset {
 /// Volume (or area, for a shell), centre of mass and inertia per unit density about that centre, computed
 /// exactly as `mjCMesh::Process` does: face centroid → one pass for the CoM → one pass for the second moments
 /// about it. Both passes take pyramids from the apex to each face; `legacy` takes their volumes absolute.
-fn mesh_inertia_mujoco(mesh: &crate::TriMesh3, method: MeshInertia) -> Result<(f64, Vector3<f64>, Matrix3<f64>), String> {
+pub(crate) fn mesh_inertia_mujoco(mesh: &crate::TriMesh3, method: MeshInertia) -> Result<(f64, Vector3<f64>, Matrix3<f64>), String> {
     const MINVAL: f64 = 1e-15;
     // triangle(): unit normal, centre, area — faces below MINVAL in |cross| are ignored (area 0)
     let tri = |a: Vector3<f64>, b: Vector3<f64>, c: Vector3<f64>| -> (Vector3<f64>, Vector3<f64>, f64) {
@@ -443,7 +475,7 @@ fn mesh_inertia_mujoco(mesh: &crate::TriMesh3, method: MeshInertia) -> Result<(f
 /// at unit scale, or a fly's claw) terminates at iteration zero, so MuJoCo takes the tensor's **diagonal** in
 /// the mesh's own axes as its principal inertia and drops the off-diagonal terms. That is measurable against
 /// MuJoCo and this port reproduces it.
-fn eig3_mujoco(mat: &Matrix3<f64>) -> ([f64; 3], [f64; 4]) {
+pub(crate) fn eig3_mujoco(mat: &Matrix3<f64>) -> ([f64; 3], [f64; 4]) {
     const EPS: f64 = 1e-12;
     let quat2mat = |q: &[f64; 4]| -> Matrix3<f64> {
         if q[0] == 1.0 && q[1] == 0.0 && q[2] == 0.0 && q[3] == 0.0 {
@@ -523,14 +555,14 @@ fn eig3_mujoco(mat: &Matrix3<f64>) -> ([f64; 3], [f64; 4]) {
 }
 
 /// Rotation matrix of a MuJoCo `(w x y z)` quaternion, columns = axes.
-fn quat_to_rotation(q: &[f64; 4]) -> Matrix3<f64> {
+pub(crate) fn quat_to_rotation(q: &[f64; 4]) -> Matrix3<f64> {
     *UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(q[0], q[1], q[2], q[3])).to_rotation_matrix().matrix()
 }
 
 /// A mesh as MuJoCo's OBJ reader (tinyobjloader with `real_t = float`) delivers it: coordinates rounded to
 /// `f32`, quads split along their **shorter diagonal** (measured in `f32`), larger polygons refused because
 /// tinyobj's ear clipping is not reproduced here.
-fn obj_as_mujoco_reads_it(text: &str) -> Result<crate::TriMesh3, String> {
+pub(crate) fn obj_as_mujoco_reads_it(text: &str) -> Result<crate::TriMesh3, String> {
     let mut verts: Vec<Vector3<f64>> = Vec::new();
     let mut tris: Vec<[usize; 3]> = Vec::new();
     for line in text.lines() {
@@ -799,6 +831,14 @@ struct Walk<'a> {
     meshes: &'a HashMap<String, MeshAsset>,
     /// per mesh name: what `mjCMesh::Process` leaves behind, in the mesh's frame
     mesh_cache: HashMap<String, MeshData>,
+    /// per mesh name: the vertices as MuJoCo stores them after processing (CoM-centred, principal frame)
+    mesh_stored: HashMap<String, crate::TriMesh3>,
+    /// per mesh name: the vertices after `ApplyTransformations`, before centring
+    mesh_raw: HashMap<String, crate::TriMesh3>,
+    /// meshes referenced by a collidable mesh geom; their hulls are built once the walk is done
+    collidable_meshes: BTreeSet<String>,
+    /// the enclosing bodies, innermost last (empty at the worldbody)
+    body_stack: Vec<String>,
     resolve: &'a dyn Fn(&str) -> Option<Vec<u8>>,
 }
 
@@ -813,6 +853,7 @@ impl Walk<'_> {
         for ch in &el.children {
             match ch.name.as_str() {
                 "body" => self.body(ch, parent, carry, childclass)?,
+                "geom" => self.note_collidable_mesh(ch, childclass)?,
                 "frame" => {
                     let f = pose_of(ch, "frame", self.defaults, childclass, self.c)?;
                     let cc = ch.attr("childclass").or(childclass);
@@ -831,6 +872,22 @@ impl Walk<'_> {
                 _ => {}
             }
         }
+        Ok(())
+    }
+
+    /// A mesh geom that can collide needs its mesh's hull data; load the mesh now so the hull is built later.
+    fn note_collidable_mesh(&mut self, g: &El, childclass: Option<&str>) -> Result<(), String> {
+        let get = |k: &str| self.defaults.get(g, "geom", k, childclass).map(|s| s.to_string());
+        if get("type").as_deref() != Some("mesh") {
+            return Ok(());
+        }
+        let Some(mname) = get("mesh") else { return Ok(()) };
+        let bits = |k: &str| -> Result<u32, String> { get(k).map(|s| s.trim().parse::<i64>().map(|x| x as u32).map_err(|e| e.to_string())).transpose().map(|v| v.unwrap_or(1)) };
+        if bits("contype")? == 0 && bits("conaffinity")? == 0 {
+            return Ok(());
+        }
+        self.mesh_data(&mname)?;
+        self.collidable_meshes.insert(mname);
         Ok(())
     }
 
@@ -862,6 +919,8 @@ impl Walk<'_> {
         if let Some(cc) = childclass.filter(|cc| !self.defaults.known(cc)) {
             return Err(format!("body '{name}' names unknown childclass '{cc}'"));
         }
+        let parent_name = self.body_stack.last().cloned().unwrap_or_else(|| "world".to_string());
+        self.out.body_parent.insert(name.clone(), parent_name);
         let joints: Vec<&El> = b.children.iter().filter(|c| c.name == "joint" || c.name == "freejoint").collect();
         let has_free = joints.iter().any(|j| j.name == "freejoint" || self.defaults.get(j, "joint", "type", childclass) == Some("free"));
         if has_free && (parent >= 0 || joints.len() > 1) {
@@ -1020,8 +1079,11 @@ impl Walk<'_> {
                 self.out.tree.link_names.insert(name.clone(), idx);
             }
         }
-        self.place("body", name, ride, pre)?;
-        self.children(b, ride, pre, childclass)
+        self.place("body", name.clone(), ride, pre)?;
+        self.body_stack.push(name);
+        let r = self.children(b, ride, pre, childclass);
+        self.body_stack.pop();
+        r
     }
 
     /// MuJoCo's `mjCGeom::Compile` + `SetInertia` for one geom, in the body frame; `None` for a geom MuJoCo
@@ -1219,6 +1281,7 @@ impl Walk<'_> {
             let p = rq.transpose() * (*v - asset.refpos);
             *v = Vector3::new(p.x * asset.scale.x, p.y * asset.scale.y, p.z * asset.scale.z);
         }
+        self.mesh_raw.insert(name.to_string(), crate::TriMesh3 { verts: mesh.verts.iter().map(|v| v.map(|x| x as f32 as f64)).collect(), tris: mesh.tris.clone() });
         let (volume, com, unit) = mesh_inertia_mujoco(&mesh, asset.inertia).map_err(|e| format!("mesh '{name}': {e}"))?;
         let (eigval, quat) = eig3_mujoco(&unit);
         if eigval[2] <= 0.0 {
@@ -1244,6 +1307,9 @@ impl Walk<'_> {
             }
         }
         let d = MeshData { volume, com, quat, boxsz, aamm };
+        // what `mjCMesh::Process` stores back into its float vertex array: CoM-centred, in the principal frame
+        let stored = crate::TriMesh3 { verts: mesh.verts.iter().map(|v| (r.transpose() * (*v - com)).map(|x| x as f32 as f64)).collect(), tris: mesh.tris.clone() };
+        self.mesh_stored.insert(name.to_string(), stored);
         self.mesh_cache.insert(name.to_string(), d);
         Ok(d)
     }
@@ -1340,17 +1406,76 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             no_inertial: Vec::new(),
             inferred_from_geoms: Vec::new(),
             angle_scale: c.deg,
+            body_parent: BTreeMap::new(),
+            mesh_hulls: BTreeMap::new(),
+            mesh_raw: BTreeMap::new(),
+            contact_excludes: Vec::new(),
+            contact_pairs: Vec::new(),
         },
         unnamed_bodies: 0,
         unnamed_joints: 0,
         meshes: &meshes,
         mesh_cache: HashMap::new(),
+        mesh_stored: HashMap::new(),
+        mesh_raw: HashMap::new(),
+        collidable_meshes: BTreeSet::new(),
+        body_stack: Vec::new(),
         resolve,
     };
     for world in worlds {
         walk.children(world, -1, Iso::identity(), world.attr("childclass"))?;
     }
-    let out = walk.out;
+    let mut out = walk.out;
+    for name in &walk.collidable_meshes {
+        let stored = &walk.mesh_stored[name];
+        let hull = crate::mujoco_hull::MeshHull::new(stored).ok_or_else(|| format!("mesh '{name}': no 3-D convex hull (MuJoCo refuses such a collision mesh)"))?;
+        out.mesh_hulls.insert(name.clone(), hull);
+        out.mesh_raw.insert(name.clone(), walk.mesh_raw[name].clone());
+    }
+    // <contact><exclude> and <contact><pair> — several <contact> blocks can arrive through includes
+    for contact in root.children_named("contact") {
+        for ex in contact.children_named("exclude") {
+            let (b1, b2) = (ex.attr("body1").ok_or("<exclude> needs body1")?, ex.attr("body2").ok_or("<exclude> needs body2")?);
+            out.contact_excludes.push((b1.to_string(), b2.to_string()));
+        }
+        for p in contact.children_named("pair") {
+            let get = |k: &str| defaults.get(p, "pair", k, None).map(|s| s.to_string());
+            let nums = |k: &str, n: usize, dflt: &[f64]| -> Result<Vec<f64>, String> {
+                match get(k) {
+                    Some(v) => {
+                        let f = floats(&v)?;
+                        if f.len() > n || f.is_empty() {
+                            return Err(format!("<pair> {k}: expected up to {n} numbers"));
+                        }
+                        let mut out = dflt.to_vec();
+                        out[..f.len()].copy_from_slice(&f);
+                        Ok(out)
+                    }
+                    None => Ok(dflt.to_vec()),
+                }
+            };
+            let condim = get("condim").map(|s| s.trim().parse::<usize>().map_err(|e| e.to_string())).transpose()?.unwrap_or(3);
+            let friction = nums("friction", 5, &[1.0, 1.0, 0.005, 0.0001, 0.0001])?;
+            let solref = nums("solref", 2, &[0.02, 1.0])?;
+            let solreffriction = nums("solreffriction", 2, &[0.0, 0.0])?;
+            let solimp = nums("solimp", 5, &[0.9, 0.95, 0.001, 0.5, 2.0])?;
+            let margin = get("margin").map(|s| s.trim().parse::<f64>().map_err(|e| e.to_string())).transpose()?.unwrap_or(0.0);
+            let gap = get("gap").map(|s| s.trim().parse::<f64>().map_err(|e| e.to_string())).transpose()?.unwrap_or(0.0);
+            let adhesion = get("adhesion").map(|s| s.trim().parse::<f64>().map_err(|e| e.to_string())).transpose()?.unwrap_or(0.0);
+            out.contact_pairs.push(MjcfContactPair {
+                geom1: p.attr("geom1").ok_or("<pair> needs geom1")?.to_string(),
+                geom2: p.attr("geom2").ok_or("<pair> needs geom2")?.to_string(),
+                condim,
+                friction: [friction[0], friction[1], friction[2], friction[3], friction[4]],
+                solref: [solref[0], solref[1]],
+                solreffriction: [solreffriction[0], solreffriction[1]],
+                solimp: [solimp[0], solimp[1], solimp[2], solimp[3], solimp[4]],
+                margin,
+                gap,
+                adhesion,
+            });
+        }
+    }
     for (i, p) in out.tree.parent.iter().enumerate() {
         if *p >= i as isize {
             return Err("internal error: joints are not in topological order".into());

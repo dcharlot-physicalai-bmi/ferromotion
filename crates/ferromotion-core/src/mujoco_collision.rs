@@ -570,28 +570,259 @@ pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2
         .collect()
 }
 
-/// `mjc_PlaneConvex`, first contact only: the vertex of a convex set deepest below the plane. Any
-/// correct hull gives the same support vertex, so the mesh's own vertices serve (MuJoCo's
-/// `mjc_meshSupport` scans them all when no hull graph is available). MuJoCo's additional face contacts
-/// from the hull polygon are not carried.
-pub fn plane_convex_first(margin: f64, p1: &GeomPose, p2: &GeomPose, local_verts: &[Vector3<f64>]) -> Option<PreContact> {
-    let normal = p1.axis();
-    let local_dir = p2.mat.transpose() * (-normal);
-    let mut best = f64::NEG_INFINITY;
-    let mut v = Vector3::zeros();
-    for lv in local_verts {
-        let d = local_dir.dot(lv);
-        if d > best {
-            best = d;
-            v = *lv;
+/// `mjraw_CapsuleBox`, MuJoCo's dedicated capsule–box routine: the closest feature of the box to the
+/// capsule's segment (a face, or the closest of the twelve edges with both parameters clamped), a sphere–box
+/// contact there, and — when the segment lies along the box within 45° — a second sphere–box contact at the
+/// far point of the overlap, so a lying capsule reports both ends. Ported branch for branch, including its
+/// `bestdist − mjMINVAL` acceptance and the case table on the corner/edge/axis-direction bit codes.
+pub fn capsule_box(margin: f64, p1: &GeomPose, size1: [f64; 2], p2: &GeomPose, size2: [f64; 3]) -> Vec<PreContact> {
+    let halflength = size1[1];
+    let mut secondpos = -4.0; // no second contact until set (valid values lie in [−1, 1])
+    // the capsule in the box frame
+    let pos = p2.mat.transpose() * (p1.pos - p2.pos);
+    let axis = p2.mat.transpose() * p1.axis();
+    let halfaxis = axis * halflength;
+    let mut axisdir = 0;
+    if halfaxis[0] > 0.0 {
+        axisdir += 1;
+    }
+    if halfaxis[1] > 0.0 {
+        axisdir += 2;
+    }
+    if halfaxis[2] > 0.0 {
+        axisdir += 4;
+    }
+    let bestdistmax = margin + 2.0 * (size1[0] + halflength + size2[0] + size2[1] + size2[2]);
+    let mut bestdist = bestdistmax;
+    let mut bestsegmentpos = 0.0;
+    let mut bestboxpos = 0.0;
+    let mut cltype: i32 = -4;
+    let mut clface: i32 = 0;
+    let mut clcorner: i32 = 0;
+    let mut cledge: usize = 0;
+
+    // a face of the box closest to one of the capsule's ends
+    for i in [-1.0f64, 1.0] {
+        let mut tmp1 = pos + halfaxis * i;
+        let tmp2 = tmp1;
+        let (mut c1, mut c2) = (0, -1i32);
+        for j in 0..3 {
+            if tmp1[j] < -size2[j] {
+                c1 += 1;
+                c2 = j as i32;
+                tmp1[j] = -size2[j];
+            } else if tmp1[j] > size2[j] {
+                c1 += 1;
+                c2 = j as i32;
+                tmp1[j] = size2[j];
+            }
+        }
+        if c1 > 1 {
+            continue;
+        }
+        let diff = tmp1 - tmp2;
+        let dist = diff.dot(&diff);
+        if dist < bestdist {
+            bestdist = dist;
+            bestsegmentpos = i;
+            cltype = -2 + i as i32;
+            clface = c2;
         }
     }
-    let vw = p2.mat * v + p2.pos;
-    let dist = normal.dot(&(vw - p1.pos));
-    if dist > margin {
-        return None;
+
+    // an edge of the box closest to the segment (line–line distance with both parameters clamped)
+    for j in 0..3 {
+        for i in 0..8i32 {
+            if (i & (1 << j)) != 0 {
+                continue;
+            }
+            let mut tmp3 = Vector3::new(if i & 1 != 0 { size2[0] } else { -size2[0] }, if i & 2 != 0 { size2[1] } else { -size2[1] }, if i & 4 != 0 { size2[2] } else { -size2[2] });
+            tmp3[j] = 0.0;
+            let dif = tmp3 - pos;
+            let ma = size2[j] * size2[j];
+            let mb = -size2[j] * halfaxis[j];
+            let mc = size1[1] * size1[1];
+            let u = -size2[j] * dif[j];
+            let v = halfaxis.dot(&dif);
+            let det = ma * mc - mb * mb;
+            if det.abs() < MINVAL {
+                continue;
+            }
+            let idet = 1.0 / det;
+            let mut x1 = (mc * u - mb * v) * idet;
+            let mut x2 = (ma * v - mb * u) * idet;
+            let (mut s1, mut s2) = (1, 1);
+            if x1 > 1.0 {
+                x1 = 1.0;
+                s1 = 2;
+                x2 = (v - mb) * (1.0 / mc);
+            } else if x1 < -1.0 {
+                x1 = -1.0;
+                s1 = 0;
+                x2 = (v + mb) * (1.0 / mc);
+            }
+            if x2 > 1.0 {
+                x2 = 1.0;
+                s2 = 2;
+                x1 = (u - mb) * (1.0 / ma);
+                if x1 > 1.0 {
+                    x1 = 1.0;
+                    s1 = 2;
+                } else if x1 < -1.0 {
+                    x1 = -1.0;
+                    s1 = 0;
+                }
+            } else if x2 < -1.0 {
+                x2 = -1.0;
+                s2 = 0;
+                x1 = (u + mb) * (1.0 / ma);
+                if x1 > 1.0 {
+                    x1 = 1.0;
+                    s1 = 2;
+                } else if x1 < -1.0 {
+                    x1 = -1.0;
+                    s1 = 0;
+                }
+            }
+            let mut dif = tmp3 - pos;
+            dif -= halfaxis * x2;
+            dif[j] += size2[j] * x1;
+            let d2 = dif.dot(&dif);
+            let c1 = s1 * 3 + s2;
+            // the −MINVAL fixes an axis numerically parallel to the box (MuJoCo's comment)
+            if d2 < bestdist - MINVAL {
+                bestdist = d2;
+                bestsegmentpos = x2;
+                bestboxpos = x1;
+                let c2 = c1 / 6;
+                clcorner = i + (1 << j) * c2;
+                cledge = j;
+                cltype = c1;
+            }
+        }
     }
-    Some(pre(dist, vw - normal * (0.5 * dist), normal, Vector3::zeros()))
+    // (MuJoCo's source carries a dead block here that recomputes a 2-D candidate and touches only variables
+    // that are reassigned before use; it has no effect on the result and is not reproduced)
+
+    if cltype == -4 {
+        return Vec::new();
+    }
+    let mut skip = false;
+    if cltype >= 0 && cltype / 3 != 1 {
+        // closest to a corner of the box
+        let mut c1 = axisdir ^ clcorner;
+        if c1 == 0 || c1 == 7 {
+            skip = true; // pointing to or away from the corner: no second contact
+        } else {
+            let (mul, de, dp);
+            if c1 == 1 || c1 == 2 || c1 == 4 {
+                mul = 1.0;
+                de = 1.0 - bestsegmentpos;
+                dp = 1.0 + bestsegmentpos;
+            } else {
+                mul = -1.0;
+                c1 = 7 - c1;
+                dp = 1.0 - bestsegmentpos;
+                de = 1.0 + bestsegmentpos;
+            }
+            let (ax, ax1, ax2) = match c1 {
+                1 => (0, 1, 2),
+                2 => (1, 2, 0),
+                _ => (2, 0, 1),
+            };
+            if axis[ax] * axis[ax] > 0.5 {
+                // second point along the edge of the box
+                secondpos = de;
+                let e1 = 2.0 * size2[ax] / halfaxis[ax].abs();
+                if e1 < secondpos {
+                    secondpos = e1;
+                }
+                secondpos *= mul;
+            } else {
+                // second point along a face of the box
+                secondpos = dp;
+                let e1 = 2.0 * size2[ax1] / halfaxis[ax1].abs();
+                if e1 < secondpos {
+                    secondpos = e1;
+                }
+                let e1 = 2.0 * size2[ax2] / halfaxis[ax2].abs();
+                if e1 < secondpos {
+                    secondpos = e1;
+                }
+                secondpos *= -mul;
+            }
+        }
+    } else if cltype >= 0 {
+        // on the box's edge: a T configuration gives no more contacts, a cross does
+        let mut c1 = axisdir ^ clcorner;
+        c1 &= 7 - (1 << cledge);
+        if c1 != 1 && c1 != 2 && c1 != 4 {
+            skip = true;
+        } else {
+            let ax = cledge;
+            let (mut ax1, mut ax2) = match cledge {
+                0 => (1, 2),
+                1 => (2, 0),
+                _ => (0, 1),
+            };
+            // the face the capsule makes the lower angle with
+            if axis[ax1].abs() > axis[ax2].abs() {
+                ax1 = ax2;
+            }
+            ax2 = 3 - ax - ax1;
+            let mul;
+            if c1 & (1 << ax2) != 0 {
+                mul = 1.0;
+                secondpos = 1.0 - bestsegmentpos;
+            } else {
+                mul = -1.0;
+                secondpos = 1.0 + bestsegmentpos;
+            }
+            let e1 = 2.0 * size2[ax2] / halfaxis[ax2].abs();
+            if e1 < secondpos {
+                secondpos = e1;
+            }
+            let e2 = if ((axisdir & (1 << ax)) != 0) == ((c1 & (1 << ax2)) != 0) { 1.0 - bestboxpos } else { 1.0 + bestboxpos };
+            let e1 = size2[ax] * e2 / halfaxis[ax].abs();
+            if e1 < secondpos {
+                secondpos = e1;
+            }
+            secondpos *= mul;
+        }
+    } else {
+        // one end of the capsule closest to a face: the other end's reach over the box
+        if clface == -1 {
+            skip = true; // the closest point is inside the box
+        } else {
+            let mul = if cltype == -3 { 1.0 } else { -1.0 };
+            secondpos = 2.0;
+            let tmp1 = pos - halfaxis * mul;
+            for i in 0..3 {
+                if i as i32 != clface {
+                    let e1 = (size2[i] - tmp1[i]) / halfaxis[i] * mul;
+                    if e1 > 0.0 && e1 < secondpos {
+                        secondpos = e1;
+                    }
+                    let e1 = (-size2[i] - tmp1[i]) / halfaxis[i] * mul;
+                    if e1 > 0.0 && e1 < secondpos {
+                        secondpos = e1;
+                    }
+                }
+            }
+            secondpos *= mul;
+        }
+    }
+    let _ = skip;
+
+    // a sphere at the first contact point, in the world
+    let mut out = Vec::new();
+    let c1 = p2.mat * (pos + halfaxis * bestsegmentpos) + p2.pos;
+    out.extend(sphere_box(margin, &GeomPose { pos: c1, mat: p1.mat }, size1[0], p2, size2));
+    if secondpos > -3.0 {
+        let c2 = p2.mat * (pos + halfaxis * (secondpos + bestsegmentpos)) + p2.pos;
+        out.extend(sphere_box(margin, &GeomPose { pos: c2, mat: p1.mat }, size1[0], p2, size2));
+    }
+    out
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -601,13 +832,13 @@ pub fn plane_convex_first(margin: f64, p1: &GeomPose, p2: &GeomPose, local_verts
 /// `mju_makeFrame`: complete `[normal, tangent]` into an orthonormal frame; a zero tangent is replaced by
 /// `y` unless the normal is mostly `y`, in which case `z`.
 pub fn make_frame(normal: Vector3<f64>, tangent: Vector3<f64>) -> [Vector3<f64>; 3] {
-    let n = normal / normal.norm();
+    let n = normal * (1.0 / normal.norm());
     let mut t = tangent;
     if t.dot(&t) < 0.25 {
         t = if n[1] < 0.5 && n[1] > -0.5 { Vector3::y() } else { Vector3::z() };
     }
     t -= n * n.dot(&t);
-    t /= t.norm();
+    t *= 1.0 / t.norm();
     [n, t, n.cross(&t)]
 }
 
@@ -627,11 +858,14 @@ pub struct GeomParams {
     pub gap: f64,
     pub contype: u32,
     pub conaffinity: u32,
+    /// `adhesion` (MuJoCo 3.13): a surface's own attraction; an adhesive contact stays active in the gap
+    /// band as a normal-only row.
+    pub adhesion: f64,
 }
 
 impl Default for GeomParams {
     fn default() -> Self {
-        Self { condim: 3, priority: 0, solmix: 1.0, solref: [0.02, 1.0], solimp: [0.9, 0.95, 0.001, 0.5, 2.0], friction: [1.0, 0.005, 0.0001], margin: 0.0, gap: 0.0, contype: 1, conaffinity: 1 }
+        Self { condim: 3, priority: 0, solmix: 1.0, solref: [0.02, 1.0], solimp: [0.9, 0.95, 0.001, 0.5, 2.0], friction: [1.0, 0.005, 0.0001], margin: 0.0, gap: 0.0, contype: 1, conaffinity: 1, adhesion: 0.0 }
     }
 }
 
@@ -643,15 +877,17 @@ pub struct PairParams {
     pub solimp: [f64; 5],
     /// MuJoCo's unpacked 5-vector: `(slide, slide, spin, roll, roll)`.
     pub friction: [f64; 5],
+    /// The two surfaces' adhesion summed, or the higher-priority geom's alone.
+    pub adhesion: f64,
 }
 
 /// `mj_contactParam`: the higher priority wins outright; otherwise condim max, friction max, solref/solimp
-/// mixed by `solmix` (direct negative solref: min).
+/// mixed by `solmix` (direct negative solref: min), adhesion summed.
 pub fn contact_param(a: &GeomParams, b: &GeomParams) -> PairParams {
-    let (condim, solref, solimp, fri) = if a.priority > b.priority {
-        (a.condim, a.solref, a.solimp, a.friction)
+    let (condim, solref, solimp, fri, adhesion) = if a.priority > b.priority {
+        (a.condim, a.solref, a.solimp, a.friction, a.adhesion)
     } else if a.priority < b.priority {
-        (b.condim, b.solref, b.solimp, b.friction)
+        (b.condim, b.solref, b.solimp, b.friction, b.adhesion)
     } else {
         let mix = if a.solmix >= MINVAL && b.solmix >= MINVAL {
             a.solmix / (a.solmix + b.solmix)
@@ -672,9 +908,9 @@ pub fn contact_param(a: &GeomParams, b: &GeomParams) -> PairParams {
             solimp[i] = mix * a.solimp[i] + (1.0 - mix) * b.solimp[i];
         }
         let fri = [a.friction[0].max(b.friction[0]), a.friction[1].max(b.friction[1]), a.friction[2].max(b.friction[2])];
-        (a.condim.max(b.condim), solref, solimp, fri)
+        (a.condim.max(b.condim), solref, solimp, fri, a.adhesion + b.adhesion)
     };
-    PairParams { condim, solref, solimp, friction: [fri[0], fri[0], fri[1], fri[2], fri[2]] }
+    PairParams { condim, solref, solimp, friction: [fri[0], fri[0], fri[1], fri[2], fri[2]], adhesion }
 }
 
 /// `filterBitmask` inverted: two geoms (or bodies) can collide when either's `contype` meets the other's
@@ -698,7 +934,9 @@ pub fn filter_body_pair(weldbody1: usize, weldparent1: usize, dofnum1: usize, we
     false
 }
 
-/// The pair's detection margin and gap: the sum of the two geoms' (an explicit `<pair>` states its own).
+/// The pair's margin and gap: the sum of the two geoms' (an explicit `<pair>` states its own). MuJoCo
+/// DETECTS with `margin + gap` and hands the solver `includemargin = margin`; a contact found in the gap
+/// band (`dist >= margin`) is recorded but excluded.
 pub fn margin_and_gap(a: &GeomParams, b: &GeomParams) -> (f64, f64) {
     (a.margin + b.margin, a.gap + b.gap)
 }
@@ -722,16 +960,20 @@ pub struct ContactRecord {
 /// `mj_setContact`: attach the pair's parameters and complete the frame; `includemargin` is the pair's
 /// margin (without the gap).
 pub fn set_contact(c: &PreContact, params: &PairParams, includemargin: f64) -> ContactRecord {
+    let in_gap = c.dist >= includemargin;
+    let adhesive = params.adhesion != 0.0;
     ContactRecord {
         dist: c.dist,
         pos: c.pos,
         frame: make_frame(c.normal, c.tangent),
-        dim: params.condim,
+        // an adhesive contact in the gap has no surface contact, so no friction rows: normal-only
+        dim: if adhesive && in_gap { 1 } else { params.condim },
         includemargin,
         friction: params.friction,
         solref: params.solref,
         solimp: params.solimp,
-        exclude: c.dist >= includemargin,
+        // adhesive contacts stay active in the gap (their reference acceleration pulls)
+        exclude: in_gap && !adhesive,
     }
 }
 
@@ -742,28 +984,59 @@ pub struct CollisionGeom<'a> {
     pub kind: GeomType,
     pub pose: GeomPose,
     pub size: [f64; 3],
-    pub verts: Option<&'a [Vector3<f64>]>,
+    /// A mesh geom's hull data (`MeshHull::new` on the mesh as MuJoCo stores it: centred at its CoM in its
+    /// principal frame, vertices `f32`).
+    pub hull: Option<&'a crate::mujoco_hull::MeshHull>,
+}
+
+/// The `<option>` values the convex pairs read: `ccd_tolerance` (1e-6), `ccd_iterations` (35) and the
+/// `multiccd` flag (enabled).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CollideOptions {
+    pub ccd_tolerance: f64,
+    pub ccd_iterations: usize,
+    pub multiccd: bool,
+}
+
+impl Default for CollideOptions {
+    fn default() -> Self {
+        Self { ccd_tolerance: 1e-6, ccd_iterations: 35, multiccd: true }
+    }
 }
 
 /// `mjCOLLISIONFUNC[type1][type2]` for the pairs carried, with the lower type first (as MuJoCo orders
 /// them); an `Err` names a pair this port does not carry. The returned contacts have their normal from the
 /// FIRST argument toward the second, so a swapped pair has its normals flipped back.
 pub fn collide_pair(margin: f64, g1: &CollisionGeom, g2: &CollisionGeom) -> Result<Vec<PreContact>, String> {
+    collide_pair_with(&CollideOptions::default(), margin, g1, g2)
+}
+
+/// `collide_pair` with the `<option>` values stated.
+pub fn collide_pair_with(opts: &CollideOptions, margin: f64, g1: &CollisionGeom, g2: &CollisionGeom) -> Result<Vec<PreContact>, String> {
+    use crate::mujoco_ccd::{convex_pair, plane_convex, CcdObj};
     use GeomType::*;
     let (a, b, swapped) = if g1.kind <= g2.kind { (g1, g2, false) } else { (g2, g1, true) };
+    fn obj<'a>(g: &CollisionGeom<'a>) -> Result<CcdObj<'a>, String> {
+        if g.kind == GeomType::Mesh && g.hull.is_none() {
+            return Err("mesh geom without hull data".to_string());
+        }
+        Ok(CcdObj::new(g.kind, g.pose, g.size, g.hull, 0.0))
+    }
     let cs = match (a.kind, b.kind) {
         (Plane, Sphere) => plane_sphere(margin, &a.pose, &b.pose, b.size[0]).into_iter().collect(),
         (Plane, Capsule) => plane_capsule(margin, &a.pose, &b.pose, [b.size[0], b.size[1]]),
         (Plane, Cylinder) => plane_cylinder(margin, &a.pose, &b.pose, [b.size[0], b.size[1]]),
         (Plane, Box) => plane_box(margin, &a.pose, &b.pose, b.size),
-        (Plane, Mesh) => plane_convex_first(margin, &a.pose, &b.pose, b.verts.ok_or("mesh geom without vertices")?).into_iter().collect(),
+        (Plane, Mesh) | (Plane, Ellipsoid) => plane_convex(margin, &a.pose, &mut obj(b)?),
         (Sphere, Sphere) => sphere_sphere(margin, &a.pose, a.size[0], &b.pose, b.size[0]).into_iter().collect(),
         (Sphere, Capsule) => sphere_capsule(margin, &a.pose, a.size[0], &b.pose, [b.size[0], b.size[1]]).into_iter().collect(),
         (Sphere, Cylinder) => sphere_cylinder(margin, &a.pose, a.size[0], &b.pose, [b.size[0], b.size[1]]).into_iter().collect(),
         (Sphere, Box) => sphere_box(margin, &a.pose, a.size[0], &b.pose, b.size).into_iter().collect(),
         (Capsule, Capsule) => capsule_capsule(margin, &a.pose, [a.size[0], a.size[1]], &b.pose, [b.size[0], b.size[1]]),
+        (Capsule, Box) => capsule_box(margin, &a.pose, [a.size[0], a.size[1]], &b.pose, b.size),
         (Box, Box) => box_box(margin, &a.pose, a.size, &b.pose, b.size),
-        (x, y) => return Err(format!("{x:?}–{y:?} is not carried by this port (MuJoCo runs it through its native CCD)")),
+        (HField, _) | (_, HField) => return Err("height fields are not carried by this port".to_string()),
+        _ => convex_pair(&mut obj(a)?, &mut obj(b)?, margin, opts.ccd_tolerance, opts.ccd_iterations, opts.multiccd),
     };
     Ok(if swapped {
         cs.into_iter()
@@ -924,18 +1197,59 @@ mod tests {
     }
 
     #[test]
+    fn capsule_box_matches_mujoco_on_face_edge_and_corner() {
+        // MuJoCo 3.13.0, box half-sizes (0.2, 0.3, 0.15) at z = 1 (`scripts/mujoco_collision_probe.py`)
+        let bx = pose([0.0, 0.0, 1.0], ID);
+        let bs = [0.2, 0.3, 0.15];
+
+        // one end over a face: a single contact, the segment's other end clear of the box
+        let c = capsule_box(0.0, &pose([0.05, 0.02, 1.27], [0.9659258, 0.2588190, 0.0, 0.0]), [0.04, 0.1], &bx, bs);
+        assert_eq!(c.len(), 1, "{c:?}");
+        check(&c[0], -0.006602544054601638, [0.05, 0.06999999363270755, 1.1466987279726992], [0.0, 0.0, -1.0], 1e-15);
+
+        // lying along a face: both ends, from the second sphere MuJoCo places at the far end of the overlap
+        let c = capsule_box(0.0, &pose([0.04, 0.02, 1.18], [0.7071068, 0.0, 0.7071068, 0.0]), [0.04, 0.1], &bx, bs);
+        assert_eq!(c.len(), 2, "{c:?}");
+        check(&c[0], -0.010000000000000057, [-0.06000000000000003, 0.02, 1.145], [0.0, 0.0, -1.0], 1e-15);
+        check(&c[1], -0.010000000000000057, [0.14000000000000004, 0.02, 1.145], [0.0, 0.0, -1.0], 1e-15);
+
+        // across an edge: two contacts along the capsule, both on the top face
+        let c = capsule_box(0.0, &pose([0.2, 0.1, 1.17], [0.7071068, 0.7071068, 0.0, 0.0]), [0.04, 0.15], &bx, bs);
+        assert_eq!(c.len(), 2, "{c:?}");
+        check(&c[0], -0.020000000000000066, [0.2, 0.25, 1.14], [0.0, 0.0, -1.0], 1e-15);
+        check(&c[1], -0.020000000000000066, [0.2, -0.05000000000000002, 1.14], [0.0, 0.0, -1.0], 1e-15);
+
+        // at a corner, pointing away from it: one contact, its normal off the box's side faces
+        let c = capsule_box(0.0, &pose([0.21, 0.31, 1.15], [0.8804762, 0.2798481, 0.3647052, 0.1159170]), [0.04, 0.1], &bx, bs);
+        assert_eq!(c.len(), 1, "{c:?}");
+        check(&c[0], -0.02633974667759746, [0.1934150655599349, 0.2885945538368705, 1.1474118075402184], [-0.49999983072470044, -0.8660255015155565, 0.0], 1e-9);
+
+        // clear of the box: no contact
+        assert!(capsule_box(0.0, &pose([0.05, 0.02, 1.4], [0.7071068, 0.0, 0.7071068, 0.0]), [0.04, 0.1], &bx, bs).is_empty());
+    }
+
+    #[test]
     fn the_dispatcher_orders_types_and_flips_a_swapped_normal() {
-        let floor = CollisionGeom { kind: GeomType::Plane, pose: GeomPose { pos: Vector3::zeros(), mat: Matrix3::identity() }, size: [1.0, 1.0, 0.1], verts: None };
-        let ball = CollisionGeom { kind: GeomType::Sphere, pose: pose([0.2, 0.3, 0.095], ID), size: [0.1, 0.0, 0.0], verts: None };
+        let floor = CollisionGeom { kind: GeomType::Plane, pose: GeomPose { pos: Vector3::zeros(), mat: Matrix3::identity() }, size: [1.0, 1.0, 0.1], hull: None };
+        let ball = CollisionGeom { kind: GeomType::Sphere, pose: pose([0.2, 0.3, 0.095], ID), size: [0.1, 0.0, 0.0], hull: None };
         let a = collide_pair(0.0, &floor, &ball).unwrap();
         let b = collide_pair(0.0, &ball, &floor).unwrap();
         assert_eq!(a.len(), 1);
         assert!((a[0].normal + b[0].normal).norm() < 1e-15 && (a[0].pos - b[0].pos).norm() < 1e-15);
-        let mesh = [Vector3::new(-0.1, -0.1, -0.1), Vector3::new(0.1, -0.1, -0.1), Vector3::new(0.0, 0.1, -0.1), Vector3::new(0.0, 0.0, 0.1)];
-        let tet = CollisionGeom { kind: GeomType::Mesh, pose: pose([0.0, 0.0, 0.05], ID), size: [0.0; 3], verts: Some(&mesh) };
+        let mesh = crate::TriMesh3 {
+            verts: vec![Vector3::new(-0.1, -0.1, -0.1), Vector3::new(0.1, -0.1, -0.1), Vector3::new(0.0, 0.1, -0.1), Vector3::new(0.0, 0.0, 0.1)],
+            tris: vec![[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]],
+        };
+        let hull = crate::mujoco_hull::MeshHull::new(&mesh).unwrap();
+        let tet = CollisionGeom { kind: GeomType::Mesh, pose: pose([0.0, 0.0, 0.05], ID), size: [0.0; 3], hull: Some(&hull) };
         let c = collide_pair(0.0, &floor, &tet).unwrap();
-        assert_eq!(c.len(), 1);
-        assert!((c[0].dist + 0.05).abs() < 1e-15 && (c[0].pos.z + 0.025).abs() < 1e-15);
-        assert!(collide_pair(0.0, &tet, &tet).is_err(), "mesh–mesh names itself as not carried");
+        // the deepest vertex first, then the rest of its bottom face (MuJoCo 3.13's `mjc_PlaneConvex`)
+        assert_eq!(c.len(), 3);
+        // 1.5e-9: the mesh's vertices are stored as `f32`, as MuJoCo stores them (−0.1 → −0.100000001490116)
+        for k in &c {
+            assert!((k.dist + 0.05).abs() < 2e-9 && (k.pos.z + 0.025).abs() < 2e-9, "{k:?}");
+        }
+        let bare = CollisionGeom { kind: GeomType::Mesh, pose: tet.pose, size: [0.0; 3], hull: None };
+        assert!(collide_pair(0.0, &floor, &bare).is_err(), "a mesh without hull data names itself");
     }
 }
