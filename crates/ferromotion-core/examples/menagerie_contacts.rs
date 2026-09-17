@@ -224,6 +224,16 @@ struct Tally {
     pair_both: usize,
     pair_only_mujoco: usize,
     pair_only_ours: usize,
+    /// over pairs both found: how many produced the SAME NUMBER of contact points, and the histogram of
+    /// (MuJoCo's count, ours) for the ones that did not — a manifold of 4 answered with 1 is a different
+    /// failure from a witness in the wrong place, and the totals cannot tell them apart
+    pair_count_same: usize,
+    counts: BTreeMap<(usize, usize), usize>,
+    /// ⭐ pairs whose MANIFOLD agrees — same deepest penetration and same normal — at 1e-9 and at 1e-6.
+    /// This is the quantity the solver actually integrates; which corner of a clipped polygon each witness
+    /// landed on is a different question, and reporting only the contact-by-contact match conflates them.
+    pair_manifold_tight: usize,
+    pair_manifold_loose: usize,
     /// worst disagreement, over pairs both found, in the deepest penetration and its normal
     pair_worst_depth: f64,
     pair_worst_normal: f64,
@@ -247,6 +257,7 @@ fn main() {
     let mut by_type: BTreeMap<String, Tally> = BTreeMap::new();
     let mut refused: Vec<(String, String)> = Vec::new();
     let mut imperfect: Vec<(String, String)> = Vec::new();
+    let mut dumped = false;
     let mut not_carried: BTreeMap<String, usize> = BTreeMap::new();
     let mut models = 0;
     // MENAGERIE_NOTES=<n> lists up to n discrepancies per model (default 3)
@@ -381,6 +392,13 @@ fn main() {
             // to compare is the manifold: does the same geom pair touch, how deep, and along which normal.
             {
                 let key = |g1: usize, g2: usize| if g1 < g2 { (g1, g2) } else { (g2, g1) };
+                let (mut theirs_n, mut ours_n): (BTreeMap<(usize, usize), usize>, BTreeMap<(usize, usize), usize>) = (BTreeMap::new(), BTreeMap::new());
+                for c in &s.contacts {
+                    *theirs_n.entry(key(oc_g1(c), oc_g2(c))).or_default() += 1;
+                }
+                for (i, j, _) in &mine {
+                    *ours_n.entry((*i, *j)).or_default() += 1;
+                }
                 let mut theirs: BTreeMap<(usize, usize), (f64, Vector3<f64>)> = BTreeMap::new();
                 for c in &s.contacts {
                     let k = key(oc_g1(c), oc_g2(c));
@@ -405,8 +423,61 @@ fn main() {
                     match ours.get(k) {
                         Some((d2, n2)) => {
                             let (dd, dn) = ((d2 - d).abs(), (n2 - n).norm());
+                            let (tn, on) = (theirs_n.get(k).copied().unwrap_or(0), ours_n.get(k).copied().unwrap_or(0));
+                            // DUMP_PAIR=<type> prints the first disagreeing pair of that type as a ready
+                            // `ccd_one_pair` command line: the instrument that turned every earlier
+                            // collision defect from a statistic into a reproduction takes explicit poses,
+                            // and assembling them by hand from the oracle is where the mistakes were made
+                            if std::env::var("DUMP_PAIR").is_ok_and(|w| w == pair_key(&o.geoms[k.0].ty, &o.geoms[k.1].ty)) && tn != on && !dumped {
+                                dumped = true;
+                                let g = |i: usize| {
+                                    let gm = &o.geoms[i];
+                                    let p = &s.poses[i];
+                                    format!(
+                                        "{} {:.17e} {:.17e} {:.17e} {}",
+                                        gm.ty,
+                                        gm.size[0],
+                                        gm.size[1],
+                                        gm.size[2],
+                                        gm.mesh.clone().unwrap_or_else(|| "-".into())
+                                    ) + &format!(
+                                        " # pos {:.17e} {:.17e} {:.17e} mat {}",
+                                        p.pos.x,
+                                        p.pos.y,
+                                        p.pos.z,
+                                        p.mat.iter().map(|x| format!("{x:.17e}")).collect::<Vec<_>>().join(" ")
+                                    )
+                                };
+                                let pose = |i: usize| {
+                                    let p = &s.poses[i];
+                                    format!("{:.17e} {:.17e} {:.17e} {}", p.pos.x, p.pos.y, p.pos.z, p.mat.transpose().iter().map(|x| format!("{x:.17e}")).collect::<Vec<_>>().join(" "))
+                                };
+                                let spec = |i: usize| {
+                                    let gm = &o.geoms[i];
+                                    format!("{} {:.17e} {:.17e} {:.17e} {}", gm.ty, gm.size[0], gm.size[1], gm.size[2], gm.mesh.clone().unwrap_or_else(|| "-".into()))
+                                };
+                                let _ = g;
+                                println!(
+                                    "DUMP {} {}–{}: MuJoCo {tn} contacts, ours {on}\n  cargo run --release --example ccd_one_pair -- <menagerie> {} {} {} {} {}",
+                                    o.rel, o.geoms[k.0].name, o.geoms[k.1].name, o.rel, spec(k.0), spec(k.1), pose(k.0), pose(k.1)
+                                );
+                                for c in s.contacts.iter().filter(|c| key(oc_g1(c), oc_g2(c)) == *k) {
+                                    println!("  MuJoCo: dist {} pos {:?} normal {:?}", c.dist, c.pos.as_slice(), c.normal.as_slice());
+                                }
+                            }
                             for t in [&mut tally, bt] {
                                 t.pair_both += 1;
+                                if tn == on {
+                                    t.pair_count_same += 1;
+                                } else {
+                                    *t.counts.entry((tn, on)).or_default() += 1;
+                                }
+                                if dd < 1e-9 && dn < 1e-9 {
+                                    t.pair_manifold_tight += 1;
+                                }
+                                if dd < 1e-6 && dn < 1e-6 {
+                                    t.pair_manifold_loose += 1;
+                                }
                                 t.pair_worst_depth = t.pair_worst_depth.max(dd);
                                 t.pair_worst_normal = t.pair_worst_normal.max(dn);
                             }
@@ -551,6 +622,12 @@ fn main() {
         grand.oracle += tally.oracle;
         grand.matched += tally.matched;
         grand.pair_both += tally.pair_both;
+        grand.pair_count_same += tally.pair_count_same;
+        grand.pair_manifold_tight += tally.pair_manifold_tight;
+        grand.pair_manifold_loose += tally.pair_manifold_loose;
+        for (k, v) in &tally.counts {
+            *grand.counts.entry(*k).or_default() += v;
+        }
         grand.pair_only_mujoco += tally.pair_only_mujoco;
         grand.pair_only_ours += tally.pair_only_ours;
         grand.pair_worst_depth = grand.pair_worst_depth.max(tally.pair_worst_depth);
@@ -580,12 +657,32 @@ fn main() {
         "geom PAIRS that touch: both {} | only MuJoCo {} | only ours {} | worst depth {:.2e} m, worst normal {:.2e}",
         grand.pair_both, grand.pair_only_mujoco, grand.pair_only_ours, grand.pair_worst_depth, grand.pair_worst_normal
     );
+    println!(
+        "  of those, the SAME NUMBER of contact points: {} of {}; the same MANIFOLD (depth and normal) to 1e-9: {}, to 1e-6: {}",
+        grand.pair_count_same, grand.pair_both, grand.pair_manifold_tight, grand.pair_manifold_loose
+    );
+    {
+        // the ten commonest disagreements, so "missing 583" can be read as manifolds rather than points
+        let mut h: Vec<_> = grand.counts.iter().collect();
+        h.sort_by_key(|(_, v)| std::cmp::Reverse(**v));
+        let line: Vec<String> = h.iter().take(10).map(|((t, o), v)| format!("MJ {t}/ours {o}: {v}")).collect();
+        println!("  contact-count disagreements: {}", line.join(", "));
+    }
     println!("by pair type:");
     for (k, t) in &by_type {
         println!(
             "  {:<22} contacts {:>5}/{:<5} near {:>4} | PAIRS both {:>5} onlyMJ {:>4} onlyOurs {:>4} depth {:.1e} normal {:.1e}",
             k, t.matched, t.oracle, t.near, t.pair_both, t.pair_only_mujoco, t.pair_only_ours, t.pair_worst_depth, t.pair_worst_normal
         );
+        if t.pair_manifold_loose < t.pair_both || t.pair_count_same < t.pair_both {
+            println!("  {:<22} manifold agrees on {} of {} pairs at 1e-9, {} at 1e-6", "", t.pair_manifold_tight, t.pair_both, t.pair_manifold_loose);
+        }
+        if t.pair_count_same < t.pair_both {
+            let mut h: Vec<_> = t.counts.iter().collect();
+            h.sort_by_key(|(_, v)| std::cmp::Reverse(**v));
+            let line: Vec<String> = h.iter().take(6).map(|((a, b), v)| format!("MJ {a}/ours {b}: {v}")).collect();
+            println!("  {:<22} same contact COUNT on {} of {} pairs; {}", "", t.pair_count_same, t.pair_both, line.join(", "));
+        }
     }
     if !not_carried.is_empty() {
         println!("pairs not carried:");

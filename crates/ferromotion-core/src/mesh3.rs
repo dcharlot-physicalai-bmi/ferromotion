@@ -257,13 +257,123 @@ pub fn try_convex_hull_3d(points: &[Vector3<f64>]) -> Option<TriMesh3> {
         work.extend(first_new..faces.len());
     }
 
+    // ⛔ A quickhull face vertex is not the same thing as a HULL VERTEX. A point that was extreme among the
+    // first few added — a seed, or a point on a facet's interior — stays in the triangulation for good, even
+    // once later points have made it non-extreme. qhull reports 245 vertices for `aloha/angled_extrusion`
+    // and the raw triangulation here keeps 280; on `d405_solid` it is 7,022 against 7,062. Those extra
+    // vertices are on the hull's surface, so they cost nothing in soundness — but they are support-function
+    // candidates that MuJoCo's hull does not have, and a support point that lands on a facet's interior
+    // instead of its corner hands EPA a different polytope and a different contact normal.
+    //
+    // A vertex of a convex polytope is exactly one that lies on THREE OR MORE facet planes; on two it is in
+    // the interior of an edge, on one it is in the interior of a face. So the faces are first merged into
+    // maximal planar patches — exactly coplanar, by the same integer predicate — and each patch is then
+    // re-triangulated over its corners alone.
+    let live: Vec<usize> = (0..faces.len()).filter(|&i| faces[i].alive).collect();
+    // union-find over faces, merging across a shared edge when the neighbour's apex is ON this face's plane.
+    // Coplanar facets of a convex hull are always adjacent, since a plane meets a convex body in one face.
+    let mut parent: Vec<usize> = (0..faces.len()).collect();
+    fn find(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    for &k in &live {
+        let v = faces[k].v;
+        for e in 0..3 {
+            let Some(&nb) = owner.get(&(v[(e + 1) % 3], v[e])) else { continue };
+            if !faces[nb].alive {
+                continue;
+            }
+            // the neighbour's vertex that is not on the shared edge
+            let (a, b) = (v[e], v[(e + 1) % 3]);
+            let Some(&apex) = faces[nb].v.iter().find(|&&x| x != a && x != b) else { continue };
+            if orient(v[0], v[1], v[2], apex) == 0 {
+                let (ra, rb) = (find(&mut parent, k), find(&mut parent, nb));
+                if ra != rb {
+                    parent[ra] = rb;
+                }
+            }
+        }
+    }
+    let mut patch = vec![usize::MAX; faces.len()];
+    for &k in &live {
+        patch[k] = find(&mut parent, k);
+    }
+    // how many distinct patches each vertex touches, kept as a short list per vertex: a hull vertex of a
+    // Menagerie mesh meets a handful of facets, so the linear scan is cheaper than a set
+    let mut planes_at: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for &k in &live {
+        for &v in &faces[k].v {
+            if !planes_at[v].contains(&patch[k]) {
+                planes_at[v].push(patch[k]);
+            }
+        }
+    }
+    let corner = |v: usize| planes_at[v].len() >= 3;
+    // group the live faces by patch and re-triangulate each patch over its corner boundary.
+    // ⛔ IN FIRST-SEEN ORDER, not a `HashMap`'s. Rust seeds each process's `HashMap` differently, so
+    // iterating one here makes the hull's vertex numbering and face order differ BETWEEN RUNS of the same
+    // binary on the same mesh — and everything downstream that breaks a tie by index follows it. Measured:
+    // the Menagerie contact sweep moved by 15 matched contacts and 42 "near" ones from one run to the next,
+    // with no code change at all. A geometric result must not depend on a hash seed.
+    let mut order: Vec<usize> = Vec::new();
+    let mut by_patch: HashMap<usize, Vec<usize>> = HashMap::new();
+    for &k in &live {
+        let e = by_patch.entry(patch[k]).or_insert_with(|| {
+            order.push(patch[k]);
+            Vec::new()
+        });
+        e.push(k);
+    }
+    let mut kept: Vec<[usize; 3]> = Vec::new();
+    for root in order {
+        let fs = &by_patch[&root];
+        // the patch's boundary: a directed edge whose twin belongs to another patch
+        let mut next: HashMap<usize, usize> = HashMap::new();
+        for &k in fs {
+            let v = faces[k].v;
+            for e in 0..3 {
+                let (a, b) = (v[e], v[(e + 1) % 3]);
+                if !owner.get(&(b, a)).map(|&nb| faces[nb].alive && patch[nb] == root).unwrap_or(false) {
+                    next.insert(a, b);
+                }
+            }
+        }
+        // walk the cycle, keeping only corners; anything else is on a facet's edge or in its interior.
+        // The start is the smallest vertex index, so the ring is the same however the edges were collected
+        let Some(&start) = next.keys().min() else { continue };
+        let mut ring: Vec<usize> = Vec::new();
+        let mut at = start;
+        for _ in 0..=next.len() {
+            if corner(at) {
+                ring.push(at);
+            }
+            match next.get(&at) {
+                Some(&n) if n != start => at = n,
+                _ => break,
+            }
+        }
+        if ring.len() < 3 {
+            // a patch with fewer than three corners cannot be a facet; keep its triangles rather than
+            // silently dropping surface, so the hull stays closed even if this reasoning is ever wrong
+            kept.extend(fs.iter().map(|&k| faces[k].v));
+            continue;
+        }
+        for i in 1..ring.len() - 1 {
+            kept.push([ring[0], ring[i], ring[i + 1]]);
+        }
+    }
+
     // compact to used vertices
     let mut remap: HashMap<usize, usize> = HashMap::new();
     let mut used = Vec::new();
     let mut tris: Vec<[usize; 3]> = Vec::new();
-    for f in faces.iter().filter(|f| f.alive) {
+    for f in &kept {
         let mut t = [0usize; 3];
-        for (k, &v) in f.v.iter().enumerate() {
+        for (k, &v) in f.iter().enumerate() {
             t[k] = *remap.entry(v).or_insert_with(|| {
                 used.push(points[v]);
                 used.len() - 1
@@ -316,9 +426,8 @@ mod verification {
                 None => shape = Some((h.verts.len(), h.tris.len())),
                 Some(s) => assert_eq!((h.verts.len(), h.tris.len()), s, "k={k}: the hull changed with the tessellation"),
             }
-            // eight corners, plus at most two seed vertices left lying coplanar on a face — the same
-            // artefact that has qhull reporting 252 hull vertices for a part whose exact hull has 245
-            assert!(h.verts.len() <= 10, "k={k}: {} hull vertices for a box", h.verts.len());
+            // a box's hull is its eight corners and nothing else, whatever was fed in
+            assert_eq!((h.verts.len(), h.tris.len()), (8, 12), "k={k}: {} vertices and {} triangles for a box", h.verts.len(), h.tris.len());
         }
     }
 
@@ -361,6 +470,39 @@ mod verification {
             assert_eq!(bad, 0, "{name}: {bad} of {} faces do not support the hull", h.tris.len());
             eprintln!("  {name}: {} points -> {} hull vertices, {} faces, sound", pts.len(), h.verts.len(), h.tris.len());
         }
+    }
+
+    /// ⛔ **The same points must give the same hull, twice in a row.** Rust gives every `HashMap` a fresh
+    /// hash key — the thread's seed is bumped per map — so iterating one to build the output makes the
+    /// vertex numbering and face order differ between two calls in the SAME process, and between runs of the
+    /// same binary. Everything downstream that breaks a tie by index follows it: the Menagerie contact sweep
+    /// moved by 15 matched contacts and 42 near ones from one run to the next, with no code change.
+    #[test]
+    fn the_same_points_give_the_same_hull_every_time() {
+        let mut pts = Vec::new();
+        for i in 0..=6 {
+            for j in 0..=6 {
+                let (u, w) = (i as f64 / 6.0 - 0.5, j as f64 / 6.0 - 0.5);
+                for s in [-0.5, 0.5] {
+                    pts.push(Vector3::new(u, w, s));
+                    pts.push(Vector3::new(u, s, w));
+                    pts.push(Vector3::new(s, u, w));
+                }
+            }
+        }
+        // a second shape whose facets are large enough to merge but whose rim is not axis-aligned
+        for i in 0..40 {
+            let a = i as f64 * std::f64::consts::TAU / 40.0;
+            for r in 0..=4 {
+                let rr = 0.9 * r as f64 / 4.0;
+                pts.push(Vector3::new(rr * a.cos(), rr * a.sin(), 1.5));
+            }
+        }
+        let a = try_convex_hull_3d(&pts).expect("a solid");
+        let b = try_convex_hull_3d(&pts).expect("a solid");
+        assert_eq!(a.verts.len(), b.verts.len(), "the hull changed size between two calls");
+        assert!(a.verts.iter().zip(&b.verts).all(|(x, y)| x == y), "the hull's vertices came back in a different order");
+        assert_eq!(a.tris, b.tris, "the hull's faces came back in a different order");
     }
 
     /// `(farthest any point lies outside the hull, faces that are not supporting planes)`. The face planes
