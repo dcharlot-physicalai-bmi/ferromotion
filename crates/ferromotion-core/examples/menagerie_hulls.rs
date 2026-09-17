@@ -98,23 +98,42 @@ fn main() {
                 if hit == o.polys.len() {
                     normals_ok += 1;
                 }
-                if nh as i64 != o.nhull || np != o.polys.len() {
+                {
                     // is our hull merely sparser, or does it cut through the mesh? the farthest any mesh
-                    // vertex lies outside our hull's faces answers that in metres
-                    let mut out: f64 = 0.0;
-                    for v in &hull.verts {
-                        let mut h = f64::NEG_INFINITY;
-                        for f in &hull.hull_faces {
+                    // vertex lies outside our hull's faces answers that in metres. ⛔ The face planes are
+                    // oriented against the hull's own centroid rather than trusted from the winding: a
+                    // normal taken the wrong way round measures the mesh's DIAMETER and reads as a hull
+                    // that misses by centimetres, which is exactly what this instrument first reported.
+                    let mut centre = Vector3::zeros();
+                    for &i in &hull.hull_verts {
+                        centre += hull.verts[i];
+                    }
+                    centre /= hull.hull_verts.len() as f64;
+                    let planes: Vec<(Vector3<f64>, f64)> = hull
+                        .hull_faces
+                        .iter()
+                        .filter_map(|f| {
                             let (a, b, c) = (hull.verts[f[0]], hull.verts[f[1]], hull.verts[f[2]]);
                             let nrm = (b - a).cross(&(c - a));
                             let l = nrm.norm();
-                            if l > 1e-14 {
-                                h = h.max((nrm / l).dot(&(v - a)));
-                            }
+                            (l > 1e-14).then(|| {
+                                let n = nrm / l;
+                                let n = if n.dot(&(a - centre)) < 0.0 { -n } else { n };
+                                (n, n.dot(&a))
+                            })
+                        })
+                        .collect();
+                    let mut out: f64 = 0.0;
+                    for v in &hull.verts {
+                        let mut h = f64::NEG_INFINITY;
+                        for (n, d) in &planes {
+                            h = h.max(n.dot(v) - d);
                         }
                         out = out.max(h);
                     }
                     soundness.insert((dirname.clone(), name.clone()), out);
+                }
+                if nh as i64 != o.nhull || np != o.polys.len() {
                     worst.push((dirname.clone(), name.clone(), o.nvert, o.nhull, nh, np.abs_diff(o.polys.len())));
                 }
             }
@@ -124,6 +143,13 @@ fn main() {
     println!("  hull vertex count identical: {same_verts}");
     println!("  polygon count identical:     {same_polys}");
     println!("  every MuJoCo polygon normal reproduced: {normals_ok} meshes; {normals_hit} of {normals_total} polygons");
+    // the one property a hull OWES regardless of how it is tessellated: it contains every input vertex
+    let unsound: Vec<_> = soundness.iter().filter(|&(_, &o)| o > 1e-9).collect();
+    let worst_out = soundness.values().copied().fold(0.0, f64::max);
+    println!("  SOUND (no mesh vertex outside our own hull): {} of {meshes}; worst excursion {worst_out:.2e} m", meshes - unsound.len());
+    for ((d, n), o) in unsound.iter().take(10) {
+        println!("    UNSOUND {d}/{n}: {o:.2e} m outside");
+    }
     worst.sort_by_key(|w| std::cmp::Reverse(w.5));
     println!("largest polygon-count differences (soundness = how far any mesh vertex lies OUTSIDE our hull):");
     for (d, n, nvert, nhull, ours, diff) in worst.iter().take(20) {
