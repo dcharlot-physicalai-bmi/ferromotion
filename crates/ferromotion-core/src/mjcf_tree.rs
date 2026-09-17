@@ -32,9 +32,10 @@
 //! * `<default>` resolution: an element's own attribute, else its `class`, else the nearest enclosing body's
 //!   `childclass`, walking each class up to its parent and finally the unnamed main default. A `childclass`
 //!   applies to the body's own children as well as its descendants — MuJoCo does this and the probe confirmed it.
-//! * `<include file>` is textual insertion of the included root's children, with every path — nested ones too
-//!   — relative to the **main** model's directory. The loader is string-based and WASM-clean, so the caller
-//!   supplies the file contents through a resolver closure; [`tree_from_mjcf_str`] is the no-includes form.
+//! * `<include file>` is textual insertion of the included root's children. A path is resolved against the
+//!   **main** model's directory first and, failing that, against the directory of the file the `<include>` is
+//!   written in — MuJoCo keeps both rules. The loader is string-based and WASM-clean, so the caller supplies
+//!   the file contents through a resolver closure; [`tree_from_mjcf_str`] is the no-includes form.
 //! * Several `<worldbody>` elements (a scene that includes its robot outside its own worldbody gets two) are
 //!   walked in order, as MuJoCo merges them. `fromto` on a site puts the frame at the segment midpoint, +z along it.
 //! * `<frame>` is a pure transform applied to its children. Jointless bodies weld into the nearest jointed
@@ -264,7 +265,29 @@ fn ypr(wxyz: &[f64]) -> (f64, f64, f64) {
 // <include>
 // ---------------------------------------------------------------------------------------------
 
-fn expand_includes(el: &mut El, resolve: &dyn Fn(&str) -> Option<Vec<u8>>, depth: usize) -> Result<(), String> {
+/// ⛔ An include path is tried against the MAIN model's directory FIRST and, only if that fails, against the
+/// directory of the file the `<include>` is written in — `IncludeXML` calls the first "legacy behavior" and
+/// the second "new behavior", and keeps both. The subtree then inherits the resolved file's own directory,
+/// so the rule compounds: `ms_human_700` reaches `assets/body_primary/Body_Torso_Simple.xml` from the model
+/// root and that file says `<include file="Body_Arm_r.xml"/>`, meaning its own neighbour. Five of Menagerie's
+/// models are written this way and a model-relative-only loader cannot open any of them.
+/// Record which file's directory an element arrived from, without overwriting a deeper include's answer.
+fn stamp_include_dir(el: &mut El, dir: &str) {
+    if el.attr(INCLUDE_DIR).is_none() {
+        el.attrs.push((INCLUDE_DIR.to_string(), dir.to_string()));
+    }
+    for c in el.children.iter_mut() {
+        stamp_include_dir(c, dir);
+    }
+}
+
+/// The attribute `stamp_include_dir` writes. Not an MJCF attribute — the leading underscores keep it out of
+/// the way of anything a model can say.
+const INCLUDE_DIR: &str = "__include_dir";
+
+fn expand_includes(el: &mut El, resolve: &dyn Fn(&str) -> Option<Vec<u8>>, dir: &str, depth: usize, included: &mut std::collections::HashSet<String>) -> Result<(), String> {
+    // ⛔ `depth` counts INCLUDE nesting, not element nesting. Counting elements caps how deep a model's
+    // bodies may go: `ms_human_700` is 40-odd bodies deep and was refused as "a cycle".
     if depth > 32 {
         return Err("<include> nesting deeper than 32 — a cycle".into());
     }
@@ -272,14 +295,39 @@ fn expand_includes(el: &mut El, resolve: &dyn Fn(&str) -> Option<Vec<u8>>, depth
     for child in std::mem::take(&mut el.children) {
         if child.name == "include" {
             let file = child.attr("file").ok_or("<include> needs a file attribute")?;
-            let bytes = resolve(file).ok_or_else(|| format!("<include file=\"{file}\"> could not be resolved"))?;
+            // MuJoCo refuses a file included twice, testing the path AS WRITTEN against a set it fills with
+            // the path AS RESOLVED — the asymmetry is its own, and is kept here so the refusals agree
+            if included.contains(file) {
+                return Err(format!("file '{file}' is already included"));
+            }
+            let nested = format!("{dir}{file}");
+            let (path, bytes) = match resolve(file) {
+                Some(b) => (file.to_string(), b),
+                None if !file.starts_with('/') && !dir.is_empty() => {
+                    let b = resolve(&nested).ok_or_else(|| format!("<include file=\"{file}\"> could not be resolved, from the model root or from '{dir}'"))?;
+                    (nested, b)
+                }
+                None => return Err(format!("<include file=\"{file}\"> could not be resolved")),
+            };
+            let next = match path.rfind('/') {
+                Some(i) => path[..=i].to_string(),
+                None => String::new(),
+            };
             let text = String::from_utf8_lossy(&bytes);
             let mut inc = parse_xml(&text).map_err(|e| format!("in included file '{file}': {e}"))?;
-            expand_includes(&mut inc, resolve, depth + 1)?;
+            included.insert(path);
+            expand_includes(&mut inc, resolve, &next, depth + 1, included)?;
+            // ⛔ An asset's `file` is resolved against `meshdir` FIRST and, failing that, against the
+            // directory of the file that declares it — `ResolveFilePath` walks up to the nearest `<include>`
+            // and reads the `dir` MuJoCo stamped on it. Splicing the subtree in loses that ancestry, so the
+            // directory is stamped onto the elements themselves, innermost include first.
+            for c in inc.children.iter_mut() {
+                stamp_include_dir(c, &next);
+            }
             out.extend(inc.children);
         } else {
             let mut child = child;
-            expand_includes(&mut child, resolve, depth + 1)?;
+            expand_includes(&mut child, resolve, dir, depth, included)?;
             out.push(child);
         }
     }
@@ -427,6 +475,9 @@ struct GeomSpec {
 
 struct MeshAsset {
     file: String,
+    /// The directory of the XML file that declared this mesh, if it arrived through an `<include>`; the
+    /// fallback `ResolveFilePath` uses when `meshdir/file` does not exist.
+    include_dir: String,
     scale: Vector3<f64>,
     refpos: Vector3<f64>,
     refquat: UnitQuaternion<f64>,
@@ -597,6 +648,118 @@ pub(crate) fn quat_to_rotation(q: &[f64; 4]) -> Matrix3<f64> {
 /// A mesh as MuJoCo's OBJ reader (tinyobjloader with `real_t = float`) delivers it: coordinates rounded to
 /// `f32`, quads split along their **shorter diagonal** (measured in `f32`), larger polygons refused because
 /// tinyobj's ear clipping is not reproduced here.
+/// **tinyobjloader's built-in ear clipping, ported branch for branch** — how a face with more than four
+/// vertices becomes triangles, which is what MuJoCo gets because its OBJ decoder builds tinyobj without
+/// `TINYOBJLOADER_USE_MAPBOX_EARCUT`. Three Menagerie families (`arx_l5`, `hello_robot_stretch_3`,
+/// `trossen_wxai`) have such faces and were refused outright until this existed.
+///
+/// Measured against MuJoCo's own `mesh_face` on `hello_robot_stretch_3`, the only Menagerie model with faces
+/// this large: the 49-, 72-, 73- and 85-gons come out **triangle for triangle identical**, all 271 of them.
+/// The 215-gon does not — MuJoCo emits NOTHING for it (its face count is short by exactly that polygon's
+/// 213) while this emits 201, none of them MuJoCo's. That polygon is degenerate at the `f32` noise floor:
+/// its corner cross products run 1e-10 to 1e-9 against an `f32::EPSILON` of 1.19e-7, so which corner first
+/// clears the threshold, and every ear test after it, is decided in the last bits. It moves four geoms of
+/// one model by 1.29e-4 m and nothing else in the corpus. Fused multiply-add in `cross`/`area` is not the
+/// cause — tried, no change.
+///
+/// It is not a textbook ear clip and the differences are the whole point of porting it rather than writing
+/// one: the working plane is chosen from the FIRST corner of the polygon whose cross product clears
+/// `f32::EPSILON`, not from a fitted normal; convexity is judged by `cross * area < 0` where `area` is one
+/// term of the shoelace sum and not the polygon's area; the ear test is `pnpoly` on the other vertices; and
+/// when no ear is found for a full cycle of `guess_vert` the remaining vertices are silently DROPPED. All of
+/// it runs in `f32`, because tinyobj's `real_t` is `float`.
+fn triangulate_as_tinyobj(poly: &[usize], verts: &[Vector3<f64>]) -> Vec<[usize; 3]> {
+    let vf = |i: usize| -> [f32; 3] {
+        let v = verts[i];
+        [v.x as f32, v.y as f32, v.z as f32]
+    };
+    // the two axes to work in: the first corner that is not degenerate picks the plane its normal is most
+    // aligned with, so the polygon is projected along its largest component
+    let n = poly.len();
+    let mut axes = [1usize, 2usize];
+    for k in 0..n {
+        let (a, b, c) = (vf(poly[k % n]), vf(poly[(k + 1) % n]), vf(poly[(k + 2) % n]));
+        let e0 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let e1 = [c[0] - b[0], c[1] - b[1], c[2] - b[2]];
+        let cx = (e0[1] * e1[2] - e0[2] * e1[1]).abs();
+        let cy = (e0[2] * e1[0] - e0[0] * e1[2]).abs();
+        let cz = (e0[0] * e1[1] - e0[1] * e1[0]).abs();
+        if cx > f32::EPSILON || cy > f32::EPSILON || cz > f32::EPSILON {
+            if !(cx > cy && cx > cz) {
+                axes[0] = 0;
+                if cz > cx && cz > cy {
+                    axes[1] = 1;
+                }
+            }
+            break;
+        }
+    }
+    // the crossing-number point-in-triangle test tinyobj carries verbatim from pnpoly
+    let pnpoly = |vx: &[f32; 3], vy: &[f32; 3], tx: f32, ty: f32| -> bool {
+        let mut c = false;
+        let mut j = 2usize;
+        for i in 0..3 {
+            if ((vy[i] > ty) != (vy[j] > ty)) && (tx < (vx[j] - vx[i]) * (ty - vy[i]) / (vy[j] - vy[i]) + vx[i]) {
+                c = !c;
+            }
+            j = i;
+        }
+        c
+    };
+    let mut out: Vec<[usize; 3]> = Vec::new();
+    let mut rem: Vec<usize> = poly.to_vec();
+    let mut guess_vert = 0usize;
+    // how many turns are left before giving up: reset whenever an ear is actually taken
+    let mut remaining_iterations = poly.len();
+    let mut previous = rem.len();
+    while rem.len() > 3 && remaining_iterations > 0 {
+        let m = rem.len();
+        if guess_vert >= m {
+            guess_vert -= m;
+        }
+        if previous != m {
+            previous = m;
+            remaining_iterations = m;
+        } else {
+            remaining_iterations -= 1;
+        }
+        let mut ind = [0usize; 3];
+        let (mut vx, mut vy) = ([0f32; 3], [0f32; 3]);
+        for k in 0..3 {
+            ind[k] = rem[(guess_vert + k) % m];
+            let p = vf(ind[k]);
+            vx[k] = p[axes[0]];
+            vy[k] = p[axes[1]];
+        }
+        let (e0x, e0y) = (vx[1] - vx[0], vy[1] - vy[0]);
+        let (e1x, e1y) = (vx[2] - vx[1], vy[2] - vy[1]);
+        let cross = e0x * e1y - e0y * e1x;
+        let area = (vx[0] * vy[1] - vy[0] * vx[1]) * 0.5;
+        if cross * area < 0.0 {
+            guess_vert += 1;
+            continue;
+        }
+        let mut overlap = false;
+        for other in 3..m {
+            let p = vf(rem[(guess_vert + other) % m]);
+            if pnpoly(&vx, &vy, p[axes[0]], p[axes[1]]) {
+                overlap = true;
+                break;
+            }
+        }
+        if overlap {
+            guess_vert += 1;
+            continue;
+        }
+        out.push(ind);
+        rem.remove((guess_vert + 1) % m);
+    }
+    if rem.len() == 3 {
+        out.push([rem[0], rem[1], rem[2]]);
+    }
+    out
+}
+
 pub(crate) fn obj_as_mujoco_reads_it(text: &str) -> Result<crate::TriMesh3, String> {
     let mut verts: Vec<Vector3<f64>> = Vec::new();
     let mut tris: Vec<[usize; 3]> = Vec::new();
@@ -646,7 +809,7 @@ pub(crate) fn obj_as_mujoco_reads_it(text: &str) -> Result<crate::TriMesh3, Stri
                             tris.push([poly[1], poly[2], poly[3]]);
                         }
                     }
-                    n => return Err(format!("OBJ face with {n} vertices: tinyobj's ear clipping is not reproduced here")),
+                    _ => tris.extend(triangulate_as_tinyobj(&poly, &verts)),
                 }
             }
             _ => {}
@@ -765,6 +928,40 @@ impl Defaults {
         out
     }
 
+    /// ⛔ The orientation attributes are ONE choice, not five independent ones. MuJoCo stores an element's
+    /// orientation as a tagged union: a default class sets the union, and an element that states any
+    /// alternative REPLACES it whole — `ReadAlternative` only refuses two alternatives written on the same
+    /// element. Resolving `quat`, `euler`, `xyaxes`… separately through the class chain both invents
+    /// conflicts (a geom with `quat` inside a class with `euler` read as "more than one given", which is why
+    /// `anybotics_anymal_b` was refused while MuJoCo compiles it) and, the other way round, silently
+    /// COMPOSES two rotations that were never meant to meet. Returns the winning layer's attributes.
+    fn orientation_attrs(&self, el: &El, kind: &str, childclass: Option<&str>) -> Vec<(String, String)> {
+        const ORIENT: [&str; 5] = ["quat", "axisangle", "euler", "xyaxes", "zaxis"];
+        let own: Vec<(String, String)> = ORIENT.iter().filter_map(|k| el.attr(k).map(|v| ((*k).to_string(), v.to_string()))).collect();
+        if !own.is_empty() {
+            return own;
+        }
+        let mut class: Option<&str> = el.attr("class").or(childclass).or(Some(MAIN));
+        let mut guard = 0;
+        while let Some(c) = class {
+            if let Some(list) = self.attrs.get(&(c.to_string(), kind.to_string())) {
+                let found: Vec<(String, String)> = ORIENT
+                    .iter()
+                    .filter_map(|k| list.iter().rev().find(|(kk, _)| kk == k).map(|(_, v)| ((*k).to_string(), v.clone())))
+                    .collect();
+                if !found.is_empty() {
+                    return found;
+                }
+            }
+            class = self.parent.get(c).and_then(|p| p.as_deref());
+            guard += 1;
+            if guard > 64 {
+                break;
+            }
+        }
+        Vec::new()
+    }
+
     fn known(&self, class: &str) -> bool {
         self.parent.contains_key(class)
     }
@@ -870,7 +1067,9 @@ fn pose_of(el: &El, kind: &str, defaults: &Defaults, childclass: Option<&str>, c
         return Ok(Iso::from_parts(Translation3::from((p1 + p2) / 2.0), rot));
     }
     let p = get("pos").map(|s| vec3(&s)).transpose()?.unwrap_or_else(Vector3::zeros);
-    Ok(Iso::from_parts(Translation3::from(p), orientation(&get, c)?))
+    let orient = defaults.orientation_attrs(el, kind, childclass);
+    let get_orient = |k: &str| orient.iter().find(|(kk, _)| kk == k).map(|(_, v)| v.clone());
+    Ok(Iso::from_parts(Translation3::from(p), orientation(&get_orient, c)?))
 }
 
 fn inertial_of(el: &El, c: &Compiler) -> Result<LinkInertia, String> {
@@ -1428,7 +1627,16 @@ impl Walk<'_> {
         } else {
             format!("{}/{}", self.c.meshdir, asset.file)
         };
-        let bytes = (self.resolve)(&path).ok_or_else(|| format!("mesh '{name}': file '{path}' could not be resolved"))?;
+        // `meshdir/file` first; then, for a mesh declared inside an included file, the same name relative to
+        // THAT file's own directory, with `meshdir` deliberately not applied — `ms_human_700` says
+        // `file="../geometry/r_pelvis.stl"` from `assets/asset/`, which means nothing from the model root
+        let bytes = match (self.resolve)(&path) {
+            Some(b) => b,
+            None => {
+                let alt = format!("{}{}", asset.include_dir, asset.file);
+                (self.resolve)(&alt).ok_or_else(|| format!("mesh '{name}': file '{path}' could not be resolved, nor '{alt}'"))?
+            }
+        };
         let lower = asset.file.to_ascii_lowercase();
         let mut mesh = if lower.ends_with(".obj") {
             obj_as_mujoco_reads_it(&String::from_utf8_lossy(&bytes)).map_err(|e| format!("mesh '{name}': '{path}': {e}"))?
@@ -1515,7 +1723,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
     if root.name != "mujoco" {
         return Err(format!("root element is <{}>, expected <mujoco>", root.name));
     }
-    expand_includes(&mut root, resolve, 0)?;
+    expand_includes(&mut root, resolve, "", 0, &mut std::collections::HashSet::new())?;
     let c = compiler(&root)?;
     let defaults = Defaults::collect(&root)?;
     // <asset><mesh name file scale refpos refquat inertia> — several <asset> blocks can arrive through includes
@@ -1546,7 +1754,8 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
                 Some("convex") => return Err(format!("mesh '{name}': inertia=\"convex\" needs the convex hull, outside this loader's subset")),
                 Some(other) => return Err(format!("mesh '{name}': unknown inertia method '{other}'")),
             };
-            meshes.insert(name, MeshAsset { file, scale, refpos, refquat, inertia });
+            let include_dir = m.attr(INCLUDE_DIR).or_else(|| asset.attr(INCLUDE_DIR)).unwrap_or("").to_string();
+            meshes.insert(name, MeshAsset { file, include_dir, scale, refpos, refquat, inertia });
         }
     }
     // an <include> outside the worldbody splices in a second <worldbody>; MuJoCo merges them in order
@@ -1850,6 +2059,65 @@ mod tests {
         assert!((z + Vector3::z()).norm() < 1e-12, "the capsule's axis is {z:?}, expected −z");
     }
 
+    /// A non-convex polygon is where fan triangulation and ear clipping part company: fanning from vertex 0
+    /// of an L puts a triangle outside the shape. Both the count and the SHAPE are checked — the triangles
+    /// must tile the polygon, so their total area equals the polygon's.
+    #[test]
+    fn a_polygon_is_ear_clipped_and_the_pieces_stay_inside_it() {
+        // an L in the z = 0 plane, wound counter-clockwise
+        let ring = [(0.0, 0.0), (3.0, 0.0), (3.0, 1.0), (1.0, 1.0), (1.0, 3.0), (0.0, 3.0)];
+        let verts: Vec<Vector3<f64>> = ring.iter().map(|&(x, y)| Vector3::new(x, y, 0.0)).collect();
+        let poly: Vec<usize> = (0..ring.len()).collect();
+        let tris = triangulate_as_tinyobj(&poly, &verts);
+        assert_eq!(tris.len(), ring.len() - 2, "an n-gon becomes n−2 triangles, got {}", tris.len());
+        let area: f64 = tris.iter().map(|t| {
+            let (a, b, c) = (verts[t[0]], verts[t[1]], verts[t[2]]);
+            0.5 * ((b - a).cross(&(c - a))).norm()
+        }).sum();
+        // the L is 3×3 minus the 2×2 notch
+        assert!((area - 5.0).abs() < 1e-12, "the pieces cover {area}, the polygon is 5 — a triangle escaped it");
+        // every triangle is wound the same way as the polygon, so none of them is inside out
+        for t in &tris {
+            let (a, b, c) = (verts[t[0]], verts[t[1]], verts[t[2]]);
+            assert!((b - a).cross(&(c - a)).z > 0.0, "triangle {t:?} is wound backwards");
+        }
+    }
+
+    /// An `<include>` resolves against the MAIN model's directory first and, failing that, against the
+    /// directory of the file it is written in — and an asset's `file` follows the same two-step rule.
+    #[test]
+    fn an_include_falls_back_to_the_directory_of_the_file_it_is_written_in() {
+        let files: std::collections::HashMap<&str, &str> = [
+            ("parts/arm.xml", r#"<mujoco><body name="arm"><joint name="a" type="hinge" axis="0 0 1"/><geom name="ga" type="sphere" size="0.1"/><include file="hand.xml"/></body></mujoco>"#),
+            ("parts/hand.xml", r#"<mujoco><body name="hand" pos="0 0 0.3"><joint name="h" type="hinge" axis="0 1 0"/><geom name="gh" type="sphere" size="0.05"/></body></mujoco>"#),
+        ]
+        .into_iter()
+        .collect();
+        let xml = r#"<mujoco><worldbody><include file="parts/arm.xml"/></worldbody></mujoco>"#;
+        let t = tree_from_mjcf(xml, &|p: &str| files.get(p).map(|s| s.as_bytes().to_vec())).expect("loads");
+        assert!(t.body_frames.contains_key("hand"), "the nested include named its own neighbour and was not found");
+        // and the failure is reported with BOTH places that were tried, not just one
+        let e = tree_from_mjcf(r#"<mujoco><worldbody><include file="nope.xml"/></worldbody></mujoco>"#, &|_: &str| None).unwrap_err();
+        assert!(e.contains("nope.xml"), "{e}");
+    }
+
+    /// ⛔ The orientation attributes are one choice, not five. A geom with its own `quat` inside a class that
+    /// states `euler` must use the geom's `quat` and MUST NOT be read as "two orientations given" — that
+    /// refusal kept `anybotics_anymal_b` out while MuJoCo compiles it.
+    #[test]
+    fn an_elements_own_orientation_replaces_its_classs_whole() {
+        let xml = r#"<mujoco>
+            <default><default class="turned"><geom type="cylinder" size="0.05 0.05" euler="0 90 0"/></default></default>
+            <worldbody><body name="b"><joint name="j" type="hinge" axis="0 0 1"/>
+              <geom name="own" class="turned" quat="1 0 0 0"/>
+              <geom name="inherited" class="turned"/>
+            </body></worldbody></mujoco>"#;
+        let t = tree_from_mjcf_str(xml).expect("loads: the two are alternatives, not a conflict");
+        let axis = |name: &str| t.geoms.iter().find(|g| g.name == name).unwrap().pose.rotation.to_rotation_matrix() * Vector3::z();
+        assert!((axis("own") - Vector3::z()).norm() < 1e-12, "the geom's own quat lost to its class: {:?}", axis("own"));
+        assert!((axis("inherited") - Vector3::x()).norm() < 1e-12, "the class's euler was dropped: {:?}", axis("inherited"));
+    }
+
     /// MuJoCo's `ReadAttr` writes only as many numbers as the attribute supplies, so a geom that states a
     /// shorter `size` than its default class keeps the class's trailing entries. `robotiq_2f85_v4` does
     /// exactly this and MuJoCo's `geom_size` for those capsules is `0.009 0.02 0.01875`.
@@ -2031,4 +2299,5 @@ mod tests {
         assert!((li.inertia - full).norm() < 1e-7 * full.norm(), "inertia {:?}", li.inertia);
     }
 }
+
 
