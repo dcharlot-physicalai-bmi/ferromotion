@@ -59,6 +59,7 @@ fn main() {
     let (mut meshes, mut same_verts, mut same_polys, mut normals_ok, mut normals_total, mut normals_hit) = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
     let mut worst: Vec<(String, String, usize, i64, usize, usize)> = Vec::new();
     let mut soundness: BTreeMap<(String, String), f64> = BTreeMap::new();
+    let mut capped: BTreeSet<(String, String)> = BTreeSet::new();
     for dir in &dirs {
         let dirname = dir.file_name().unwrap().to_string_lossy().to_string();
         let mut models: Vec<_> = std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().map(|x| x == "xml").unwrap_or(false)).collect();
@@ -78,6 +79,9 @@ fn main() {
                     continue;
                 }
                 meshes += 1;
+                if hull.max_verts.is_some() {
+                    capped.insert(key.clone());
+                }
                 let nh = hull.hull_verts.len();
                 let np = hull.polygons.len();
                 if o.nhull < 0 || nh as i64 == o.nhull {
@@ -144,9 +148,17 @@ fn main() {
     println!("  polygon count identical:     {same_polys}");
     println!("  every MuJoCo polygon normal reproduced: {normals_ok} meshes; {normals_hit} of {normals_total} polygons");
     // the one property a hull OWES regardless of how it is tessellated: it contains every input vertex
-    let unsound: Vec<_> = soundness.iter().filter(|&(_, &o)| o > 1e-9).collect();
-    let worst_out = soundness.values().copied().fold(0.0, f64::max);
-    println!("  SOUND (no mesh vertex outside our own hull): {} of {meshes}; worst excursion {worst_out:.2e} m", meshes - unsound.len());
+    // a capped hull (`<mesh maxhullvert>`) is a deliberate under-approximation and MuJoCo's is too, so it
+    // cannot be asked to contain every vertex; it is counted apart rather than scored as a failure
+    let unsound: Vec<_> = soundness.iter().filter(|&(k, &o)| o > 1e-9 && !capped.contains(k)).collect();
+    let worst_out = soundness.iter().filter(|(k, _)| !capped.contains(*k)).map(|(_, &v)| v).fold(0.0, f64::max);
+    println!(
+        "  SOUND (no mesh vertex outside our own hull): {} of {} uncapped; {} meshes are capped by maxhullvert; worst excursion {:.2e} m",
+        meshes - capped.len() - unsound.len(),
+        meshes - capped.len(),
+        capped.len(),
+        worst_out
+    );
     for ((d, n), o) in unsound.iter().take(10) {
         println!("    UNSOUND {d}/{n}: {o:.2e} m outside");
     }

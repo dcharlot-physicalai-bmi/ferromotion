@@ -364,7 +364,7 @@ pub use apriltag::{decode_payload, tag_pose};
 pub use cfd_contact::{rollout_impulse, CfdContact};
 pub use bit_star::BitStar;
 pub use bvh::{Aabb, Bvh};
-pub use mesh3::{convex_hull_3d, try_convex_hull_3d, TriMesh3};
+pub use mesh3::{convex_hull_3d, try_convex_hull_3d, try_convex_hull_3d_capped, TriMesh3};
 pub use mesh_io::{from_obj, from_stl, from_stl_ascii, from_stl_binary, scale_mesh, second_moment, solid_inertia};
 pub use link_geometry::{geometry_from_urdf, inertia_of_parts, primitive_link_inertia, primitive_mesh, resolve_uri, transform_mesh, GeomRole, GeometryRef, LinkGeometry};
 pub use acd::{convex_decompose, AcdOptions, AcdReport};

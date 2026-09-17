@@ -78,6 +78,17 @@ pub fn convex_hull_3d(points: &[Vector3<f64>]) -> TriMesh3 {
 /// A degenerate part is a real case, not a hypothetical: a mesh exported as a single flat plate, or a
 /// decomposition that produced a sliver, arrives here looking like data.
 pub fn try_convex_hull_3d(points: &[Vector3<f64>]) -> Option<TriMesh3> {
+    try_convex_hull_3d_capped(points, None)
+}
+
+/// **The convex hull, optionally capped at `max_verts` vertices** — MJCF's `<mesh maxhullvert>`, which MuJoCo
+/// implements by handing qhull `Q9 TA<n−4>`: `Q9` takes the furthest of ALL furthest points rather than the
+/// furthest of the facet in hand, and `TA` stops after that many vertices have joined the initial simplex.
+/// The result is a deliberate under-approximation — it does NOT contain every input point, and MuJoCo's does
+/// not either — bought because a 3,428-vertex hull is expensive to collide against every step.
+///
+/// `None` is the exact hull. A cap below 4 is the same as 4: the seed tetrahedron is not negotiable.
+pub fn try_convex_hull_3d_capped(points: &[Vector3<f64>], max_verts: Option<usize>) -> Option<TriMesh3> {
     let n = points.len();
     if n < 4 || !points.iter().all(|p| p.iter().all(|c| c.is_finite())) {
         return None;
@@ -122,9 +133,26 @@ pub fn try_convex_hull_3d(points: &[Vector3<f64>]) -> Option<TriMesh3> {
     // Seed: four points that are not coplanar. Each is chosen by the widest `f64` margin so the tetrahedron
     // is fat, then CONFIRMED exactly; if the widest candidate is exactly degenerate the scan falls back to
     // any point that is not, so the refusals mean what they say — no 3-D hull exists.
-    let p0 = (0..n).min_by(|&a, &b| (q[a][0], q[a][1], q[a][2]).cmp(&(q[b][0], q[b][1], q[b][2]))).unwrap();
+    // ⭐ qhull's `qh_maxsimplex` starts from the six coordinate extremes (`qh_maxmin`) and takes the pair
+    // among THEM that is furthest apart, then searches all points for the rest. The exact hull does not
+    // depend on the seed, but a hull CAPPED by `maxhullvert` is the seed plus whichever points the budget
+    // reaches, so matching the rule is the only way a capped hull can resemble MuJoCo's.
     let far = |f: &dyn Fn(usize) -> f64| -> usize { (0..n).max_by(|&a, &b| f(a).total_cmp(&f(b))).unwrap() };
-    let p1 = far(&|i| (points[i] - points[p0]).norm());
+    let mut extremes: Vec<usize> = Vec::new();
+    for k in 0..3 {
+        extremes.push((0..n).min_by(|&a, &b| (q[a][k], q[a][(k + 1) % 3], q[a][(k + 2) % 3]).cmp(&(q[b][k], q[b][(k + 1) % 3], q[b][(k + 2) % 3]))).unwrap());
+        extremes.push((0..n).max_by(|&a, &b| (q[a][k], q[a][(k + 1) % 3], q[a][(k + 2) % 3]).cmp(&(q[b][k], q[b][(k + 1) % 3], q[b][(k + 2) % 3]))).unwrap());
+    }
+    let mut seed = (extremes[0], extremes[1], f64::NEG_INFINITY);
+    for (x, &a) in extremes.iter().enumerate() {
+        for &b in &extremes[x + 1..] {
+            let d = (points[a] - points[b]).norm();
+            if d > seed.2 {
+                seed = (a, b, d);
+            }
+        }
+    }
+    let (p0, p1) = (seed.0, seed.1);
     let p1 = if q[p1] != q[p0] { p1 } else { (0..n).find(|&i| q[i] != q[p0])? };
     let cross_q = |i: usize| -> [i128; 3] {
         let (a, b, c) = (q[p0], q[p1], q[i]);
@@ -197,11 +225,41 @@ pub fn try_convex_hull_3d(points: &[Vector3<f64>]) -> Option<TriMesh3> {
 
     use std::collections::HashSet;
     let mut work: Vec<usize> = (0..faces.len()).collect();
-    while let Some(fi) = work.pop() {
-        if !faces[fi].alive || faces[fi].outside.is_empty() {
-            continue;
-        }
-        let p = *faces[fi].outside.iter().max_by(|&&a, &&b| height(&faces[fi], a).total_cmp(&height(&faces[fi], b))).unwrap();
+    // `Q9` when capped: the point taken next is the furthest outside ANY live face, not the furthest outside
+    // whichever face came off the queue, so a small budget is spent on the points that matter most
+    let mut budget = max_verts.map(|m| m.saturating_sub(4));
+    loop {
+        let (fi, p) = if max_verts.is_some() {
+            if budget == Some(0) {
+                break;
+            }
+            let mut best: Option<(usize, usize, f64)> = None;
+            for k in 0..faces.len() {
+                if !faces[k].alive {
+                    continue;
+                }
+                for &i in &faces[k].outside {
+                    let h = height(&faces[k], i);
+                    if best.map(|(_, _, b)| h > b).unwrap_or(true) {
+                        best = Some((k, i, h));
+                    }
+                }
+            }
+            match best {
+                Some((k, i, _)) => (k, i),
+                None => break,
+            }
+        } else {
+            match work.pop() {
+                Some(fi) if faces[fi].alive && !faces[fi].outside.is_empty() => {
+                    let p = *faces[fi].outside.iter().max_by(|&&a, &&b| height(&faces[fi], a).total_cmp(&height(&faces[fi], b))).unwrap();
+                    (fi, p)
+                }
+                Some(_) => continue,
+                None => break,
+            }
+        };
+        budget = budget.map(|b| b - 1);
         // the faces that see p, flooded across shared edges — exact, so this IS all of them, and a patch
         let mut vis: Vec<usize> = vec![fi];
         let mut seen: HashSet<usize> = HashSet::from([fi]);
@@ -470,6 +528,44 @@ mod verification {
             assert_eq!(bad, 0, "{name}: {bad} of {} faces do not support the hull", h.tris.len());
             eprintln!("  {name}: {} points -> {} hull vertices, {} faces, sound", pts.len(), h.verts.len(), h.tris.len());
         }
+    }
+
+    /// `maxhullvert`: the hull stops at the budget, and what it keeps is the points furthest outside it — so
+    /// a coarse hull of a sphere is still a decent sphere, not a sliver near the seed. It no longer contains
+    /// every input point, which is the whole trade, and MuJoCo's capped hull does not either.
+    #[test]
+    fn a_capped_hull_stops_at_its_budget_and_still_covers_the_shape() {
+        let sphere: Vec<Vector3<f64>> = (0..3000)
+            .map(|i| {
+                let z = 1.0 - 2.0 * (i as f64 + 0.5) / 3000.0;
+                let r = (1.0 - z * z).max(0.0).sqrt();
+                let t = i as f64 * 2.399963229728653;
+                Vector3::new(r * t.cos(), r * t.sin(), z)
+            })
+            .collect();
+        let full = try_convex_hull_3d(&sphere).expect("a solid");
+        assert_eq!(full.verts.len(), 3000, "uncapped, every point of a sphere is extreme");
+        for cap in [8usize, 16, 64, 256] {
+            let h = try_convex_hull_3d_capped(&sphere, Some(cap)).expect("a solid");
+            assert!(h.verts.len() <= cap, "cap {cap}: kept {} vertices", h.verts.len());
+            assert!(h.verts.len() >= cap.min(8) - 4, "cap {cap}: only {} vertices, the budget went unspent", h.verts.len());
+            // the budget was spent on breadth: an inscribed sphere of a fair fraction of the radius, which a
+            // hull that piled its vertices into one region could not manage
+            let centre = h.verts.iter().sum::<Vector3<f64>>() / h.verts.len() as f64;
+            let inradius = h
+                .tris
+                .iter()
+                .map(|t| {
+                    let (a, b, c) = (h.verts[t[0]], h.verts[t[1]], h.verts[t[2]]);
+                    let nrm = (b - a).cross(&(c - a));
+                    (nrm / nrm.norm()).dot(&(a - centre)).abs()
+                })
+                .fold(f64::INFINITY, f64::min);
+            let want = if cap < 16 { 0.25 } else { 0.55 };
+            assert!(inradius > want, "cap {cap}: the capped hull's inradius is {inradius:.3}, so the budget went into one corner");
+        }
+        // and the cap is off by default
+        assert_eq!(try_convex_hull_3d_capped(&sphere, None).unwrap().verts.len(), full.verts.len());
     }
 
     /// ⛔ **The same points must give the same hull, twice in a row.** Rust gives every `HashMap` a fresh

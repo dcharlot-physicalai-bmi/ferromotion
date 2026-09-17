@@ -36,6 +36,9 @@ pub struct MeshHull {
     pub hull_verts: Vec<usize>,
     /// Hull triangles as mesh-vertex indices, outward wound.
     pub hull_faces: Vec<[usize; 3]>,
+    /// `<mesh maxhullvert>` if the model set one. A capped hull does NOT contain every mesh vertex — that is
+    /// what the cap buys — so anything checking containment has to know.
+    pub max_verts: Option<usize>,
     /// Merged coplanar polygons of the hull.
     pub polygons: Vec<HullPolygon>,
     /// For each mesh vertex, the polygons it belongs to (`mesh_polymap`).
@@ -50,8 +53,14 @@ impl MeshHull {
     /// Build from a mesh in its own frame (after `scale`/`refpos`/`refquat`). `None` when the vertices have
     /// no 3-D hull (fewer than four, collinear, coplanar — MuJoCo refuses those meshes at compile time).
     pub fn new(mesh: &TriMesh3) -> Option<Self> {
+        Self::with_max_verts(mesh, None)
+    }
+
+    /// The same, with MJCF's `<mesh maxhullvert>` — the hull qhull would build under `Q9 TA<n−4>`. A capped
+    /// hull is an under-approximation of the mesh and MuJoCo collides against it anyway.
+    pub fn with_max_verts(mesh: &TriMesh3, max_verts: Option<usize>) -> Option<Self> {
         let verts: Vec<Vector3<f64>> = mesh.verts.iter().map(|v| v.map(|x| x as f32 as f64)).collect();
-        let hull = crate::try_convex_hull_3d(&verts)?;
+        let hull = crate::try_convex_hull_3d_capped(&verts, max_verts)?;
         // the hull mesh's vertices are a subset of `verts` (same coordinates); map each back to its index
         let mut index_of: HashMap<[u64; 3], usize> = HashMap::new();
         for (i, v) in verts.iter().enumerate() {
@@ -69,7 +78,7 @@ impl MeshHull {
                 polymap[v].push(pi);
             }
         }
-        Some(Self { verts, hull_verts, hull_faces, polygons, polymap })
+        Some(Self { verts, hull_verts, hull_faces, polygons, polymap, max_verts })
     }
 
     /// `mjc_meshSupport`: the vertex most along `local_dir` (mesh frame), scanning the hull's vertices from

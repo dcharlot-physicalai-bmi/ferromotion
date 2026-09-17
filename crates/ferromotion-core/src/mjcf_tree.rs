@@ -475,6 +475,9 @@ struct GeomSpec {
 
 struct MeshAsset {
     file: String,
+    /// `<mesh maxhullvert>`: the collision hull is capped at this many vertices (MuJoCo's qhull `Q9 TA`).
+    /// `None` is MJCF's `-1`, an uncapped hull. Three Menagerie families set it to 64.
+    maxhullvert: Option<usize>,
     /// The directory of the XML file that declared this mesh, if it arrived through an `<include>`; the
     /// fallback `ResolveFilePath` uses when `meshdir/file` does not exist.
     include_dir: String,
@@ -1755,7 +1758,12 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
                 Some(other) => return Err(format!("mesh '{name}': unknown inertia method '{other}'")),
             };
             let include_dir = m.attr(INCLUDE_DIR).or_else(|| asset.attr(INCLUDE_DIR)).unwrap_or("").to_string();
-            meshes.insert(name, MeshAsset { file, include_dir, scale, refpos, refquat, inertia });
+            let maxhullvert = get("maxhullvert")
+                .map(|v| v.trim().parse::<i64>().map_err(|e| format!("mesh '{name}': maxhullvert: {e}")))
+                .transpose()?
+                .filter(|&v| v > -1)
+                .map(|v| v.max(4) as usize);
+            meshes.insert(name, MeshAsset { file, include_dir, maxhullvert, scale, refpos, refquat, inertia });
         }
     }
     // an <include> outside the worldbody splices in a second <worldbody>; MuJoCo merges them in order
@@ -1822,7 +1830,8 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
         .collect();
     for name in &walk.collidable_meshes {
         let stored = &walk.mesh_stored[name];
-        let hull = crate::mujoco_hull::MeshHull::new(stored).ok_or_else(|| format!("mesh '{name}': no 3-D convex hull (MuJoCo refuses such a collision mesh)"))?;
+        let cap = walk.meshes.get(name).and_then(|a| a.maxhullvert);
+        let hull = crate::mujoco_hull::MeshHull::with_max_verts(stored, cap).ok_or_else(|| format!("mesh '{name}': no 3-D convex hull (MuJoCo refuses such a collision mesh)"))?;
         out.mesh_hulls.insert(name.clone(), hull);
         out.mesh_raw.insert(name.clone(), walk.mesh_raw[name].clone());
     }
