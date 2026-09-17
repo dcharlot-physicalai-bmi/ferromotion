@@ -156,10 +156,33 @@ pub struct MjcfTree {
     /// the mesh file's own frame — for placing them under a frame chosen elsewhere (MuJoCo's `mesh_pos`,
     /// `mesh_quat` when comparing against it).
     pub mesh_raw: BTreeMap<String, crate::TriMesh3>,
+    /// Every geom, in file order — the order MuJoCo numbers them in.
+    pub geoms: Vec<MjcfGeom>,
     /// `<contact><exclude body1 body2/>`, in file order.
     pub contact_excludes: Vec<(String, String)>,
     /// `<contact><pair/>` entries with their parameters resolved (defaults classes applied).
     pub contact_pairs: Vec<MjcfContactPair>,
+}
+
+/// **One geom as the collision pipeline needs it**: where it is, what shape, and the contact parameters
+/// MJCF gave it. `joint` is the tree joint it rides on (`None` for a geom welded to the world) and `pose` is
+/// its transform from that joint's frame, so its world pose is `frames[joint] * pose`.
+#[derive(Clone, Debug)]
+pub struct MjcfGeom {
+    /// The geom's `name`, or `geom{i}` with `i` its index in [`MjcfTree::geoms`] — which is MuJoCo's own
+    /// geom id, since the vector is in MuJoCo's body-major order, so an unnamed geom still lines up.
+    pub name: String,
+    /// The body it belongs to.
+    pub body: String,
+    pub joint: Option<usize>,
+    pub pose: Iso,
+    pub kind: crate::mujoco_collision::GeomType,
+    /// MuJoCo's resolved `geom_size`, after `fromto` and after fitting to a mesh.
+    pub size: [f64; 3],
+    /// The mesh it references, for [`MjcfTree::mesh_hulls`]; set for a `type="mesh"` geom, and also for a
+    /// primitive geom fitted to a mesh, where the SHAPE is the primitive and this is only provenance.
+    pub mesh: Option<String>,
+    pub params: crate::mujoco_collision::GeomParams,
 }
 
 /// An explicit `<contact><pair>`: the two geoms and the contact parameters MuJoCo uses for that pair
@@ -390,6 +413,18 @@ struct MeshData {
     aamm: [f64; 6],
 }
 
+/// What [`Walk::geom_spec`] resolves: MuJoCo's own `geom_type`, `geom_size` and pose for one geom.
+struct GeomSpec {
+    ty: String,
+    size: Vec<f64>,
+    pose: Iso,
+    mesh: Option<String>,
+    /// For a `type="mesh"` geom, the mesh's OWN stored frame — the centre of mass and the principal rotation
+    /// `mjCMesh::Process` left it in — which MuJoCo folds into `geom_xmat`. Kept apart from `pose` because
+    /// [`Walk::geom_mass`] applies the same frame itself, through the inertia, and would double-count it.
+    mesh_frame: Option<Iso>,
+}
+
 struct MeshAsset {
     file: String,
     scale: Vector3<f64>,
@@ -565,9 +600,17 @@ pub(crate) fn quat_to_rotation(q: &[f64; 4]) -> Matrix3<f64> {
 pub(crate) fn obj_as_mujoco_reads_it(text: &str) -> Result<crate::TriMesh3, String> {
     let mut verts: Vec<Vector3<f64>> = Vec::new();
     let mut tris: Vec<[usize; 3]> = Vec::new();
+    // ⛔ MuJoCo reads the faces of the FIRST SHAPE ONLY: `obj_decoder.cc` takes `GetShapes()[0]` and drops
+    // the rest, while tinyobj starts a new shape at each `o`/`g` tag that follows a face. Its vertex array,
+    // by contrast, is the whole file's, so the later objects' vertices stay — and they still count towards
+    // the mesh's bounds only through faces that no longer exist. Menagerie's `distal.obj` is one object of
+    // 9,802 faces followed by a 1,450-face tip: reading both moved the mesh's centre of mass 7.9 mm and
+    // turned its principal frame 90°, which is 9.6 mm of geom placement and a permuted `geom_size`.
+    let mut first_shape_done = false;
     for line in text.lines() {
         let mut tok = line.split_whitespace();
         match tok.next() {
+            Some("o") | Some("g") if !tris.is_empty() => first_shape_done = true,
             Some("v") => {
                 let mut c = [0.0f64; 3];
                 for x in c.iter_mut() {
@@ -576,7 +619,7 @@ pub(crate) fn obj_as_mujoco_reads_it(text: &str) -> Result<crate::TriMesh3, Stri
                 }
                 verts.push(Vector3::new(c[0], c[1], c[2]));
             }
-            Some("f") => {
+            Some("f") if !first_shape_done => {
                 let mut poly = Vec::new();
                 for t in tok {
                     let raw: i64 = t.split('/').next().unwrap_or("").parse().map_err(|e| format!("OBJ face index '{t}': {e}"))?;
@@ -631,7 +674,12 @@ struct Defaults {
     attrs: HashMap<(String, String), Vec<(String, String)>>,
 }
 
-const MAIN: &str = "";
+/// ⛔ MJCF's top-level default class is NAMED, and the name is `main`. A file may write `<default>` or
+/// `<default class="main">` and mean the same class. Holding the root under a different key — the empty
+/// string, say — makes the second spelling register a separate class that nothing inherits from, so every
+/// default in it is silently dropped: on `pal_tiago_dual` that turned `type="mesh"` back into the sphere
+/// default and `contype="0"` back into 1, on 77 of Menagerie's geoms, with no error anywhere.
+const MAIN: &str = "main";
 
 impl Defaults {
     fn collect(root: &El) -> Result<Self, String> {
@@ -686,6 +734,35 @@ impl Defaults {
             }
         }
         None
+    }
+
+    /// Every value of `key` that applies to `el`, OUTERMOST FIRST: main's, then each class down the chain,
+    /// then the element's own. ⛔ MuJoCo's `ReadAttr` writes only as many numbers as the attribute supplies
+    /// and leaves the rest of the array as the default class left it, so a numeric array attribute overrides
+    /// only its LEADING entries. `robotiq_2f85_v4` inherits `size="0.004 0.011 0.01875"` from a class and
+    /// writes `size="0.009 0.02"` on the geom; MuJoCo's `geom_size` is `0.009 0.02 0.01875`.
+    fn chain<'a>(&'a self, el: &'a El, kind: &str, key: &str, childclass: Option<&str>) -> Vec<&'a str> {
+        let mut classes: Vec<&str> = Vec::new();
+        let mut class: Option<&str> = el.attr("class").or(childclass).or(Some(MAIN));
+        while let Some(c) = class {
+            if classes.len() > 64 {
+                break;
+            }
+            classes.push(c);
+            class = self.parent.get(c).and_then(|p| p.as_deref());
+        }
+        let mut out: Vec<&str> = Vec::new();
+        for c in classes.iter().rev() {
+            if let Some(list) = self.attrs.get(&((*c).to_string(), kind.to_string()))
+                && let Some((_, v)) = list.iter().rev().find(|(k, _)| k == key)
+            {
+                out.push(v.as_str());
+            }
+        }
+        if let Some(v) = el.attr(key) {
+            out.push(v);
+        }
+        out
     }
 
     fn known(&self, class: &str) -> bool {
@@ -779,7 +856,12 @@ fn pose_of(el: &El, kind: &str, defaults: &Defaults, childclass: Option<&str>, c
             return Err(format!("{kind} fromto needs 6 numbers"));
         }
         let (p1, p2) = (Vector3::new(v[0], v[1], v[2]), Vector3::new(v[3], v[4], v[5]));
-        let d = p2 - p1;
+        // ⛔ MuJoCo's +z runs from the SECOND endpoint to the FIRST (`mjCGeom::Compile` and `mjCSite::Compile`
+        // both take `vec = fromto[0..3] − fromto[3..6]`, then `mjuu_z2quat`). Taking it the other way puts the
+        // frame 180° out: the position, the size and the shape are all still right, because a capsule is
+        // symmetric about its axis, so nothing fails until something reads `geom_xmat` — 77 of Menagerie's
+        // 11,912 geoms, every one of them a `fromto` capsule.
+        let d = p1 - p2;
         if !(d.norm().is_finite() && d.norm() > 0.0) {
             return Err(format!("{kind} fromto endpoints coincide"));
         }
@@ -839,6 +921,11 @@ struct Walk<'a> {
     collidable_meshes: BTreeSet<String>,
     /// the enclosing bodies, innermost last (empty at the worldbody)
     body_stack: Vec<String>,
+    /// MuJoCo's body ids: the world is 0 and the rest are numbered on first entry, depth-first in file order
+    body_ids: HashMap<String, usize>,
+    /// geoms with the key MuJoCo sorts them by — `(body id, order within the file)` — and the name the MJCF
+    /// gave them, if any; the auto-generated `geom{i}` needs the FINAL index, so it is assigned after sorting
+    geom_records: Vec<(usize, usize, Option<String>, MjcfGeom)>,
     resolve: &'a dyn Fn(&str) -> Option<Vec<u8>>,
 }
 
@@ -853,7 +940,7 @@ impl Walk<'_> {
         for ch in &el.children {
             match ch.name.as_str() {
                 "body" => self.body(ch, parent, carry, childclass)?,
-                "geom" => self.note_collidable_mesh(ch, childclass)?,
+                "geom" => self.record_geom(ch, parent, carry, childclass)?,
                 "frame" => {
                     let f = pose_of(ch, "frame", self.defaults, childclass, self.c)?;
                     let cc = ch.attr("childclass").or(childclass);
@@ -875,19 +962,71 @@ impl Walk<'_> {
         Ok(())
     }
 
-    /// A mesh geom that can collide needs its mesh's hull data; load the mesh now so the hull is built later.
-    fn note_collidable_mesh(&mut self, g: &El, childclass: Option<&str>) -> Result<(), String> {
+    /// **Record one geom**, resolved the way MuJoCo resolves it, and note the mesh a collidable mesh geom
+    /// needs a hull for. `parent` is the tree joint the enclosing frame rides on and `carry` the transform
+    /// from that joint's frame to it, so the geom's own pose composes on the right.
+    fn record_geom(&mut self, g: &El, parent: isize, carry: Iso, childclass: Option<&str>) -> Result<(), String> {
+        use crate::mujoco_collision::{GeomParams, GeomType};
+        let body = self.body_stack.last().cloned().unwrap_or_else(|| "world".to_string());
+        let spec = self.geom_spec(g, childclass, &body)?;
+        let index = self.geom_records.len();
         let get = |k: &str| self.defaults.get(g, "geom", k, childclass).map(|s| s.to_string());
-        if get("type").as_deref() != Some("mesh") {
-            return Ok(());
+        let num = |k: &str, dflt: f64| -> Result<f64, String> { get(k).map(|s| s.trim().parse::<f64>().map_err(|e| format!("geom {k}: {e}"))).transpose().map(|v| v.unwrap_or(dflt)) };
+        let int = |k: &str, dflt: i64| -> Result<i64, String> { get(k).map(|s| s.trim().parse::<f64>().map(|x| x as i64).map_err(|e| format!("geom {k}: {e}"))).transpose().map(|v| v.unwrap_or(dflt)) };
+        // each layer of the default chain overwrites only the entries it states, as `ReadAttr` does
+        let list = |k: &str, dflt: &[f64]| -> Result<Vec<f64>, String> {
+            let mut out = dflt.to_vec();
+            for layer in self.defaults.chain(g, "geom", k, childclass) {
+                let f = floats(layer)?;
+                if f.is_empty() || f.len() > dflt.len() {
+                    return Err(format!("geom {k}: expected 1..{} numbers", dflt.len()));
+                }
+                out[..f.len()].copy_from_slice(&f);
+            }
+            Ok(out)
+        };
+        let kind = match spec.ty.as_str() {
+            "plane" => GeomType::Plane,
+            "hfield" => GeomType::HField,
+            "sphere" => GeomType::Sphere,
+            "capsule" => GeomType::Capsule,
+            "ellipsoid" => GeomType::Ellipsoid,
+            "cylinder" => GeomType::Cylinder,
+            "box" => GeomType::Box,
+            "mesh" | "sdf" => GeomType::Mesh,
+            other => return Err(format!("body '{body}': unknown geom type '{other}'")),
+        };
+        let friction = list("friction", &[1.0, 0.005, 0.0001])?;
+        let solref = list("solref", &[0.02, 1.0])?;
+        let solimp = list("solimp", &[0.9, 0.95, 0.001, 0.5, 2.0])?;
+        let params = GeomParams {
+            condim: int("condim", 3)? as usize,
+            priority: int("priority", 0)? as i32,
+            solmix: num("solmix", 1.0)?,
+            solref: [solref[0], solref[1]],
+            solimp: [solimp[0], solimp[1], solimp[2], solimp[3], solimp[4]],
+            friction: [friction[0], friction[1], friction[2]],
+            margin: num("margin", 0.0)?,
+            gap: num("gap", 0.0)?,
+            contype: int("contype", 1)? as u32,
+            conaffinity: int("conaffinity", 1)? as u32,
+            adhesion: num("adhesion", 0.0)?,
+        };
+        if let Some(mname) = spec.mesh.as_ref().filter(|_| kind == GeomType::Mesh && (params.contype != 0 || params.conaffinity != 0)) {
+            self.mesh_data(mname)?;
+            self.collidable_meshes.insert(mname.clone());
         }
-        let Some(mname) = get("mesh") else { return Ok(()) };
-        let bits = |k: &str| -> Result<u32, String> { get(k).map(|s| s.trim().parse::<i64>().map(|x| x as u32).map_err(|e| e.to_string())).transpose().map(|v| v.unwrap_or(1)) };
-        if bits("contype")? == 0 && bits("conaffinity")? == 0 {
-            return Ok(());
-        }
-        self.mesh_data(&mname)?;
-        self.collidable_meshes.insert(mname);
+        let body_id = self.body_stack.last().and_then(|b| self.body_ids.get(b).copied()).unwrap_or(0);
+        self.geom_records.push((body_id, index, g.attr("name").map(|s| s.to_string()), MjcfGeom {
+            name: String::new(),
+            body,
+            joint: (parent >= 0).then_some(parent as usize),
+            pose: carry * spec.pose * spec.mesh_frame.unwrap_or_else(Iso::identity),
+            kind,
+            size: [spec.size.first().copied().unwrap_or(0.0), spec.size.get(1).copied().unwrap_or(0.0), spec.size.get(2).copied().unwrap_or(0.0)],
+            mesh: spec.mesh,
+            params,
+        }));
         Ok(())
     }
 
@@ -921,6 +1060,9 @@ impl Walk<'_> {
         }
         let parent_name = self.body_stack.last().cloned().unwrap_or_else(|| "world".to_string());
         self.out.body_parent.insert(name.clone(), parent_name);
+        // MuJoCo numbers bodies depth-first in file order, the world being 0
+        let next_id = self.body_ids.len() + 1;
+        self.body_ids.entry(name.clone()).or_insert(next_id);
         let joints: Vec<&El> = b.children.iter().filter(|c| c.name == "joint" || c.name == "freejoint").collect();
         let has_free = joints.iter().any(|j| j.name == "freejoint" || self.defaults.get(j, "joint", "type", childclass) == Some("free"));
         if has_free && (parent >= 0 || joints.len() > 1) {
@@ -1088,17 +1230,21 @@ impl Walk<'_> {
 
     /// MuJoCo's `mjCGeom::Compile` + `SetInertia` for one geom, in the body frame; `None` for a geom MuJoCo
     /// gives no mass (planes, height fields, zero density or mass, outside the group range).
-    fn geom_mass(&mut self, g: &El, childclass: Option<&str>, body: &str) -> Result<Option<GeomMass>, String> {
+    /// **Resolve one geom the way MuJoCo's compiler does**: its type, its `geom_size` after `fromto` and
+    /// after fitting to a mesh, and its pose in the body frame. Shared by the inertia pass and by
+    /// [`Walk::record_geom`], because a geom fitted to a mesh must be the SAME primitive in both.
+    fn geom_spec(&mut self, g: &El, childclass: Option<&str>, body: &str) -> Result<GeomSpec, String> {
         let get = |k: &str| self.defaults.get(g, "geom", k, childclass).map(|s| s.to_string());
-        let group: i64 = get("group").map(|s| s.trim().parse::<f64>().map(|x| x as i64).map_err(|e| e.to_string())).transpose()?.unwrap_or(0);
-        if group < self.c.inertiagrouprange.0 || group > self.c.inertiagrouprange.1 {
-            return Ok(None);
-        }
-        if get("shellinertia").as_deref() == Some("true") {
-            return Err(format!("body '{body}': geom shellinertia is outside this loader's subset"));
-        }
         let ty = get("type").unwrap_or_else(|| "sphere".into());
-        let mut size = get("size").map(|s| floats(&s)).transpose()?.unwrap_or_default();
+        // ⛔ layered, not last-wins: a `size` on the geom overrides only as many entries as it supplies
+        let mut size: Vec<f64> = Vec::new();
+        for layer in self.defaults.chain(g, "geom", "size", childclass) {
+            let v = floats(layer)?;
+            if v.len() > size.len() {
+                size.resize(v.len(), 0.0);
+            }
+            size[..v.len()].copy_from_slice(&v);
+        }
         let mut pose = pose_of(g, "geom", self.defaults, childclass, self.c)?;
         // **Mesh fitting.** A geom of a primitive type that names a `mesh` is sized from that mesh
         // (`mjCMesh::FitGeom`): from its equivalent inertia box, or its bounding box under `fitaabb`, times
@@ -1171,6 +1317,27 @@ impl Walk<'_> {
                 other => return Err(format!("body '{body}': fromto requires capsule, cylinder, box or ellipsoid, not {other}")),
             }
         }
+        // a mesh geom takes MuJoCo's `geom_size` from the mesh's own bounds, and carries the mesh frame
+        let mut mesh_frame = None;
+        if ty == "mesh" {
+            let name = mesh_name.clone().ok_or_else(|| format!("body '{body}': a mesh geom needs a `mesh` attribute"))?;
+            let md = self.mesh_data(&name)?;
+            size = (0..3).map(|k| md.aamm[k].abs().max(md.aamm[k + 3].abs())).collect();
+            mesh_frame = Some(Iso::from_parts(Translation3::from(md.com), UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(md.quat[0], md.quat[1], md.quat[2], md.quat[3]))));
+        }
+        Ok(GeomSpec { ty, size, pose, mesh: mesh_name, mesh_frame })
+    }
+
+    fn geom_mass(&mut self, g: &El, childclass: Option<&str>, body: &str) -> Result<Option<GeomMass>, String> {
+        let get = |k: &str| self.defaults.get(g, "geom", k, childclass).map(|s| s.to_string());
+        let group: i64 = get("group").map(|s| s.trim().parse::<f64>().map(|x| x as i64).map_err(|e| e.to_string())).transpose()?.unwrap_or(0);
+        if group < self.c.inertiagrouprange.0 || group > self.c.inertiagrouprange.1 {
+            return Ok(None);
+        }
+        if get("shellinertia").as_deref() == Some("true") {
+            return Err(format!("body '{body}': geom shellinertia is outside this loader's subset"));
+        }
+        let GeomSpec { ty, size, pose, mesh: mesh_name, mesh_frame: _ } = self.geom_spec(g, childclass, body)?;
         let need = |k: usize| -> Result<(), String> {
             if size.len() < k {
                 Err(format!("body '{body}': geom type '{ty}' needs {k} size value(s), got {}", size.len()))
@@ -1409,6 +1576,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             body_parent: BTreeMap::new(),
             mesh_hulls: BTreeMap::new(),
             mesh_raw: BTreeMap::new(),
+            geoms: Vec::new(),
             contact_excludes: Vec::new(),
             contact_pairs: Vec::new(),
         },
@@ -1420,12 +1588,29 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
         mesh_raw: HashMap::new(),
         collidable_meshes: BTreeSet::new(),
         body_stack: Vec::new(),
+        body_ids: HashMap::new(),
+        geom_records: Vec::new(),
         resolve,
     };
     for world in worlds {
         walk.children(world, -1, Iso::identity(), world.attr("childclass"))?;
     }
     let mut out = walk.out;
+    // ⛔ MuJoCo orders geoms BODY-MAJOR — every geom of body 0 (the world), then of body 1, and so on —
+    // not in file order. A scene that `<include>`s a robot and then declares its own floor puts that floor
+    // LAST in the file and FIRST in `geom_xpos`, because the floor belongs to the world body. Recording in
+    // file order gives the right set with the wrong indices, which every by-index comparison then reads as a
+    // pose error on almost every geom.
+    walk.geom_records.sort_by_key(|(body, seq, _, _)| (*body, *seq));
+    out.geoms = walk
+        .geom_records
+        .into_iter()
+        .enumerate()
+        .map(|(i, (_, _, name, mut g))| {
+            g.name = name.unwrap_or_else(|| format!("geom{i}"));
+            g
+        })
+        .collect();
     for name in &walk.collidable_meshes {
         let stored = &walk.mesh_stored[name];
         let hull = crate::mujoco_hull::MeshHull::new(stored).ok_or_else(|| format!("mesh '{name}': no 3-D convex hull (MuJoCo refuses such a collision mesh)"))?;
@@ -1646,6 +1831,78 @@ mod tests {
         assert!(e.contains("autolimits"), "{e}");
     }
 
+    /// `fromto`'s +z runs from the second endpoint to the first, which is the opposite of the reading a
+    /// left-to-right name suggests. MuJoCo 3.13.0's `geom_xmat` for this model, via
+    /// `scripts/mujoco_geom_oracle.py`.
+    #[test]
+    fn a_fromto_geoms_axis_runs_from_the_second_endpoint_to_the_first() {
+        let xml = r#"<mujoco><worldbody><body name="b">
+            <joint name="j" type="hinge" axis="0 0 1"/>
+            <geom name="rod" type="capsule" fromto="0 0 0  0 0 0.4" size="0.05"/>
+        </body></worldbody></mujoco>"#;
+        let t = tree_from_mjcf_str(xml).expect("loads");
+        let g = t.geoms.iter().find(|g| g.name == "rod").expect("the geom");
+        // half the segment length goes into size[1], and the frame sits at the midpoint
+        assert!((g.size[0] - 0.05).abs() < 1e-15 && (g.size[1] - 0.2).abs() < 1e-15, "{:?}", g.size);
+        assert!((g.pose.translation.vector - Vector3::new(0.0, 0.0, 0.2)).norm() < 1e-15);
+        // the segment runs +z, so MuJoCo's `vec` is −z and the frame's own +z points DOWN
+        let z = g.pose.rotation.to_rotation_matrix() * Vector3::z();
+        assert!((z + Vector3::z()).norm() < 1e-12, "the capsule's axis is {z:?}, expected −z");
+    }
+
+    /// MuJoCo's `ReadAttr` writes only as many numbers as the attribute supplies, so a geom that states a
+    /// shorter `size` than its default class keeps the class's trailing entries. `robotiq_2f85_v4` does
+    /// exactly this and MuJoCo's `geom_size` for those capsules is `0.009 0.02 0.01875`.
+    #[test]
+    fn a_shorter_size_overrides_only_the_entries_it_states() {
+        let xml = r#"<mujoco>
+            <default><default class="pad"><geom type="box" size="0.004 0.011 0.01875" friction="1 0.02 0.03"/></default></default>
+            <worldbody><body name="b"><joint name="j" type="hinge" axis="0 0 1"/>
+              <geom name="g" class="pad" type="capsule" size="0.009 0.02" friction="2"/>
+            </body></worldbody></mujoco>"#;
+        let t = tree_from_mjcf_str(xml).expect("loads");
+        let g = t.geoms.iter().find(|g| g.name == "g").expect("the geom");
+        assert_eq!(g.size, [0.009, 0.02, 0.01875], "size");
+        assert_eq!(g.params.friction, [2.0, 0.02, 0.03], "friction");
+    }
+
+    /// MuJoCo's OBJ decoder keeps `GetShapes()[0]` — the faces up to the second `o`/`g` tag — while its
+    /// vertex array stays the whole file's. A mesh whose later objects are read too has the wrong centre of
+    /// mass, the wrong principal frame and the wrong `geom_size`, all silently.
+    #[test]
+    fn an_obj_contributes_only_its_first_shapes_faces_and_all_of_its_vertices() {
+        let obj = "o first\n\
+            v 0 0 0\nv 1 0 0\nv 0 1 0\nv 0 0 1\n\
+            f 1 3 2\nf 1 2 4\nf 2 3 4\nf 3 1 4\n\
+            o second\n\
+            v 10 0 0\nv 11 0 0\nv 10 1 0\nv 10 0 1\n\
+            f 5 7 6\nf 5 6 8\nf 6 7 8\nf 7 5 8\n";
+        let m = obj_as_mujoco_reads_it(obj).expect("parses");
+        assert_eq!(m.verts.len(), 8, "every vertex in the file is kept, whichever shape declared it");
+        assert_eq!(m.tris.len(), 4, "only the first shape's faces are read");
+        assert!(m.tris.iter().flatten().all(|&i| i < 4), "a face of the second shape survived: {:?}", m.tris);
+        // and the split is what makes the frame right: the pair read together would sit near x = 5
+        let (_, com, _) = mesh_inertia_mujoco(&m, MeshInertia::Legacy).expect("inertia");
+        assert!(com.x < 0.5, "centre of mass at {com:?} — the second object is still being weighed");
+    }
+
+    /// `<default>` and `<default class="main">` are the same class, and a geom with no class inherits from
+    /// it either way.
+    #[test]
+    fn the_top_level_default_class_is_named_main_however_it_is_written() {
+        for spelling in ["<default>", r#"<default class="main">"#] {
+            let xml = format!(
+                r#"<mujoco>{spelling}<geom contype="0" conaffinity="1" type="capsule" size="0.1 0.2" condim="6"/></default>
+                <worldbody><body name="b"><joint name="j" type="hinge" axis="0 0 1"/><geom name="g"/></body></worldbody></mujoco>"#
+            );
+            let t = tree_from_mjcf_str(&xml).unwrap_or_else(|e| panic!("{spelling}: {e}"));
+            let g = t.geoms.iter().find(|g| g.name == "g").expect("the geom");
+            assert_eq!(g.kind, crate::mujoco_collision::GeomType::Capsule, "{spelling}: type");
+            assert_eq!((g.params.contype, g.params.conaffinity, g.params.condim), (0, 1, 6), "{spelling}: contact parameters");
+            assert!((g.size[0] - 0.1).abs() < 1e-15 && (g.size[1] - 0.2).abs() < 1e-15, "{spelling}: size {:?}", g.size);
+        }
+    }
+
     #[test]
     fn a_frame_is_a_transform_and_a_jointless_body_welds_into_its_ancestor() {
         let xml = r#"<mujoco><compiler angle="radian"/><worldbody>
@@ -1774,3 +2031,4 @@ mod tests {
         assert!((li.inertia - full).norm() < 1e-7 * full.norm(), "inertia {:?}", li.inertia);
     }
 }
+
