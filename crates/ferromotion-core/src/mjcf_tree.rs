@@ -120,6 +120,27 @@ pub struct MjcfJoint {
     /// MuJoCo `ref` (the `qpos` value at which the model is in its declared configuration), already in
     /// radians for a hinge. Folded into the tree joint's origin, so callers pass MuJoCo's raw `qpos`.
     pub reference: f64,
+    /// `range` when the joint is limited, in `qpos` units (radians for a hinge). NOT shifted by `ref`,
+    /// because MuJoCo's range is in `qpos` and so is this tree's `q`.
+    pub range: Option<(f64, f64)>,
+    /// `actuatorfrcrange` when the joint limits it: the cap on the TOTAL actuator force this degree of
+    /// freedom will pass, applied after every actuator driving it has been summed.
+    pub actuator_force_range: Option<(f64, f64)>,
+}
+
+impl MjcfTree {
+    /// One entry per degree of freedom: the joint's cap on the total actuator force through it, for
+    /// [`crate::qfrc_actuator`]. `None` where the joint does not limit it.
+    pub fn dof_actuator_force_range(&self) -> Vec<Option<[f64; 2]>> {
+        let mut out = vec![None; self.tree.joints.len()];
+        for j in &self.joints {
+            // MuJoCo clamps at the joint's `dofadr`, so a multi-dof joint caps only its first
+            if let Some((lo, hi)) = j.actuator_force_range {
+                out[j.first] = Some([lo, hi]);
+            }
+        }
+        out
+    }
 }
 
 /// A branched MJCF model as a [`KinematicTree`], plus the bookkeeping MuJoCo-level parity needs.
@@ -159,6 +180,13 @@ pub struct MjcfTree {
     pub mesh_raw: BTreeMap<String, crate::TriMesh3>,
     /// Every geom, in file order — the order MuJoCo numbers them in.
     pub geoms: Vec<MjcfGeom>,
+    /// `<actuator>` entries, resolved into MuJoCo's gain/bias form, in file order — the same order as
+    /// `ctrl`. Only stateless joint transmissions are carried; the loader refuses the rest.
+    pub actuators: Vec<crate::mujoco_actuator::Actuator>,
+    /// Actuators the loader could not carry, as `(name, why)` — a tendon or site transmission, a muscle, an
+    /// activation state. The model still loads; `qfrc_actuator` is simply short of these terms, and this
+    /// list is how a caller finds that out instead of wondering.
+    pub actuators_unsupported: Vec<(String, String)>,
     /// `<contact><exclude body1 body2/>`, in file order.
     pub contact_excludes: Vec<(String, String)>,
     /// `<contact><pair/>` entries with their parameters resolved (defaults classes applied).
@@ -280,6 +308,10 @@ fn stamp_include_dir(el: &mut El, dir: &str) {
         stamp_include_dir(c, dir);
     }
 }
+
+/// The `<actuator>` children MuJoCo accepts. The tag chooses the force law's SHAPE — which gain and bias
+/// type — and the attributes only fill it in, so the tag has to be read even though the defaults are shared.
+const ACTUATOR_TAGS: [&str; 12] = ["general", "motor", "position", "velocity", "damper", "intvelocity", "cylinder", "muscle", "adhesion", "pid", "dcmotor", "orientation"];
 
 /// The attribute `stamp_include_dir` writes. Not an MJCF attribute — the leading underscores keep it out of
 /// the way of anything a model can say.
@@ -835,6 +867,11 @@ struct GeomMass {
 /// The default classes: for each class, its parent class and the attributes it sets per element kind.
 #[derive(Default)]
 struct Defaults {
+    /// ⛔ A class's actuator default is a RECORD, not a bag of attributes: `<default><position kp="80"/>`
+    /// has already been through the shortcut resolution by the time an element inherits it, so `kp` and `kv`
+    /// no longer exist — they are `gainprm[0]` and `biasprm[2]`. Keeping the declarations in order, with
+    /// their tags, is what lets the record be rebuilt the way MuJoCo built it.
+    actuator_decls: HashMap<String, Vec<(String, Vec<(String, String)>)>>,
     parent: HashMap<String, Option<String>>,
     /// (class, element kind) → attributes
     attrs: HashMap<(String, String), Vec<(String, String)>>,
@@ -872,7 +909,14 @@ impl Defaults {
             if el.name == "default" {
                 self.collect_class(el, Some(&class))?;
             } else {
-                self.attrs.entry((class.clone(), el.name.clone())).or_default().extend(el.attrs.iter().cloned());
+                // ⛔ MuJoCo keeps ONE actuator record per default class, not one per shortcut tag: a class
+                // that says `<position kp="80"/>` is setting the same record a `<general>` in that class
+                // would read. Keying by element name would make the two invisible to each other.
+                if ACTUATOR_TAGS.contains(&el.name.as_str()) {
+                    self.actuator_decls.entry(class.clone()).or_default().push((el.name.clone(), el.attrs.clone()));
+                } else {
+                    self.attrs.entry((class.clone(), el.name.clone())).or_default().extend(el.attrs.iter().cloned());
+                }
             }
         }
         Ok(())
@@ -1322,6 +1366,24 @@ impl Walk<'_> {
                     (Some(other), _) => return Err(format!("joint '{jname}': limited '{other}' is not true/false/auto")),
                 }
             };
+            // `actuatorfrcrange`: the joint's own cap on the total actuator force through it
+            let actfrc = {
+                let r = get("actuatorfrcrange").map(|s| floats(&s)).transpose()?;
+                let r = match r {
+                    Some(v) if v.len() == 2 => Some((v[0], v[1])),
+                    Some(_) => return Err(format!("joint '{jname}': actuatorfrcrange needs 2 numbers")),
+                    None => None,
+                };
+                match (get("actuatorfrclimited").as_deref(), r) {
+                    (Some("false"), _) | (_, None) => None,
+                    (Some("true"), Some(v)) => Some(v),
+                    (_, Some(v)) if v != (0.0, 0.0) && self.c.autolimits => Some(v),
+                    (None, Some(v)) if v != (0.0, 0.0) => {
+                        return Err(format!("joint '{jname}' has an actuatorfrcrange but no actuatorfrclimited and autolimits is false"))
+                    }
+                    _ => None,
+                }
+            };
             let limits = match limits {
                 Some(r) if kind == MjcfJointKind::Hinge || kind == MjcfJointKind::Slide => {
                     let v = floats(&r)?;
@@ -1379,7 +1441,7 @@ impl Walk<'_> {
                 }
             }
             self.out.tree.joint_names.insert(jname.clone(), first);
-            self.out.joints.push(MjcfJoint { name: jname, kind, body: name.clone(), first, reference });
+            self.out.joints.push(MjcfJoint { name: jname, kind, body: name.clone(), first, reference, range: limits, actuator_force_range: actfrc });
             // after the motion, the body frame sits at −anchor from the joint's frame
             pre = Iso::from_parts(Translation3::from(-anchor), UnitQuaternion::identity());
         }
@@ -1718,6 +1780,276 @@ impl Walk<'_> {
     }
 }
 
+/// **`<actuator>`**, resolved the way MuJoCo's compiler resolves it: the shortcut tag picks a gain and bias
+/// TYPE, the attributes fill in the parameters, and everything downstream sees only `gain·ctrl + bias`.
+///
+/// Refuses, rather than approximating, anything this port does not carry: a transmission other than a joint
+/// (tendon, site, body, slider-crank), a target that is not a hinge or a slide, an activation state
+/// (`dyntype`), and the tags whose force law is not affine (`muscle`, `adhesion`, `damper`, `cylinder`,
+/// `pid`, `dcmotor`, `orientation`). A silently dropped actuator is a robot that does not move for reasons
+/// nobody can see.
+/// Why an actuator was not carried: a feature outside this port's subset, or a malformed file. The first is
+/// recorded and the model still loads; the second refuses the model, as any other parse error does.
+enum ActErr {
+    Unsupported(String),
+    Bad(String),
+}
+use ActErr::{Bad, Unsupported};
+
+/// **An actuator under construction**, in MuJoCo's own form. A default class holds one of these, an element
+/// inherits it, and both are built by the same two steps: the general attribute table, then the shortcut tag.
+#[derive(Clone, Debug)]
+struct ActRecord {
+    gain: crate::mujoco_actuator::ActGain,
+    gainprm: [f64; 3],
+    bias: crate::mujoco_actuator::ActBias,
+    biasprm: [f64; 3],
+    gear: f64,
+    ctrlrange: [f64; 2],
+    ctrllimited: Option<bool>,
+    forcerange: [f64; 2],
+    forcelimited: Option<bool>,
+    inheritrange: f64,
+    /// the transmission as `(kind, target)`; only `joint`/`jointinparent` are carried
+    trn: Option<(String, String)>,
+    /// set the moment a feature outside the subset is seen, so the reason survives to the caller
+    unsupported: Option<String>,
+}
+
+impl Default for ActRecord {
+    fn default() -> Self {
+        Self {
+            gain: crate::mujoco_actuator::ActGain::Fixed,
+            gainprm: [1.0, 0.0, 0.0],
+            bias: crate::mujoco_actuator::ActBias::None,
+            biasprm: [0.0; 3],
+            gear: 1.0,
+            ctrlrange: [0.0; 2],
+            ctrllimited: None,
+            forcerange: [0.0; 2],
+            forcelimited: None,
+            inheritrange: 0.0,
+            trn: None,
+            unsupported: None,
+        }
+    }
+}
+
+impl ActRecord {
+    /// One `<motor>`/`<position>`/`<general>`/… applied to this record, exactly as `mjXReader::OneActuator`
+    /// applies it: **the general attribute table first, the shortcut tag second**. The order is the whole
+    /// point — a class that sets `biasprm="0 -200 -100"` and an element that says `kp="400"` must end at
+    /// `biasprm[1] = −400`, because the shortcut overwrites what the table left. Reading it the other way
+    /// round leaves `−200`, which is a servo with half the stiffness it was asked for and no error anywhere.
+    ///
+    /// ⛔ `kp`, `kv` and `dampratio` are ELEMENT-ONLY. They are not in the general table, so a class never
+    /// hands them down — by the time a class is inherited they have already become `gainprm[0]` and
+    /// `biasprm[2]`. Reading them through the default chain both invents conflicts (`pal_tiago` states `kv`
+    /// on the element and `dampratio` on the class, which MuJoCo accepts and a chained read rejects) and
+    /// silently uses a parent's `kv` where MuJoCo used the child's.
+    fn apply(&mut self, tag: &str, attrs: &[(String, String)], c: &Compiler) -> Result<(), ActErr> {
+        let at = |k: &str| attrs.iter().rev().find(|(a, _)| a == k).map(|(_, v)| v.as_str());
+        let num = |k: &str| -> Result<Option<f64>, ActErr> {
+            at(k).map(|v| v.trim().parse::<f64>().map_err(|e| Bad(format!("actuator {k}: {e}")))).transpose()
+        };
+        let vec3 = |k: &str, p: &mut [f64; 3]| -> Result<(), ActErr> {
+            if let Some(v) = at(k) {
+                for (i, x) in floats(v).map_err(Bad)?.iter().take(3).enumerate() {
+                    p[i] = *x;
+                }
+            }
+            Ok(())
+        };
+        // --- the general attribute table
+        for (k, kind) in [("joint", "joint"), ("jointinparent", "joint"), ("tendon", "tendon"), ("site", "site"), ("body", "body"), ("cranksite", "slider-crank")] {
+            if let Some(v) = at(k) {
+                self.trn = Some((kind.to_string(), v.to_string()));
+            }
+        }
+        if let Some(g) = at("gear") {
+            self.gear = floats(g).map_err(Bad)?.first().copied().unwrap_or(1.0);
+        }
+        match at("gaintype") {
+            None => {}
+            Some("fixed") => self.gain = crate::mujoco_actuator::ActGain::Fixed,
+            Some("affine") => self.gain = crate::mujoco_actuator::ActGain::Affine,
+            Some(o) => self.unsupported = Some(format!("gaintype '{o}'")),
+        }
+        match at("biastype") {
+            None => {}
+            Some("none") => self.bias = crate::mujoco_actuator::ActBias::None,
+            Some("affine") => self.bias = crate::mujoco_actuator::ActBias::Affine,
+            Some(o) => self.unsupported = Some(format!("biastype '{o}'")),
+        }
+        match at("dyntype") {
+            None | Some("none") => {}
+            Some(o) => self.unsupported = Some(format!("dyntype '{o}' carries an activation state")),
+        }
+        vec3("gainprm", &mut self.gainprm)?;
+        vec3("biasprm", &mut self.biasprm)?;
+        let rng = |k: &str, lk: &str, r: &mut [f64; 2], lim: &mut Option<bool>| -> Result<(), ActErr> {
+            if let Some(v) = at(k) {
+                let f = floats(v).map_err(Bad)?;
+                if f.len() != 2 {
+                    return Err(Bad(format!("actuator {k} needs 2 numbers")));
+                }
+                *r = [f[0], f[1]];
+            }
+            match at(lk) {
+                Some("true") => *lim = Some(true),
+                Some("false") => *lim = Some(false),
+                Some("auto") | None => {}
+                Some(o) => return Err(Bad(format!("actuator {lk} '{o}' is not true/false/auto"))),
+            }
+            Ok(())
+        };
+        rng("ctrlrange", "ctrllimited", &mut self.ctrlrange, &mut self.ctrllimited)?;
+        rng("forcerange", "forcelimited", &mut self.forcerange, &mut self.forcelimited)?;
+        if let Some(v) = num("inheritrange")? {
+            self.inheritrange = v;
+        }
+        let _ = c;
+        // --- the shortcut tag
+        use crate::mujoco_actuator::{ActBias, ActGain};
+        match tag {
+            "general" => {}
+            "motor" => {
+                self.gainprm[0] = 1.0;
+                self.gain = ActGain::Fixed;
+                self.bias = ActBias::None;
+            }
+            "position" => {
+                let kp = num("kp")?.unwrap_or(self.gainprm[0]);
+                let (kv, dr) = (num("kv")?, num("dampratio")?);
+                if kv.is_some() && dr.is_some() {
+                    return Err(Bad("actuator: kv and dampratio cannot both be given".into()));
+                }
+                if num("timeconst")?.unwrap_or(0.0) != 0.0 {
+                    self.unsupported = Some("a position actuator with timeconst has a filter state".into());
+                }
+                self.gainprm[0] = kp;
+                self.biasprm[1] = -kp;
+                // ⛔ a POSITIVE biasprm[2] is MuJoCo's marker for an unresolved `dampratio`
+                if let Some(v) = kv {
+                    self.biasprm[2] = -v;
+                } else if let Some(v) = dr {
+                    self.biasprm[2] = v;
+                }
+                self.gain = ActGain::Fixed;
+                self.bias = ActBias::Affine;
+            }
+            "velocity" => {
+                let kv = num("kv")?.unwrap_or(self.gainprm[0]);
+                self.biasprm = [0.0; 3];
+                self.gainprm[0] = kv;
+                self.biasprm[2] = -kv;
+                self.gain = ActGain::Fixed;
+                self.bias = ActBias::Affine;
+            }
+            other => self.unsupported = Some(format!("<{other}>")),
+        }
+        Ok(())
+    }
+}
+
+/// **`<actuator>`**, resolved the way MuJoCo's compiler resolves it.
+///
+/// ⛔ An actuator this port does not carry does not cost the whole model — a tendon-driven hand still has
+/// geoms to collide and a tree to move — but it is NAMED, with its reason, in the second return value. A
+/// silently dropped actuator is a robot that does not move for reasons nobody can see.
+#[allow(clippy::type_complexity)]
+fn parse_actuators(root: &El, defaults: &Defaults, c: &Compiler, joints: &[MjcfJoint]) -> Result<(Vec<crate::mujoco_actuator::Actuator>, Vec<(String, String)>), String> {
+    let by_name: HashMap<&str, &MjcfJoint> = joints.iter().map(|j| (j.name.as_str(), j)).collect();
+    let (mut out, mut unsupported) = (Vec::new(), Vec::new());
+    for section in root.children_named("actuator") {
+        for el in &section.children {
+            let name = el.attr("name").map(|s| s.to_string()).unwrap_or_else(|| format!("actuator{}", out.len() + unsupported.len()));
+            match one_actuator(el, defaults, c, &by_name, section.attr("childclass"), &name) {
+                Ok(a) => out.push(a),
+                Err(Unsupported(why)) => unsupported.push((name, why)),
+                Err(Bad(why)) => return Err(format!("actuator '{name}': {why}")),
+            }
+        }
+    }
+    Ok((out, unsupported))
+}
+
+fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&str, &MjcfJoint>, childclass: Option<&str>, name: &str) -> Result<crate::mujoco_actuator::Actuator, ActErr> {
+    use crate::mujoco_actuator::Actuator;
+    let tag = el.name.as_str();
+    if !ACTUATOR_TAGS.contains(&tag) {
+        // `<plugin>` and anything else MuJoCo accepts here is an actuator we do not model, not a broken file
+        return Err(Unsupported(format!("<{tag}>")));
+    }
+    // the class chain, outermost first: each class's declarations rebuild its record on top of its parent's
+    let mut chain: Vec<&str> = Vec::new();
+    let mut class: Option<&str> = el.attr("class").or(childclass).or(Some(MAIN));
+    while let Some(k) = class {
+        if chain.len() > 64 {
+            break;
+        }
+        chain.push(k);
+        class = defaults.parent.get(k).and_then(|p| p.as_deref());
+    }
+    let mut rec = ActRecord::default();
+    for k in chain.iter().rev() {
+        for (dtag, dattrs) in defaults.actuator_decls.get(*k).into_iter().flatten() {
+            rec.apply(dtag, dattrs, c)?;
+        }
+    }
+    rec.apply(tag, &el.attrs, c)?;
+    if let Some(why) = rec.unsupported {
+        return Err(Unsupported(why));
+    }
+    let (kind, target) = rec.trn.ok_or_else(|| Unsupported("no transmission named".into()))?;
+    if kind != "joint" {
+        return Err(Unsupported(format!("a {kind} transmission")));
+    }
+    let j = *by_name.get(target.as_str()).ok_or_else(|| Bad(format!("no joint named '{target}'")))?;
+    if !matches!(j.kind, MjcfJointKind::Hinge | MjcfJointKind::Slide) {
+        return Err(Unsupported(format!("joint '{target}' is a {:?} joint", j.kind)));
+    }
+    // `limited="auto"`: under `autolimits` a stated range limits and an unstated one does not, and with
+    // autolimits off MuJoCo refuses a range with no `limited`
+    let limit = |r: [f64; 2], lim: Option<bool>, what: &str| -> Result<Option<[f64; 2]>, ActErr> {
+        let on = match lim {
+            Some(v) => v,
+            None if r != [0.0, 0.0] => {
+                if !c.autolimits {
+                    return Err(Bad(format!("{what}range is given but {what}limited is not, and autolimits is off")));
+                }
+                true
+            }
+            None => false,
+        };
+        Ok(on.then_some(r))
+    };
+    let mut ctrlrange = limit(rec.ctrlrange, rec.ctrllimited, "ctrl")?;
+    // ⭐ `inheritrange` takes the ctrlrange from the joint's own range, scaled about its midpoint. Without it
+    // a position servo is UNCLAMPED, and the difference is not subtle: on `agilex_piper` the force ran to its
+    // ±100 limit where MuJoCo's sat at −20.6, because a control of 2 rad is far outside a ±0.4 rad joint.
+    if rec.inheritrange > 0.0 {
+        if ctrlrange.is_some() {
+            return Err(Bad("ctrlrange and inheritrange cannot both be given".into()));
+        }
+        let (lo, hi) = j.range.ok_or_else(|| Bad(format!("inheritrange, but joint '{target}' has no range")))?;
+        let (mean, radius) = (0.5 * (hi + lo), 0.5 * (hi - lo) * rec.inheritrange);
+        ctrlrange = Some([mean - radius, mean + radius]);
+    }
+    let forcerange = limit(rec.forcerange, rec.forcelimited, "force")?;
+    Ok(Actuator {
+        name: name.to_string(),
+        joint: j.first,
+        gear: rec.gear,
+        gain: rec.gain,
+        gainprm: rec.gainprm,
+        bias: rec.bias,
+        biasprm: rec.biasprm,
+        ctrlrange,
+        forcerange,
+    })
+}
+
 /// **Load an MJCF model as a branched tree**, resolving `<include file>` and `<asset><mesh file>` through
 /// `resolve`, which receives the path exactly as written (MuJoCo resolves every include, nested ones too,
 /// against the main model's directory; a mesh path is `meshdir/file`) and returns the file's bytes.
@@ -1794,6 +2126,8 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             mesh_hulls: BTreeMap::new(),
             mesh_raw: BTreeMap::new(),
             geoms: Vec::new(),
+            actuators: Vec::new(),
+            actuators_unsupported: Vec::new(),
             contact_excludes: Vec::new(),
             contact_pairs: Vec::new(),
         },
@@ -1834,6 +2168,18 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
         let hull = crate::mujoco_hull::MeshHull::with_max_verts(stored, cap).ok_or_else(|| format!("mesh '{name}': no 3-D convex hull (MuJoCo refuses such a collision mesh)"))?;
         out.mesh_hulls.insert(name.clone(), hull);
         out.mesh_raw.insert(name.clone(), walk.mesh_raw[name].clone());
+    }
+    let (acts, unsupported) = parse_actuators(&root, &defaults, &c, &out.joints)?;
+    out.actuators = acts;
+    out.actuators_unsupported = unsupported;
+    // ⛔ `dampratio` cannot be resolved while reading the file: it is a ratio against the inertia the
+    // transmission reflects, so it needs the mass matrix. MuJoCo does it in `mj_setConst`, at `qpos0` —
+    // which is `q = 0` here, because a joint's `ref` is folded into its origin.
+    if out.actuators.iter().any(|a| a.biasprm[2] > 0.0) {
+        let nv = out.tree.joints.len();
+        let m0 = crate::tree_dynamics::tree_mass_matrix(&out.tree.joints, &out.tree.inertia, &out.tree.parent, &vec![0.0; nv]);
+        let diag: Vec<f64> = (0..nv).map(|i| m0[(i, i)]).collect();
+        crate::mujoco_actuator::resolve_dampratio(&mut out.actuators, &diag);
     }
     // <contact><exclude> and <contact><pair> — several <contact> blocks can arrive through includes
     for contact in root.children_named("contact") {
