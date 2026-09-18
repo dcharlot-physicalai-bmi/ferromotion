@@ -231,6 +231,141 @@ pub struct ConstraintUpdate {
     pub cost: f64,
 }
 
+/// **One block of `efc` rows**, in MuJoCo's own order — equality first, then friction, then limits and
+/// contacts. The order is not cosmetic: `mj_constraintUpdate_impl` decides a row's law from its POSITION
+/// (`i < ne`, then `i < ne + nf`), not from a per-row tag, so a block list is the faithful description.
+#[derive(Clone, Debug)]
+pub enum EfcBlock {
+    /// `rows` equality rows: purely quadratic and unbounded, because an equality pushes as hard as it must.
+    Equality { rows: usize },
+    /// One friction row — `<joint frictionloss>` or a tendon's — bounded to ±`loss`. Between the bounds it
+    /// is quadratic; outside, the force saturates and the cost becomes linear in `jar`.
+    Friction { loss: f64 },
+    /// One limit row, joint or tendon: the same one-sided law a frictionless contact row obeys.
+    Limit,
+    /// One contact, consuming [`mujoco_cone_rows`] rows.
+    Contact(ConeContact),
+}
+
+impl EfcBlock {
+    /// How many `efc` rows this block occupies.
+    pub fn rows(&self) -> usize {
+        match self {
+            EfcBlock::Equality { rows } => *rows,
+            EfcBlock::Friction { .. } | EfcBlock::Limit => 1,
+            EfcBlock::Contact(c) => mujoco_cone_rows(c.cone, c.condim),
+        }
+    }
+}
+
+/// **`mj_constraintUpdate` for every row type MuJoCo has**, not only contacts: given `jar = J·qacc − a_ref`,
+/// the force each row exerts, the zone it is in, and the cost.
+///
+/// `d` is `efc_D` (`1/R`) for every row, in order; `blocks` describes the same rows in the same order.
+pub fn mujoco_constraint_update_blocks(blocks: &[EfcBlock], d: &[f64], jar: &[f64]) -> ConstraintUpdate {
+    let n = d.len().min(jar.len());
+    let mut force: Vec<f64> = (0..n).map(|i| -d[i] * jar[i]).collect();
+    let mut state = vec![ConstraintState::Quadratic; n];
+    let mut cost = 0.0;
+    let mut i = 0;
+    for b in blocks {
+        let rows = b.rows();
+        if i + rows > n {
+            break;
+        }
+        match b {
+            EfcBlock::Equality { .. } => {
+                for k in i..i + rows {
+                    cost += 0.5 * d[k] * jar[k] * jar[k];
+                    state[k] = ConstraintState::Quadratic;
+                }
+            }
+            EfcBlock::Friction { loss } => {
+                // R is 1/D; the bounds live at |jar| = R·loss, where the quadratic meets the two lines
+                let r = if d[i] > 0.0 { 1.0 / d[i] } else { 0.0 };
+                if jar[i] <= -r * loss {
+                    cost += -0.5 * r * loss * loss - loss * jar[i];
+                    force[i] = *loss;
+                    state[i] = ConstraintState::LinearNeg;
+                } else if jar[i] >= r * loss {
+                    cost += -0.5 * r * loss * loss + loss * jar[i];
+                    force[i] = -loss;
+                    state[i] = ConstraintState::LinearPos;
+                } else {
+                    cost += 0.5 * d[i] * jar[i] * jar[i];
+                    state[i] = ConstraintState::Quadratic;
+                }
+            }
+            EfcBlock::Limit => {
+                if jar[i] >= 0.0 {
+                    force[i] = 0.0;
+                    state[i] = ConstraintState::Satisfied;
+                } else {
+                    cost += 0.5 * d[i] * jar[i] * jar[i];
+                    state[i] = ConstraintState::Quadratic;
+                }
+            }
+            EfcBlock::Contact(c) => contact_zone(c, d, jar, i, &mut force, &mut state, &mut cost),
+        }
+        i += rows;
+    }
+    ConstraintUpdate { force, state, cost }
+}
+
+/// The contact branch of [`mujoco_constraint_update_blocks`], split out so the block walker stays readable.
+/// Writes this contact's rows of `force` and `state` and adds to `cost`.
+///
+/// ⛔ The rows of a PYRAMIDAL contact are independent constraints and their states are not one value — one
+/// side of the pyramid can be satisfied while the opposite side is loaded. An elliptic contact is the
+/// opposite: its rows are one cone and share a single zone.
+fn contact_zone(c: &ConeContact, d: &[f64], jar: &[f64], i: usize, force: &mut [f64], state: &mut [ConstraintState], cost: &mut f64) {
+    let rows = mujoco_cone_rows(c.cone, c.condim);
+    if c.cone != Cone::Elliptic || c.condim == 1 {
+        for k in i..i + rows {
+            if jar[k] >= 0.0 {
+                force[k] = 0.0;
+                state[k] = ConstraintState::Satisfied;
+            } else {
+                *cost += 0.5 * d[k] * jar[k] * jar[k];
+                state[k] = ConstraintState::Quadratic;
+            }
+        }
+        return;
+    }
+    let dim = c.condim;
+    let mu = c.mu;
+    let mut u = [0.0f64; 6];
+    u[0] = jar[i] * mu;
+    for j in 1..dim {
+        u[j] = jar[i + j] * c.friction[j - 1];
+    }
+    let nn = u[0];
+    let t = u[1..dim].iter().map(|x| x * x).sum::<f64>().sqrt();
+    let zone = if nn >= mu * t || (t <= 0.0 && nn >= 0.0) {
+        for f in force.iter_mut().skip(i).take(dim) {
+            *f = 0.0;
+        }
+        ConstraintState::Satisfied
+    } else if mu * nn + t <= 0.0 || (t <= 0.0 && nn < 0.0) {
+        for k in i..i + dim {
+            *cost += 0.5 * d[k] * jar[k] * jar[k];
+        }
+        ConstraintState::Quadratic
+    } else {
+        let dm = d[i] / (mu * mu * (1.0 + mu * mu));
+        let nmt = nn - mu * t;
+        *cost += 0.5 * dm * nmt * nmt;
+        force[i] = -dm * nmt * mu;
+        for j in 1..dim {
+            force[i + j] = -force[i] / t * u[j] * c.friction[j - 1];
+        }
+        ConstraintState::Cone
+    };
+    for st in state.iter_mut().skip(i).take(dim) {
+        *st = zone;
+    }
+}
+
 /// **`mj_constraintUpdate` for contact rows**: given `jar = J·qacc − a_ref`, the force each row exerts, the
 /// zone it is in, and the cost. This is the function MuJoCo's own solvers evaluate at every trial `qacc`;
 /// the pyramidal branch is a per-row clamp at zero, and the elliptic branch is the part a box-constrained
@@ -243,66 +378,8 @@ pub struct ConstraintUpdate {
 ///
 /// `d` is `efc_D` (`1/R`) for every row, in order; `contacts` are in the same row order.
 pub fn mujoco_constraint_update(contacts: &[ConeContact], d: &[f64], jar: &[f64]) -> ConstraintUpdate {
-    let n = d.len().min(jar.len());
-    let mut force: Vec<f64> = (0..n).map(|i| -d[i] * jar[i]).collect();
-    let mut state = vec![ConstraintState::Quadratic; n];
-    let mut cost = 0.0;
-    let mut i = 0;
-    for c in contacts {
-        let rows = mujoco_cone_rows(c.cone, c.condim);
-        if i + rows > n {
-            break;
-        }
-        if c.cone != Cone::Elliptic || c.condim == 1 {
-            // every row is its own non-negative constraint
-            for k in i..i + rows {
-                if jar[k] >= 0.0 {
-                    force[k] = 0.0;
-                    state[k] = ConstraintState::Satisfied;
-                } else {
-                    cost += 0.5 * d[k] * jar[k] * jar[k];
-                    state[k] = ConstraintState::Quadratic;
-                }
-            }
-            i += rows;
-            continue;
-        }
-        let dim = c.condim;
-        let mu = c.mu;
-        // map into the regular dual cone: diag(mu, friction)
-        let mut u = [0.0f64; 6];
-        u[0] = jar[i] * mu;
-        for j in 1..dim {
-            u[j] = jar[i + j] * c.friction[j - 1];
-        }
-        let nn = u[0];
-        let t = u[1..dim].iter().map(|x| x * x).sum::<f64>().sqrt();
-        let zone = if nn >= mu * t || (t <= 0.0 && nn >= 0.0) {
-            for f in force.iter_mut().skip(i).take(dim) {
-                *f = 0.0;
-            }
-            ConstraintState::Satisfied
-        } else if mu * nn + t <= 0.0 || (t <= 0.0 && nn < 0.0) {
-            for k in i..i + dim {
-                cost += 0.5 * d[k] * jar[k] * jar[k];
-            }
-            ConstraintState::Quadratic
-        } else {
-            let dm = d[i] / (mu * mu * (1.0 + mu * mu));
-            let nmt = nn - mu * t;
-            cost += 0.5 * dm * nmt * nmt;
-            force[i] = -dm * nmt * mu;
-            for j in 1..dim {
-                force[i + j] = -force[i] / t * u[j] * c.friction[j - 1];
-            }
-            ConstraintState::Cone
-        };
-        for st in state.iter_mut().skip(i).take(dim) {
-            *st = zone;
-        }
-        i += dim;
-    }
-    ConstraintUpdate { force, state, cost }
+    let blocks: Vec<EfcBlock> = contacts.iter().cloned().map(EfcBlock::Contact).collect();
+    mujoco_constraint_update_blocks(&blocks, d, jar)
 }
 
 /// **The constraint cost's Hessian in `jar`**, block-diagonal by contact, `nefc × nefc`.
@@ -383,6 +460,47 @@ pub fn mujoco_constraint_hessian(contacts: &[ConeContact], d: &[f64], jar: &[f64
     h
 }
 
+/// **The constraint cost's Hessian in `jar`, for every row type**, block-diagonal, `nefc × nefc`.
+///
+/// ⛔ A SATURATED friction row has a linear cost, so it contributes nothing: the curvature vanishes the
+/// moment the force reaches ±loss, and the Newton step there is a pure gradient step. An equality row is the
+/// opposite — quadratic everywhere, so its second derivative is `D` and never anything else.
+pub fn mujoco_constraint_hessian_blocks(blocks: &[EfcBlock], d: &[f64], jar: &[f64]) -> DMatrix<f64> {
+    let n = d.len().min(jar.len());
+    let mut h = DMatrix::zeros(n, n);
+    let u = mujoco_constraint_update_blocks(blocks, d, jar);
+    let mut i = 0;
+    for b in blocks {
+        let rows = b.rows();
+        if i + rows > n {
+            break;
+        }
+        match b {
+            EfcBlock::Equality { .. } => {
+                for k in i..i + rows {
+                    h[(k, k)] = d[k];
+                }
+            }
+            EfcBlock::Friction { .. } | EfcBlock::Limit => {
+                if u.state[i] == ConstraintState::Quadratic {
+                    h[(i, i)] = d[i];
+                }
+            }
+            EfcBlock::Contact(c) => {
+                // the contact block on its own rows, by the routine the cone cases already pin
+                let sub = mujoco_constraint_hessian(std::slice::from_ref(c), &d[i..i + rows], &jar[i..i + rows]);
+                for k in 0..rows {
+                    for j in 0..rows {
+                        h[(i + k, i + j)] = sub[(k, j)];
+                    }
+                }
+            }
+        }
+        i += rows;
+    }
+    h
+}
+
 /// What [`solve_constraints_newton`] produces.
 #[derive(Clone, Debug)]
 pub struct NewtonSolve {
@@ -422,6 +540,24 @@ pub fn solve_constraints_newton(
     tol: f64,
     max_iter: usize,
 ) -> Result<NewtonSolve, String> {
+    let blocks: Vec<EfcBlock> = contacts.iter().cloned().map(EfcBlock::Contact).collect();
+    solve_constraints_newton_blocks(m, a_smooth, jac, aref, d, &blocks, tol, max_iter)
+}
+
+/// The same solve over MuJoCo's full row set — equality, friction and limit rows as well as contacts.
+/// `blocks` describes the rows of `jac` in order, and their order is MuJoCo's: equality, friction, then
+/// limits and contacts.
+#[allow(clippy::too_many_arguments)]
+pub fn solve_constraints_newton_blocks(
+    m: &DMatrix<f64>,
+    a_smooth: &DVector<f64>,
+    jac: &DMatrix<f64>,
+    aref: &[f64],
+    d: &[f64],
+    blocks: &[EfcBlock],
+    tol: f64,
+    max_iter: usize,
+) -> Result<NewtonSolve, String> {
     let nv = m.nrows();
     let nefc = jac.nrows();
     if m.ncols() != nv || a_smooth.len() != nv || jac.ncols() != nv {
@@ -433,7 +569,7 @@ pub fn solve_constraints_newton(
     let arefv = DVector::from_row_slice(aref);
     let objective = |a: &DVector<f64>| -> (f64, ConstraintUpdate, Vec<f64>) {
         let jar: Vec<f64> = (jac * a - &arefv).iter().copied().collect();
-        let u = mujoco_constraint_update(contacts, d, &jar);
+        let u = mujoco_constraint_update_blocks(blocks, d, &jar);
         let da = a - a_smooth;
         (0.5 * (da.transpose() * m * &da)[(0, 0)] + u.cost, u, jar)
     };
@@ -448,7 +584,7 @@ pub fn solve_constraints_newton(
         if grad_norm <= tol {
             break;
         }
-        let h = mujoco_constraint_hessian(contacts, d, &jar);
+        let h = mujoco_constraint_hessian_blocks(blocks, d, &jar);
         let hess = m + jac.transpose() * h * jac;
         // a strictly convex objective has a positive-definite Hessian; a Cholesky that fails means the
         // active set has left it singular, so fall back to the steepest descent direction rather than stop
@@ -849,6 +985,84 @@ mod cone_tests {
         assert_eq!(mujoco_cone_rows(Cone::Elliptic, 4), 4);
         assert_eq!(mujoco_cone_rows(Cone::Pyramidal, 6), 10);
         assert_eq!(mujoco_cone_rows(Cone::Elliptic, 6), 6);
+    }
+}
+
+#[cfg(test)]
+mod block_tests {
+    use super::*;
+
+    /// A friction row is a quadratic well with a flat floor on each side: inside `|jar| < R·loss` it behaves
+    /// like any other row, outside it SATURATES at ±loss and the cost becomes linear. Both branches are
+    /// checked against their closed forms, and the corner is checked from both sides so the two pieces are
+    /// shown to meet.
+    #[test]
+    fn a_friction_row_saturates_at_plus_and_minus_its_loss() {
+        let (d, loss) = (4.0, 3.0);
+        let r = 1.0 / d;
+        let block = [EfcBlock::Friction { loss }];
+        // inside the band: force = −D·jar, cost = ½D·jar²
+        let jar = [0.5 * r * loss];
+        let u = mujoco_constraint_update_blocks(&block, &[d], &jar);
+        assert_eq!(u.state[0], ConstraintState::Quadratic);
+        assert!((u.force[0] + d * jar[0]).abs() < 1e-15);
+        assert!((u.cost - 0.5 * d * jar[0] * jar[0]).abs() < 1e-15);
+        // past the positive bound: the force stops at −loss whatever `jar` does
+        for far in [1.0001, 2.0, 100.0] {
+            let jar = [far * r * loss];
+            let u = mujoco_constraint_update_blocks(&block, &[d], &jar);
+            assert_eq!(u.state[0], ConstraintState::LinearPos);
+            assert!((u.force[0] + loss).abs() < 1e-15, "force {} at {far}", u.force[0]);
+            assert!((u.cost - (-0.5 * r * loss * loss + loss * jar[0])).abs() < 1e-13);
+        }
+        let jar = [-2.0 * r * loss];
+        let u = mujoco_constraint_update_blocks(&block, &[d], &jar);
+        assert_eq!(u.state[0], ConstraintState::LinearNeg);
+        assert!((u.force[0] - loss).abs() < 1e-15);
+        // ⛔ the two pieces meet: at the corner the quadratic and the line agree in value AND slope, which is
+        // what makes the cost differentiable and the Newton solve well posed
+        let eps = 1e-9;
+        let c = |x: f64| mujoco_constraint_update_blocks(&block, &[d], &[x]).cost;
+        let (lo, hi) = (r * loss - eps, r * loss + eps);
+        assert!((c(hi) - c(lo)).abs() < 1e-8, "value jumps at the corner");
+        let (dlo, dhi) = ((c(lo) - c(lo - eps)) / eps, (c(hi + eps) - c(hi)) / eps);
+        assert!((dhi - dlo).abs() < 1e-5, "slope jumps at the corner: {dlo} then {dhi}");
+        // and a saturated row has NO curvature, so it contributes nothing to the Hessian
+        assert_eq!(mujoco_constraint_hessian_blocks(&block, &[d], &[2.0 * r * loss])[(0, 0)], 0.0);
+        assert!((mujoco_constraint_hessian_blocks(&block, &[d], &[0.0])[(0, 0)] - d).abs() < 1e-15);
+    }
+
+    /// An equality row is quadratic everywhere and unbounded in both directions — it pushes as hard as it
+    /// must, which is exactly what a contact row may not do.
+    #[test]
+    fn an_equality_row_is_never_satisfied_and_never_saturates() {
+        let d = [7.0, 7.0];
+        let block = [EfcBlock::Equality { rows: 2 }];
+        for jar in [[-5.0, 3.0], [1e6, -1e6], [0.0, 0.0]] {
+            let u = mujoco_constraint_update_blocks(&block, &d, &jar);
+            assert!(u.state.iter().all(|s| *s == ConstraintState::Quadratic));
+            for k in 0..2 {
+                assert!((u.force[k] + d[k] * jar[k]).abs() < 1e-9 * d[k] * jar[k].abs().max(1.0));
+                assert!((mujoco_constraint_hessian_blocks(&block, &d, &jar)[(k, k)] - d[k]).abs() < 1e-15);
+            }
+        }
+        // ⛔ the same `jar` on a LIMIT row is one-sided: positive means satisfied, and it exerts nothing
+        let limit = [EfcBlock::Limit, EfcBlock::Limit];
+        let u = mujoco_constraint_update_blocks(&limit, &d, &[-5.0, 3.0]);
+        assert_eq!(u.state, vec![ConstraintState::Quadratic, ConstraintState::Satisfied]);
+        assert_eq!(u.force[1], 0.0);
+    }
+
+    /// ⛔ A row's law comes from its POSITION, not a tag: the same numbers read as an equality, a friction
+    /// row or a limit depending only on where they sit. Getting `ne`/`nf` wrong is therefore silent.
+    #[test]
+    fn the_same_row_means_three_different_things_at_three_positions() {
+        let (d, jar) = ([2.0], [4.0]);
+        let e = mujoco_constraint_update_blocks(&[EfcBlock::Equality { rows: 1 }], &d, &jar);
+        let f = mujoco_constraint_update_blocks(&[EfcBlock::Friction { loss: 0.5 }], &d, &jar);
+        let l = mujoco_constraint_update_blocks(&[EfcBlock::Limit], &d, &jar);
+        assert_eq!((e.force[0], f.force[0], l.force[0]), (-8.0, -0.5, 0.0));
+        assert!(e.cost > 0.0 && f.cost > 0.0 && l.cost == 0.0);
     }
 }
 
