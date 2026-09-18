@@ -159,6 +159,21 @@ pub fn mujoco_cone_rows(cone: Cone, condim: usize) -> usize {
     }
 }
 
+/// **One constraint row's `efc_R` and `efc_aref`** — `mj_makeImpedance` followed by `mj_referenceConstraint`,
+/// which is where every row type meets, whatever built it.
+///
+/// `pos` is the constraint's signed position (negative means violated), `margin` where it switches on,
+/// `diag_a` the row's diagonal of `J M⁻¹ Jᵀ` at `qpos0` (`dof_invweight0` for a joint row,
+/// [`mujoco_diag_approx`] for a contact), and `jvel` is `J·q̇`.
+///
+/// `R` is the regularisation `(1 − d)/d · Ā` and `aref = −B·J·q̇ − K·d·(pos − margin)`: the acceleration the
+/// row is asked to reach, which is what makes the solve a spring-damper rather than a hard projection.
+pub fn row_reference(solref: &SolRef, solimp: &SolImp, pos: f64, margin: f64, diag_a: f64, jvel: f64) -> (f64, f64) {
+    let k = mujoco_kbip(solref, solimp, pos, margin);
+    let r = ((1.0 - k[2]) * diag_a / k[2]).max(1e-15);
+    (-k[1] * jvel - k[0] * k[2] * (pos - margin), r)
+}
+
 /// **The regularisation MuJoCo puts on a frictional contact's rows**, applied to `r` in place, returning the
 /// contact's `mu` — the coefficient of the REGULARIZED cone, which is what the solver's projection uses and
 /// what `mjContact.mu` reports. Not `friction[0]`: `<option impratio>` trades normal stiffness against
@@ -722,9 +737,8 @@ pub fn solve_contacts_mujoco(m: &DMatrix<f64>, a0: &DVector<f64>, qvel: &DVector
     let mut r = Vec::with_capacity(nefc);
     for i in 0..nefc {
         let (solref, solimp) = params[i];
-        let k = mujoco_kbip(&solref, &solimp, pos[i], margin[i]);
-        r.push(((1.0 - k[2]) * diag_a[i] / k[2]).max(MINVAL));
-        kb.push(k);
+        kb.push(mujoco_kbip(&solref, &solimp, pos[i], margin[i]));
+        r.push(row_reference(&solref, &solimp, pos[i], margin[i], diag_a[i], 0.0).1);
     }
     for &(first, n, pyr, mu) in &groups {
         if pyr {

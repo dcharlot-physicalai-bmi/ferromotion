@@ -51,7 +51,11 @@ for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
         mujoco.mj_fullM(m, d, M)
         lines.append(f"case\t{rel}\t{k}\t{m.nv}\t{nefc}\t{int(d.ne)}\t{int(d.nf)}\t{int(m.opt.cone)}")
         lines.append("\t".join(["type"] + [CT[int(t)] for t in d.efc_type[:nefc]]))
-        for tag, v in (("aref", d.efc_aref[:nefc]), ("D", d.efc_D[:nefc]), ("R", d.efc_R[:nefc]),
+        for j in range(m.njnt):
+            lines.append("\t".join(["joint", mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_JOINT, j) or f"joint{j}",
+                                    {int(v): k.replace("mjJNT_", "").lower() for k, v in mujoco.mjtJoint.__members__.items()}[int(m.jnt_type[j])],
+                                    str(int(m.jnt_qposadr[j]))]))
+        for tag, v in (("qpos", d.qpos), ("qvel", d.qvel), ("aref", d.efc_aref[:nefc]), ("D", d.efc_D[:nefc]), ("R", d.efc_R[:nefc]),
                        ("floss", d.efc_frictionloss[:nefc]), ("qacc_smooth", d.qacc_smooth), ("qacc", d.qacc)):
             lines.append("\t".join([tag] + [repr(float(x)) for x in v]))
         for r in range(nefc):

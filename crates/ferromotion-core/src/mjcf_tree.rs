@@ -172,6 +172,78 @@ impl MjcfTree {
         out
     }
 
+    /// **`dof_invweight0`**: the diagonal of `J M⁻¹ Jᵀ` for each degree of freedom at `qpos0`, which for a
+    /// single-dof joint is `(M⁻¹)ᵢᵢ`. It is the scale every joint constraint row regularises against, and
+    /// MuJoCo computes it ONCE at the reference configuration — not at the current state — so a row's
+    /// stiffness does not change as the model moves.
+    pub fn dof_invweight0(&self) -> Vec<f64> {
+        let nv = self.tree.joints.len();
+        let m = crate::tree_dynamics::tree_mass_matrix(&self.tree.joints, &self.tree.inertia, &self.tree.parent, &vec![0.0; nv]);
+        // ⛔ a CHOLESKY solve, not a general inverse: the mass matrix is symmetric positive definite, and
+        // on an ill-conditioned one — a mobile base with light links — the general inverse loses digits that
+        // show up directly in every constraint row's regularisation. `google_robot` moved by 5e-9 relative.
+        match m.clone().cholesky() {
+            Some(chol) => {
+                let inv = chol.solve(&nalgebra::DMatrix::identity(nv, nv));
+                (0..nv).map(|i| inv[(i, i)]).collect()
+            }
+            None => vec![0.0; nv],
+        }
+    }
+
+    /// **`mj_makeConstraint` for the rows a joint alone produces**: dof friction first, then limits, which is
+    /// MuJoCo's own order and therefore part of the problem statement — `mj_constraintUpdate_impl` reads a
+    /// row's law from its position. Contacts are appended by the caller AFTER these.
+    ///
+    /// ⛔ A limit produces a row per SIDE, and only when that side is within `margin`: `dist = side·(range −
+    /// q)` for `side = ∓1`, with the row's Jacobian `−side`. Both sides can be active at once on a joint
+    /// whose range is narrower than twice its margin, and a port that emits one row per joint is wrong there
+    /// in a way no single-limit test can see.
+    pub fn joint_constraint_rows(&self, q: &[f64], qd: &[f64], dof_invweight0: &[f64]) -> AssembledRows {
+        use crate::mujoco_contact::{row_reference, EfcBlock, SolImp, SolRef};
+        let nv = self.tree.joints.len();
+        let (mut blocks, mut rows, mut aref, mut d) = (Vec::new(), Vec::<Vec<f64>>::new(), Vec::new(), Vec::new());
+        let solr = |v: [f64; 2]| SolRef(v[0], v[1]);
+        let soli = |v: [f64; 5]| SolImp { d0: v[0], d_width: v[1], width: v[2], midpoint: v[3], power: v[4] };
+        let mut push = |j: Vec<f64>, a: f64, r: f64, block: EfcBlock| {
+            rows.push(j);
+            aref.push(a);
+            d.push(1.0 / r.max(1e-15));
+            blocks.push(block);
+        };
+        // --- dof friction, in dof order
+        for j in &self.joints {
+            if j.frictionloss <= 0.0 || !matches!(j.kind, MjcfJointKind::Hinge | MjcfJointKind::Slide) {
+                continue;
+            }
+            let i = j.first;
+            let mut jac = vec![0.0; nv];
+            jac[i] = 1.0;
+            // a friction row has no position and no margin: it resists motion, not penetration
+            let (a, r) = row_reference(&solr(j.solref_friction), &soli(j.solimp_friction), 0.0, 0.0, dof_invweight0[i], qd[i]);
+            push(jac, a, r, EfcBlock::Friction { loss: j.frictionloss });
+        }
+        // --- joint limits, in joint order, lower side then upper
+        for j in &self.joints {
+            let (Some((lo, hi)), true) = (j.range, matches!(j.kind, MjcfJointKind::Hinge | MjcfJointKind::Slide)) else {
+                continue;
+            };
+            let i = j.first;
+            for side in [-1.0f64, 1.0] {
+                let dist = side * (if side < 0.0 { lo } else { hi } - q[i]);
+                if dist >= j.margin {
+                    continue;
+                }
+                let mut jac = vec![0.0; nv];
+                jac[i] = -side;
+                let (a, r) = row_reference(&solr(j.solref_limit), &soli(j.solimp_limit), dist, j.margin, dof_invweight0[i], -side * qd[i]);
+                push(jac, a, r, EfcBlock::Limit);
+            }
+        }
+        let jac = nalgebra::DMatrix::from_fn(rows.len(), nv, |r, c| rows[r][c]);
+        AssembledRows { blocks, jac, aref, d }
+    }
+
     /// One entry per degree of freedom: the joint's cap on the total actuator force through it, for
     /// [`crate::qfrc_actuator`]. `None` where the joint does not limit it.
     pub fn dof_actuator_force_range(&self) -> Vec<Option<[f64; 2]>> {
@@ -184,6 +256,16 @@ impl MjcfTree {
         }
         out
     }
+}
+
+/// **Constraint rows as `mj_makeConstraint` builds them**: the blocks that say what law each row obeys, the
+/// Jacobian, `efc_aref` and `efc_D`, ready for [`crate::solve_constraints_newton_blocks`].
+#[derive(Clone, Debug)]
+pub struct AssembledRows {
+    pub blocks: Vec<crate::mujoco_contact::EfcBlock>,
+    pub jac: nalgebra::DMatrix<f64>,
+    pub aref: Vec<f64>,
+    pub d: Vec<f64>,
 }
 
 /// A branched MJCF model as a [`KinematicTree`], plus the bookkeeping MuJoCo-level parity needs.
@@ -1184,10 +1266,7 @@ fn inertial_of(el: &El, c: &Compiler) -> Result<LinkInertia, String> {
         // off-diagonal term of 8.3e-7 is 2.3e-7 RELATIVE. Keeping the exact input instead leaves the mass
         // matrix out by 1.1e-7 relative at the root of `franka_emika_panda` — invisible in `qfrc_bias`,
         // because at that pose joint 1's axis is vertical and gravity exerts no torque about it.
-        let full = Matrix3::new(v[0], v[3], v[4], v[3], v[1], v[5], v[4], v[5], v[2]);
-        let (eigval, quat) = eig3_mujoco(&full);
-        let r = quat_to_rotation(&quat);
-        r * Matrix3::from_diagonal(&Vector3::new(eigval[0], eigval[1], eigval[2])) * r.transpose()
+        mujoco_stored_inertia(&Matrix3::new(v[0], v[3], v[4], v[3], v[1], v[5], v[4], v[5], v[2]))
     } else if mass == 0.0 {
         // MuJoCo accepts `<inertial pos="0 0 0" mass="0"/>` (Menagerie's rby1 uses it for its world body):
         // a massless body has no tensor to state
@@ -1854,7 +1933,7 @@ impl Walk<'_> {
             let d = p.com - com;
             inertia += p.inertia + p.mass * (Matrix3::identity() * d.dot(&d) - d * d.transpose());
         }
-        Ok(Some(LinkInertia { mass, com, inertia }))
+        Ok(Some(LinkInertia { mass, com, inertia: mujoco_stored_inertia(&inertia) }))
     }
 
     fn body_count(&self) -> usize {
@@ -2032,6 +2111,23 @@ impl ActRecord {
         }
         Ok(())
     }
+}
+
+/// ⛔ **The inertia MuJoCo actually stores for a body, which is not the one the file states.**
+/// `mjCBody::Compile` ends by diagonalising with `mjuu_eig3` and keeping `body_inertia` (the eigenvalues)
+/// beside `body_iquat`, so the tensor the dynamics see is the ROUND TRIP — and `mjuu_eig3` stops on an
+/// ABSOLUTE 1e-12, which on an off-diagonal of 8.3e-7 is 2.3e-7 RELATIVE.
+///
+/// ⚠ It applies wherever MuJoCo had to DIAGONALISE — a `fullinertia`, and an inertia inferred from geoms —
+/// and NOT to a `diaginertia`, which is already in the stored form and is kept verbatim. Applying it to all
+/// three is worse than applying it to one: it puts error into the case MuJoCo leaves exact.
+/// `google_robot` declares four `<inertial>` elements for twelve bodies, so eight go through the geom path;
+/// round-tripping only the stated ones left its root dof's inverse weight out by 2.1e-9, which lands
+/// straight in every constraint row's regularisation.
+fn mujoco_stored_inertia(full: &Matrix3<f64>) -> Matrix3<f64> {
+    let (eigval, quat) = eig3_mujoco(full);
+    let r = quat_to_rotation(&quat);
+    r * Matrix3::from_diagonal(&Vector3::new(eigval[0], eigval[1], eigval[2])) * r.transpose()
 }
 
 /// **`<actuator>`**, resolved the way MuJoCo's compiler resolves it.
@@ -2572,6 +2668,44 @@ mod tests {
         let g = t.geoms.iter().find(|g| g.name == "g").expect("the geom");
         assert_eq!(g.size, [0.009, 0.02, 0.01875], "size");
         assert_eq!(g.params.friction, [2.0, 0.02, 0.03], "friction");
+    }
+
+    /// ⛔ A limit produces a row per SIDE and only when that side is within `margin`, so a joint whose range
+    /// is narrower than twice its margin has BOTH rows live at once. A port that emits one row per joint is
+    /// wrong exactly there, and no test with a comfortable range can see it.
+    #[test]
+    fn a_joint_limit_makes_a_row_per_side_and_both_at_once_when_the_range_is_narrow() {
+        let model = |range: &str, margin: &str| {
+            format!(
+                r#"<mujoco><compiler angle="radian"/><worldbody><body name="b">
+                <joint name="j" type="hinge" axis="0 0 1" range="{range}" margin="{margin}" frictionloss="0.4"/>
+                <inertial mass="1" pos="0 0 0" diaginertia="0.1 0.1 0.1"/>
+                <geom name="g" type="sphere" size="0.05"/>
+            </body></worldbody></mujoco>"#
+            )
+        };
+        let t = tree_from_mjcf_str(&model("-1 1", "0.1")).expect("loads");
+        let iw = t.dof_invweight0();
+        let rows = |q: f64| t.joint_constraint_rows(&[q], &[0.0], &iw);
+        // ⭐ the friction row is always there and comes FIRST — MuJoCo reads a row's law from its position
+        let mid = rows(0.0);
+        assert_eq!(mid.blocks.len(), 1, "well inside the range, only friction");
+        assert!(matches!(mid.blocks[0], crate::mujoco_contact::EfcBlock::Friction { loss } if loss == 0.4));
+        assert_eq!(mid.jac[(0, 0)], 1.0);
+        // near the upper limit: a second row, with Jacobian −1 because the limit pushes the other way
+        let hi = rows(0.95);
+        assert_eq!(hi.blocks.len(), 2);
+        assert!(matches!(hi.blocks[1], crate::mujoco_contact::EfcBlock::Limit));
+        assert_eq!(hi.jac[(1, 0)], -1.0);
+        // near the lower limit: Jacobian +1
+        let lo = rows(-0.95);
+        assert_eq!(lo.blocks.len(), 2);
+        assert_eq!(lo.jac[(1, 0)], 1.0);
+        // ⛔ a range narrower than twice the margin: BOTH sides are within it everywhere
+        let narrow = tree_from_mjcf_str(&model("-0.05 0.05", "0.2")).expect("loads");
+        let both = narrow.joint_constraint_rows(&[0.0], &[0.0], &narrow.dof_invweight0());
+        assert_eq!(both.blocks.len(), 3, "one friction row and a limit row on each side");
+        assert_eq!((both.jac[(1, 0)], both.jac[(2, 0)]), (1.0, -1.0), "lower then upper");
     }
 
     /// ⛔⛔ **MuJoCo's `damping` and `frictionloss` are not actuator terms**: damping is a passive force and
