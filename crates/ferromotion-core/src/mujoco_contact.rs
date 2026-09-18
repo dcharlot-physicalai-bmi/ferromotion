@@ -44,6 +44,26 @@ pub struct SolImp {
     pub power: f64,
 }
 
+impl SolImp {
+    /// ⛔ MuJoCo CLIPS `solimp` where it USES it, not where it stores it: `getsolparam` forces `d0`,
+    /// `d_width` and `midpoint` into `[mjMINIMP, mjMAXIMP] = [1e-4, 0.9999]`, `width` to ≥ 0 and `power` to
+    /// ≥ 1. The model keeps what the file said — `seeed_rebot_devarm` writes `solimp="0.9999 0.99999 …"` and
+    /// `eq_solimp` reports it unchanged — so a port that reads the stored value gets `1 − d = 1e-5` where
+    /// MuJoCo has `1e-4`, and every regularisation on that row is out by exactly TEN.
+    ///
+    /// ⚠ It applies to the STIFFNESS as well as the impedance: `K` and `B` are built from `d_width`, so
+    /// clipping only inside the sigmoid leaves `aref` out by 1.8e-4 with `efc_D` exact.
+    pub fn clamped(&self) -> SolImp {
+        SolImp {
+            d0: self.d0.clamp(1e-4, 0.9999),
+            d_width: self.d_width.clamp(1e-4, 0.9999),
+            width: self.width.max(0.0),
+            midpoint: self.midpoint.clamp(1e-4, 0.9999),
+            power: self.power.max(1.0),
+        }
+    }
+}
+
 impl Default for SolImp {
     fn default() -> Self {
         Self { d0: 0.9, d_width: 0.95, width: 0.001, midpoint: 0.5, power: 2.0 }
@@ -66,6 +86,12 @@ const MINVAL: f64 = 1e-15;
 /// `getimpedance`: the impedance `d` and its derivative `d'` at constraint position `pos` (negative =
 /// penetrating for a contact) and `margin`.
 pub fn mujoco_impedance(s: &SolImp, pos: f64, margin: f64) -> (f64, f64) {
+    // ⛔ MuJoCo CLIPS the impedance where it uses it, not where it stores it: `getsolparam` forces `d0`,
+    // `d_width` and `midpoint` into [mjMINIMP, mjMAXIMP] = [1e-4, 0.9999], `width` to ≥ 0 and `power` to ≥ 1.
+    // The model keeps what the file said — `seeed_rebot_devarm` writes `solimp="0.9999 0.99999 ..."` and
+    // `eq_solimp` reports it unchanged — so a port that reads the stored value gets `1 − d = 1e-5` where
+    // MuJoCo has `1e-4`, and every regularisation on that row is out by exactly TEN.
+    let s = &s.clamped();
     if s.d0 == s.d_width || s.width <= MINVAL {
         return (0.5 * (s.d0 + s.d_width), 0.0);
     }
@@ -92,6 +118,7 @@ pub fn mujoco_impedance(s: &SolImp, pos: f64, margin: f64) -> (f64, f64) {
 
 /// MuJoCo's `efc_KBIP` for one row: `[K, B, impedance, impedance']`.
 pub fn mujoco_kbip(r: &SolRef, s: &SolImp, pos: f64, margin: f64) -> [f64; 4] {
+    let s = &s.clamped();
     let (imp, imp_p) = mujoco_impedance(s, pos, margin);
     let k = if r.0 > 0.0 { 1.0 / (s.d_width * s.d_width * r.0 * r.0 * r.1 * r.1).max(MINVAL) } else { -r.0 / (s.d_width * s.d_width).max(MINVAL) };
     let b = if r.1 > 0.0 { 2.0 / (s.d_width * r.0).max(MINVAL) } else { -r.1 / s.d_width.max(MINVAL) };
@@ -168,8 +195,12 @@ pub fn mujoco_cone_rows(cone: Cone, condim: usize) -> usize {
 ///
 /// `R` is the regularisation `(1 − d)/d · Ā` and `aref = −B·J·q̇ − K·d·(pos − margin)`: the acceleration the
 /// row is asked to reach, which is what makes the solve a spring-damper rather than a hard projection.
-pub fn row_reference(solref: &SolRef, solimp: &SolImp, pos: f64, margin: f64, diag_a: f64, jvel: f64) -> (f64, f64) {
-    let k = mujoco_kbip(solref, solimp, pos, margin);
+pub fn row_reference(solref: &SolRef, solimp: &SolImp, pos: f64, margin: f64, diag_a: f64, jvel: f64, timestep: f64) -> (f64, f64) {
+    // ⛔ "integrator safety": in the standard `(timeconst, dampratio)` format MuJoCo floors the time constant
+    // at TWO TIMESTEPS, because a reference stiffer than the integrator can follow is unstable. A model that
+    // asks for 0.001 s at a 0.002 s timestep gets 0.004 s, and nothing in the file says so.
+    let solref = if solref.0 > 0.0 && solref.1 > 0.0 { SolRef(solref.0.max(2.0 * timestep), solref.1) } else { *solref };
+    let k = mujoco_kbip(&solref, solimp, pos, margin);
     let r = ((1.0 - k[2]) * diag_a / k[2]).max(1e-15);
     (-k[1] * jvel - k[0] * k[2] * (pos - margin), r)
 }
@@ -738,7 +769,7 @@ pub fn solve_contacts_mujoco(m: &DMatrix<f64>, a0: &DVector<f64>, qvel: &DVector
     for i in 0..nefc {
         let (solref, solimp) = params[i];
         kb.push(mujoco_kbip(&solref, &solimp, pos[i], margin[i]));
-        r.push(row_reference(&solref, &solimp, pos[i], margin[i], diag_a[i], 0.0).1);
+        r.push(row_reference(&solref, &solimp, pos[i], margin[i], diag_a[i], 0.0, 0.0).1);
     }
     for &(first, n, pyr, mu) in &groups {
         if pyr {
@@ -1005,6 +1036,48 @@ mod cone_tests {
 #[cfg(test)]
 mod block_tests {
     use super::*;
+
+    /// ⛔⛔ **`solimp` is clipped where it is USED, not where it is stored** — and the clip reaches the
+    /// STIFFNESS, not only the sigmoid. A model may write `0.99999`; MuJoCo reports it back unchanged and
+    /// then works with `0.9999`, so `1 − d` is `1e-4` and not `1e-5`. Reading the stored value makes every
+    /// regularisation on that row out by exactly TEN, and clipping only inside the sigmoid still leaves
+    /// `aref` out by 1.8e-4 while `efc_D` looks perfect.
+    #[test]
+    fn an_impedance_past_the_limit_is_clipped_in_the_stiffness_as_well_as_the_sigmoid() {
+        let past = SolImp { d0: 0.9999, d_width: 0.99999, width: 0.001, midpoint: 0.5, power: 2.0 };
+        let clipped = SolImp { d_width: 0.9999, ..past };
+        let r = SolRef(0.004, 1.0);
+        // far outside the width: the impedance saturates, and at the clipped ceiling
+        let (imp, _) = mujoco_impedance(&past, 0.03, 0.0);
+        assert_eq!(imp, 0.9999, "the stored 0.99999 must not reach the answer");
+        // K and B are built from d_width, so they must see the clipped value too
+        let (a, b) = (mujoco_kbip(&r, &past, 0.03, 0.0), mujoco_kbip(&r, &clipped, 0.03, 0.0));
+        assert_eq!(a, b, "the stiffness was computed from the unclipped impedance");
+        // ⛔ and the difference is not decorative: 1e-5 against 1e-4 is a factor of ten in R
+        let unclipped_r = (1.0 - 0.99999) * 25.7376 / 0.99999;
+        let (_, r_real) = row_reference(&r, &past, 0.03, 0.0, 25.7376, 0.0, 0.002);
+        // ten to within the difference between the two denominators, which is itself only 1e-4
+        assert!((r_real / unclipped_r - 10.0).abs() < 1e-2, "R is {r_real}, ten times {unclipped_r} was expected");
+    }
+
+    /// ⛔ In the standard `(timeconst, dampratio)` format MuJoCo floors the time constant at TWO TIMESTEPS —
+    /// a reference stiffer than the integrator can follow is unstable — and nothing in the file says so.
+    #[test]
+    fn a_reference_time_constant_is_floored_at_two_timesteps() {
+        let s = SolImp::default();
+        let stiff = SolRef(0.001, 1.0);
+        let (a_fast, _) = row_reference(&stiff, &s, -0.01, 0.0, 1.0, 0.0, 0.002);
+        let (a_floor, _) = row_reference(&SolRef(0.004, 1.0), &s, -0.01, 0.0, 1.0, 0.0, 0.002);
+        assert!((a_fast - a_floor).abs() < 1e-12, "0.001 s at a 0.002 s step must become 0.004 s");
+        // with a small enough timestep the request stands
+        let (a_kept, _) = row_reference(&stiff, &s, -0.01, 0.0, 1.0, 0.0, 0.0001);
+        assert!((a_kept - a_fast).abs() > 1e-6, "the floor was applied when it should not have been");
+        // ⛔ and the DIRECT format (both negative: stiffness and damping) is never floored
+        let direct = SolRef(-1000.0, -50.0);
+        let (d1, _) = row_reference(&direct, &s, -0.01, 0.0, 1.0, 0.0, 0.002);
+        let (d2, _) = row_reference(&direct, &s, -0.01, 0.0, 1.0, 0.0, 10.0);
+        assert_eq!(d1, d2);
+    }
 
     /// A friction row is a quadratic well with a flat floor on each side: inside `|jar| < R·loss` it behaves
     /// like any other row, outside it SATURATES at ±loss and the cost becomes linear. Both branches are

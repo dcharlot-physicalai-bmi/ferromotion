@@ -107,10 +107,14 @@ fn main() {
         if std::env::var("DUMP_IW").is_ok() {
             println!("IW {}: {:?}", c.rel, iw);
         }
+        if !t.equalities_unsupported.is_empty() {
+            *counts.entry("an equality this port does not carry (connect, weld, tendon)").or_default() += 1;
+            continue;
+        }
         let mine = t.joint_constraint_rows(&q, &c.qvel, &iw);
-        // MuJoCo's friction rows are `ne..ne+nf`; its limit rows follow them, before the contacts
+        // MuJoCo's order: equality, friction, limits, contacts — and this port builds the first three
         let nl = c.types.iter().filter(|x| x.starts_with("limit")).count();
-        let theirs: Vec<usize> = (c.ne..c.ne + c.nf + nl).collect();
+        let theirs: Vec<usize> = (0..c.ne + c.nf + nl).collect();
         seen += 1;
         if theirs.len() != mine.blocks.len() {
             *counts.entry("we and MuJoCo disagree on how many joint rows there are").or_default() += 1;
@@ -128,10 +132,15 @@ fn main() {
             da = da.max((mine.aref[k] - c.aref[row]).abs() / c.aref[row].abs().max(1.0));
             dd = dd.max((mine.d[k] - c.d[row]).abs() / c.d[row].abs().max(1.0));
             // and the block must agree with MuJoCo's own type for that row
-            let want_friction = c.types[row] == "friction_dof";
-            let got_friction = matches!(mine.blocks[k], EfcBlock::Friction { .. });
-            if want_friction != got_friction && notes.len() < 8 {
-                notes.push(format!("{}: row {k} is {} here and {} in MuJoCo", c.rel, if got_friction { "friction" } else { "a limit" }, c.types[row]));
+            let want = c.types[row].as_str();
+            let got = match mine.blocks[k] {
+                EfcBlock::Equality { .. } => "equality",
+                EfcBlock::Friction { .. } => "friction_dof",
+                EfcBlock::Limit => "limit_joint",
+                EfcBlock::Contact(_) => "contact",
+            };
+            if want != got && notes.len() < 8 {
+                notes.push(format!("{}: row {k} is {got} here and {want} in MuJoCo", c.rel));
             }
             if let EfcBlock::Friction { loss } = mine.blocks[k]
                 && (loss - c.floss[row]).abs() > 1e-12
@@ -147,6 +156,9 @@ fn main() {
             ok += 1;
         } else if notes.len() < 8 {
             notes.push(format!("{}: J off {dj:.2e}, aref off {da:.2e}, D off {dd:.2e} over {} rows", c.rel, theirs.len()));
+            for (k, &row) in theirs.iter().enumerate().take(3) {
+                notes.push(format!("      row {k} ({}): aref {} vs {}, D {} vs {}", c.types[row], mine.aref[k], c.aref[row], mine.d[k], c.d[row]));
+            }
         }
     }
     println!("states whose joint rows were assembled and compared: {seen}");

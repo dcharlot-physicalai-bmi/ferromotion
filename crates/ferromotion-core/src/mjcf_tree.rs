@@ -143,6 +143,9 @@ pub struct MjcfJoint {
     /// `solreffriction` and `solimpfriction`: what a dof-friction row is built from.
     pub solref_friction: [f64; 2],
     pub solimp_friction: [f64; 5],
+    /// A SLIDE joint whose anchor is at the body frame's origin and whose axis is a coordinate axis — one of
+    /// the conditions for MuJoCo's "simple body" shortcut in [`MjcfTree::dof_invweight0`].
+    pub aligned_slide: bool,
 }
 
 impl MjcfTree {
@@ -178,6 +181,38 @@ impl MjcfTree {
     /// stiffness does not change as the model moves.
     pub fn dof_invweight0(&self) -> Vec<f64> {
         let nv = self.tree.joints.len();
+        let mut out = self.dof_invweight0_general();
+        // ⛔⛔ MuJoCo does NOT use `(M⁻¹)ᵢᵢ` for a "simple body with no rotations" — it uses `1/mass`, which
+        // ignores the armature and every coupling. On `franka_emika_panda`'s fingers that is 66.67 against a
+        // true 8.70, a factor of 7.7 in every constraint row on those dofs, and it is not an approximation
+        // MuJoCo falls back to: it is the value it ships.
+        //
+        // A body qualifies when its inertial frame IS its body frame, it has no children, it is a child of
+        // the world or of a dof-less child of the world, and every one of its joints is a slide along a
+        // coordinate axis anchored at the origin.
+        let mut dofs: BTreeMap<&str, Vec<&MjcfJoint>> = BTreeMap::new();
+        for j in &self.joints {
+            dofs.entry(j.body.as_str()).or_default().push(j);
+        }
+        let has_child = |b: &str| self.body_parent.values().any(|p| p == b);
+        for (body, js) in &dofs {
+            let parent = self.body_parent.get(*body).map(|s| s.as_str()).unwrap_or("world");
+            let near_world = parent == "world" || (!dofs.contains_key(parent) && self.body_parent.get(parent).map(|s| s.as_str()).unwrap_or("world") == "world");
+            let li = &self.tree.inertia[js[0].first];
+            let frames_agree = li.com.norm() == 0.0 && (0..3).all(|r| (0..3).all(|c| r == c || li.inertia[(r, c)] == 0.0));
+            if js.iter().all(|j| j.aligned_slide) && !has_child(body) && near_world && frames_agree && li.mass > 0.0 {
+                for j in js {
+                    out[j.first] = 1.0 / li.mass;
+                }
+            }
+        }
+        let _ = nv;
+        out
+    }
+
+    /// `(M⁻¹)ᵢᵢ` at `qpos0` — the general case, before MuJoCo's simple-body shortcut.
+    fn dof_invweight0_general(&self) -> Vec<f64> {
+        let nv = self.tree.joints.len();
         let m = crate::tree_dynamics::tree_mass_matrix(&self.tree.joints, &self.tree.inertia, &self.tree.parent, &vec![0.0; nv]);
         // ⛔ a CHOLESKY solve, not a general inverse: the mass matrix is symmetric positive definite, and
         // on an ill-conditioned one — a mobile base with light links — the general inverse loses digits that
@@ -211,6 +246,30 @@ impl MjcfTree {
             d.push(1.0 / r.max(1e-15));
             blocks.push(block);
         };
+        // --- equality first: MuJoCo counts `ne` from the front, and a row's law is its position
+        for e in &self.equalities {
+            let mut jac = vec![0.0; nv];
+            let c = e.polycoef;
+            let (pos, diag) = match e.joint2 {
+                Some(j2) => {
+                    let y = q[j2] - e.reference.1;
+                    // q₁ − ref₁ − (c₀ + c₁y + c₂y² + c₃y³ + c₄y⁴), and the Jacobian carries the derivative
+                    let poly = c[0] + c[1] * y + c[2] * y * y + c[3] * y * y * y + c[4] * y * y * y * y;
+                    let deriv = c[1] + 2.0 * c[2] * y + 3.0 * c[3] * y * y + 4.0 * c[4] * y * y * y;
+                    jac[e.joint1] += 1.0;
+                    jac[j2] -= deriv;
+                    (q[e.joint1] - e.reference.0 - poly, dof_invweight0[e.joint1] + dof_invweight0[j2])
+                }
+                None => {
+                    jac[e.joint1] = 1.0;
+                    (q[e.joint1] - e.reference.0 - c[0], dof_invweight0[e.joint1])
+                }
+            };
+            let jvel: f64 = (0..nv).map(|k| jac[k] * qd[k]).sum();
+            // ⛔ an equality has NO margin: it is violated by however far it is from zero, in both directions
+            let (a, r) = row_reference(&solr(e.solref), &soli(e.solimp), pos, 0.0, diag, jvel, self.timestep);
+            push(jac, a, r, EfcBlock::Equality { rows: 1 });
+        }
         // --- dof friction, in dof order
         for j in &self.joints {
             if j.frictionloss <= 0.0 || !matches!(j.kind, MjcfJointKind::Hinge | MjcfJointKind::Slide) {
@@ -220,7 +279,7 @@ impl MjcfTree {
             let mut jac = vec![0.0; nv];
             jac[i] = 1.0;
             // a friction row has no position and no margin: it resists motion, not penetration
-            let (a, r) = row_reference(&solr(j.solref_friction), &soli(j.solimp_friction), 0.0, 0.0, dof_invweight0[i], qd[i]);
+            let (a, r) = row_reference(&solr(j.solref_friction), &soli(j.solimp_friction), 0.0, 0.0, dof_invweight0[i], qd[i], self.timestep);
             push(jac, a, r, EfcBlock::Friction { loss: j.frictionloss });
         }
         // --- joint limits, in joint order, lower side then upper
@@ -236,7 +295,7 @@ impl MjcfTree {
                 }
                 let mut jac = vec![0.0; nv];
                 jac[i] = -side;
-                let (a, r) = row_reference(&solr(j.solref_limit), &soli(j.solimp_limit), dist, j.margin, dof_invweight0[i], -side * qd[i]);
+                let (a, r) = row_reference(&solr(j.solref_limit), &soli(j.solimp_limit), dist, j.margin, dof_invweight0[i], -side * qd[i], self.timestep);
                 push(jac, a, r, EfcBlock::Limit);
             }
         }
@@ -256,6 +315,24 @@ impl MjcfTree {
         }
         out
     }
+}
+
+/// **`<equality>`**, resolved. Only the `joint` kind is carried — 210 of Menagerie's 255 equality elements,
+/// the coupled fingers and linkages — and `connect`, `weld` and `tendon` are left to
+/// [`MjcfTree::equalities_unsupported`] rather than silently dropped.
+#[derive(Clone, Debug)]
+pub struct MjcfEquality {
+    pub name: String,
+    /// The driven joint: the row constrains ITS value.
+    pub joint1: usize,
+    /// The driving joint, if any. With none, the constraint pins `joint1` to a constant.
+    pub joint2: Option<usize>,
+    /// Each joint's `ref`. MuJoCo writes the coupling in `qpos − qpos0`, so the references are part of it.
+    pub reference: (f64, f64),
+    /// `polycoef`: `q₁ − ref₁ = c₀ + c₁·y + c₂·y² + c₃·y³ + c₄·y⁴` with `y = q₂ − ref₂`.
+    pub polycoef: [f64; 5],
+    pub solref: [f64; 2],
+    pub solimp: [f64; 5],
 }
 
 /// **Constraint rows as `mj_makeConstraint` builds them**: the blocks that say what law each row obeys, the
@@ -292,6 +369,9 @@ pub struct MjcfTree {
     pub inferred_from_geoms: Vec<String>,
     /// `<compiler angle>` as the radians-per-unit factor that was applied: `1` for radian, `π/180` for degree.
     pub angle_scale: f64,
+    /// `<option timestep>`, default 0.002. Needed where a constraint row is built, because MuJoCo floors a
+    /// reference time constant at two timesteps.
+    pub timestep: f64,
     /// Each body's MJCF parent body (`world` for the children of the worldbody) — what MuJoCo's contact
     /// filtering reads through `body_parentid` and `body_weldid`.
     pub body_parent: BTreeMap<String, String>,
@@ -308,6 +388,10 @@ pub struct MjcfTree {
     /// `<actuator>` entries, resolved into MuJoCo's gain/bias form, in file order — the same order as
     /// `ctrl`. Only stateless joint transmissions are carried; the loader refuses the rest.
     pub actuators: Vec<crate::mujoco_actuator::Actuator>,
+    /// `<equality>` entries the loader carries, in file order — which is the order their rows appear in.
+    pub equalities: Vec<MjcfEquality>,
+    /// `<equality>` entries it does not, as `(name, why)`: `connect`, `weld`, `tendon` and `flex`.
+    pub equalities_unsupported: Vec<(String, String)>,
     /// Actuators the loader could not carry, as `(name, why)` — a tendon or site transmission, a muscle, an
     /// activation state. The model still loads; `qfrc_actuator` is simply short of these terms, and this
     /// list is how a caller finds that out instead of wondering.
@@ -1602,6 +1686,9 @@ impl Walk<'_> {
                 solimp_limit: five(get("solimplimit"), [0.9, 0.95, 0.001, 0.5, 2.0])?,
                 solref_friction: pair(get("solreffriction"), [0.02, 1.0])?,
                 solimp_friction: five(get("solimpfriction"), [0.9, 0.95, 0.001, 0.5, 2.0])?,
+                aligned_slide: kind == MjcfJointKind::Slide
+                    && anchor.norm() == 0.0
+                    && axis.iter().filter(|x| x.abs() > f64::EPSILON).count() == 1,
             });
             // after the motion, the body frame sits at −anchor from the joint's frame
             pre = Iso::from_parts(Translation3::from(-anchor), UnitQuaternion::identity());
@@ -2300,12 +2387,15 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             no_inertial: Vec::new(),
             inferred_from_geoms: Vec::new(),
             angle_scale: c.deg,
+            timestep: 0.002,
             body_parent: BTreeMap::new(),
             mesh_hulls: BTreeMap::new(),
             mesh_raw: BTreeMap::new(),
             geoms: Vec::new(),
             actuators: Vec::new(),
             actuators_unsupported: Vec::new(),
+            equalities: Vec::new(),
+            equalities_unsupported: Vec::new(),
             contact_excludes: Vec::new(),
             contact_pairs: Vec::new(),
         },
@@ -2347,6 +2437,11 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
         out.mesh_hulls.insert(name.clone(), hull);
         out.mesh_raw.insert(name.clone(), walk.mesh_raw[name].clone());
     }
+    for el in root.children_named("option") {
+        if let Some(v) = el.attr("timestep") {
+            out.timestep = v.trim().parse::<f64>().map_err(|e| format!("<option timestep>: {e}"))?;
+        }
+    }
     let (acts, unsupported) = parse_actuators(&root, &defaults, &c, &out.joints)?;
     out.actuators = acts;
     out.actuators_unsupported = unsupported;
@@ -2358,6 +2453,64 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
         let m0 = crate::tree_dynamics::tree_mass_matrix(&out.tree.joints, &out.tree.inertia, &out.tree.parent, &vec![0.0; nv]);
         let diag: Vec<f64> = (0..nv).map(|i| m0[(i, i)]).collect();
         crate::mujoco_actuator::resolve_dampratio(&mut out.actuators, &diag);
+    }
+    // <equality>: only the `joint` coupling is carried; the rest are named rather than dropped
+    {
+        let by_name: HashMap<&str, &MjcfJoint> = out.joints.iter().map(|j| (j.name.as_str(), j)).collect();
+        for section in root.children_named("equality") {
+            for el in &section.children {
+                let name = el.attr("name").map(|s| s.to_string()).unwrap_or_else(|| format!("equality{}", out.equalities.len() + out.equalities_unsupported.len()));
+                let get = |k: &str| defaults.get(el, "equality", k, section.attr("childclass")).map(|s| s.to_string());
+                // `active="false"` is a constraint the model has switched off; it produces no rows
+                if get("active").as_deref() == Some("false") {
+                    continue;
+                }
+                if el.name != "joint" {
+                    out.equalities_unsupported.push((name, format!("<{}>", el.name)));
+                    continue;
+                }
+                let j1 = el.attr("joint1").ok_or_else(|| format!("equality '{name}': needs joint1"))?;
+                let Some(a) = by_name.get(j1) else { return Err(format!("equality '{name}': no joint named '{j1}'")) };
+                let b = match el.attr("joint2") {
+                    Some(j2) => match by_name.get(j2) {
+                        Some(b) => Some(*b),
+                        None => return Err(format!("equality '{name}': no joint named '{j2}'")),
+                    },
+                    None => None,
+                };
+                if !matches!(a.kind, MjcfJointKind::Hinge | MjcfJointKind::Slide) || b.is_some_and(|b| !matches!(b.kind, MjcfJointKind::Hinge | MjcfJointKind::Slide)) {
+                    out.equalities_unsupported.push((name, "a ball or free joint".into()));
+                    continue;
+                }
+                let mut polycoef = [0.0, 1.0, 0.0, 0.0, 0.0];
+                if let Some(v) = get("polycoef") {
+                    for (i, x) in floats(&v)?.iter().take(5).enumerate() {
+                        polycoef[i] = *x;
+                    }
+                }
+                let mut solref = [0.02, 1.0];
+                if let Some(v) = get("solref") {
+                    for (i, x) in floats(&v)?.iter().take(2).enumerate() {
+                        solref[i] = *x;
+                    }
+                }
+                let mut solimp = [0.9, 0.95, 0.001, 0.5, 2.0];
+                if let Some(v) = get("solimp") {
+                    for (i, x) in floats(&v)?.iter().take(5).enumerate() {
+                        solimp[i] = *x;
+                    }
+                }
+                out.equalities.push(MjcfEquality {
+                    name,
+                    joint1: a.first,
+                    joint2: b.map(|b| b.first),
+                    reference: (a.reference, b.map(|b| b.reference).unwrap_or(0.0)),
+                    polycoef,
+                    solref,
+                    solimp,
+                });
+            }
+        }
     }
     // <contact><exclude> and <contact><pair> — several <contact> blocks can arrive through includes
     for contact in root.children_named("contact") {
