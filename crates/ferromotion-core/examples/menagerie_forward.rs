@@ -26,7 +26,6 @@ struct OState {
     nefc: usize,
     ncontact: usize,
     ncon: usize,
-    actuator: f64,
     passive: f64,
     dims: Vec<usize>,
     qpos: Vec<f64>,
@@ -69,7 +68,6 @@ fn main() {
                 nefc: t[2].parse().unwrap(),
                 ncontact: t[3].parse().unwrap(),
                 ncon: t[4].parse().unwrap(),
-                actuator: f(t[5]),
                 passive: f(t[6]),
                 dims: if t[7] == "-" { Vec::new() } else { t[7].split(',').map(|x| x.parse().unwrap()).collect() },
                 ..Default::default()
@@ -90,8 +88,9 @@ fn main() {
     }
 
     let mut skip: BTreeMap<&'static str, usize> = BTreeMap::new();
-    let (mut states, mut smooth_ok, mut solved, mut solved_ok) = (0usize, 0usize, 0usize, 0usize);
-    let (mut worst_bias, mut worst_smooth, mut worst_qacc) = (0.0f64, 0.0f64, 0.0f64);
+    let (mut states, mut smooth_ok, mut smooth_tried, mut solved, mut solved_ok) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    let (mut worst_smooth_where, mut worst_qacc_where, mut worst_resid_where) = (String::new(), String::new(), String::new());
+    let (mut worst_bias, mut worst_smooth, mut worst_qacc, mut worst_resid) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     let mut notes: Vec<String> = Vec::new();
     for o in &models {
         if filter.as_ref().is_some_and(|fl| !o.rel.contains(fl.as_str())) {
@@ -124,8 +123,8 @@ fn main() {
         let pairs: HashMap<(String, String), usize> = t.contact_pairs.iter().enumerate().flat_map(|(i, p)| [((p.geom1.clone(), p.geom2.clone()), i), ((p.geom2.clone(), p.geom1.clone()), i)]).collect();
         for s in &o.states {
             states += 1;
-            if s.actuator != 0.0 {
-                *skip.entry("an actuator is pushing at ctrl = 0").or_default() += 1;
+            if !t.actuators_unsupported.is_empty() {
+                *skip.entry("an actuator this port does not carry (muscle, tendon, adhesion, plugin)").or_default() += 1;
                 continue;
             }
             if s.passive != 0.0 {
@@ -141,13 +140,41 @@ fn main() {
             let bias = tree_inverse_dynamics(joints, inertia, parent, &q, &vec![0.0; nv], &vec![0.0; nv], o.gravity);
             let db = bias.iter().zip(&s.qfrc_bias).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
             worst_bias = worst_bias.max(db);
+            if std::env::var("DUMP_M").is_ok() {
+                println!("M {} state:", o.rel);
+                for i in 0..nv {
+                    println!("  {:?}", (0..nv).map(|j| m[(i, j)]).collect::<Vec<_>>());
+                }
+            }
+            // the oracle samples with `ctrl = 0`; a position servo still pushes, because its bias is the
+            // servo law and the model is not at its setpoint
+            let act = ferromotion_core::qfrc_actuator(&t.actuators, &q, &vec![0.0; nv], &vec![0.0; t.actuators.len()], &t.dof_actuator_force_range());
             let Some(minv) = m.clone().try_inverse() else {
                 *skip.entry("singular mass matrix").or_default() += 1;
                 continue;
             };
-            let a0 = &minv * DVector::from_iterator(nv, bias.iter().map(|x| -x));
-            let ds = (0..nv).map(|i| (a0[i] - s.qacc_smooth[i]).abs()).fold(0.0, f64::max);
-            worst_smooth = worst_smooth.max(ds);
+            let a0 = &minv * DVector::from_iterator(nv, (0..nv).map(|i| act[i] - bias[i]));
+            // ⛔ RELATIVE, against the magnitude of the answer. A joint with a stiff servo accelerates at
+            // hundreds of rad/s², so an absolute 1e-6 is a tolerance on the eighth significant digit for one
+            // model and on the second for another — the same number meaning two different claims.
+            let rel = |a: &[f64], b: &[f64]| (0..a.len()).map(|i| (a[i] - b[i]).abs() / b[i].abs().max(1.0)).fold(0.0, f64::max);
+            let ds = rel(a0.as_slice(), &s.qacc_smooth);
+            // ⭐ separate "our M is wrong" from "inverting M lost digits": put MuJoCo's own answer back
+            // through OUR mass matrix. A residual near zero means the matrix agrees and only the solve drifted
+            let resid = {
+                let r = &m * DVector::from_row_slice(&s.qacc_smooth) - DVector::from_iterator(nv, (0..nv).map(|i| act[i] - bias[i]));
+                let scale = (0..nv).map(|i| (act[i] - bias[i]).abs()).fold(1.0, f64::max);
+                r.amax() / scale
+            };
+            if resid > worst_resid {
+                worst_resid = resid;
+                worst_resid_where = o.rel.clone();
+            }
+            smooth_tried += 1;
+            if ds > worst_smooth {
+                worst_smooth = ds;
+                worst_smooth_where = o.rel.clone();
+            }
             if ds < 1e-6 {
                 smooth_ok += 1;
             } else if notes.len() < 12 {
@@ -258,14 +285,18 @@ fn main() {
             }
             solved += 1;
             let qvel = DVector::zeros(nv);
-            match ferromotion_core::solve_contacts_mujoco(&m, &a0, &qvel, &contacts, true, 1.0, 1e-12, 4000) {
+            let iters: usize = std::env::var("PGS_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(4000);
+            match ferromotion_core::solve_contacts_mujoco(&m, &a0, &qvel, &contacts, true, 1.0, 1e-12, iters) {
                 Ok(sol) => {
-                    let dq = (0..nv).map(|i| (sol.qacc[i] - s.qacc[i]).abs()).fold(0.0, f64::max);
-                    worst_qacc = worst_qacc.max(dq);
+                    let dq = (0..nv).map(|i| (sol.qacc[i] - s.qacc[i]).abs() / s.qacc[i].abs().max(1.0)).fold(0.0, f64::max);
+                    if dq > worst_qacc {
+                        worst_qacc = dq;
+                        worst_qacc_where = format!("{} ({} contacts)", o.rel, contacts.len());
+                    }
                     if dq < 1e-6 {
                         solved_ok += 1;
                     } else if notes.len() < 12 {
-                        notes.push(format!("{}: qacc off {dq:.2e} with {} contacts", o.rel, contacts.len()));
+                        notes.push(format!("{}: qacc off {dq:.2e} with {} contacts, {} rows, solver residual {:.2e}", o.rel, contacts.len(), sol.r.len(), sol.residual));
                     }
                 }
                 Err(e) => {
@@ -278,8 +309,9 @@ fn main() {
         }
     }
     println!("states {states}");
-    println!("  SMOOTH (mass matrix, bias, unconstrained acceleration, all from the file): {smooth_ok} within 1e-6; worst qfrc_bias {worst_bias:.2e}, worst qacc_smooth {worst_smooth:.2e}");
-    println!("  CONSTRAINED (contacts found and solved by us): {solved_ok} of {solved} within 1e-6; worst qacc {worst_qacc:.2e}");
+    println!("  SMOOTH (mass matrix, bias, actuators, unconstrained acceleration — all from the file): {smooth_ok} of {smooth_tried} within 1e-6; worst qfrc_bias {worst_bias:.2e}, worst qacc_smooth (relative) {worst_smooth:.2e} on {worst_smooth_where}");
+    println!("    and MuJoCo's own qacc_smooth back through OUR mass matrix: worst residual {worst_resid:.2e} on {worst_resid_where}");
+    println!("  CONSTRAINED (contacts found and solved by us): {solved_ok} of {solved} within 1e-6; worst qacc (relative) {worst_qacc:.2e} on {worst_qacc_where}");
     println!("  not compared, by what blocks it:");
     let mut by: Vec<_> = skip.iter().collect();
     by.sort_by_key(|(_, v)| std::cmp::Reverse(**v));

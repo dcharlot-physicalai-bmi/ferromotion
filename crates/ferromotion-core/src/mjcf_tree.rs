@@ -1135,7 +1135,16 @@ fn inertial_of(el: &El, c: &Compiler) -> Result<LinkInertia, String> {
         if v.len() != 6 {
             return Err("fullinertia needs 6 numbers (xx yy zz xy xz yz)".into());
         }
-        Matrix3::new(v[0], v[3], v[4], v[3], v[1], v[5], v[4], v[5], v[2])
+        // ⛔ MuJoCo does not keep the tensor you wrote. `mjCBody::Compile` diagonalises a `fullinertia` with
+        // `mjuu_eig3` and stores `body_inertia` (the eigenvalues) beside `body_iquat`, so the tensor the
+        // dynamics actually see is the ROUND TRIP — and `mjuu_eig3` stops on an ABSOLUTE 1e-12, which on an
+        // off-diagonal term of 8.3e-7 is 2.3e-7 RELATIVE. Keeping the exact input instead leaves the mass
+        // matrix out by 1.1e-7 relative at the root of `franka_emika_panda` — invisible in `qfrc_bias`,
+        // because at that pose joint 1's axis is vertical and gravity exerts no torque about it.
+        let full = Matrix3::new(v[0], v[3], v[4], v[3], v[1], v[5], v[4], v[5], v[2]);
+        let (eigval, quat) = eig3_mujoco(&full);
+        let r = quat_to_rotation(&quat);
+        r * Matrix3::from_diagonal(&Vector3::new(eigval[0], eigval[1], eigval[2])) * r.transpose()
     } else if mass == 0.0 {
         // MuJoCo accepts `<inertial pos="0 0 0" mass="0"/>` (Menagerie's rby1 uses it for its world body):
         // a massless body has no tensor to state
@@ -2487,6 +2496,44 @@ mod tests {
         let g = t.geoms.iter().find(|g| g.name == "g").expect("the geom");
         assert_eq!(g.size, [0.009, 0.02, 0.01875], "size");
         assert_eq!(g.params.friction, [2.0, 0.02, 0.03], "friction");
+    }
+
+    /// ⛔ **A `fullinertia` is not stored, its EIGENDECOMPOSITION is.** `mjCBody::Compile` diagonalises with
+    /// `mjuu_eig3` and keeps `body_inertia` beside `body_iquat`, so the tensor the dynamics see is the round
+    /// trip — and `mjuu_eig3` stops on an ABSOLUTE 1e-12, which on an off-diagonal of 8.3e-7 is 2.3e-7
+    /// RELATIVE. The numbers below are MuJoCo 3.13.0's own, read back from `franka_emika_panda`.
+    ///
+    /// ⚠ Why this hid: with the exact input the mass matrix was out by 1.1e-7 relative at the arm's root
+    /// while `qfrc_bias` matched to 1e-14, because at that pose joint 1's axis is vertical and gravity
+    /// exerts no torque about it. An inertia error invisible in the force it produces is still an inertia
+    /// error in everything that divides by it.
+    #[test]
+    fn a_fullinertia_is_stored_as_mujoco_stores_it_which_is_its_eigendecomposition() {
+        let xml = r#"<mujoco><worldbody><body name="b">
+            <joint name="j" type="hinge" axis="0 0 1"/>
+            <inertial mass="0.629769" pos="-0.041018 -0.00014 0.049974"
+              fullinertia="0.00315 0.00388 0.004285 8.2904e-7 0.00015 8.2299e-6"/>
+            <geom name="g" type="sphere" size="0.1"/>
+        </body></worldbody></mujoco>"#;
+        let t = tree_from_mjcf_str(xml).expect("loads");
+        let i = t.tree.inertia[0].inertia;
+        // MuJoCo's own round trip, to every digit it prints — kept verbatim rather than shortened to the
+        // shortest round-tripping literal, because the point of the test is that these ARE MuJoCo's digits
+        #[allow(clippy::excessive_precision)]
+        let want = [
+            [3.1499999999977401e-03, 8.2903980985604243e-07, 1.4999999999510235e-04],
+            [8.2903980985604232e-07, 3.8799999999426333e-03, 8.2298985390907685e-06],
+            [1.4999999999510229e-04, 8.2298985390907499e-06, 4.2850000000596985e-03],
+        ];
+        for r in 0..3 {
+            for c in 0..3 {
+                assert!((i[(r, c)] - want[r][c]).abs() <= 1e-9 * want[r][c].abs(), "({r},{c}): {} vs MuJoCo {}", i[(r, c)], want[r][c]);
+            }
+        }
+        // ⛔ and it is NOT the tensor the file states — that is the whole point, so a port that skips the
+        // round trip cannot pass by accident
+        assert!((i[(0, 1)] - 8.2904e-7).abs() > 1e-14, "the off-diagonal came back unchanged, so nothing was diagonalised");
+        assert!((i[(0, 0)] - 0.00315).abs() > 1e-17, "the diagonal came back unchanged");
     }
 
     /// MuJoCo's OBJ decoder keeps `GetShapes()[0]` — the faces up to the second `o`/`g` tag — while its
