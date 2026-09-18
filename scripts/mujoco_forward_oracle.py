@@ -32,6 +32,8 @@ for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
     models += 1
     name = lambda t, i: mujoco.mj_id2name(m, t, i)
     lines.append(f"model\t{rel}\t{m.nq}\t{m.nv}\t{int(m.opt.cone)}\t{float(m.opt.impratio)!r}\t{float(m.opt.gravity[0])!r}\t{float(m.opt.gravity[1])!r}\t{float(m.opt.gravity[2])!r}")
+    for b in range(m.nbody):
+        lines.append("\t".join(["body", name(mujoco.mjtObj.mjOBJ_BODY, b) or f"body{b}"]))
     for j in range(m.njnt):
         lines.append("\t".join(["joint", name(mujoco.mjtObj.mjOBJ_JOINT, j) or f"joint{j}", JT[int(m.jnt_type[j])], str(int(m.jnt_qposadr[j]))]))
     for k in range(K):
@@ -62,6 +64,15 @@ for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
             ",".join(str(x) for x in dims) or "-",
             ";".join(f"{k}={v}" for k, v in sorted(hist.items())) or "-",
         ]))
+        # ⛔ the body accelerations in the WORLD frame: the only comparison that survives a different dof
+        # basis. A free joint is six coordinates here and six there, but not the SAME six.
+        mujoco.mj_rnePostConstraint(m, d)
+        acc = []
+        for b in range(m.nbody):
+            res = np.zeros(6)
+            mujoco.mj_objectAcceleration(m, d, mujoco.mjtObj.mjOBJ_XBODY, b, res, 0)
+            acc.extend(res)
+        lines.append("\t".join(["bodyacc"] + [repr(float(x)) for x in acc]))
         for tag, v in (("qpos", d.qpos), ("qvel", d.qvel), ("qfrc_bias", d.qfrc_bias), ("qfrc_passive", d.qfrc_passive), ("qacc_smooth", d.qacc_smooth), ("qacc", d.qacc)):
             lines.append("\t".join([tag] + [repr(float(x)) for x in v]))
 with open(out, "w") as fh:

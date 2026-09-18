@@ -29,6 +29,7 @@ struct OState {
     dims: Vec<usize>,
     qpos: Vec<f64>,
     qvel: Vec<f64>,
+    bodyacc: Vec<f64>,
     qfrc_bias: Vec<f64>,
     qfrc_passive: Vec<f64>,
     qacc_smooth: Vec<f64>,
@@ -40,6 +41,7 @@ struct OModel {
     rel: String,
     cone_pyramidal: bool,
     gravity: Vector3<f64>,
+    bodies: Vec<String>,
     joints: Vec<(String, String, usize)>,
     states: Vec<OState>,
 }
@@ -64,6 +66,7 @@ fn main() {
                 gravity: Vector3::new(f(t[6]), f(t[7]), f(t[8])),
                 ..Default::default()
             }),
+            "body" => models.last_mut().unwrap().bodies.push(t[1].to_string()),
             "joint" => models.last_mut().unwrap().joints.push((t[1].to_string(), t[2].to_string(), t[3].parse().unwrap())),
             "state" => models.last_mut().unwrap().states.push(OState {
                 nefc: t[2].parse().unwrap(),
@@ -72,13 +75,14 @@ fn main() {
                 dims: if t[7] == "-" { Vec::new() } else { t[7].split(',').map(|x| x.parse().unwrap()).collect() },
                 ..Default::default()
             }),
-            "qpos" | "qfrc_bias" | "qfrc_passive" | "qacc_smooth" | "qacc" | "qvel" => {
+            "qpos" | "qfrc_bias" | "qfrc_passive" | "qacc_smooth" | "qacc" | "qvel" | "bodyacc" => {
                 let v: Vec<f64> = t[1..].iter().map(|x| f(x)).collect();
                 let s = models.last_mut().unwrap().states.last_mut().unwrap();
                 match t[0] {
                     "qpos" => s.qpos = v,
                     "qvel" => s.qvel = v,
                     "qfrc_bias" => s.qfrc_bias = v,
+                    "bodyacc" => s.bodyacc = v,
                     "qfrc_passive" => s.qfrc_passive = v,
                     "qacc_smooth" => s.qacc_smooth = v,
                     "qacc" => s.qacc = v,
@@ -91,6 +95,8 @@ fn main() {
 
     let mut skip: BTreeMap<&'static str, usize> = BTreeMap::new();
     let (mut states, mut smooth_ok, mut smooth_tried, mut solved, mut solved_ok) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    let (mut acc_ok, mut acc_tried, mut worst_acc) = (0usize, 0usize, 0.0f64);
+    let (mut chain_ok, mut chain_tried, mut worst_chain, mut worst_chain_bias) = (0usize, 0usize, 0.0f64, 0.0f64);
     let (mut worst_smooth_where, mut worst_qacc_where, mut worst_resid_where) = (String::new(), String::new(), String::new());
     let (mut worst_bias, mut worst_smooth, mut worst_qacc, mut worst_resid, mut worst_passive) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
     let mut notes: Vec<String> = Vec::new();
@@ -110,12 +116,35 @@ fn main() {
         };
         // ⛔ Only a model whose joints line up one for one can have its `qacc` compared ENTRY BY ENTRY. A
         // free or ball joint is several joints here and one there, so the vectors are not the same vector.
-        let lined_up = t.joints.len() == o.joints.len()
-            && t.joints.iter().zip(&o.joints).all(|(a, b)| matches!((a.kind, b.1.as_str()), (MjcfJointKind::Hinge, "hinge") | (MjcfJointKind::Slide, "slide")));
-        if !lined_up {
-            *skip.entry("a free or ball joint: the dof vectors do not correspond").or_default() += o.states.len();
+        // ⛔ the joints must CORRESPOND for `qpos` to map at all; whether their coordinates are the same is
+        // a separate question, and the answer is no for a free or ball joint — six of ours are three world
+        // slides and three Euler hinges, six of MuJoCo's are a world translation and a body-frame angular
+        // velocity. Those states are still checked, through the BODY ACCELERATIONS, which no basis owns.
+        let kinds_match = t.joints.len() == o.joints.len()
+            && t.joints.iter().zip(&o.joints).all(|(a, b)| {
+                matches!(
+                    (a.kind, b.1.as_str()),
+                    (MjcfJointKind::Hinge, "hinge") | (MjcfJointKind::Slide, "slide") | (MjcfJointKind::Ball, "ball") | (MjcfJointKind::Free, "free")
+                )
+            });
+        if !kinds_match {
+            *skip.entry("the joints do not correspond one for one").or_default() += o.states.len();
             continue;
         }
+        let elementwise = t.joints.iter().all(|a| matches!(a.kind, MjcfJointKind::Hinge | MjcfJointKind::Slide));
+        // ⭐ Only the BASE's six coordinates are in a different basis. Every hinge and slide dof is the same
+        // quantity on both sides — the joint angle's second derivative — and sits at the same index, because
+        // the joints correspond one for one and a free joint occupies six slots in either convention. So the
+        // chain of a legged robot can be compared entry by entry even when its base cannot.
+        let shared: Vec<usize> = t.joints.iter().filter(|j| matches!(j.kind, MjcfJointKind::Hinge | MjcfJointKind::Slide)).map(|j| j.first).collect();
+        // ⛔⛔ ARMATURE ON A FREE OR BALL JOINT IS BASIS-DEPENDENT. It is a constant added to the diagonal of
+        // the mass matrix, and a diagonal is only a diagonal in one basis: MuJoCo's three body-frame angular
+        // velocities and this tree's three Euler-rate hinges are different coordinates, so the same number
+        // makes a different matrix. The translations agree; the rotations cannot. Ten Menagerie models do
+        // this — every `rainbow_robotics_rby1` variant — and they are exactly the ten whose chain
+        // accelerations disagree, at 1.2e-2. No amount of care in the recursion fixes it; only a base that
+        // uses MuJoCo's own coordinates would.
+        let rotational_armature = t.joints.iter().any(|j| matches!(j.kind, MjcfJointKind::Free | MjcfJointKind::Ball) && j.armature != 0.0);
         let qposadr: Vec<usize> = o.joints.iter().map(|j| j.2).collect();
         let (joints, parent, inertia) = (&t.tree.joints, &t.tree.parent, &t.tree.inertia);
         let nv = joints.len();
@@ -136,8 +165,11 @@ fn main() {
             // --- the smooth half: mass matrix, bias, and the acceleration with no constraints
             let m = tree_mass_matrix(joints, inertia, parent, &q);
             let bias = tree_inverse_dynamics(joints, inertia, parent, &q, &s.qvel, &vec![0.0; nv], o.gravity);
+            // ⛔ `qfrc_bias` is a vector in the DOF basis, so it can only be compared where the bases agree
             let db = bias.iter().zip(&s.qfrc_bias).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
-            worst_bias = worst_bias.max(db);
+            if elementwise {
+                worst_bias = worst_bias.max(db);
+            }
             if std::env::var("DUMP_M").is_ok() {
                 println!("M {} state:", o.rel);
                 for i in 0..nv {
@@ -162,10 +194,91 @@ fn main() {
                 continue;
             };
             let a0 = &minv * DVector::from_iterator(nv, (0..nv).map(|i| passive[i] + act[i] - bias[i]));
+            let frames_for_acc = tree_frames(&t.tree, &q);
             // ⛔ RELATIVE, against the magnitude of the answer. A joint with a stiff servo accelerates at
             // hundreds of rad/s², so an absolute 1e-6 is a tolerance on the eighth significant digit for one
             // model and on the second for another — the same number meaning two different claims.
             let rel = |a: &[f64], b: &[f64]| (0..a.len()).map(|i| (a[i] - b[i]).abs() / b[i].abs().max(1.0)).fold(0.0, f64::max);
+            // ⭐ the basis-free check: every body's PROPER acceleration in the world frame, which is what an
+            // accelerometer on it would read. Valid only at rest — at speed the velocity products enter and
+            // `J·q̈` is no longer the whole story — and that is stated rather than hidden, because a resting
+            // state cannot see a velocity term at all.
+            // ⛔ and only where MuJoCo has NO constraint rows: its `bodyacc` is taken at the CONSTRAINED
+            // acceleration, so comparing it against our unconstrained `a0` would be comparing two different
+            // questions — a robot resting on the floor is not accelerating downward at 9.81.
+            if s.qvel.iter().all(|v| *v == 0.0) && s.nefc == 0 && !s.bodyacc.is_empty() && !rotational_armature {
+                let mut worst = 0.0f64;
+                let mut worst_body = String::new();
+                for (b, name) in o.bodies.iter().enumerate() {
+                    // ⛔ a body WELDED TO THE WORLD is reported as exactly zero by MuJoCo, not as the
+                    // +9.81 its own recursion would give — the static bodies are outside the acceleration
+                    // tree. Comparing them would assert a convention, not a dynamic.
+                    let Some((j, iso)) = t.body_frames.get(name) else { continue };
+                    let (jnt, iso) = (Some(*j), *iso);
+                    let world = match jnt {
+                        Some(j) => frames_for_acc[j] * iso,
+                        None => iso,
+                    };
+                    let p = world.translation.vector;
+                    let jl = ferromotion_core::tree_point_jacobian(joints, parent, &frames_for_acc, jnt, p);
+                    let ja = ferromotion_core::tree_angular_jacobian(joints, parent, &frames_for_acc, jnt);
+                    // MuJoCo reports PROPER acceleration: the world's own frame carries −gravity, so a body
+                    // bolted to it reads +9.81 upward rather than zero
+                    let lin = &jl * &a0 - o.gravity;
+                    let ang = &ja * &a0;
+                    for k in 0..3 {
+                        for (mine, theirs, what) in [(ang[k], s.bodyacc[6 * b + k], "ang"), (lin[k], s.bodyacc[6 * b + 3 + k], "lin")] {
+                            let e = (mine - theirs).abs() / theirs.abs().max(1.0);
+                            if e > worst {
+                                worst = e;
+                                worst_body = format!("{name} {what}[{k}] {mine} vs {theirs}");
+                            }
+                        }
+                    }
+                    if std::env::var("DUMP_ACC").is_ok() && b < 4 {
+                        println!("    ours ang {:?} lin {:?}", ang.as_slice(), lin.as_slice());
+                    }
+                }
+                if std::env::var("DUMP_ACC").is_ok() {
+                    println!("ACC {} state:", o.rel);
+                    for (b, name) in o.bodies.iter().enumerate().take(4) {
+                        println!("  {name}: MuJoCo {:?}", &s.bodyacc[6 * b..6 * b + 6]);
+                    }
+                }
+                acc_tried += 1;
+                if worst < 1e-6 {
+                    acc_ok += 1;
+                } else if notes.len() < 12 {
+                    notes.push(format!("{}: body acceleration off {worst:.2e}{} — {worst_body}", o.rel, if elementwise { "" } else { " (free/ball base)" }));
+                }
+                worst_acc = worst_acc.max(worst);
+            }
+            if !elementwise {
+                // ⛔ and only AT REST. The oracle's `qvel` is in MuJoCo's basis, so feeding it to this tree
+                // as if it were ours is wrong for the base's six — and at speed those six feed Coriolis
+                // terms into every chain dof. A resting state has no such coupling to get wrong.
+                if !s.qvel.iter().all(|v| *v == 0.0) {
+                    *skip.entry("a free or ball joint MOVING: its velocity is in a different basis too").or_default() += 1;
+                    continue;
+                }
+                if rotational_armature {
+                    *skip.entry("armature on a free or ball joint: a diagonal in MuJoCo's basis is not one in ours").or_default() += 1;
+                    continue;
+                }
+                // the chain's own dofs, entry by entry, even though the base's six are not comparable
+                let dq = shared.iter().map(|&i| (a0[i] - s.qacc_smooth[i]).abs() / s.qacc_smooth[i].abs().max(1.0)).fold(0.0, f64::max);
+                let db = shared.iter().map(|&i| (bias[i] - s.qfrc_bias[i]).abs() / s.qfrc_bias[i].abs().max(1.0)).fold(0.0, f64::max);
+                chain_tried += 1;
+                if dq < 1e-6 {
+                    chain_ok += 1;
+                } else if notes.len() < 12 {
+                    notes.push(format!("{}: chain qacc_smooth off {dq:.2e} (chain bias off {db:.2e})", o.rel));
+                }
+                worst_chain = worst_chain.max(dq);
+                worst_chain_bias = worst_chain_bias.max(db);
+                *skip.entry("a free or ball joint: the base's six coordinates are in a different basis").or_default() += 1;
+                continue;
+            }
             let ds = rel(a0.as_slice(), &s.qacc_smooth);
             // ⭐ separate "our M is wrong" from "inverting M lost digits": put MuJoCo's own answer back
             // through OUR mass matrix. A residual near zero means the matrix agrees and only the solve drifted
@@ -321,6 +434,8 @@ fn main() {
     println!("    and MuJoCo's own qacc_smooth back through OUR mass matrix: worst residual {worst_resid:.2e} on {worst_resid_where}");
     println!("  CONSTRAINED (contacts found and solved by us): {solved_ok} of {solved} within 1e-6; worst qacc (relative) {worst_qacc:.2e} on {worst_qacc_where}");
     println!("    worst qfrc_passive on the states it blocked: {worst_passive:.2e}");
+    println!("  BODY ACCELERATIONS in the world frame, at rest — basis-free, so a free or ball base is included: {acc_ok} of {acc_tried} within 1e-6; worst {worst_acc:.2e}");
+    println!("  CHAIN dofs of a free- or ball-based model, entry by entry: {chain_ok} of {chain_tried} within 1e-6; worst qacc_smooth {worst_chain:.2e}, worst qfrc_bias {worst_chain_bias:.2e}");
     println!("  not compared, by what blocks it:");
     let mut by: Vec<_> = skip.iter().collect();
     by.sort_by_key(|(_, v)| std::cmp::Reverse(**v));

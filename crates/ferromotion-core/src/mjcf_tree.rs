@@ -143,6 +143,9 @@ pub struct MjcfJoint {
     /// `solreffriction` and `solimpfriction`: what a dof-friction row is built from.
     pub solref_friction: [f64; 2],
     pub solimp_friction: [f64; 5],
+    /// `armature`, the constant this joint adds to the mass matrix's diagonal. ⚠ On a free or ball joint it
+    /// matches MuJoCo only on the translations — see the note where the joints are built.
+    pub armature: f64,
     /// A SLIDE joint whose anchor is at the body frame's origin and whose axis is a coordinate axis — one of
     /// the conditions for MuJoCo's "simple body" shortcut in [`MjcfTree::dof_invweight0`].
     pub aligned_slide: bool,
@@ -1653,19 +1656,36 @@ impl Walk<'_> {
                     }
                     push(joint);
                 }
+                // ⛔ ARMATURE APPLIES TO EVERY DOF OF A MULTI-DOF JOINT, not only to hinges and slides:
+                // MuJoCo writes it into all six of a free joint's `dof_armature`, and ten Menagerie models
+                // set it there. Dropping it left the base six mass-matrix entries short.
+                //
+                // ⚠ It can only be made to match on the THREE TRANSLATIONS. Armature is a constant added to
+                // the mass matrix's diagonal, and a diagonal is only a diagonal in one basis: MuJoCo's three
+                // body-frame angular velocities are not these three Euler-rate hinges, so the same number
+                // builds a different matrix on the rotations. That is a property of the coordinates, not of
+                // the recursion, and only a base in MuJoCo's own coordinates removes it.
                 MjcfJointKind::Ball => {
                     let origin = pre * Iso::from_parts(Translation3::from(anchor), UnitQuaternion::identity());
-                    push(Joint::revolute(origin, Vector3::z()));
-                    push(Joint::revolute(Iso::identity(), Vector3::y()));
-                    push(Joint::revolute(Iso::identity(), Vector3::x()));
+                    let arm = |j: Joint| match armature {
+                        Some(a) => j.with_armature(a),
+                        None => j,
+                    };
+                    push(arm(Joint::revolute(origin, Vector3::z())));
+                    push(arm(Joint::revolute(Iso::identity(), Vector3::y())));
+                    push(arm(Joint::revolute(Iso::identity(), Vector3::x())));
                 }
                 MjcfJointKind::Free => {
-                    push(Joint::prismatic(Iso::identity(), Vector3::x()));
-                    push(Joint::prismatic(Iso::identity(), Vector3::y()));
-                    push(Joint::prismatic(Iso::identity(), Vector3::z()));
-                    push(Joint::revolute(Iso::identity(), Vector3::z()));
-                    push(Joint::revolute(Iso::identity(), Vector3::y()));
-                    push(Joint::revolute(Iso::identity(), Vector3::x()));
+                    let arm = |j: Joint| match armature {
+                        Some(a) => j.with_armature(a),
+                        None => j,
+                    };
+                    push(arm(Joint::prismatic(Iso::identity(), Vector3::x())));
+                    push(arm(Joint::prismatic(Iso::identity(), Vector3::y())));
+                    push(arm(Joint::prismatic(Iso::identity(), Vector3::z())));
+                    push(arm(Joint::revolute(Iso::identity(), Vector3::z())));
+                    push(arm(Joint::revolute(Iso::identity(), Vector3::y())));
+                    push(arm(Joint::revolute(Iso::identity(), Vector3::x())));
                 }
             }
             self.out.tree.joint_names.insert(jname.clone(), first);
@@ -1686,6 +1706,7 @@ impl Walk<'_> {
                 solimp_limit: five(get("solimplimit"), [0.9, 0.95, 0.001, 0.5, 2.0])?,
                 solref_friction: pair(get("solreffriction"), [0.02, 1.0])?,
                 solimp_friction: five(get("solimpfriction"), [0.9, 0.95, 0.001, 0.5, 2.0])?,
+                armature: armature.unwrap_or(0.0),
                 aligned_slide: kind == MjcfJointKind::Slide
                     && anchor.norm() == 0.0
                     && axis.iter().filter(|x| x.abs() > f64::EPSILON).count() == 1,
@@ -2821,6 +2842,32 @@ mod tests {
         let g = t.geoms.iter().find(|g| g.name == "g").expect("the geom");
         assert_eq!(g.size, [0.009, 0.02, 0.01875], "size");
         assert_eq!(g.params.friction, [2.0, 0.02, 0.03], "friction");
+    }
+
+    /// ⛔ **Armature applies to EVERY dof of a multi-dof joint.** MuJoCo writes it into all six of a free
+    /// joint's `dof_armature`; dropping it left the base's six mass-matrix entries short, which showed up
+    /// nowhere in `qfrc_bias` and only in the accelerations.
+    ///
+    /// ⚠ It can only be made to AGREE on the three translations. Armature is a constant on the mass
+    /// matrix's diagonal, and a diagonal belongs to a basis: MuJoCo's three body-frame angular velocities
+    /// are not these three Euler-rate hinges. Ten Menagerie models set it there and they are exactly the ten
+    /// whose chain accelerations disagree.
+    #[test]
+    fn armature_reaches_every_dof_of_a_free_joint() {
+        let xml = r#"<mujoco><compiler angle="radian"/><worldbody><body name="b">
+            <freejoint name="root"/>
+            <inertial mass="1" pos="0 0 0" diaginertia="0.1 0.1 0.1"/>
+            <geom name="g" type="sphere" size="0.05"/>
+        </body></worldbody></mujoco>"#;
+        let plain = tree_from_mjcf_str(xml).expect("loads");
+        assert!(plain.tree.joints.iter().all(|j| j.armature.is_none()));
+        let with_arm = tree_from_mjcf_str(&xml.replace("<freejoint name=\"root\"/>", "<joint name=\"root\" type=\"free\" armature=\"0.01\"/>")).expect("loads");
+        assert_eq!(with_arm.tree.joints.len(), 6);
+        assert!(with_arm.tree.joints.iter().all(|j| j.armature == Some(0.01)), "armature reached only some of the six");
+        assert_eq!(with_arm.joints[0].armature, 0.01);
+        // and it lands on the mass matrix: a unit sphere's translational inertia goes from 1 to 1.01
+        let m = crate::tree_dynamics::tree_mass_matrix(&with_arm.tree.joints, &with_arm.tree.inertia, &with_arm.tree.parent, &[0.0; 6]);
+        assert!((m[(0, 0)] - 1.01).abs() < 1e-12, "{}", m[(0, 0)]);
     }
 
     /// ⛔ A limit produces a row per SIDE and only when that side is within `margin`, so a joint whose range
