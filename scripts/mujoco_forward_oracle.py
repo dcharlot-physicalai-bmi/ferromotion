@@ -43,6 +43,10 @@ for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
                     a = int(m.jnt_qposadr[j])
                     lo, hi = m.jnt_range[j] if m.jnt_limited[j] else (-0.5, 0.5)
                     d.qpos[a] = rng.uniform(lo, hi)
+            # ⛔ a state at rest cannot tell a velocity-dependent term from a missing one: damping and
+            # joint friction are both zero at qvel = 0, so sample the last state MOVING
+            if k > 1:
+                d.qvel[:] = rng.uniform(-0.4, 0.4, m.nv)
         mujoco.mj_forward(m, d)
         # which constraint rows are contacts: anything else needs machinery this port does not claim
         CT = {int(v): k.replace("mjCNSTR_", "").lower() for k, v in mujoco.mjtConstraint.__members__.items()}
@@ -58,7 +62,7 @@ for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
             ",".join(str(x) for x in dims) or "-",
             ";".join(f"{k}={v}" for k, v in sorted(hist.items())) or "-",
         ]))
-        for tag, v in (("qpos", d.qpos), ("qvel", d.qvel), ("qfrc_bias", d.qfrc_bias), ("qacc_smooth", d.qacc_smooth), ("qacc", d.qacc)):
+        for tag, v in (("qpos", d.qpos), ("qvel", d.qvel), ("qfrc_bias", d.qfrc_bias), ("qfrc_passive", d.qfrc_passive), ("qacc_smooth", d.qacc_smooth), ("qacc", d.qacc)):
             lines.append("\t".join([tag] + [repr(float(x)) for x in v]))
 with open(out, "w") as fh:
     fh.write("\n".join(lines) + "\n")

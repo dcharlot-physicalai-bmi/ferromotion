@@ -126,9 +126,52 @@ pub struct MjcfJoint {
     /// `actuatorfrcrange` when the joint limits it: the cap on the TOTAL actuator force this degree of
     /// freedom will pass, applied after every actuator driving it has been summed.
     pub actuator_force_range: Option<(f64, f64)>,
+    /// ⛔ `damping` and `frictionloss` are NOT actuator terms in MuJoCo and are deliberately not folded into
+    /// the tree's [`crate::Joint`]: damping is a PASSIVE force (`qfrc_passive`) and frictionloss is a
+    /// CONSTRAINT row, neither of which belongs in `qfrc_bias`. Folding them in leaves the bias wrong the
+    /// moment the model moves — 2.0e-1 on Menagerie — while every state sampled at rest agrees exactly.
+    pub damping: f64,
+    pub frictionloss: f64,
+    /// `stiffness` and `springref`: the joint's spring, also a passive force. `springref` is in `qpos` units
+    /// and defaults to `qpos0`, which is `q = 0` here.
+    pub stiffness: f64,
+    pub springref: f64,
+    /// `margin`, `solreflimit` and `solimplimit`: what a limit row is built from.
+    pub margin: f64,
+    pub solref_limit: [f64; 2],
+    pub solimp_limit: [f64; 5],
+    /// `solreffriction` and `solimpfriction`: what a dof-friction row is built from.
+    pub solref_friction: [f64; 2],
+    pub solimp_friction: [f64; 5],
 }
 
 impl MjcfTree {
+    /// **`qfrc_passive`**: the forces a MuJoCo model exerts without being asked — joint damping and joint
+    /// springs.
+    ///
+    /// ⛔ These are NOT part of `qfrc_bias`. MuJoCo's bias is the rigid-body recursion alone; damping and
+    /// springs are added separately, and a port that folds damping into the recursion's actuator terms is
+    /// exactly right at rest and wrong the moment the model moves.
+    ///
+    /// ⚠ Short of `gravcomp` and of tendon and fluid forces, which this loader does not carry. Nine
+    /// Menagerie files set `gravcomp`; on those the result is missing that term.
+    pub fn qfrc_passive(&self, q: &[f64], qd: &[f64]) -> Vec<f64> {
+        let mut out = vec![0.0; self.tree.joints.len()];
+        for j in &self.joints {
+            if !matches!(j.kind, MjcfJointKind::Hinge | MjcfJointKind::Slide) {
+                continue;
+            }
+            let i = j.first;
+            out[i] -= j.damping * qd[i];
+            if j.stiffness != 0.0 {
+                // `springref` is in `qpos`, and this tree's `q` is `qpos` because `ref` is folded into the
+                // joint's origin — so the rest position is `springref` with no further shift
+                out[i] -= j.stiffness * (q[i] - j.springref);
+            }
+        }
+        out
+    }
+
     /// One entry per degree of freedom: the joint's cap on the total actuator force through it, for
     /// [`crate::qfrc_actuator`]. `None` where the joint does not limit it.
     pub fn dof_actuator_force_range(&self) -> Vec<Option<[f64; 2]>> {
@@ -1362,6 +1405,25 @@ impl Walk<'_> {
             let first = self.out.tree.joints.len();
             let parse = |s: Option<String>| s.and_then(|v| v.trim().parse::<f64>().ok());
             let (armature, damping, frictionloss) = (parse(get("armature")), parse(get("damping")), parse(get("frictionloss")));
+            // a fixed-length numeric attribute, filled from the left and defaulted for what is missing
+            let pair = |v: Option<String>, d: [f64; 2]| -> Result<[f64; 2], String> {
+                let mut out = d;
+                if let Some(t) = v {
+                    for (i, x) in floats(&t)?.iter().take(2).enumerate() {
+                        out[i] = *x;
+                    }
+                }
+                Ok(out)
+            };
+            let five = |v: Option<String>, d: [f64; 5]| -> Result<[f64; 5], String> {
+                let mut out = d;
+                if let Some(t) = v {
+                    for (i, x) in floats(&t)?.iter().take(5).enumerate() {
+                        out[i] = *x;
+                    }
+                }
+                Ok(out)
+            };
             let limits = {
                 let limited = get("limited");
                 let range = get("range");
@@ -1426,12 +1488,6 @@ impl Walk<'_> {
                     if let Some(a) = armature {
                         joint = joint.with_armature(a);
                     }
-                    if let Some(d) = damping {
-                        joint = joint.with_damping(d);
-                    }
-                    if let Some(f) = frictionloss {
-                        joint = joint.with_friction(f);
-                    }
                     push(joint);
                 }
                 MjcfJointKind::Ball => {
@@ -1450,7 +1506,24 @@ impl Walk<'_> {
                 }
             }
             self.out.tree.joint_names.insert(jname.clone(), first);
-            self.out.joints.push(MjcfJoint { name: jname, kind, body: name.clone(), first, reference, range: limits, actuator_force_range: actfrc });
+            self.out.joints.push(MjcfJoint {
+                name: jname,
+                kind,
+                body: name.clone(),
+                first,
+                reference,
+                range: limits,
+                actuator_force_range: actfrc,
+                damping: damping.unwrap_or(0.0),
+                frictionloss: frictionloss.unwrap_or(0.0),
+                stiffness: parse(get("stiffness")).unwrap_or(0.0),
+                springref: parse(get("springref")).unwrap_or(0.0) * angle_scale,
+                margin: parse(get("margin")).unwrap_or(0.0) * angle_scale,
+                solref_limit: pair(get("solreflimit"), [0.02, 1.0])?,
+                solimp_limit: five(get("solimplimit"), [0.9, 0.95, 0.001, 0.5, 2.0])?,
+                solref_friction: pair(get("solreffriction"), [0.02, 1.0])?,
+                solimp_friction: five(get("solimpfriction"), [0.9, 0.95, 0.001, 0.5, 2.0])?,
+            });
             // after the motion, the body frame sits at −anchor from the joint's frame
             pre = Iso::from_parts(Translation3::from(-anchor), UnitQuaternion::identity());
         }
@@ -2358,7 +2431,10 @@ mod tests {
         assert_eq!(t.tree.joints[1].limits, Some((-1.0, 1.0)));
         assert_eq!(t.tree.joints[4].limits, None);
         // and damping from main reached every joint
-        assert!(t.tree.joints.iter().all(|j| j.damping == Some(1.0)));
+        // ⛔ on `MjcfJoint`, not on the tree's `Joint`: MuJoCo's damping is a passive force, not an
+        // actuator term, and folding it into the tree would put it in `qfrc_bias` where MuJoCo has none
+        assert!(t.joints.iter().all(|j| j.damping == 1.0));
+        assert!(t.tree.joints.iter().all(|j| j.damping.is_none()));
     }
 
     #[test]
@@ -2496,6 +2572,35 @@ mod tests {
         let g = t.geoms.iter().find(|g| g.name == "g").expect("the geom");
         assert_eq!(g.size, [0.009, 0.02, 0.01875], "size");
         assert_eq!(g.params.friction, [2.0, 0.02, 0.03], "friction");
+    }
+
+    /// ⛔⛔ **MuJoCo's `damping` and `frictionloss` are not actuator terms**: damping is a passive force and
+    /// frictionloss is a constraint row, and neither belongs in `qfrc_bias`. Folding them into the tree's
+    /// `Joint` — where this crate's own convention puts them — is exactly right at rest and wrong the moment
+    /// the model moves.
+    ///
+    /// ⚠ That is why it survived: every state the sweeps sampled had `qvel = 0`, and both terms are zero
+    /// there. A state at rest cannot tell a velocity-dependent term from a missing one.
+    #[test]
+    fn damping_and_frictionloss_stay_out_of_the_bias_and_show_up_where_mujoco_puts_them() {
+        // ⛔ `angle="radian"`, because `springref` is an ANGLE and is converted while `stiffness` is a
+        // torque per radian and is not — in the default degree mode the two are in different units
+        let xml = r#"<mujoco><compiler angle="radian"/><worldbody><body name="b" pos="0 0 1">
+            <joint name="j" type="hinge" axis="0 1 0" damping="3" frictionloss="0.7" stiffness="5" springref="0.2"/>
+            <inertial mass="2" pos="0 0 -0.5" diaginertia="0.1 0.1 0.1"/>
+            <geom name="g" type="sphere" size="0.05"/>
+        </body></worldbody></mujoco>"#;
+        let t = tree_from_mjcf_str(xml).expect("loads");
+        assert_eq!(t.tree.joints[0].damping, None, "damping must not become an actuator term");
+        assert_eq!(t.tree.joints[0].friction, None, "frictionloss must not become an actuator term");
+        assert_eq!((t.joints[0].damping, t.joints[0].frictionloss), (3.0, 0.7));
+        // the bias at speed is the rigid-body recursion alone, so it is unchanged by either
+        let bias = |q: f64, qd: f64| crate::tree_inverse_dynamics(&t.tree.joints, &t.tree.inertia, &t.tree.parent, &[q], &[qd], &[0.0], Vector3::new(0.0, 0.0, -9.81))[0];
+        assert!((bias(0.3, 2.0) - bias(0.3, -2.0)).abs() < 1e-12, "the bias depends on the SIGN of the velocity, so a friction term is in it");
+        // and the passive force is damping plus the spring, about `springref` and not about zero
+        let p = t.qfrc_passive(&[0.5], &[2.0]);
+        assert!((p[0] - (-3.0 * 2.0 - 5.0 * (0.5 - 0.2))).abs() < 1e-12, "{p:?}");
+        assert!((t.qfrc_passive(&[0.2], &[0.0])[0]).abs() < 1e-15, "at the spring's rest position and at rest there is no passive force");
     }
 
     /// ⛔ **A `fullinertia` is not stored, its EIGENDECOMPOSITION is.** `mjCBody::Compile` diagonalises with

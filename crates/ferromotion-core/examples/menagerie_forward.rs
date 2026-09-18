@@ -26,10 +26,11 @@ struct OState {
     nefc: usize,
     ncontact: usize,
     ncon: usize,
-    passive: f64,
     dims: Vec<usize>,
     qpos: Vec<f64>,
+    qvel: Vec<f64>,
     qfrc_bias: Vec<f64>,
+    qfrc_passive: Vec<f64>,
     qacc_smooth: Vec<f64>,
     qacc: Vec<f64>,
 }
@@ -68,16 +69,17 @@ fn main() {
                 nefc: t[2].parse().unwrap(),
                 ncontact: t[3].parse().unwrap(),
                 ncon: t[4].parse().unwrap(),
-                passive: f(t[6]),
                 dims: if t[7] == "-" { Vec::new() } else { t[7].split(',').map(|x| x.parse().unwrap()).collect() },
                 ..Default::default()
             }),
-            "qpos" | "qfrc_bias" | "qacc_smooth" | "qacc" | "qvel" => {
+            "qpos" | "qfrc_bias" | "qfrc_passive" | "qacc_smooth" | "qacc" | "qvel" => {
                 let v: Vec<f64> = t[1..].iter().map(|x| f(x)).collect();
                 let s = models.last_mut().unwrap().states.last_mut().unwrap();
                 match t[0] {
                     "qpos" => s.qpos = v,
+                    "qvel" => s.qvel = v,
                     "qfrc_bias" => s.qfrc_bias = v,
+                    "qfrc_passive" => s.qfrc_passive = v,
                     "qacc_smooth" => s.qacc_smooth = v,
                     "qacc" => s.qacc = v,
                     _ => {}
@@ -90,7 +92,7 @@ fn main() {
     let mut skip: BTreeMap<&'static str, usize> = BTreeMap::new();
     let (mut states, mut smooth_ok, mut smooth_tried, mut solved, mut solved_ok) = (0usize, 0usize, 0usize, 0usize, 0usize);
     let (mut worst_smooth_where, mut worst_qacc_where, mut worst_resid_where) = (String::new(), String::new(), String::new());
-    let (mut worst_bias, mut worst_smooth, mut worst_qacc, mut worst_resid) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    let (mut worst_bias, mut worst_smooth, mut worst_qacc, mut worst_resid, mut worst_passive) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
     let mut notes: Vec<String> = Vec::new();
     for o in &models {
         if filter.as_ref().is_some_and(|fl| !o.rel.contains(fl.as_str())) {
@@ -127,17 +129,13 @@ fn main() {
                 *skip.entry("an actuator this port does not carry (muscle, tendon, adhesion, plugin)").or_default() += 1;
                 continue;
             }
-            if s.passive != 0.0 {
-                *skip.entry("a passive force (joint spring, damping, fluid)").or_default() += 1;
-                continue;
-            }
             let Ok(q) = t.q_from_qpos(&s.qpos, &qposadr) else {
                 *skip.entry("qpos does not map onto our coordinates").or_default() += 1;
                 continue;
             };
             // --- the smooth half: mass matrix, bias, and the acceleration with no constraints
             let m = tree_mass_matrix(joints, inertia, parent, &q);
-            let bias = tree_inverse_dynamics(joints, inertia, parent, &q, &vec![0.0; nv], &vec![0.0; nv], o.gravity);
+            let bias = tree_inverse_dynamics(joints, inertia, parent, &q, &s.qvel, &vec![0.0; nv], o.gravity);
             let db = bias.iter().zip(&s.qfrc_bias).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
             worst_bias = worst_bias.max(db);
             if std::env::var("DUMP_M").is_ok() {
@@ -148,12 +146,22 @@ fn main() {
             }
             // the oracle samples with `ctrl = 0`; a position servo still pushes, because its bias is the
             // servo law and the model is not at its setpoint
-            let act = ferromotion_core::qfrc_actuator(&t.actuators, &q, &vec![0.0; nv], &vec![0.0; t.actuators.len()], &t.dof_actuator_force_range());
+            // ⛔ compare `qfrc_passive` ITSELF before letting it into the acceleration. This port carries
+            // joint damping and joint springs and nothing else — no gravcomp, no tendon or fluid force — so
+            // a model that uses one of those must be counted as not carried, not reported as a wrong answer.
+            let passive = t.qfrc_passive(&q, &s.qvel);
+            let dp = (0..nv).map(|i| (passive[i] - s.qfrc_passive[i]).abs()).fold(0.0, f64::max);
+            if dp > 1e-9 * (0..nv).map(|i| s.qfrc_passive[i].abs()).fold(1.0, f64::max) {
+                *skip.entry("a passive force this port does not carry (gravcomp, tendon, fluid)").or_default() += 1;
+                worst_passive = worst_passive.max(dp);
+                continue;
+            }
+            let act = ferromotion_core::qfrc_actuator(&t.actuators, &q, &s.qvel, &vec![0.0; t.actuators.len()], &t.dof_actuator_force_range());
             let Some(minv) = m.clone().try_inverse() else {
                 *skip.entry("singular mass matrix").or_default() += 1;
                 continue;
             };
-            let a0 = &minv * DVector::from_iterator(nv, (0..nv).map(|i| act[i] - bias[i]));
+            let a0 = &minv * DVector::from_iterator(nv, (0..nv).map(|i| passive[i] + act[i] - bias[i]));
             // ⛔ RELATIVE, against the magnitude of the answer. A joint with a stiff servo accelerates at
             // hundreds of rad/s², so an absolute 1e-6 is a tolerance on the eighth significant digit for one
             // model and on the second for another — the same number meaning two different claims.
@@ -162,8 +170,8 @@ fn main() {
             // ⭐ separate "our M is wrong" from "inverting M lost digits": put MuJoCo's own answer back
             // through OUR mass matrix. A residual near zero means the matrix agrees and only the solve drifted
             let resid = {
-                let r = &m * DVector::from_row_slice(&s.qacc_smooth) - DVector::from_iterator(nv, (0..nv).map(|i| act[i] - bias[i]));
-                let scale = (0..nv).map(|i| (act[i] - bias[i]).abs()).fold(1.0, f64::max);
+                let r = &m * DVector::from_row_slice(&s.qacc_smooth) - DVector::from_iterator(nv, (0..nv).map(|i| passive[i] + act[i] - bias[i]));
+                let scale = (0..nv).map(|i| (passive[i] + act[i] - bias[i]).abs()).fold(1.0, f64::max);
                 r.amax() / scale
             };
             if resid > worst_resid {
@@ -284,7 +292,7 @@ fn main() {
                 continue;
             }
             solved += 1;
-            let qvel = DVector::zeros(nv);
+            let qvel = DVector::from_row_slice(&s.qvel);
             let iters: usize = std::env::var("PGS_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(4000);
             match ferromotion_core::solve_contacts_mujoco(&m, &a0, &qvel, &contacts, true, 1.0, 1e-12, iters) {
                 Ok(sol) => {
@@ -312,6 +320,7 @@ fn main() {
     println!("  SMOOTH (mass matrix, bias, actuators, unconstrained acceleration — all from the file): {smooth_ok} of {smooth_tried} within 1e-6; worst qfrc_bias {worst_bias:.2e}, worst qacc_smooth (relative) {worst_smooth:.2e} on {worst_smooth_where}");
     println!("    and MuJoCo's own qacc_smooth back through OUR mass matrix: worst residual {worst_resid:.2e} on {worst_resid_where}");
     println!("  CONSTRAINED (contacts found and solved by us): {solved_ok} of {solved} within 1e-6; worst qacc (relative) {worst_qacc:.2e} on {worst_qacc_where}");
+    println!("    worst qfrc_passive on the states it blocked: {worst_passive:.2e}");
     println!("  not compared, by what blocks it:");
     let mut by: Vec<_> = skip.iter().collect();
     by.sort_by_key(|(_, v)| std::cmp::Reverse(**v));
