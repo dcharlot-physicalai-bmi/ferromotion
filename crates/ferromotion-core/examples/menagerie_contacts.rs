@@ -232,6 +232,8 @@ struct Tally {
     /// ⭐ pairs whose MANIFOLD agrees — same deepest penetration and same normal — at 1e-9 and at 1e-6.
     /// This is the quantity the solver actually integrates; which corner of a clipped polygon each witness
     /// landed on is a different question, and reporting only the contact-by-contact match conflates them.
+    /// how far our nearest contact on the same pair was, for the ones that did not match
+    miss_dist: BTreeMap<&'static str, usize>,
     pair_manifold_tight: usize,
     pair_manifold_loose: usize,
     /// worst disagreement, over pairs both found, in the deepest penetration and its normal
@@ -580,6 +582,22 @@ fn main() {
                     _ => {
                         tally.missing += 1;
                         bt.missing += 1;
+                        // ⭐ how far away OUR nearest contact of the same pair is. A miss at a tenth of a
+                        // millimetre is a witness on the wrong corner of the right face; a miss at a
+                        // centimetre is the wrong face. The totals cannot tell those apart, and they need
+                        // completely different work.
+                        let mag = best.map(|(_, d)| d).unwrap_or(f64::INFINITY);
+                        let bucket = match mag {
+                            d if d < 1e-5 => "<10um",
+                            d if d < 1e-4 => "<0.1mm",
+                            d if d < 1e-3 => "<1mm",
+                            d if d < 1e-2 => "<1cm",
+                            d if d.is_finite() => ">=1cm",
+                            _ => "no contact of ours on that pair",
+                        };
+                        for t in [&mut tally, bt] {
+                            *t.miss_dist.entry(bucket).or_default() += 1;
+                        }
                         if model_notes.len() < max_notes {
                             model_notes.push(format!("missing {}–{} ({}): MuJoCo dist {} pos {:?}{}", o.geoms[a].name, o.geoms[b].name, key, oc.dist, oc.pos, best.map(|(k, d)| format!(", nearest of ours {d:.2e} away at dist {}", mine[k].2.dist)).unwrap_or_default()));
                         }
@@ -624,6 +642,9 @@ fn main() {
         grand.pair_both += tally.pair_both;
         grand.pair_count_same += tally.pair_count_same;
         grand.pair_manifold_tight += tally.pair_manifold_tight;
+        for (k, v) in &tally.miss_dist {
+            *grand.miss_dist.entry(k).or_default() += v;
+        }
         grand.pair_manifold_loose += tally.pair_manifold_loose;
         for (k, v) in &tally.counts {
             *grand.counts.entry(*k).or_default() += v;
@@ -668,12 +689,22 @@ fn main() {
         let line: Vec<String> = h.iter().take(10).map(|((t, o), v)| format!("MJ {t}/ours {o}: {v}")).collect();
         println!("  contact-count disagreements: {}", line.join(", "));
     }
+    {
+        let order = ["<10um", "<0.1mm", "<1mm", "<1cm", ">=1cm", "no contact of ours on that pair"];
+        let line: Vec<String> = order.iter().filter_map(|k| grand.miss_dist.get(k).map(|v| format!("{k}: {v}"))).collect();
+        println!("  how far our nearest contact was, for the misses: {}", line.join(", "));
+    }
     println!("by pair type:");
     for (k, t) in &by_type {
         println!(
             "  {:<22} contacts {:>5}/{:<5} near {:>4} | PAIRS both {:>5} onlyMJ {:>4} onlyOurs {:>4} depth {:.1e} normal {:.1e}",
             k, t.matched, t.oracle, t.near, t.pair_both, t.pair_only_mujoco, t.pair_only_ours, t.pair_worst_depth, t.pair_worst_normal
         );
+        if !t.miss_dist.is_empty() {
+            let order = ["<10um", "<0.1mm", "<1mm", "<1cm", ">=1cm", "no contact of ours on that pair"];
+            let line: Vec<String> = order.iter().filter_map(|k| t.miss_dist.get(k).map(|v| format!("{k}: {v}"))).collect();
+            println!("  {:<22} misses by distance: {}", "", line.join(", "));
+        }
         if t.pair_manifold_loose < t.pair_both || t.pair_count_same < t.pair_both {
             println!("  {:<22} manifold agrees on {} of {} pairs at 1e-9, {} at 1e-6", "", t.pair_manifold_tight, t.pair_both, t.pair_manifold_loose);
         }
