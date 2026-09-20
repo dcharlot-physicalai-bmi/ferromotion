@@ -70,8 +70,12 @@ fn main() {
 
     let (mut seen, mut ok) = (0usize, 0usize);
     let (mut worst_j, mut worst_aref, mut worst_d) = (0.0f64, 0.0f64, 0.0f64);
+    let (mut worst_aref_where, mut worst_d_where) = (String::new(), String::new());
     let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut notes: Vec<String> = Vec::new();
+    // ⭐ how close the ones that miss are: a row out by a closed loop's worth of geometry and a row out by
+    // the last digits of a quaternion round trip are not the same finding
+    let mut ladder = [0usize; 4];
     let mut cache: BTreeMap<String, Option<ferromotion_core::MjcfTree>> = BTreeMap::new();
     for c in &cases {
         if filter.as_ref().is_some_and(|fl| !c.rel.contains(fl.as_str())) {
@@ -146,14 +150,36 @@ fn main() {
             dd = dd.max((mine.d[k] - c.d[row]).abs() / c.d[row].abs().max(1.0));
             // and the block must agree with MuJoCo's own type for that row
             let want = c.types[row].as_str();
+            // ⛔ `EfcBlock::Limit` does not say WHICH object is at its limit, and it does not need to: a
+            // tendon limit's Jacobian spans the dofs the tendon names and a joint limit's is a single ∓1,
+            // so the `J` comparison already separates them. Insisting on the label here reported
+            // `toddlerbot`'s two tendon limits as wrong when both the row and its Jacobian were right.
             let got = match mine.blocks[k] {
                 EfcBlock::Equality { .. } => "equality",
                 EfcBlock::Friction { .. } => "friction_dof",
+                EfcBlock::Limit if want == "limit_tendon" => "limit_tendon",
                 EfcBlock::Limit => "limit_joint",
                 EfcBlock::Contact(_) => "contact",
             };
             if want != got && notes.len() < 8 {
-                notes.push(format!("{}: row {k} is {got} here and {want} in MuJoCo", c.rel));
+                // ⭐ the per-type COUNTS, not just the first row that differs: a type mismatch at one
+                // position means one side emitted a row the other did not, and the counts say which
+                let mut mine_n: BTreeMap<&str, usize> = BTreeMap::new();
+                for b in &mine.blocks {
+                    *mine_n
+                        .entry(match b {
+                            EfcBlock::Equality { .. } => "equality",
+                            EfcBlock::Friction { .. } => "friction_dof",
+                            EfcBlock::Limit => "limit",
+                            EfcBlock::Contact(_) => "contact",
+                        })
+                        .or_default() += 1;
+                }
+                let mut their_n: BTreeMap<&str, usize> = BTreeMap::new();
+                for &row in &theirs {
+                    *their_n.entry(c.types[row].as_str()).or_default() += 1;
+                }
+                notes.push(format!("{}: row {k} is {got} here and {want} in MuJoCo — ours {mine_n:?}, MuJoCo's {their_n:?}", c.rel));
             }
             if let EfcBlock::Friction { loss } = mine.blocks[k]
                 && (loss - c.floss[row]).abs() > 1e-12
@@ -163,8 +189,19 @@ fn main() {
             }
         }
         worst_j = worst_j.max(dj);
-        worst_aref = worst_aref.max(da);
-        worst_d = worst_d.max(dd);
+        if da > worst_aref {
+            worst_aref = da;
+            worst_aref_where = c.rel.clone();
+        }
+        if dd > worst_d {
+            worst_d = dd;
+            worst_d_where = c.rel.clone();
+        }
+        for (i, tol) in [1e-9f64, 1e-7, 1e-5, 1e-3].iter().enumerate() {
+            if dj < 1e-12 && da < *tol && dd < *tol {
+                ladder[i] += 1;
+            }
+        }
         if dj < 1e-12 && da < 1e-9 && dd < 1e-9 {
             ok += 1;
         } else if notes.len() < 8 {
@@ -188,6 +225,10 @@ fn main() {
                     if !cols.is_empty() {
                         println!("      row {k} ({}) J differs at {} of {} columns: {}", c.types[row], cols.len(), c.nv, cols.join(", "));
                     }
+                    let (da, dd) = ((mine.aref[k] - c.aref[row]).abs(), (mine.d[k] - c.d[row]).abs());
+                    if da > 1e-9 || dd > 1e-9 {
+                        println!("      row {k} ({}): aref {} vs {} (off {da:.2e}), D {} vs {} (off {dd:.2e})", c.types[row], mine.aref[k], c.aref[row], mine.d[k], c.d[row]);
+                    }
                 }
             }
             for (k, &row) in theirs.iter().enumerate().take(3) {
@@ -197,7 +238,8 @@ fn main() {
     }
     println!("states whose joint rows were assembled and compared: {seen}");
     println!("  every row matching MuJoCo's: {ok}");
-    println!("  worst J {worst_j:.2e}, worst aref (relative) {worst_aref:.2e}, worst D (relative) {worst_d:.2e}");
+    println!("  worst J {worst_j:.2e}, worst aref (relative) {worst_aref:.2e} on {worst_aref_where}, worst D (relative) {worst_d:.2e} on {worst_d_where}");
+    println!("    every row within 1e-9 {}, 1e-7 {}, 1e-5 {}, 1e-3 {} — of {seen}", ladder[0], ladder[1], ladder[2], ladder[3]);
     if !counts.is_empty() {
         println!("  not compared:");
         let mut v: Vec<_> = counts.iter().collect();

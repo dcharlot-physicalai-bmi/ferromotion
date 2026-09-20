@@ -558,7 +558,9 @@ impl MjcfTree {
         let Some(chol) = self.mass_matrix(&self.reference_q).cholesky() else {
             return vec![0.0; self.tendons.len()];
         };
-        self.ten_moment(&vec![0.0; nv])
+        // ⛔ BOTH at the reference pose. Taking the moment at `q = 0` and the mass matrix at `qpos0` is the
+        // kind of half-migration that reads right on a model with no `ref` and wrong on one with.
+        self.ten_moment(&self.reference_q)
             .iter()
             .map(|m| {
                 let mut j = nalgebra::DVector::zeros(nv);
