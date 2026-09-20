@@ -132,7 +132,8 @@ fn main() {
     let (mut chain_ok, mut chain_tried, mut worst_chain, mut worst_chain_bias) = (0usize, 0usize, 0.0f64, 0.0f64);
     let (mut solved_nomesh, mut solved_ok_nomesh, mut worst_qacc_nomesh) = (0usize, 0usize, 0.0f64);
     let (mut framed, mut frame_unpaired, mut tangent_differs) = (0usize, 0usize, 0usize);
-    let (mut worst_con_normal, mut worst_con_tangent, mut worst_con_tangent_where) = (0.0f64, 0.0f64, String::new());
+    let (mut worst_con_normal, mut worst_con_normal_where) = (0.0f64, String::new());
+    let (mut worst_con_tangent, mut worst_con_tangent_where) = (0.0f64, String::new());
     let (mut worst_con_d, mut worst_con_d_where, mut worst_con_aref, mut worst_con_aref_where) = (0.0f64, String::new(), 0.0f64, String::new());
     let (mut reversed_pair, mut con_rows_compared) = (0usize, 0usize);
     // `MJ_CONTACT=frame` rebuilds each contact Jacobian from MuJoCo's own frame, `=all` from its frame,
@@ -503,7 +504,22 @@ fn main() {
             }
             let paired: Option<Vec<(usize, usize)>> = (ours_by_pair.len() == theirs_by_pair.len()
                 && ours_by_pair.iter().all(|(k, v)| theirs_by_pair.get(k).is_some_and(|w| w.len() == v.len())))
-            .then(|| ours_by_pair.iter().flat_map(|(k, mine)| mine.iter().zip(&theirs_by_pair[k]).map(|(a, b)| (*a, *b))).collect());
+            .then(|| {
+                // ⛔ within one geom pair, match by WITNESS POSITION, not by the order the two colliders
+                // happened to emit them. On `stanford_tidybot` the same pad pair produces two contacts and
+                // the two orders are opposite, which read as a factor-two error in `efc_aref` until the
+                // rows were lined up by where the contacts actually are.
+                let mut v: Vec<(usize, usize)> = Vec::new();
+                for (k, mine) in &ours_by_pair {
+                    let mut free: Vec<usize> = theirs_by_pair[k].clone();
+                    for &a in mine {
+                        let p = ourcon[a].2;
+                        let Some((at, _)) = free.iter().enumerate().min_by(|(_, x), (_, y)| (theirs_with_rows[**x].pos - p).norm().total_cmp(&(theirs_with_rows[**y].pos - p).norm())) else { continue };
+                        v.push((a, free.remove(at)));
+                    }
+                }
+                v
+            });
             match &paired {
                 Some(pairs) => {
                     framed += pairs.len();
@@ -511,7 +527,11 @@ fn main() {
                         let (mine, theirs) = (&ourcon[a], theirs_with_rows[b]);
                         // MuJoCo may order the pair the other way round, and then its normal is ours negated
                         let flip = if mine.0 == theirs.g1 { 1.0 } else { -1.0 };
-                        worst_con_normal = worst_con_normal.max((mine.3[0] * flip - theirs.frame[0]).norm());
+                        let dn = (mine.3[0] * flip - theirs.frame[0]).norm();
+                        if dn > worst_con_normal {
+                            worst_con_normal = dn;
+                            worst_con_normal_where = format!("{} geom{}+geom{} (dist {:.3e} vs {:.3e}, witness {:.3e} m apart)", o.rel, theirs.g1, theirs.g2, mine.4, theirs.dist, (mine.2 - theirs.pos).norm());
+                        }
                         // the tangent pair spans a plane; what matters is how far it is ROTATED within it
                         let dt = 1.0 - mine.3[1].dot(&theirs.frame[1]).abs();
                         if dt > 1e-9 {
@@ -643,7 +663,7 @@ fn main() {
     println!("  CONSTRAINED (contacts found and solved by us): {solved_ok} of {solved} within 1e-6; worst qacc (relative) {worst_qacc:.2e} on {worst_qacc_where}");
     println!("    of those, with NO mesh geom in any contact: {solved_ok_nomesh} of {solved_nomesh}; worst qacc (relative) {worst_qacc_nomesh:.2e}");
     println!("  CONTACT FRAMES (the tangent pair, not only the normal): {framed} contacts paired with MuJoCo's ({frame_unpaired} states could not be paired by geom)");
-    println!("    worst normal {worst_con_normal:.2e}; tangent pair rotated on {tangent_differs} of them, worst 1-|t·t'| {worst_con_tangent:.2e} on {worst_con_tangent_where}");
+    println!("    worst normal {worst_con_normal:.2e} on {worst_con_normal_where}; tangent pair rotated on {tangent_differs} of them, worst 1-|t·t'| {worst_con_tangent:.2e} on {worst_con_tangent_where}");
     println!("    worst efc_D (relative) {worst_con_d:.2e} on {worst_con_d_where} ({con_rows_compared} contacts compared row by row; {reversed_pair} left out because MuJoCo wrote the geom pair the other way round)");
     println!("    worst efc_aref (relative) {worst_con_aref:.2e} on {worst_con_aref_where}");
     println!("    worst qfrc_passive on the states it blocked: {worst_passive:.2e}");
