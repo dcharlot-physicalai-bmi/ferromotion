@@ -386,6 +386,54 @@ impl MjcfTree {
         Some((m_mj.try_inverse()? * rhs).iter().copied().collect())
     }
 
+    /// **`body_weldid`, `body_dofnum` and the parent's weld, per body** — what MuJoCo's contact filter reads.
+    ///
+    /// A body's WELD body is itself when it has joints, and otherwise the nearest ancestor that has any;
+    /// `0` means welded to the world. Two geoms are not collided when their weld bodies are the same, when
+    /// neither weld has dofs, or when one weld is the other's parent weld.
+    ///
+    /// ⛔⛔ The obvious shortcut — "the tree dof a geom rides on IS its body" — is wrong the moment a body
+    /// has MORE THAN ONE joint: the ride dof's PARENT is then the body's own previous dof, not the parent
+    /// body's, so a child reads as unrelated to its parent and the pair is collided. On
+    /// `hello_robot_stretch` the rubber tips have two joints each and collided with the fingers they hang
+    /// off, which MuJoCo filters out.
+    ///
+    /// Returned as `(weld, parent weld, dofnum of the weld)` keyed by body name, with the same numbering on
+    /// both sides so they can be compared.
+    pub fn body_welds(&self) -> BTreeMap<String, (usize, usize, usize)> {
+        let mut dofs: BTreeMap<&str, usize> = BTreeMap::new();
+        for j in &self.joints {
+            *dofs.entry(j.body.as_str()).or_default() += 1;
+        }
+        // stable ids: 0 is the world, then bodies in name order
+        let ids: BTreeMap<&str, usize> = self.body_parent.keys().enumerate().map(|(i, b)| (b.as_str(), i + 1)).collect();
+        fn weld_of<'a>(mut b: &'a str, dofs: &BTreeMap<&str, usize>, parents: &'a BTreeMap<String, String>) -> &'a str {
+            let mut guard = 0;
+            while dofs.get(b).copied().unwrap_or(0) == 0 {
+                match parents.get(b) {
+                    Some(p) if p != "world" => b = p.as_str(),
+                    _ => return "world",
+                }
+                guard += 1;
+                if guard > 1024 {
+                    return "world";
+                }
+            }
+            b
+        }
+        self.body_parent
+            .keys()
+            .map(|b| {
+                let w = weld_of(b, &dofs, &self.body_parent);
+                let pw = match self.body_parent.get(b) {
+                    Some(p) if p != "world" => weld_of(p.as_str(), &dofs, &self.body_parent),
+                    _ => "world",
+                };
+                (b.clone(), (ids.get(w).copied().unwrap_or(0), ids.get(pw).copied().unwrap_or(0), dofs.get(w).copied().unwrap_or(0)))
+            })
+            .collect()
+    }
+
     /// **`ten_length`** for every tendon. A FIXED tendon is `L = Σ coefₖ·qₖ`; a SPATIAL one is the length
     /// of the path through its sites, `Σ |pᵢ₊₁ − pᵢ|`.
     pub fn ten_length(&self, q: &[f64]) -> Vec<f64> {
@@ -4558,6 +4606,42 @@ mod tests {
         for (i, w) in want.iter().enumerate() {
             assert!((got[i] - w).abs() < 1e-9, "qacc_smooth[{i}] {} vs {w}", got[i]);
         }
+    }
+
+    /// **A body with TWO joints still hangs off its parent.** MuJoCo's contact filter asks whether one
+    /// geom's weld body is the other's PARENT weld; the shortcut "the tree dof a geom rides on is its body"
+    /// answers that with the body's own previous dof the moment a body has more than one joint, and the pair
+    /// is collided when MuJoCo filters it.
+    ///
+    /// On `hello_robot_stretch` the rubber tips have two joints each and collided with the fingers they hang
+    /// off — a contact MuJoCo never produces, in every sampled state.
+    #[test]
+    fn a_body_with_two_joints_is_still_its_parents_child() {
+        let t = tree_from_mjcf_str(
+            r#"<mujoco><compiler angle="radian"/><worldbody>
+<body name="upper"><joint name="a" type="hinge" axis="0 0 1"/><inertial pos="0 0 0" mass="1" diaginertia="0.01 0.01 0.01"/>
+  <geom name="g_upper" type="box" size="0.05 0.05 0.05"/>
+  <body name="tip" pos="0.06 0 0">
+    <joint name="b1" type="slide" axis="1 0 0"/><joint name="b2" type="slide" axis="0 1 0"/>
+    <inertial pos="0 0 0" mass="0.1" diaginertia="0.001 0.001 0.001"/>
+    <geom name="g_tip" type="box" size="0.05 0.05 0.05"/>
+    <body name="cap" pos="0.02 0 0"><inertial pos="0 0 0" mass="0.05" diaginertia="0.0001 0.0001 0.0001"/>
+      <geom name="g_cap" type="sphere" size="0.02"/></body>
+  </body>
+</body></worldbody></mujoco>"#,
+        )
+        .unwrap();
+        let w = t.body_welds();
+        let (upper, tip, cap) = (w["upper"], w["tip"], w["cap"]);
+        assert_eq!(tip.2, 2, "the tip has two dofs of its own");
+        assert_eq!(tip.1, upper.0, "the tip's PARENT weld is the upper body, not the tip's own first dof");
+        assert_eq!(cap.0, tip.0, "a jointless child welds into the body it hangs off");
+        assert_eq!(cap.1, tip.0, "its PARENT weld is the tip, because the tip is the body it hangs off");
+        let f = |a: (usize, usize, usize), b: (usize, usize, usize)| crate::mujoco_collision::filter_body_pair(a.0, a.1, a.2, b.0, b.1, b.2, true);
+        assert!(f(upper, tip), "parent and child by weld");
+        assert!(f(tip, cap), "the same weld body");
+        // ⛔ and a GRANDCHILD is not filtered — MuJoCo looks one weld up, not all the way
+        assert!(!f(upper, cap), "the cap welds into the tip, and the tip's parent is not the cap's business");
     }
 
     /// **The inertia-box fluid model, against MuJoCo's own numbers.** Every coefficient was fitted one term

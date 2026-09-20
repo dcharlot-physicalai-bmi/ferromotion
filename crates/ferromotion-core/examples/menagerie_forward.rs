@@ -191,8 +191,10 @@ fn main() {
         let qposadr: Vec<usize> = o.joints.iter().map(|j| j.2).collect();
         let (joints, parent, inertia) = (&t.tree.joints, &t.tree.parent, &t.tree.inertia);
         let nv = joints.len();
-        // welds, as the contact sweep computes them; with hinges and slides only, a joint IS its body
-        let weld_of = |j: Option<usize>| j.map(|k| k + 1).unwrap_or(0);
+        // ⛔ the welds as MuJoCo computes them, from the BODY tree — not from the tree dof a geom rides on.
+        // A body with two joints has a ride dof whose parent is its own previous dof, and that reads as
+        // unrelated to the body it hangs off.
+        let welds = t.body_welds();
         let excludes: HashSet<(String, String)> = t.contact_excludes.iter().flat_map(|(a, b)| [(a.clone(), b.clone()), (b.clone(), a.clone())]).collect();
         let pairs: HashMap<(String, String), usize> = t.contact_pairs.iter().enumerate().flat_map(|(i, p)| [((p.geom1.clone(), p.geom2.clone()), i), ((p.geom2.clone(), p.geom1.clone()), i)]).collect();
         for s in &o.states {
@@ -425,9 +427,9 @@ fn main() {
                             why.insert(key, "contype/conaffinity".into());
                             continue;
                         }
-                        let (w1, w2) = (weld_of(gi.joint), weld_of(gj.joint));
-                        let pw = |j: Option<usize>| j.map(|k| (parent[k] + 1) as usize).unwrap_or(0);
-                        if filter_body_pair(w1, pw(gi.joint), usize::from(w1 != 0), w2, pw(gj.joint), usize::from(w2 != 0), true) {
+                        let (w1, pw1, n1) = welds.get(&gi.body).copied().unwrap_or((0, 0, 0));
+                        let (w2, pw2, n2) = welds.get(&gj.body).copied().unwrap_or((0, 0, 0));
+                        if filter_body_pair(w1, pw1, n1, w2, pw2, n2, true) {
                             why.insert(key, "the body filter (same weld, both static, or parent and child)".into());
                             continue;
                         }
