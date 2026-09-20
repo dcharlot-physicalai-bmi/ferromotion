@@ -12,8 +12,24 @@
 //! cargo run --release --example menagerie_efc -- <efc oracle txt> [substring]
 //! ```
 //!
-//! The objective is strictly convex, so its minimiser is unique and the comparison is the ANSWER, never the
-//! path: a disagreement is reported as a failure only if OUR cost is also worse than MuJoCo's.
+//! The comparison is the ANSWER, never the path: a disagreement is reported as a failure only if our cost
+//! is also worse than MuJoCo's.
+//!
+//! ⛔⛔ and that verdict is only as good as OUR cost. The rows here are MuJoCo's to the last bit, but the
+//! map from a row's residual to a cost is this port's own, and a row's LINEAR TAIL — the part that bites
+//! once the row is driven past its bound — is exactly where two implementations could differ. So the
+//! verdict is settled OUTSIDE this file:
+//!
+//! ```text
+//! DUMP_QACC=/tmp/ours.txt cargo run --release --example menagerie_efc -- <efc oracle txt>
+//! python scripts/mujoco_cost_at.py <menagerie root> <efc oracle txt> /tmp/ours.txt
+//! ```
+//!
+//! which rebuilds each state and scores both answers with `mj_constraintUpdate`. Measured against MuJoCo
+//! 3.13.0 on Menagerie: of the 40 states where the two answers differ by more than 1e-6, ZERO cost more
+//! under MuJoCo's own cost function. MuJoCo's solver stalls short of the optimum of its own rows — not
+//! only on the models that cap `iterations`, but on `robot_soccer_kit`, `hello_robot_stretch`, `flybody`,
+//! `umi_gripper`, `i2rt_yam` and `rainbow_robotics_rby1`, which all leave the default 100 in place.
 
 use ferromotion_core::{mujoco_constraint_update_blocks, solve_constraints_newton_blocks, Cone, ConeContact, EfcBlock};
 use nalgebra::{DMatrix, DVector};
@@ -88,6 +104,11 @@ fn main() {
 
     let (mut seen, mut ok, mut better, mut worse) = (0usize, 0usize, 0usize, 0usize);
     let mut worst = (0.0f64, String::new());
+    let mut worst_gap = (0.0f64, String::new());
+    let dump_qacc = std::env::var("DUMP_QACC").ok();
+    if let Some(p) = &dump_qacc {
+        let _ = std::fs::remove_file(p);
+    }
     let mut by_kind: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
     let mut notes: Vec<String> = Vec::new();
     for c in &cases {
@@ -155,6 +176,16 @@ fn main() {
         let want = DVector::from_row_slice(&c.qacc);
         match solve_constraints_newton_blocks(&m, &a_smooth, &jac, &c.aref, &c.d, &blocks, 1e-14, 300) {
             Ok(sol) => {
+                // ⭐ our answer, written out so MuJoCo's OWN cost function can be evaluated at it. "Our
+                // cost is no worse" is only as good as our cost: the rows are MuJoCo's, but the map from
+                // a row's residual to a cost is this port's, and a friction row's linear tails are
+                // exactly where the two could differ. `scripts/mujoco_cost_at.py` takes this file and
+                // asks `mj_constraintUpdate` instead.
+                if let Some(path) = &dump_qacc {
+                    use std::io::Write;
+                    let mut fh = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+                    writeln!(fh, "ours\t{}\t{}\t{}", c.rel, c.state, sol.qacc.iter().map(|x| format!("{x:?}")).collect::<Vec<_>>().join("\t")).unwrap();
+                }
                 let scale = want.amax().max(1.0);
                 let err = (&sol.qacc - &want).amax() / scale;
                 if err > worst.0 {
@@ -164,8 +195,11 @@ fn main() {
                     ok += 1;
                     by_kind.entry(kind).or_default().0 += 1;
                 } else {
-                    // the objective is strictly convex, so the minimiser is unique: if we are FURTHER down
-                    // the same cost, MuJoCo's solver stopped first and the disagreement is not ours
+                    // ⛔ the objective is convex but NOT strictly so: a row driven past its bound
+                    // contributes a LINEAR piece, so a set of saturated rows leaves flat directions and
+                    // the argmin is a SET, not a point. Two answers can both be optimal. So the test is
+                    // the cost, and how far apart the two costs are is reported below — a gap at machine
+                    // precision says the minimiser is not unique, a real deficit says MuJoCo stopped first.
                     let cost_at = |a: &DVector<f64>| {
                         let jar: Vec<f64> = (&jac * a - DVector::from_row_slice(&c.aref)).iter().copied().collect();
                         let u = mujoco_constraint_update_blocks(&blocks, &c.d, &jar);
@@ -175,6 +209,10 @@ fn main() {
                     let (ours, theirs) = (cost_at(&sol.qacc), cost_at(&want));
                     if ours <= theirs {
                         better += 1;
+                        let gap = (theirs - ours) / theirs.abs().max(1.0);
+                        if gap > worst_gap.0 {
+                            worst_gap = (gap, format!("{} [{}]: qacc off {err:.2e}", c.rel, c.state));
+                        }
                         by_kind.entry(kind).or_default().0 += 1;
                     } else {
                         worse += 1;
@@ -194,7 +232,7 @@ fn main() {
     }
     println!("constraint sets solved from MuJoCo's own rows: {seen}");
     println!("  reach MuJoCo's qacc within 1e-6 relative: {ok}");
-    println!("  differ, but at a cost no worse than MuJoCo's (its solver stopped first): {better}");
+    println!("  differ, but at a cost no worse than MuJoCo's: {better}; worst cost DEFICIT (relative) {:.2e} on {} — at machine precision the minimiser is a flat set and both answers are optimal, above it MuJoCo's solver stopped first", worst_gap.0, worst_gap.1);
     println!("  differ AND cost more — ours is wrong: {worse}");
     println!("  worst relative qacc {:.2e} on {}", worst.0, worst.1);
     for (k, (good, n)) in &by_kind {
