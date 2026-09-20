@@ -170,11 +170,13 @@ impl MjcfTree {
         // a tendon's spring and damper, carried back through its constant Jacobian. ⛔ `springlength` is a
         // BAND: between its two values the tendon is slack and pulls nothing at all, which a single resting
         // length cannot express and a model that states two values is relying on.
+        let ten = (!self.tendons.is_empty()).then(|| (self.ten_length(q), self.ten_moment(q)));
         for (i, t) in self.tendons.iter().enumerate() {
             if t.stiffness == 0.0 && t.damping == 0.0 {
                 continue;
             }
-            let (len, vel) = (self.ten_length(q)[i], self.ten_velocity(qd)[i]);
+            let (lengths, moments) = ten.as_ref().expect("built whenever there is a tendon");
+            let (len, vel) = (lengths[i], moments[i].iter().map(|(d, c)| c * qd[*d]).sum::<f64>());
             let stretch = if len < t.springlength[0] {
                 len - t.springlength[0]
             } else if len > t.springlength[1] {
@@ -183,7 +185,7 @@ impl MjcfTree {
                 0.0
             };
             let f = -t.stiffness * stretch - t.damping * vel;
-            for (d, c) in &t.joints {
+            for (d, c) in &moments[i] {
                 out[*d] += c * f;
             }
         }
@@ -202,14 +204,74 @@ impl MjcfTree {
         out
     }
 
-    /// **`ten_length`** for every fixed tendon: `L = Σ coefₖ·qₖ`.
+    /// **`ten_length`** for every tendon. A FIXED tendon is `L = Σ coefₖ·qₖ`; a SPATIAL one is the length
+    /// of the path through its sites, `Σ |pᵢ₊₁ − pᵢ|`.
     pub fn ten_length(&self, q: &[f64]) -> Vec<f64> {
-        self.tendons.iter().map(|t| t.joints.iter().map(|(d, c)| c * q[*d]).sum()).collect()
+        let frames = self.tendons.iter().any(|t| matches!(t.path, TendonPath::Spatial(_))).then(|| crate::tree_frames(&self.tree, q));
+        self.tendons
+            .iter()
+            .map(|t| match &t.path {
+                TendonPath::Fixed(j) => j.iter().map(|(d, c)| c * q[*d]).sum(),
+                TendonPath::Spatial(sites) => {
+                    let p = self.site_points(sites, frames.as_ref().expect("frames are built whenever a spatial tendon is present"));
+                    p.windows(2).map(|w| (w[1] - w[0]).norm()).sum()
+                }
+            })
+            .collect()
     }
 
-    /// **`ten_velocity`**: the same combination of `q̇`, because a fixed tendon's Jacobian is constant.
-    pub fn ten_velocity(&self, qd: &[f64]) -> Vec<f64> {
-        self.ten_length(qd)
+    /// **`ten_velocity`**: `J·q̇` with the tendon's Jacobian at this state.
+    pub fn ten_velocity(&self, q: &[f64], qd: &[f64]) -> Vec<f64> {
+        self.ten_moment(q).iter().map(|m| m.iter().map(|(d, c)| c * qd[*d]).sum()).collect()
+    }
+
+    /// **`ten_J`**: each tendon's moment at this state. Constant for a fixed tendon; for a spatial one it is
+    /// `Σ ûᵢᵀ(Jᵢ₊₁ − Jᵢ)` over the path's segments, with `ûᵢ` the unit direction of segment `i`.
+    pub fn ten_moment(&self, q: &[f64]) -> Vec<Vec<(usize, f64)>> {
+        let nv = self.tree.joints.len();
+        let frames = self.tendons.iter().any(|t| matches!(t.path, TendonPath::Spatial(_))).then(|| crate::tree_frames(&self.tree, q));
+        self.tendons
+            .iter()
+            .map(|t| match &t.path {
+                TendonPath::Fixed(j) => j.clone(),
+                TendonPath::Spatial(sites) => {
+                    let frames = frames.as_ref().expect("frames are built whenever a spatial tendon is present");
+                    let p = self.site_points(sites, frames);
+                    let jac: Vec<nalgebra::DMatrix<f64>> = sites
+                        .iter()
+                        .zip(&p)
+                        .map(|(n, pt)| match self.site_frames.get(n) {
+                            Some((ride, _)) => crate::tree_jacobian::tree_point_jacobian(&self.tree.joints, &self.tree.parent, frames, Some(*ride), *pt),
+                            None => nalgebra::DMatrix::zeros(3, nv),
+                        })
+                        .collect();
+                    let mut out = vec![0.0; nv];
+                    for i in 0..p.len() - 1 {
+                        let d = p[i + 1] - p[i];
+                        let n = d.norm();
+                        if n < 1e-15 {
+                            continue;
+                        }
+                        let u = d / n;
+                        for k in 0..nv {
+                            out[k] += (0..3).map(|r| u[r] * (jac[i + 1][(r, k)] - jac[i][(r, k)])).sum::<f64>();
+                        }
+                    }
+                    out.iter().enumerate().filter(|(_, m)| **m != 0.0).map(|(k, m)| (k, *m)).collect()
+                }
+            })
+            .collect()
+    }
+
+    /// The world positions of a path's sites; a site welded to the world is a fixed point.
+    fn site_points(&self, sites: &[String], frames: &[Iso]) -> Vec<Vector3<f64>> {
+        sites
+            .iter()
+            .map(|n| match self.site_frames.get(n) {
+                Some((ride, off)) => (frames[*ride] * off).translation.vector,
+                None => self.world_fixed.get(&format!("site:{n}")).map(|i| i.translation.vector).unwrap_or_else(Vector3::zeros),
+            })
+            .collect()
     }
 
     /// **`tendon_invweight0`**: `J M⁻¹ Jᵀ` at `qpos0` for each fixed tendon's (constant) Jacobian row — the
@@ -221,11 +283,11 @@ impl MjcfTree {
         let Some(chol) = m.cholesky() else {
             return vec![0.0; self.tendons.len()];
         };
-        self.tendons
+        self.ten_moment(&vec![0.0; nv])
             .iter()
-            .map(|t| {
+            .map(|m| {
                 let mut j = nalgebra::DVector::zeros(nv);
-                for (d, c) in &t.joints {
+                for (d, c) in m {
                     j[*d] += c;
                 }
                 j.dot(&chol.solve(&j))
@@ -236,47 +298,67 @@ impl MjcfTree {
     /// **`actuator_moment` for every actuator**, at this state. A joint or fixed-tendon transmission carries
     /// its moment from the file; a SITE transmission's is a wrench in the site's frame and turns with the
     /// model, so it is rebuilt here: `mj_jacSite` at the site, and `gear` rotated into the world.
-    pub fn actuator_moments(&self, q: &[f64]) -> Vec<Vec<(usize, f64)>> {
-        let nv = self.tree.joints.len();
-        if self.actuators.iter().all(|a| a.site.is_none()) {
-            return self.actuators.iter().map(|a| a.moment.clone()).collect();
+    pub fn actuator_state(&self, q: &[f64], qd: &[f64]) -> Vec<crate::mujoco_actuator::ActState> {
+        use crate::mujoco_actuator::ActState;
+        if self.actuators.iter().all(|a| a.dynamic.is_none()) {
+            return self.actuators.iter().map(|a| ActState { moment: a.moment.clone(), length: a.length(q), velocity: a.velocity(qd) }).collect();
         }
-        let _ = nv;
         let frames = crate::tree_frames(&self.tree, q);
-        self.actuators.iter().map(|a| self.moment_of(a, &frames)).collect()
+        // a spatial tendon's length is shared by every actuator that pulls on it, so build it once
+        let ten = self.tendons.iter().any(|t| matches!(t.path, TendonPath::Spatial(_))).then(|| (self.ten_length(q), self.ten_moment(q)));
+        self.actuators.iter().map(|a| self.act_state_of(a, &frames, ten.as_ref(), q, qd)).collect()
     }
 
-    /// One actuator's moment at a state whose frames are already built — the per-actuator half of
-    /// [`MjcfTree::actuator_moments`], so a caller inside a loop does not pay for every other actuator.
-    pub fn actuator_moment_at(&self, a: &crate::mujoco_actuator::Actuator, q: &[f64]) -> Vec<(usize, f64)> {
-        if a.site.is_none() {
-            return a.moment.clone();
+    /// One actuator's transmission at a state — the per-actuator half of [`MjcfTree::actuator_state`], so a
+    /// caller inside a loop does not pay for every other actuator.
+    pub fn actuator_state_at(&self, a: &crate::mujoco_actuator::Actuator, q: &[f64], qd: &[f64]) -> crate::mujoco_actuator::ActState {
+        use crate::mujoco_actuator::ActState;
+        if a.dynamic.is_none() {
+            return ActState { moment: a.moment.clone(), length: a.length(q), velocity: a.velocity(qd) };
         }
-        self.moment_of(a, &crate::tree_frames(&self.tree, q))
+        let frames = crate::tree_frames(&self.tree, q);
+        let ten = matches!(a.dynamic, Some(crate::mujoco_actuator::DynTransmission::SpatialTendon { .. })).then(|| (self.ten_length(q), self.ten_moment(q)));
+        self.act_state_of(a, &frames, ten.as_ref(), q, qd)
     }
 
-    fn moment_of(&self, a: &crate::mujoco_actuator::Actuator, frames: &[Iso]) -> Vec<(usize, f64)> {
+    #[allow(clippy::type_complexity)]
+    fn act_state_of(&self, a: &crate::mujoco_actuator::Actuator, frames: &[Iso], ten: Option<&(Vec<f64>, Vec<Vec<(usize, f64)>>)>, q: &[f64], qd: &[f64]) -> crate::mujoco_actuator::ActState {
+        use crate::mujoco_actuator::{ActState, DynTransmission};
         let nv = self.tree.joints.len();
-        let Some(st) = &a.site else { return a.moment.clone() };
-        // a site welded to the world moves nothing, whatever wrench is applied to it
-        let Some((ride, off)) = self.site_frames.get(&st.site) else { return Vec::new() };
-        let pose = frames[*ride] * off;
-        let rot = pose.rotation.to_rotation_matrix().into_inner();
-        let f = rot * Vector3::new(st.gear[0], st.gear[1], st.gear[2]);
-        let t = rot * Vector3::new(st.gear[3], st.gear[4], st.gear[5]);
-        let jp = crate::tree_jacobian::tree_point_jacobian(&self.tree.joints, &self.tree.parent, frames, Some(*ride), pose.translation.vector);
-        let ja = crate::tree_jacobian::tree_angular_jacobian(&self.tree.joints, &self.tree.parent, frames, Some(*ride));
-        (0..nv)
-            .filter_map(|k| {
-                let m: f64 = (0..3).map(|r| jp[(r, k)] * f[r] + ja[(r, k)] * t[r]).sum();
-                (m != 0.0).then_some((k, m))
-            })
-            .collect()
+        let vel = |m: &[(usize, f64)]| m.iter().map(|(d, c)| c * qd[*d]).sum::<f64>();
+        let moment: Vec<(usize, f64)> = match &a.dynamic {
+            None => return ActState { moment: a.moment.clone(), length: a.length(q), velocity: a.velocity(qd) },
+            Some(DynTransmission::SpatialTendon { index }) => {
+                let (lengths, moments) = ten.expect("tendon lengths are built whenever a spatial transmission is present");
+                let m: Vec<(usize, f64)> = moments[*index].iter().map(|(d, c)| (*d, a.gear * c)).collect();
+                let v = vel(&m);
+                return ActState { moment: m, length: a.gear * lengths[*index], velocity: v };
+            }
+            Some(DynTransmission::Site { site, gear }) => {
+                // a site welded to the world moves nothing, whatever wrench is applied to it
+                let Some((ride, off)) = self.site_frames.get(site) else { return ActState::default() };
+                let pose = frames[*ride] * off;
+                let rot = pose.rotation.to_rotation_matrix().into_inner();
+                let f = rot * Vector3::new(gear[0], gear[1], gear[2]);
+                let t = rot * Vector3::new(gear[3], gear[4], gear[5]);
+                let jp = crate::tree_jacobian::tree_point_jacobian(&self.tree.joints, &self.tree.parent, frames, Some(*ride), pose.translation.vector);
+                let ja = crate::tree_jacobian::tree_angular_jacobian(&self.tree.joints, &self.tree.parent, frames, Some(*ride));
+                (0..nv)
+                    .filter_map(|k| {
+                        let m: f64 = (0..3).map(|r| jp[(r, k)] * f[r] + ja[(r, k)] * t[r]).sum();
+                        (m != 0.0).then_some((k, m))
+                    })
+                    .collect()
+            }
+        };
+        // a site transmission has NO length, whatever the pose; its velocity is the ordinary moment·q̇
+        let velocity = vel(&moment);
+        ActState { moment, length: 0.0, velocity }
     }
 
     /// **`qfrc_actuator`** for this model at this state, with every transmission it carries.
     pub fn qfrc_actuator(&self, q: &[f64], qd: &[f64], ctrl: &[f64]) -> Vec<f64> {
-        crate::mujoco_actuator::qfrc_actuator_with(&self.actuators, &self.actuator_moments(q), q, qd, ctrl, &self.dof_actuator_force_range())
+        crate::mujoco_actuator::qfrc_actuator_with(&self.actuators, &self.actuator_state(q, qd), ctrl, &self.dof_actuator_force_range())
     }
 
     /// **`mj_inertiaBoxFluidModel`**: the ambient medium's drag on every body, from `<option density>`,
@@ -601,6 +683,7 @@ impl MjcfTree {
         if self.tendons.iter().any(|t| t.range.is_some()) {
             let tiw = self.tendon_invweight0();
             let len = self.ten_length(q);
+            let mom = self.ten_moment(q);
             for (i, t) in self.tendons.iter().enumerate() {
                 let Some((lo, hi)) = t.range else { continue };
                 for side in [-1.0f64, 1.0] {
@@ -609,7 +692,7 @@ impl MjcfTree {
                         continue;
                     }
                     let mut jac = vec![0.0; nv];
-                    for (d, c) in &t.joints {
+                    for (d, c) in &mom[i] {
                         jac[*d] -= side * c;
                     }
                     let jvel: f64 = (0..nv).map(|k| jac[k] * qd[k]).sum();
@@ -764,13 +847,22 @@ pub struct MjcfTree {
 /// `L = Σ coefₖ·qₖ`, with a constant Jacobian. MuJoCo uses it for the coupled linkages that a real gripper
 /// has and a kinematic tree does not — two fingers driven by one motor, a telescoping stage, a differential.
 ///
-/// ⛔ A `<spatial>` tendon is a different object: its length is a path through sites and around wrapping
-/// geoms, and it is NOT carried here. Those are named in [`MjcfTree::tendons_unsupported`].
+/// A `<spatial>` tendon is a different object: its length is a PATH, and it moves with the model, so its
+/// Jacobian is not a constant. ⛔ Only a path of sites is carried; a wrapping geom or a pulley is named in
+/// [`MjcfTree::tendons_unsupported`] instead.
+#[derive(Clone, Debug)]
+pub enum TendonPath {
+    /// `<fixed>`: `(tree dof, coefficient)` in file order. The Jacobian row IS these coefficients.
+    Fixed(Vec<(usize, f64)>),
+    /// `<spatial>`: the sites the cable runs through, in order. `L = Σ |pᵢ₊₁ − pᵢ|`, and the moment is
+    /// `Σ ûᵢᵀ(Jᵢ₊₁ − Jᵢ)` — a function of the state, not of the file.
+    Spatial(Vec<String>),
+}
+
 #[derive(Clone, Debug)]
 pub struct MjcfTendon {
     pub name: String,
-    /// `(tree dof, coefficient)`, in file order. The Jacobian row is these coefficients and nothing else.
-    pub joints: Vec<(usize, f64)>,
+    pub path: TendonPath,
     /// `range` when `limited`, in the tendon's own length units — NOT scaled by `<compiler angle>`, because
     /// a tendon length is a length even when every joint it names is a hinge.
     pub range: Option<(f64, f64)>,
@@ -2665,7 +2757,7 @@ fn parse_tendons(root: &El, defaults: &Defaults, c: &Compiler, joints: &[MjcfJoi
     for section in root.children_named("tendon") {
         for el in &section.children {
             let name = el.attr("name").map(|s| s.to_string()).unwrap_or_else(|| format!("tendon{}", out.len() + unsupported.len()));
-            if el.name != "fixed" {
+            if el.name != "fixed" && el.name != "spatial" {
                 unsupported.push((name, format!("<{}>", el.name)));
                 continue;
             }
@@ -2676,6 +2768,21 @@ fn parse_tendons(root: &El, defaults: &Defaults, c: &Compiler, joints: &[MjcfJoi
                     None => Ok(dflt),
                 }
             };
+            let mut path: Option<TendonPath> = None;
+            if el.name == "spatial" {
+                // ⛔ a wrapping geom or a pulley changes the path's length in a way a list of sites cannot
+                // express; say so rather than compute a cable that runs through the obstacle
+                if let Some(other) = el.children.iter().find(|x| x.name != "site") {
+                    unsupported.push((name.clone(), format!("a spatial tendon with <{}>", other.name)));
+                    continue;
+                }
+                let sites: Vec<String> = el.children.iter().filter(|x| x.name == "site").filter_map(|x| x.attr("site").map(|s| s.to_string())).collect();
+                if sites.len() < 2 {
+                    unsupported.push((name.clone(), "a spatial tendon with fewer than two sites".into()));
+                    continue;
+                }
+                path = Some(TendonPath::Spatial(sites));
+            }
             let mut links: Vec<(usize, f64)> = Vec::new();
             for j in el.children.iter().filter(|x| x.name == "joint") {
                 let jn = j.attr("joint").ok_or_else(|| format!("tendon '{name}': a <joint> with no joint"))?;
@@ -2691,9 +2798,11 @@ fn parse_tendons(root: &El, defaults: &Defaults, c: &Compiler, joints: &[MjcfJoi
                 };
                 links.push((target.first, coef));
             }
-            if links.is_empty() {
-                continue;
-            }
+            let path = match path {
+                Some(p) => p,
+                None if !links.is_empty() => TendonPath::Fixed(links),
+                None => continue,
+            };
             let rng = match get("range") {
                 Some(v) => {
                     let f = floats(v)?;
@@ -2717,7 +2826,7 @@ fn parse_tendons(root: &El, defaults: &Defaults, c: &Compiler, joints: &[MjcfJoi
             };
             let record = MjcfTendon {
                 name: name.clone(),
-                joints: links,
+                path,
                 range: limited.then_some((rng[0], rng[1])),
                 margin: num("margin", 0.0)?,
                 solref_limit: pair(get("solreflimit"), [0.02, 1.0])?,
@@ -2759,7 +2868,7 @@ fn five(v: Option<&str>, dflt: [f64; 5]) -> Result<[f64; 5], String> {
 #[allow(clippy::type_complexity)]
 fn parse_actuators(root: &El, defaults: &Defaults, c: &Compiler, joints: &[MjcfJoint], tendons: &[MjcfTendon]) -> Result<(Vec<crate::mujoco_actuator::Actuator>, Vec<(String, String)>), String> {
     let by_name: HashMap<&str, &MjcfJoint> = joints.iter().map(|j| (j.name.as_str(), j)).collect();
-    let ten_by_name: HashMap<&str, &MjcfTendon> = tendons.iter().map(|t| (t.name.as_str(), t)).collect();
+    let ten_by_name: HashMap<&str, (usize, &MjcfTendon)> = tendons.iter().enumerate().map(|(i, t)| (t.name.as_str(), (i, t))).collect();
     let (mut out, mut unsupported) = (Vec::new(), Vec::new());
     for section in root.children_named("actuator") {
         for el in &section.children {
@@ -2775,7 +2884,7 @@ fn parse_actuators(root: &El, defaults: &Defaults, c: &Compiler, joints: &[MjcfJ
 }
 
 #[allow(clippy::too_many_arguments)]
-fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&str, &MjcfJoint>, ten_by_name: &HashMap<&str, &MjcfTendon>, childclass: Option<&str>, name: &str) -> Result<crate::mujoco_actuator::Actuator, ActErr> {
+fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&str, &MjcfJoint>, ten_by_name: &HashMap<&str, (usize, &MjcfTendon)>, childclass: Option<&str>, name: &str) -> Result<crate::mujoco_actuator::Actuator, ActErr> {
     use crate::mujoco_actuator::Actuator;
     let tag = el.name.as_str();
     if !ACTUATOR_TAGS.contains(&tag) {
@@ -2803,7 +2912,7 @@ fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&s
         return Err(Unsupported(why));
     }
     let (kind, target) = rec.trn.ok_or_else(|| Unsupported("no transmission named".into()))?;
-    let mut site = None;
+    let mut dynamic = None;
     // ⛔ a TENDON transmission is the same actuator with a different moment: `length = gear·L`, and the
     // force comes back through `gear·coef` on every joint the tendon names, not through one dof. Everything
     // downstream — gain, bias, the clamps — is untouched, which is exactly MuJoCo's factoring.
@@ -2816,8 +2925,15 @@ fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&s
             (Some(j), vec![(j.first, rec.gear)])
         }
         "tendon" => {
-            let t = *ten_by_name.get(target.as_str()).ok_or_else(|| Unsupported(format!("tendon '{target}' is not one this loader carries")))?;
-            (None, t.joints.iter().map(|(d, c)| (*d, rec.gear * c)).collect())
+            let (i, t) = ten_by_name.get(target.as_str()).copied().ok_or_else(|| Unsupported(format!("tendon '{target}' is not one this loader carries")))?;
+            match &t.path {
+                TendonPath::Fixed(j) => (None, j.iter().map(|(d, c)| (*d, rec.gear * c)).collect()),
+                // a spatial tendon's moment is a path derivative: it belongs to the state, not to the file
+                TendonPath::Spatial(_) => {
+                    dynamic = Some(crate::mujoco_actuator::DynTransmission::SpatialTendon { index: i });
+                    (None, Vec::new())
+                }
+            }
         }
         // ⛔ a SITE transmission has no length at all — MuJoCo reports `actuator_length = 0` and
         // `actuator_velocity = 0` — and its moment is not a constant: the gear is a wrench in the SITE's
@@ -2826,7 +2942,7 @@ fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&s
             if el.attr("refsite").is_some() {
                 return Err(Unsupported("a site transmission relative to another site".into()));
             }
-            site = Some(crate::mujoco_actuator::SiteTransmission { site: target.clone(), gear: rec.gear6 });
+            dynamic = Some(crate::mujoco_actuator::DynTransmission::Site { site: target.clone(), gear: rec.gear6 });
             (None, Vec::new())
         }
         _ => return Err(Unsupported(format!("a {kind} transmission"))),
@@ -2862,7 +2978,7 @@ fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&s
     Ok(Actuator {
         name: name.to_string(),
         moment,
-        site,
+        dynamic,
         gear: rec.gear,
         gain: rec.gain,
         gainprm: rec.gainprm,
@@ -3722,6 +3838,60 @@ mod tests {
         }
     }
 
+    /// **A SPATIAL tendon through sites, against MuJoCo's own numbers.** Its length is the path
+    /// `Σ |pᵢ₊₁ − pᵢ|` and its moment `Σ ûᵢᵀ(Jᵢ₊₁ − Jᵢ)`, so unlike a fixed tendon neither is a constant —
+    /// the limit row, the spring, the damper and any actuator pulling on it all have to be rebuilt per state.
+    ///
+    /// ⛔ 590 of Menagerie's 881 spatial tendons run through sites alone; the other 291 wrap around geoms,
+    /// and those are reported as not carried rather than run straight through the obstacle.
+    #[test]
+    fn a_spatial_tendon_is_the_length_of_its_path() {
+        let t = tree_from_mjcf_str(
+            r#"<mujoco><compiler angle="radian"/><option gravity="0 0 0"/><worldbody>
+  <site name="anchor" pos="0.1 -0.05 0.9"/>
+  <body name="a" pos="0 0 0.5" euler="0.1 -0.2 0.3"><joint name="j1" type="hinge" axis="0 1 0"/>
+    <inertial pos="0.2 0 0" mass="1.5" diaginertia="0.03 0.05 0.07"/>
+    <site name="s1" pos="0.12 0.04 0.03"/>
+    <body name="b" pos="0.4 0 0" euler="0.3 0.1 -0.2"><joint name="j2" type="slide" axis="1 0 0"/>
+      <inertial pos="0.1 0 0" mass="0.8" diaginertia="0.01 0.014 0.02"/>
+      <site name="s2" pos="0.15 -0.03 0.02"/>
+      <site name="s3" pos="0.25 0.01 -0.04"/>
+    </body>
+  </body>
+</worldbody>
+<tendon><spatial name="cable" limited="true" range="0 0.9" stiffness="30" springlength="0.5" damping="2">
+  <site site="anchor"/><site site="s1"/><site site="s2"/><site site="s3"/>
+</spatial></tendon></mujoco>"#,
+        )
+        .unwrap();
+        assert!(t.tendons_unsupported.is_empty(), "{:?}", t.tendons_unsupported);
+        let (q, qd) = ([0.4, 0.15], [0.9, -0.6]);
+        assert!((t.ten_length(&q)[0] - 1.118181624639552).abs() < 1e-12, "{:?}", t.ten_length(&q));
+        assert!((t.ten_velocity(&q, &qd)[0] + 0.49105407378281224).abs() < 1e-12, "{:?}", t.ten_velocity(&q, &qd));
+        for (k, want) in [0.11969509707489943, 0.9979661019170363].iter().enumerate() {
+            let got = t.ten_moment(&q)[0].iter().find(|(d, _)| *d == k).map(|(_, m)| *m).unwrap_or(0.0);
+            assert!((got - want).abs() < 1e-12, "ten_J[{k}] {got} vs {want}");
+        }
+        assert!((t.tendon_invweight0()[0] - 1.2485132).abs() < 1e-6, "{:?}", t.tendon_invweight0());
+        // the spring and damper, carried back through that same moment
+        let passive = t.qfrc_passive(&q, &qd);
+        for (k, want) in [-2.1022457570735895, -17.5276185468612].iter().enumerate() {
+            assert!((passive[k] - want).abs() < 1e-10, "qfrc_passive[{k}] {} vs {want}", passive[k]);
+        }
+        // a wrapping geom is named, not run straight through
+        let wrapped = tree_from_mjcf_str(
+            r#"<mujoco><compiler angle="radian"/><worldbody>
+  <site name="anchor" pos="0 0 1"/>
+  <body name="a"><joint name="j1" type="slide" axis="1 0 0"/><inertial pos="0 0 0" mass="1" diaginertia="0.01 0.01 0.01"/>
+    <geom name="pulley" type="sphere" size="0.1"/><site name="s1" pos="0.2 0 0"/></body>
+</worldbody>
+<tendon><spatial name="over"><site site="anchor"/><geom geom="pulley"/><site site="s1"/></spatial></tendon></mujoco>"#,
+        )
+        .unwrap();
+        assert_eq!(wrapped.tendons.len(), 0);
+        assert_eq!(wrapped.tendons_unsupported.len(), 1, "{:?}", wrapped.tendons_unsupported);
+    }
+
     /// **A site transmission, against MuJoCo's own numbers.** `gear` is a WRENCH in the site's frame, so
     /// the moment turns with the model and cannot be resolved when the file is read — every quadrotor in
     /// Menagerie is actuated this way.
@@ -3746,14 +3916,13 @@ mod tests {
         .unwrap();
         assert!(t.actuators_unsupported.is_empty(), "{:?}", t.actuators_unsupported);
         let (q, qd) = ([0.4, 0.15], [0.9, -0.6]);
-        let mom = &t.actuator_moments(&q)[0];
+        let st = t.actuator_state(&q, &qd).remove(0);
         for (k, want) in [-0.5622785719716145, -0.09983341664682814].iter().enumerate() {
-            let got = mom.iter().find(|(d, _)| *d == k).map(|(_, m)| *m).unwrap_or(0.0);
+            let got = st.moment.iter().find(|(d, _)| *d == k).map(|(_, m)| *m).unwrap_or(0.0);
             assert!((got - want).abs() < 1e-12, "moment[{k}] {got} vs {want}");
         }
-        let a = &t.actuators[0];
-        assert_eq!(a.length_with(mom, &q), 0.0, "a site transmission has no length");
-        assert!((a.velocity_with(mom, &qd) + 0.44615066449714825).abs() < 1e-9, "{}", a.velocity_with(mom, &qd));
+        assert_eq!(st.length, 0.0, "a site transmission has no length");
+        assert!((st.velocity + 0.44615066449714825).abs() < 1e-9, "{}", st.velocity);
         let f = t.qfrc_actuator(&q, &qd, &[2.5]);
         for (k, want) in [-1.4056964299290362, -0.24958354161707036].iter().enumerate() {
             assert!((f[k] - want).abs() < 1e-12, "qfrc[{k}] {} vs {want}", f[k]);
@@ -3880,7 +4049,7 @@ mod tests {
         let t = tree_from_mjcf_str(xml).unwrap();
         let (q, qd) = ([0.7, -0.12], [0.35, -0.2]);
         assert!((t.ten_length(&q)[0] - 0.576).abs() < 1e-15, "{:?}", t.ten_length(&q));
-        assert!((t.ten_velocity(&qd)[0] - 0.47).abs() < 1e-15, "{:?}", t.ten_velocity(&qd));
+        assert!((t.ten_velocity(&q, &qd)[0] - 0.47).abs() < 1e-15, "{:?}", t.ten_velocity(&q, &qd));
         assert!((t.tendon_invweight0()[0] - 3.76260032).abs() < 1e-8, "{:?}", t.tendon_invweight0());
         let set = t.joint_constraint_rows(&q, &qd, &t.dof_invweight0());
         assert_eq!(set.blocks.len(), 1, "only the UPPER side is within margin");

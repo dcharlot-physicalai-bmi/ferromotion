@@ -174,9 +174,8 @@ fn main() {
                 let Ok(q) = t.q_from_qpos(&s.qpos, &qposadr) else { continue };
                 states += 1;
                 // ⛔ the moment for THIS state: a site transmission's turns with the model
-                let mom = t.actuator_moment_at(a, &q);
-                let mom = &mom;
-                let (l, v) = (a.length_with(mom, &q), a.velocity_with(mom, &s.qvel));
+                let st = t.actuator_state_at(a, &q, &s.qvel);
+                let (l, v) = (st.length, st.velocity);
                 let force = a.force(l, v, s.ctrl[u]);
                 let (dl, dv, df) = ((l - s.length[u]).abs(), (v - s.velocity[u]).abs(), (force - s.force[u]).abs());
                 worst_len = worst_len.max(dl);
