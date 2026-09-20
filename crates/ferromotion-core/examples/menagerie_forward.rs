@@ -16,7 +16,7 @@
 //! the remaining work and hiding it inside an average would be a lie about coverage.
 
 use ferromotion_core::{
-    can_collide, collide_pair_with, contact_jacobian, contact_param, filter_body_pair, margin_and_gap, set_contact, tree_frames, tree_from_mjcf, tree_inverse_dynamics, tree_mass_matrix, CollideOptions, CollisionGeom, ContactRecord, GeomPose, GeomType, InvWeight, MjcfJointKind, PairParams, SolImp, SolRef,
+    can_collide, collide_pair_with, contact_jacobian, contact_param, filter_body_pair, margin_and_gap, set_contact, tree_frames, tree_from_mjcf, tree_inverse_dynamics, CollideOptions, CollisionGeom, ContactRecord, GeomPose, GeomType, InvWeight, MjcfJointKind, PairParams, SolImp, SolRef,
 };
 use nalgebra::{DVector, Vector3};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -206,7 +206,9 @@ fn main() {
                 continue;
             };
             // --- the smooth half: mass matrix, bias, and the acceleration with no constraints
-            let m = tree_mass_matrix(joints, inertia, parent, &q);
+            // ⛔ the tree's own mass matrix does not know that armature on a free or ball joint is a
+            // diagonal in MUJOCO's basis; `MjcfTree::mass_matrix` maps it into this one
+            let m = t.mass_matrix(&q);
             let bias = tree_inverse_dynamics(joints, inertia, parent, &q, &s.qvel, &vec![0.0; nv], o.gravity);
             // ⛔ `qfrc_bias` is a vector in the DOF basis, so it can only be compared where the bases agree
             let db = bias.iter().zip(&s.qfrc_bias).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);

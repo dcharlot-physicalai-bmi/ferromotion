@@ -204,6 +204,78 @@ impl MjcfTree {
         out
     }
 
+    /// **The change of basis a free or ball joint needs**: `v_mujoco = T·v_ours`, identity everywhere else.
+    ///
+    /// A free joint is six coordinates here and six there but not the same six. MuJoCo's are the body frame
+    /// origin's world velocity and a BODY-FRAME angular velocity; this port's are three world slides and
+    /// three Euler hinges with `R = Rz(ψ)·Ry(θ)·Rx(φ)`, so the Euler rates map to that angular velocity
+    /// through the columns `[Rxᵀ Ryᵀ ẑ, Rxᵀ ŷ, x̂]`. A ball joint is the same three columns alone.
+    ///
+    /// ⛔ Verified the only way it can be: `M_ours = Tᵀ·M_mujoco·T` entry by entry, on 225 of 228 free-base
+    /// states of Menagerie (`examples/menagerie_floating`).
+    pub fn free_basis(&self, q: &[f64]) -> nalgebra::DMatrix<f64> {
+        let nv = self.tree.joints.len();
+        let mut t = nalgebra::DMatrix::identity(nv, nv);
+        for j in &self.joints {
+            let (base, rot) = match j.kind {
+                MjcfJointKind::Free => (j.first, j.first + 3),
+                MjcfJointKind::Ball => (j.first, j.first),
+                _ => continue,
+            };
+            let _ = base;
+            let (yaw, pitch, roll) = (q[rot], q[rot + 1], q[rot + 2]);
+            let _ = yaw;
+            let rx: Matrix3<f64> = *UnitQuaternion::from_euler_angles(roll, 0.0, 0.0).to_rotation_matrix().matrix();
+            let ry: Matrix3<f64> = *UnitQuaternion::from_euler_angles(0.0, pitch, 0.0).to_rotation_matrix().matrix();
+            let cols = [rx.transpose() * ry.transpose() * Vector3::z(), rx.transpose() * Vector3::y(), Vector3::x()];
+            for (k, col) in cols.iter().enumerate() {
+                for r in 0..3 {
+                    t[(rot + r, rot + k)] = col[r];
+                }
+            }
+        }
+        t
+    }
+
+    /// **The mass matrix, with armature where MuJoCo puts it.**
+    ///
+    /// ⛔⛔ `dof_armature` is a DIAGONAL in MuJoCo's basis, and a diagonal there is not one here. On a hinge
+    /// or a slide the two coincide and nothing happens; on a free or a ball joint the correct contribution
+    /// is `Tᵀ·diag(a)·T`, which is full. Adding `a` to this port's own diagonal instead is the error that
+    /// made `rainbow_robotics_rby1`'s acceleration 8.2e-2 out — the one thing about a floating base this
+    /// port could not previously match.
+    pub fn mass_matrix(&self, q: &[f64]) -> nalgebra::DMatrix<f64> {
+        let nv = self.tree.joints.len();
+        let mut m = crate::tree_dynamics::tree_mass_matrix(&self.tree.joints, &self.tree.inertia, &self.tree.parent, q);
+        let multi: Vec<(usize, usize, f64)> = self
+            .joints
+            .iter()
+            .filter_map(|j| match j.kind {
+                MjcfJointKind::Free => Some((j.first + 3, 3, j.armature)),
+                MjcfJointKind::Ball => Some((j.first, 3, j.armature)),
+                _ => None,
+            })
+            .filter(|(_, _, a)| *a != 0.0)
+            .collect();
+        if multi.is_empty() {
+            return m;
+        }
+        let t = self.free_basis(q);
+        for (first, n, a) in multi {
+            for r in 0..n {
+                m[(first + r, first + r)] -= a;
+            }
+            // Tᵀ diag(a) T restricted to those rows: the block is `a · Eᵀ E` with E the rotation columns
+            for r in 0..n {
+                for c in 0..n {
+                    m[(first + r, first + c)] += a * (0..n).map(|k| t[(first + k, first + r)] * t[(first + k, first + c)]).sum::<f64>();
+                }
+            }
+        }
+        let _ = nv;
+        m
+    }
+
     /// **`ten_length`** for every tendon. A FIXED tendon is `L = Σ coefₖ·qₖ`; a SPATIAL one is the length
     /// of the path through its sites, `Σ |pᵢ₊₁ − pᵢ|`.
     pub fn ten_length(&self, q: &[f64]) -> Vec<f64> {
@@ -4185,6 +4257,59 @@ mod tests {
         for (k, want) in [-1.4056964299290362, -0.24958354161707036].iter().enumerate() {
             assert!((f[k] - want).abs() < 1e-12, "qfrc[{k}] {} vs {want}", f[k]);
         }
+    }
+
+    /// **A floating base in MuJoCo's basis, against MuJoCo's own mass matrix.** A free joint is six
+    /// coordinates here and six there but not the same six, so `M_ours = Tᵀ·M_mujoco·T` is the identity that
+    /// says the two are the same physics — and it is also the only way to put `dof_armature` where MuJoCo
+    /// puts it, because a DIAGONAL in its basis is not one in ours.
+    ///
+    /// Numbers from MuJoCo 3.13.0 on this model, at a pose with the base rotated so the two bases differ.
+    #[test]
+    fn a_free_joints_mass_matrix_is_mujocos_through_the_basis() {
+        let t = tree_from_mjcf_str(
+            r#"<mujoco><compiler angle="radian"/><option gravity="0 0 -9.81"/><worldbody>
+<body name="base" pos="0 0 1"><joint name="root" type="free" armature="0.02"/>
+  <inertial pos="0.05 -0.02 0.01" quat="0.9 0.2 -0.3 0.1" mass="3" diaginertia="0.05 0.08 0.11"/>
+  <body name="arm" pos="0.2 0 0"><joint name="j1" type="hinge" axis="0 1 0" armature="0.004"/>
+    <inertial pos="0.1 0 0" mass="1.2" diaginertia="0.01 0.012 0.014"/>
+  </body>
+</body></worldbody></mujoco>"#,
+        )
+        .unwrap();
+        let qpos = [0.3, -0.2, 1.1, 0.9233805168766387, 0.20519567041703082, -0.3077935056255462, 0.10259783520851541, 0.4];
+        let q = t.q_from_qpos(&qpos, &[0, 7]).unwrap();
+        #[rustfmt::skip]
+        let mj: [[f64; 7]; 7] = [
+            [4.22, 0.0, 0.0, 0.026295725975672157, 0.25022737771830994, -0.11069283766747774, 0.021280009297257315],
+            [0.0, 4.22, 0.0, 0.04149544306892891, 0.22022911792960326, 0.4516297067245203, 0.04591332845591904],
+            [0.0, 0.0, 4.22, -0.038295725975672164, -0.3737551230822326, 0.1946928376674777, -0.10880775466117998],
+            [0.026295725975672157, 0.04149544306892891, -0.038295725975672164, 0.10353853469087368, 0.00848476454293631, -0.012343088896731358, 0.0],
+            [0.25022737771830994, 0.22022911792960326, -0.3737551230822326, 0.00848476454293631, 0.22975497203346804, -0.010190027700831016, 0.04610546385606923],
+            [-0.11069283766747774, 0.4516297067245203, 0.1946928376674777, -0.012343088896731358, -0.010190027700831016, 0.22912834869993517, 0.0],
+            [0.021280009297257315, 0.04591332845591904, -0.10880775466117998, 0.0, 0.04610546385606923, 0.0, 0.028000000000000004],
+        ];
+        let theirs = nalgebra::DMatrix::from_fn(7, 7, |r, c| mj[r][c]);
+        let tm = t.free_basis(&q);
+        let mapped = tm.transpose() * &theirs * &tm;
+        let ours = t.mass_matrix(&q);
+        for r in 0..7 {
+            for c in 0..7 {
+                assert!((ours[(r, c)] - mapped[(r, c)]).abs() < 1e-12, "M[{r},{c}] {} vs {}", ours[(r, c)], mapped[(r, c)]);
+            }
+        }
+        // and the acceleration follows: at REST the basis change has no velocity term, so `a_mujoco = T·a_ours`
+        let zero = vec![0.0; 7];
+        let bias = crate::tree_dynamics::tree_inverse_dynamics(&t.tree.joints, &t.tree.inertia, &t.tree.parent, &q, &zero, &zero, t.gravity);
+        let a_ours = ours.clone().try_inverse().unwrap() * nalgebra::DVector::from_iterator(7, bias.iter().map(|b| -b));
+        let a_mj = tm * a_ours;
+        let want = [-0.006566036987102614, -0.00018945353024978957, -9.751510865034783, 0.011093993260240298, 0.0795308742763936, -0.04836289437347041, 0.10163169173360131];
+        for (i, w) in want.iter().enumerate() {
+            assert!((a_mj[i] - w).abs() < 1e-9, "qacc_smooth[{i}] {} vs {w}", a_mj[i]);
+        }
+        // ⛔ and the armature is NOT a diagonal here: putting it on this port's own diagonal instead is what
+        // made a free-based model's acceleration 8.2e-2 out, and nothing about the pose says so
+        assert!(ours[(3, 4)].abs() > 1e-6, "the base block is coupled: {}", ours[(3, 4)]);
     }
 
     /// **The inertia-box fluid model, against MuJoCo's own numbers.** Every coefficient was fitted one term

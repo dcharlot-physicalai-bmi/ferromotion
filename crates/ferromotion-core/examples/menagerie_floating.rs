@@ -14,8 +14,8 @@
 //! cargo run --release --example menagerie_floating -- <menagerie root> <floating oracle txt> [substring]
 //! ```
 
-use ferromotion_core::{tree_from_mjcf, tree_mass_matrix, MjcfJointKind};
-use nalgebra::{DMatrix, Matrix3, UnitQuaternion, Vector3};
+use ferromotion_core::{tree_from_mjcf, tree_inverse_dynamics, MjcfJointKind};
+use nalgebra::{DMatrix, DVector};
 use std::collections::BTreeMap;
 
 #[derive(Default)]
@@ -31,6 +31,7 @@ struct Case {
 struct State {
     qpos: Vec<f64>,
     qvel: Vec<f64>,
+    smooth: Vec<f64>,
     xquat: Vec<f64>,
     xpos: Vec<f64>,
     xipos: Vec<f64>,
@@ -57,12 +58,13 @@ fn main() {
             "armature" => cases.last_mut().unwrap().armature = t[1..].iter().map(|x| f(x)).collect(),
             "state" => cases.last_mut().unwrap().states.push(State::default()),
             "M" => cases.last_mut().unwrap().states.last_mut().unwrap().m.push(t[1..].iter().map(|x| f(x)).collect()),
-            "qpos" | "qvel" | "xquat" | "xpos" | "xipos" | "subtreecom" => {
+            "qpos" | "qvel" | "xquat" | "xpos" | "xipos" | "subtreecom" | "smooth" => {
                 let v: Vec<f64> = t[1..].iter().map(|x| f(x)).collect();
                 let s = cases.last_mut().unwrap().states.last_mut().unwrap();
                 match t[0] {
                     "qpos" => s.qpos = v,
                     "qvel" => s.qvel = v,
+                    "smooth" => s.smooth = v,
                     "xquat" => s.xquat = v,
                     "xpos" => s.xpos = v,
                     "xipos" => s.xipos = v,
@@ -75,6 +77,8 @@ fn main() {
     }
 
     let (mut seen, mut ok) = (0usize, 0usize);
+    let (mut acc_seen, mut acc_ok, mut acc_worst, mut acc_where) = (0usize, 0usize, 0.0f64, String::new());
+    let mut acc_skip: BTreeMap<&'static str, usize> = BTreeMap::new();
     let (mut worst, mut worst_where) = (0.0f64, String::new());
     let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut notes: Vec<String> = Vec::new();
@@ -106,28 +110,51 @@ fn main() {
                 continue;
             };
             seen += 1;
-            let ours = tree_mass_matrix(&t.tree.joints, &t.tree.inertia, &t.tree.parent, &q);
+            // ⛔ `MjcfTree::mass_matrix`, not the bare tree one: armature on a free joint is a diagonal in
+            // MuJoCo's basis and has to be mapped into this one
+            let ours = t.mass_matrix(&q);
             let theirs = DMatrix::from_fn(nv, nv, |r, k| s.m[r][k]);
-            // armature is a diagonal in each basis; strip it from both so the map itself is what is tested
-            let arm = |m: &DMatrix<f64>, a: &[f64]| {
-                let mut m = m.clone();
-                for (i, x) in a.iter().enumerate().take(nv) {
-                    m[(i, i)] -= x;
-                }
-                m
-            };
-            // ⛔ strip it from BOTH matrices at every dof. Away from the base the two bases coincide and both
-            // matrices carry the same armature; stripping it from one of them only turned an exact match
-            // into a 1.9e-2 error in the joint-joint block and sent me looking at the basis, which was right.
-            let ours_bare = arm(&ours, &c.armature);
-            let theirs_bare = arm(&theirs, &c.armature);
-            let tmat = basis(&s.xquat, &s.xpos, &s.xipos, &s.subtreecom, nv);
+            // ⛔ armature is NOT stripped any more. `MjcfTree::mass_matrix` puts it where MuJoCo puts it —
+            // a diagonal in MuJoCo's basis, mapped here as `Tᵀ·diag(a)·T` — so both matrices carry it and
+            // the identity `M_ours = Tᵀ·M_mujoco·T` has to hold with it included. Stripping it as a diagonal
+            // from one side and not the other is how a 1.9e-2 error in the joint-joint block appeared while
+            // the basis was right all along.
+            let (ours_bare, theirs_bare) = (ours.clone(), theirs.clone());
+            let _ = &c.armature;
+            let tmat = t.free_basis(&q);
             let mapped = tmat.transpose() * &theirs_bare * &tmat;
             let d = (0..nv).map(|r| (0..nv).map(|k| (mapped[(r, k)] - ours_bare[(r, k)]).abs()).fold(0.0, f64::max)).fold(0.0, f64::max);
             let scale = ours_bare.amax().max(1e-12);
             if d / scale > worst {
                 worst = d / scale;
                 worst_where = c.rel.clone();
+            }
+            // ⭐ and now the acceleration itself, in MuJoCo's basis. At REST `a_mujoco = T·a_ours` exactly —
+            // the velocity-dependent half of the change of basis is `Ṫ·v`, which is zero — so a floating
+            // base's `qacc_smooth` becomes comparable entry by entry for the first time.
+            if s.qvel.iter().all(|v| *v == 0.0) {
+                if !t.actuators_unsupported.is_empty() || !t.tendons_unsupported.is_empty() {
+                    *acc_skip.entry("an actuator or tendon this port does not carry").or_default() += 1;
+                } else if let Some(minv) = ours.clone().try_inverse() {
+                    let _ = &tmat;
+                    acc_seen += 1;
+                    let zero = vec![0.0; nv];
+                    let bias = tree_inverse_dynamics(&t.tree.joints, &t.tree.inertia, &t.tree.parent, &q, &zero, &zero, t.gravity);
+                    let passive = t.qfrc_passive(&q, &zero);
+                    let act = t.qfrc_actuator(&q, &zero, &vec![0.0; t.actuators.len()]);
+                    let a_ours = &minv * DVector::from_iterator(nv, (0..nv).map(|i| passive[i] + act[i] - bias[i]));
+                    let a_mj = &tmat * a_ours;
+                    let e = (0..nv).map(|i| (a_mj[i] - s.smooth[i]).abs() / s.smooth[i].abs().max(1.0)).fold(0.0, f64::max);
+                    if e > acc_worst {
+                        acc_worst = e;
+                        acc_where = c.rel.clone();
+                    }
+                    if e < 1e-6 {
+                        acc_ok += 1;
+                    }
+                }
+            } else {
+                *acc_skip.entry("a moving base: the basis change has a velocity term this sweep omits").or_default() += 1;
             }
             if d / scale < 1e-9 {
                 ok += 1;
@@ -155,6 +182,10 @@ fn main() {
     println!("free-base states whose mass matrix was compared: {seen}");
     println!("  MuJoCo's M mapped into our basis, entry by entry: {ok}");
     println!("  worst relative difference {worst:.2e} on {worst_where}");
+    println!("  qacc_smooth in MUJOCO'S basis, at rest: {acc_ok} of {acc_seen} within 1e-6; worst {acc_worst:.2e} on {acc_where}");
+    for (k, n) in &acc_skip {
+        println!("    {n:>5}  {k}");
+    }
     if !counts.is_empty() {
         println!("  not compared:");
         for (k, n) in &counts {
@@ -164,24 +195,4 @@ fn main() {
     for n in &notes {
         println!("  {n}");
     }
-}
-
-/// `v_mujoco = T·v_ours` for the whole model: identity off the base, and a `6 × 6` block on it.
-///
-/// Our base is three world slides then yaw, pitch, roll with `R = Rz(ψ)·Ry(θ)·Rx(φ)`, so the Euler rates map
-/// to an angular velocity through the columns `[Rxᵀ Ryᵀ ẑ, Rxᵀ ŷ, x̂]` in the BODY frame.
-fn basis(xquat: &[f64], xpos: &[f64], xipos: &[f64], subtreecom: &[f64], nv: usize) -> DMatrix<f64> {
-    let mut t = DMatrix::identity(nv, nv);
-    let quat = UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(xquat[0], xquat[1], xquat[2], xquat[3]));
-    let (roll, pitch, _yaw) = quat.euler_angles();
-    let rx: Matrix3<f64> = *UnitQuaternion::from_euler_angles(roll, 0.0, 0.0).to_rotation_matrix().matrix();
-    let ry: Matrix3<f64> = *UnitQuaternion::from_euler_angles(0.0, pitch, 0.0).to_rotation_matrix().matrix();
-    let cols = [rx.transpose() * ry.transpose() * Vector3::z(), rx.transpose() * Vector3::y(), Vector3::x()];
-    for (k, col) in cols.iter().enumerate() {
-        for r in 0..3 {
-            t[(3 + r, 3 + k)] = col[r];
-        }
-    }
-    let _ = (xpos, xipos, subtreecom);
-    t
 }
