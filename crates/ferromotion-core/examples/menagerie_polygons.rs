@@ -150,7 +150,7 @@ fn main() {
                 if worst < 1e-9 {
                     support_same += 1;
                 } else {
-                    different_body.push(format!("{rel} / {} ({:.2e}, {} hull verts here, {} in MuJoCo)", m.name, worst, ov.len(), tv.len()));
+                    different_body.push(format!("{rel} / {} ({:.2e}, {} hull verts here, {} in MuJoCo, {} shared)", m.name, worst, ov.len(), tv.len(), ov.intersection(&tv).count()));
                 }
                 if worst > worst_support {
                     worst_support = worst;
