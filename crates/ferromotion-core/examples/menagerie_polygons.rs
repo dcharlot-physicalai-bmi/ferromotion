@@ -52,6 +52,11 @@ fn main() {
     let (mut shared_faces, mut normal_off, mut normal_flipped) = (0usize, 0usize, 0usize);
     let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut notes: Vec<String> = Vec::new();
+    let (mut hull_vert_same, mut hull_vert_tried, mut hull_vert_diff) = (0usize, 0usize, 0usize);
+    let (mut hull_only_ours, mut hull_only_theirs) = (0usize, 0usize);
+    let (mut plane_same, mut plane_tried, mut plane_only_ours, mut plane_only_theirs) = (0usize, 0usize, 0usize, 0usize);
+    let (mut support_same, mut support_tried, mut worst_support) = (0usize, 0usize, 0.0f64);
+    let (mut worst_support_where, mut different_body) = (String::new(), Vec::<String>::new());
     for (rel, list) in &by_model {
         if filter.as_ref().is_some_and(|fl| !rel.contains(fl.as_str())) {
             continue;
@@ -93,6 +98,78 @@ fn main() {
                     v
                 })
                 .collect();
+            // ⭐⭐ the SUPPORTING PLANES, which are merge-invariant: a merged polygon and the triangles it
+            // was merged from lie in the same plane, so two hulls of the SAME polytope have the same plane
+            // set however their faces are grouped. This is the measurement that separates "we built a
+            // different hull" from "we grouped the same hull's faces differently", and nothing about the
+            // polygon lists can do it.
+            {
+                let plane = |n: &[f64], v0: usize| -> [f64; 4] {
+                    let p = hull.verts[v0];
+                    [n[0], n[1], n[2], n[0] * p.x + n[1] * p.y + n[2] * p.z]
+                };
+                let mut myplanes: Vec<[f64; 4]> = hull.polygons.iter().map(|p| plane(p.normal.as_slice(), p.verts[0])).collect();
+                let theirplanes: Vec<[f64; 4]> = m.polys.iter().map(|(n, v)| plane(n, v[0])).collect();
+                // the mesh's own size, so the offset tolerance is relative to the object and not to a metre
+                let extent = hull.verts.iter().map(|v| v.amax()).fold(0.0, f64::max).max(1e-9);
+                let close = |a: &[f64; 4], b: &[f64; 4]| {
+                    (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] > 0.999_999) && (a[3] - b[3]).abs() < 1e-6 * extent
+                };
+                let unmatched = |xs: &[[f64; 4]], ys: &[[f64; 4]]| xs.iter().filter(|x| !ys.iter().any(|y| close(x, y))).count();
+                let (a, b) = (unmatched(&myplanes, &theirplanes), unmatched(&theirplanes, &myplanes));
+                plane_tried += 1;
+                if a == 0 && b == 0 {
+                    plane_same += 1;
+                }
+                plane_only_ours += a;
+                plane_only_theirs += b;
+                myplanes.clear();
+                // ⭐⭐⭐ and the SUPPORT FUNCTION, which is the polytope itself: `max over vertices of d·v`
+                // over a fixed set of directions is equal for two hulls exactly when they are the same
+                // convex body, whatever their faces or their vertex lists say. A plane comparison needs a
+                // tolerance on the normal and so cannot tell a different shape from a different
+                // triangulation of the same one; this can.
+                let ov: BTreeSet<usize> = ours.iter().flatten().copied().collect();
+                let tv: BTreeSet<usize> = theirs.iter().flatten().copied().collect();
+                let mut worst = 0.0f64;
+                let mut seed = 0x9E3779B97F4A7C15u64;
+                for _ in 0..256 {
+                    let mut d = [0.0f64; 3];
+                    for x in d.iter_mut() {
+                        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                        *x = ((seed >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0;
+                    }
+                    let n = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-12);
+                    let d = [d[0] / n, d[1] / n, d[2] / n];
+                    let sup = |set: &BTreeSet<usize>| {
+                        set.iter().map(|&i| d[0] * hull.verts[i].x + d[1] * hull.verts[i].y + d[2] * hull.verts[i].z).fold(f64::NEG_INFINITY, f64::max)
+                    };
+                    worst = worst.max((sup(&ov) - sup(&tv)).abs() / extent);
+                }
+                support_tried += 1;
+                if worst < 1e-9 {
+                    support_same += 1;
+                } else {
+                    different_body.push(format!("{rel} / {} ({:.2e}, {} hull verts here, {} in MuJoCo)", m.name, worst, ov.len(), tv.len()));
+                }
+                if worst > worst_support {
+                    worst_support = worst;
+                    worst_support_where = format!("{rel} / {}", m.name);
+                }
+            }
+            // the HULL VERTEX SET before the face grouping: if the two hulls keep the same vertices and
+            // differ only in how faces are merged, the gap is qhull's coplanar-merge rule and nothing
+            // else. If they keep different vertices, it is the hull itself and the merge is downstream.
+            let vset = |it: &BTreeSet<Vec<usize>>| -> BTreeSet<usize> { it.iter().flatten().copied().collect() };
+            hull_vert_tried += 1;
+            if vset(&ours) == vset(&theirs) {
+                hull_vert_same += 1;
+            } else {
+                let (a, b) = (vset(&ours), vset(&theirs));
+                hull_only_ours += a.difference(&b).count();
+                hull_only_theirs += b.difference(&a).count();
+                hull_vert_diff += a.difference(&b).count() + b.difference(&a).count();
+            }
             if ours == theirs {
                 same_faces += 1;
             } else if notes.len() < 10 {
@@ -131,10 +208,22 @@ fn main() {
     println!("collision meshes compared: {seen}");
     println!("  same polygon COUNT as MuJoCo: {same_count}");
     println!("  same polygon SET (every face, by its vertices): {same_faces}");
+    println!("  ⭐⭐ same SUPPORT FUNCTION over 256 directions (the polytope itself, faces and vertex lists aside): {support_same} of {support_tried}; worst {worst_support:.2e} relative to the mesh's own size on {worst_support_where}");
+    println!("  ⭐ same set of SUPPORTING PLANES (merge-invariant: the same polytope however its faces are grouped): {plane_same} of {plane_tried}; {plane_only_ours} planes only ours, {plane_only_theirs} only MuJoCo's");
+    println!("  same HULL VERTEX SET (the faces aside): {hull_vert_same} of {hull_vert_tried}; {hull_vert_diff} vertices on one hull and not the other ({hull_only_ours} only ours, {hull_only_theirs} only MuJoCo's)");
     println!("  faces both have, by their vertices: {shared_faces}; normals differing by more than 1e-6: {normal_off}, of which OPPOSITE: {normal_flipped}");
     println!("  worst normal disagreement on a shared face that is not simply reversed: {worst_normal:.2e} on {worst_where}");
     if !counts.is_empty() {
-        println!("  not compared:");
+        if !different_body.is_empty() {
+        println!("  meshes where the two hulls are a DIFFERENT CONVEX BODY, not a different grouping of the same one:");
+        for d in different_body.iter().take(12) {
+            println!("    {d}");
+        }
+        if different_body.len() > 12 {
+            println!("    … and {} more", different_body.len() - 12);
+        }
+    }
+    println!("  not compared:");
         for (k, n) in &counts {
             println!("    {n:>5}  {k}");
         }
