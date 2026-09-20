@@ -77,11 +77,7 @@ fn main() {
         if filter.as_ref().is_some_and(|fl| !c.rel.contains(fl.as_str())) {
             continue;
         }
-        // tendon rows are a transmission this port does not carry, so a case with any is out of scope
-        if c.types.iter().any(|t| t.ends_with("_tendon")) {
-            *counts.entry("has tendon rows").or_default() += 1;
-            continue;
-        }
+
         let t = cache.entry(c.rel.clone()).or_insert_with(|| {
             let model = root.join(&c.rel);
             let dir = model.parent().unwrap().to_path_buf();
@@ -113,6 +109,13 @@ fn main() {
         }
         let mine = t.joint_constraint_rows(&q, &c.qvel, &iw);
         // MuJoCo's order: equality, friction, limits, contacts — and this port builds the first three
+        // ⛔ only where it MATTERS: a spatial tendon this loader does not carry contributes nothing to
+        // `efc` unless MuJoCo gave it a row, and blocking on its mere presence throws away 27 states whose
+        // rows are all fixed-tendon and joint rows
+        if !t.tendons_unsupported.is_empty() && c.types.iter().any(|x| x.ends_with("_tendon")) {
+            *counts.entry("a tendon row from a spatial tendon this port does not carry").or_default() += 1;
+            continue;
+        }
         let nl = c.types.iter().filter(|x| x.starts_with("limit")).count();
         let theirs: Vec<usize> = (0..c.ne + c.nf + nl).collect();
         seen += 1;

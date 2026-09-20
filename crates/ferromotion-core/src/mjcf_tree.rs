@@ -163,6 +163,26 @@ impl MjcfTree {
     /// way MuJoCo includes it: `d.qfrc_passive` carries `d.qfrc_gravcomp`.
     pub fn qfrc_passive(&self, q: &[f64], qd: &[f64]) -> Vec<f64> {
         let mut out = self.qfrc_gravcomp(q);
+        // a tendon's spring and damper, carried back through its constant Jacobian. ⛔ `springlength` is a
+        // BAND: between its two values the tendon is slack and pulls nothing at all, which a single resting
+        // length cannot express and a model that states two values is relying on.
+        for (i, t) in self.tendons.iter().enumerate() {
+            if t.stiffness == 0.0 && t.damping == 0.0 {
+                continue;
+            }
+            let (len, vel) = (self.ten_length(q)[i], self.ten_velocity(qd)[i]);
+            let stretch = if len < t.springlength[0] {
+                len - t.springlength[0]
+            } else if len > t.springlength[1] {
+                len - t.springlength[1]
+            } else {
+                0.0
+            };
+            let f = -t.stiffness * stretch - t.damping * vel;
+            for (d, c) in &t.joints {
+                out[*d] += c * f;
+            }
+        }
         for j in &self.joints {
             if !matches!(j.kind, MjcfJointKind::Hinge | MjcfJointKind::Slide) {
                 continue;
@@ -176,6 +196,37 @@ impl MjcfTree {
             }
         }
         out
+    }
+
+    /// **`ten_length`** for every fixed tendon: `L = Σ coefₖ·qₖ`.
+    pub fn ten_length(&self, q: &[f64]) -> Vec<f64> {
+        self.tendons.iter().map(|t| t.joints.iter().map(|(d, c)| c * q[*d]).sum()).collect()
+    }
+
+    /// **`ten_velocity`**: the same combination of `q̇`, because a fixed tendon's Jacobian is constant.
+    pub fn ten_velocity(&self, qd: &[f64]) -> Vec<f64> {
+        self.ten_length(qd)
+    }
+
+    /// **`tendon_invweight0`**: `J M⁻¹ Jᵀ` at `qpos0` for each fixed tendon's (constant) Jacobian row — the
+    /// scale a tendon limit row regularises against, the tendon counterpart of `dof_invweight0`. Cached once
+    /// by MuJoCo, like every other `*_invweight0`.
+    pub fn tendon_invweight0(&self) -> Vec<f64> {
+        let nv = self.tree.joints.len();
+        let m = crate::tree_dynamics::tree_mass_matrix(&self.tree.joints, &self.tree.inertia, &self.tree.parent, &vec![0.0; nv]);
+        let Some(chol) = m.cholesky() else {
+            return vec![0.0; self.tendons.len()];
+        };
+        self.tendons
+            .iter()
+            .map(|t| {
+                let mut j = nalgebra::DVector::zeros(nv);
+                for (d, c) in &t.joints {
+                    j[*d] += c;
+                }
+                j.dot(&chol.solve(&j))
+            })
+            .collect()
     }
 
     /// **`mj_gravcomp`**: `<body gravcomp>` as an upward force `−gravcomp·mass·g` applied at that body's
@@ -372,6 +423,27 @@ impl MjcfTree {
                 push(jac, a, r, EfcBlock::Limit);
             }
         }
+        // --- tendon limits, after every joint limit: MuJoCo's own order is limit_joint then limit_tendon
+        if self.tendons.iter().any(|t| t.range.is_some()) {
+            let tiw = self.tendon_invweight0();
+            let len = self.ten_length(q);
+            for (i, t) in self.tendons.iter().enumerate() {
+                let Some((lo, hi)) = t.range else { continue };
+                for side in [-1.0f64, 1.0] {
+                    let dist = side * (if side < 0.0 { lo } else { hi } - len[i]);
+                    if dist >= t.margin {
+                        continue;
+                    }
+                    let mut jac = vec![0.0; nv];
+                    for (d, c) in &t.joints {
+                        jac[*d] -= side * c;
+                    }
+                    let jvel: f64 = (0..nv).map(|k| jac[k] * qd[k]).sum();
+                    let (a, r) = row_reference(&solr(t.solref_limit), &soli(t.solimp_limit), dist, t.margin, tiw[i], jvel, self.timestep);
+                    push(jac, a, r, EfcBlock::Limit);
+                }
+            }
+        }
         let jac = nalgebra::DMatrix::from_fn(rows.len(), nv, |r, c| rows[r][c]);
         crate::mujoco_contact::AssembledRows { blocks, jac, aref, d }
     }
@@ -474,6 +546,39 @@ pub struct MjcfTree {
     pub contact_excludes: Vec<(String, String)>,
     /// `<contact><pair/>` entries with their parameters resolved (defaults classes applied).
     pub contact_pairs: Vec<MjcfContactPair>,
+    /// `<tendon><fixed>` entries in file order — which is the order their limit rows appear in.
+    pub tendons: Vec<MjcfTendon>,
+    /// `<tendon><spatial>` and anything else in a `<tendon>` block, as `(name, why)`. A model still loads;
+    /// what it loses is that tendon's length, its limit and any actuator driving it.
+    pub tendons_unsupported: Vec<(String, String)>,
+}
+
+/// **`<tendon><fixed>`**: a tendon whose length is a fixed linear combination of single-dof joint positions,
+/// `L = Σ coefₖ·qₖ`, with a constant Jacobian. MuJoCo uses it for the coupled linkages that a real gripper
+/// has and a kinematic tree does not — two fingers driven by one motor, a telescoping stage, a differential.
+///
+/// ⛔ A `<spatial>` tendon is a different object: its length is a path through sites and around wrapping
+/// geoms, and it is NOT carried here. Those are named in [`MjcfTree::tendons_unsupported`].
+#[derive(Clone, Debug)]
+pub struct MjcfTendon {
+    pub name: String,
+    /// `(tree dof, coefficient)`, in file order. The Jacobian row is these coefficients and nothing else.
+    pub joints: Vec<(usize, f64)>,
+    /// `range` when `limited`, in the tendon's own length units — NOT scaled by `<compiler angle>`, because
+    /// a tendon length is a length even when every joint it names is a hinge.
+    pub range: Option<(f64, f64)>,
+    pub margin: f64,
+    pub solref_limit: [f64; 2],
+    pub solimp_limit: [f64; 5],
+    pub stiffness: f64,
+    /// `springlength`, MuJoCo's resting BAND: below `[0]` and above `[1]` the spring pulls back, between
+    /// them it is slack. A single stated value fills both, and the default `-1 -1` means "the length at
+    /// `qpos0`", resolved at load.
+    pub springlength: [f64; 2],
+    pub damping: f64,
+    pub frictionloss: f64,
+    pub solref_friction: [f64; 2],
+    pub solimp_friction: [f64; 5],
 }
 
 /// **One geom as the collision pipeline needs it**: where it is, what shape, and the contact parameters
@@ -2318,19 +2423,116 @@ fn mujoco_stored_inertia(full: &Matrix3<f64>) -> Matrix3<f64> {
     r * Matrix3::from_diagonal(&Vector3::new(eigval[0], eigval[1], eigval[2])) * r.transpose()
 }
 
+/// **`<tendon>`**: the `<fixed>` tendons, with their defaults class applied. A `<spatial>` tendon is
+/// reported as unsupported rather than approximated — a path length around wrapping geoms is not something
+/// a linear combination can stand in for, and a wrong tendon length is a wrong actuator force.
+#[allow(clippy::type_complexity)]
+fn parse_tendons(root: &El, defaults: &Defaults, c: &Compiler, joints: &[MjcfJoint]) -> Result<(Vec<MjcfTendon>, Vec<(String, String)>), String> {
+    let by_name: HashMap<&str, &MjcfJoint> = joints.iter().map(|j| (j.name.as_str(), j)).collect();
+    let (mut out, mut unsupported) = (Vec::new(), Vec::new());
+    for section in root.children_named("tendon") {
+        for el in &section.children {
+            let name = el.attr("name").map(|s| s.to_string()).unwrap_or_else(|| format!("tendon{}", out.len() + unsupported.len()));
+            if el.name != "fixed" {
+                unsupported.push((name, format!("<{}>", el.name)));
+                continue;
+            }
+            let get = |k: &str| defaults.get(el, "tendon", k, section.attr("childclass"));
+            let num = |k: &str, dflt: f64| -> Result<f64, String> {
+                match get(k) {
+                    Some(v) => v.trim().parse::<f64>().map_err(|e| format!("tendon '{name}' {k}: {e}")),
+                    None => Ok(dflt),
+                }
+            };
+            let mut links: Vec<(usize, f64)> = Vec::new();
+            for j in el.children.iter().filter(|x| x.name == "joint") {
+                let jn = j.attr("joint").ok_or_else(|| format!("tendon '{name}': a <joint> with no joint"))?;
+                let target = *by_name.get(jn).ok_or_else(|| format!("tendon '{name}': no joint named '{jn}'"))?;
+                if !matches!(target.kind, MjcfJointKind::Hinge | MjcfJointKind::Slide) {
+                    unsupported.push((name.clone(), format!("joint '{jn}' is a {:?} joint", target.kind)));
+                    links.clear();
+                    break;
+                }
+                let coef: f64 = match j.attr("coef") {
+                    Some(v) => v.trim().parse().map_err(|e| format!("tendon '{name}' coef: {e}"))?,
+                    None => return Err(format!("tendon '{name}': a <joint> with no coef")),
+                };
+                links.push((target.first, coef));
+            }
+            if links.is_empty() {
+                continue;
+            }
+            let rng = match get("range") {
+                Some(v) => {
+                    let f = floats(v)?;
+                    [f.first().copied().unwrap_or(0.0), f.get(1).copied().unwrap_or(0.0)]
+                }
+                None => [0.0, 0.0],
+            };
+            let limited = match get("limited") {
+                Some("true") => true,
+                Some("false") => false,
+                // `limited="auto"` and an unstated `limited` both defer to `autolimits`
+                _ => c.autolimits && rng != [0.0, 0.0],
+            };
+            let spring = match get("springlength") {
+                Some(v) => {
+                    let f = floats(v)?;
+                    let a = f.first().copied().unwrap_or(-1.0);
+                    [a, f.get(1).copied().unwrap_or(a)]
+                }
+                None => [-1.0, -1.0],
+            };
+            let record = MjcfTendon {
+                name: name.clone(),
+                joints: links,
+                range: limited.then_some((rng[0], rng[1])),
+                margin: num("margin", 0.0)?,
+                solref_limit: pair(get("solreflimit"), [0.02, 1.0])?,
+                solimp_limit: five(get("solimplimit"), [0.9, 0.95, 0.001, 0.5, 2.0])?,
+                stiffness: num("stiffness", 0.0)?,
+                springlength: spring,
+                damping: num("damping", 0.0)?,
+                frictionloss: num("frictionloss", 0.0)?,
+                solref_friction: pair(get("solreffriction"), [0.02, 1.0])?,
+                solimp_friction: five(get("solimpfriction"), [0.9, 0.95, 0.001, 0.5, 2.0])?,
+            };
+            out.push(record);
+        }
+    }
+    Ok((out, unsupported))
+}
+
+fn pair(v: Option<&str>, dflt: [f64; 2]) -> Result<[f64; 2], String> {
+    let Some(v) = v else { return Ok(dflt) };
+    let f = floats(v)?;
+    Ok([f.first().copied().unwrap_or(dflt[0]), f.get(1).copied().unwrap_or(dflt[1])])
+}
+
+fn five(v: Option<&str>, dflt: [f64; 5]) -> Result<[f64; 5], String> {
+    let Some(v) = v else { return Ok(dflt) };
+    let f = floats(v)?;
+    let mut out = dflt;
+    for (o, x) in out.iter_mut().zip(&f) {
+        *o = *x;
+    }
+    Ok(out)
+}
+
 /// **`<actuator>`**, resolved the way MuJoCo's compiler resolves it.
 ///
 /// ⛔ An actuator this port does not carry does not cost the whole model — a tendon-driven hand still has
 /// geoms to collide and a tree to move — but it is NAMED, with its reason, in the second return value. A
 /// silently dropped actuator is a robot that does not move for reasons nobody can see.
 #[allow(clippy::type_complexity)]
-fn parse_actuators(root: &El, defaults: &Defaults, c: &Compiler, joints: &[MjcfJoint]) -> Result<(Vec<crate::mujoco_actuator::Actuator>, Vec<(String, String)>), String> {
+fn parse_actuators(root: &El, defaults: &Defaults, c: &Compiler, joints: &[MjcfJoint], tendons: &[MjcfTendon]) -> Result<(Vec<crate::mujoco_actuator::Actuator>, Vec<(String, String)>), String> {
     let by_name: HashMap<&str, &MjcfJoint> = joints.iter().map(|j| (j.name.as_str(), j)).collect();
+    let ten_by_name: HashMap<&str, &MjcfTendon> = tendons.iter().map(|t| (t.name.as_str(), t)).collect();
     let (mut out, mut unsupported) = (Vec::new(), Vec::new());
     for section in root.children_named("actuator") {
         for el in &section.children {
             let name = el.attr("name").map(|s| s.to_string()).unwrap_or_else(|| format!("actuator{}", out.len() + unsupported.len()));
-            match one_actuator(el, defaults, c, &by_name, section.attr("childclass"), &name) {
+            match one_actuator(el, defaults, c, &by_name, &ten_by_name, section.attr("childclass"), &name) {
                 Ok(a) => out.push(a),
                 Err(Unsupported(why)) => unsupported.push((name, why)),
                 Err(Bad(why)) => return Err(format!("actuator '{name}': {why}")),
@@ -2340,7 +2542,8 @@ fn parse_actuators(root: &El, defaults: &Defaults, c: &Compiler, joints: &[MjcfJ
     Ok((out, unsupported))
 }
 
-fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&str, &MjcfJoint>, childclass: Option<&str>, name: &str) -> Result<crate::mujoco_actuator::Actuator, ActErr> {
+#[allow(clippy::too_many_arguments)]
+fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&str, &MjcfJoint>, ten_by_name: &HashMap<&str, &MjcfTendon>, childclass: Option<&str>, name: &str) -> Result<crate::mujoco_actuator::Actuator, ActErr> {
     use crate::mujoco_actuator::Actuator;
     let tag = el.name.as_str();
     if !ACTUATOR_TAGS.contains(&tag) {
@@ -2368,13 +2571,23 @@ fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&s
         return Err(Unsupported(why));
     }
     let (kind, target) = rec.trn.ok_or_else(|| Unsupported("no transmission named".into()))?;
-    if kind != "joint" {
-        return Err(Unsupported(format!("a {kind} transmission")));
-    }
-    let j = *by_name.get(target.as_str()).ok_or_else(|| Bad(format!("no joint named '{target}'")))?;
-    if !matches!(j.kind, MjcfJointKind::Hinge | MjcfJointKind::Slide) {
-        return Err(Unsupported(format!("joint '{target}' is a {:?} joint", j.kind)));
-    }
+    // ⛔ a TENDON transmission is the same actuator with a different moment: `length = gear·L`, and the
+    // force comes back through `gear·coef` on every joint the tendon names, not through one dof. Everything
+    // downstream — gain, bias, the clamps — is untouched, which is exactly MuJoCo's factoring.
+    let (j, moment) = match kind.as_str() {
+        "joint" => {
+            let j = *by_name.get(target.as_str()).ok_or_else(|| Bad(format!("no joint named '{target}'")))?;
+            if !matches!(j.kind, MjcfJointKind::Hinge | MjcfJointKind::Slide) {
+                return Err(Unsupported(format!("joint '{target}' is a {:?} joint", j.kind)));
+            }
+            (Some(j), vec![(j.first, rec.gear)])
+        }
+        "tendon" => {
+            let t = *ten_by_name.get(target.as_str()).ok_or_else(|| Unsupported(format!("tendon '{target}' is not one this loader carries")))?;
+            (None, t.joints.iter().map(|(d, c)| (*d, rec.gear * c)).collect())
+        }
+        _ => return Err(Unsupported(format!("a {kind} transmission"))),
+    };
     // `limited="auto"`: under `autolimits` a stated range limits and an unstated one does not, and with
     // autolimits off MuJoCo refuses a range with no `limited`
     let limit = |r: [f64; 2], lim: Option<bool>, what: &str| -> Result<Option<[f64; 2]>, ActErr> {
@@ -2398,14 +2611,14 @@ fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&s
         if ctrlrange.is_some() {
             return Err(Bad("ctrlrange and inheritrange cannot both be given".into()));
         }
-        let (lo, hi) = j.range.ok_or_else(|| Bad(format!("inheritrange, but joint '{target}' has no range")))?;
+        let (lo, hi) = j.and_then(|j| j.range).ok_or_else(|| Bad(format!("inheritrange, but '{target}' has no range")))?;
         let (mean, radius) = (0.5 * (hi + lo), 0.5 * (hi - lo) * rec.inheritrange);
         ctrlrange = Some([mean - radius, mean + radius]);
     }
     let forcerange = limit(rec.forcerange, rec.forcelimited, "force")?;
     Ok(Actuator {
         name: name.to_string(),
-        joint: j.first,
+        moment,
         gear: rec.gear,
         gain: rec.gain,
         gainprm: rec.gainprm,
@@ -2493,6 +2706,8 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             gravity: Vector3::new(0.0, 0.0, -9.81),
             body_mass: BTreeMap::new(),
             body_gravcomp: BTreeMap::new(),
+            tendons: Vec::new(),
+            tendons_unsupported: Vec::new(),
             body_parent: BTreeMap::new(),
             mesh_hulls: BTreeMap::new(),
             mesh_raw: BTreeMap::new(),
@@ -2550,7 +2765,18 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             out.gravity = vec3(v).map_err(|e| format!("<option gravity>: {e}"))?;
         }
     }
-    let (acts, unsupported) = parse_actuators(&root, &defaults, &c, &out.joints)?;
+    let (mut tendons, ten_unsupported) = parse_tendons(&root, &defaults, &c, &out.joints)?;
+    // `springlength = -1` means "however long the tendon is at qpos0", which MuJoCo resolves when it
+    // compiles. ⭐ For a FIXED tendon that is `Σ coef·qpos0`, and this tree folds every joint's `ref` into
+    // its origin, so `qpos0` is `q = 0` here and the resting length is exactly zero.
+    for t in &mut tendons {
+        if t.springlength[0] < 0.0 {
+            t.springlength = [0.0, 0.0];
+        }
+    }
+    out.tendons = tendons;
+    out.tendons_unsupported = ten_unsupported;
+    let (acts, unsupported) = parse_actuators(&root, &defaults, &c, &out.joints, &out.tendons)?;
     out.actuators = acts;
     out.actuators_unsupported = unsupported;
     // ⛔ `dampratio` cannot be resolved while reading the file: it is a ratio against the inertia the
@@ -3197,6 +3423,89 @@ mod tests {
         for i in 0..nv {
             assert!((passive[i] - 0.5 * bias[i]).abs() < 1e-12, "dof {i}: {} vs half of {}", passive[i], bias[i]);
         }
+    }
+
+    /// **A fixed tendon's limit row, against MuJoCo's own numbers.** Nothing in Menagerie can check this:
+    /// the two models whose tendons produce `limit_tendon` rows are `toddlerbot`, which has a free base and
+    /// so no dof correspondence, and `robotiq_2f85`, whose rows come with `connect` equalities this loader
+    /// does not build. A corpus that exercises a feature is not the same as a corpus that CHECKS it, so the
+    /// numbers below come from MuJoCo 3.13.0 run on exactly this model.
+    ///
+    /// ⛔ The row's Jacobian is `−side·coef`, its position `side·(range − L)` and its velocity `J·q̇`, all in
+    /// the tendon's own length units — `<compiler angle>` does not touch a tendon range even when every
+    /// joint it names is a hinge.
+    #[test]
+    fn a_fixed_tendons_limit_row_is_mujocos() {
+        let xml = r#"<mujoco><compiler angle="radian"/><option timestep="0.002"/><worldbody>
+<body name="l1" pos="0 0 0.5"><joint name="j1" type="hinge" axis="0 1 0" damping="0"/>
+  <inertial pos="0.2 0 0" mass="1.5" diaginertia="0.03 0.02 0.04"/>
+  <body name="l2" pos="0.4 0 0"><joint name="j2" type="slide" axis="1 0 0"/>
+    <inertial pos="0.1 0 0" mass="0.7" diaginertia="0.01 0.012 0.008"/>
+  </body>
+</body></worldbody>
+<tendon><fixed name="coup" limited="true" range="-0.15 0.25" margin="0.02" solreflimit="0.01 0.9" solimplimit="0.8 0.93 0.002 0.4 3">
+  <joint joint="j1" coef="0.6"/><joint joint="j2" coef="-1.3"/>
+</fixed></tendon></mujoco>"#;
+        let t = tree_from_mjcf_str(xml).unwrap();
+        let (q, qd) = ([0.7, -0.12], [0.35, -0.2]);
+        assert!((t.ten_length(&q)[0] - 0.576).abs() < 1e-15, "{:?}", t.ten_length(&q));
+        assert!((t.ten_velocity(&qd)[0] - 0.47).abs() < 1e-15, "{:?}", t.ten_velocity(&qd));
+        assert!((t.tendon_invweight0()[0] - 3.76260032).abs() < 1e-8, "{:?}", t.tendon_invweight0());
+        let set = t.joint_constraint_rows(&q, &qd, &t.dof_invweight0());
+        assert_eq!(set.blocks.len(), 1, "only the UPPER side is within margin");
+        assert!((set.jac[(0, 0)] + 0.6).abs() < 1e-15 && (set.jac[(0, 1)] - 1.3).abs() < 1e-15, "{}", set.jac);
+        assert!((set.aref[0] - 4694.1988583565635).abs() < 1e-8, "aref {}", set.aref[0]);
+        assert!((set.d[0] - 3.5309927050893757).abs() < 1e-9, "D {}", set.d[0]);
+        // at a length INSIDE the range by more than the margin there is no row at all
+        assert_eq!(t.joint_constraint_rows(&[0.1, 0.0], &qd, &t.dof_invweight0()).blocks.len(), 0);
+    }
+
+    /// **`springlength` is a BAND**: between its two values a tendon is slack and pulls nothing. A single
+    /// stated value fills both ends, which is the ordinary spring; two values are a deadband, and a port
+    /// that keeps one resting length turns a slack tendon into one that is always pulling.
+    #[test]
+    fn a_tendon_spring_is_slack_inside_its_band() {
+        let model = |spring: &str| {
+            let xml = format!(
+                r#"<mujoco><compiler angle="radian"/><worldbody>
+<body name="l1"><joint name="j1" type="slide" axis="1 0 0"/><inertial pos="0 0 0" mass="1" diaginertia="0.01 0.01 0.01"/></body>
+</worldbody><tendon><fixed name="s" stiffness="10" damping="2" springlength="{spring}">
+  <joint joint="j1" coef="1"/></fixed></tendon></mujoco>"#
+            );
+            tree_from_mjcf_str(&xml).unwrap()
+        };
+        let band = model("0.1 0.3");
+        assert_eq!(band.qfrc_passive(&[0.2], &[0.0])[0], 0.0, "slack inside the band");
+        assert!((band.qfrc_passive(&[0.5], &[0.0])[0] + 10.0 * 0.2).abs() < 1e-12, "pulled back from above");
+        assert!((band.qfrc_passive(&[0.0], &[0.0])[0] - 10.0 * 0.1).abs() < 1e-12, "pushed out from below");
+        // the damper does not care where in the band it is
+        assert!((band.qfrc_passive(&[0.2], &[3.0])[0] + 2.0 * 3.0).abs() < 1e-12);
+        // one value is one resting length, and then there is no slack anywhere
+        let single = model("0.2");
+        assert_eq!(single.qfrc_passive(&[0.2], &[0.0])[0], 0.0);
+        assert!((single.qfrc_passive(&[0.25], &[0.0])[0] + 10.0 * 0.05).abs() < 1e-12);
+    }
+
+    /// **A tendon transmission spreads one actuator's force over every joint the tendon names.** Menagerie
+    /// checks the numbers (2,814 of 2,814 actuators, `actuator_length` to 5.6e-17); this pins the shape.
+    #[test]
+    fn a_tendon_actuator_pulls_every_joint_the_tendon_names() {
+        let t = tree_from_mjcf_str(
+            r#"<mujoco><compiler angle="radian"/><worldbody>
+<body name="a"><joint name="j1" type="slide" axis="1 0 0"/><inertial pos="0 0 0" mass="1" diaginertia="0.01 0.01 0.01"/>
+  <body name="b"><joint name="j2" type="slide" axis="0 1 0"/><inertial pos="0 0 0" mass="1" diaginertia="0.01 0.01 0.01"/></body>
+</body></worldbody>
+<tendon><fixed name="split"><joint joint="j1" coef="0.5"/><joint joint="j2" coef="0.25"/></fixed></tendon>
+<actuator><general name="drive" tendon="split" gear="3"/></actuator></mujoco>"#,
+        )
+        .unwrap();
+        assert_eq!(t.actuators.len(), 1, "{:?}", t.actuators_unsupported);
+        let a = &t.actuators[0];
+        assert_eq!(a.moment, vec![(0, 1.5), (1, 0.75)], "gear times each coefficient");
+        // actuator_length = gear·(0.5·q₁ + 0.25·q₂)
+        assert!((a.length(&[2.0, 4.0]) - 3.0 * (0.5 * 2.0 + 0.25 * 4.0)).abs() < 1e-15);
+        let f = crate::mujoco_actuator::qfrc_actuator(&t.actuators, &[0.0, 0.0], &[0.0, 0.0], &[2.0], &[None, None]);
+        assert_eq!(f, vec![3.0, 1.5], "one control, two dofs, in the tendon's proportions");
     }
 
     /// **Two geoms welded onto the same link belong to two different BODIES**, and MuJoCo gives each its own

@@ -44,8 +44,12 @@ pub enum ActBias {
 #[derive(Clone, Debug)]
 pub struct Actuator {
     pub name: String,
-    /// The tree joint (one degree of freedom) this drives.
-    pub joint: usize,
+    /// **`actuator_moment`**: which dofs this actuator pulls on, and how hard — `(dof, moment)` for every
+    /// non-zero entry, with `gear` already folded in. A JOINT transmission is the single entry
+    /// `(joint, gear)`; a FIXED TENDON is one entry per joint the tendon names, `(dof, gear·coef)`. The
+    /// whole of MuJoCo's transmission lives here: `length = m·q`, `velocity = m·q̇`, and the same `m` carries
+    /// the force back.
+    pub moment: Vec<(usize, f64)>,
     /// `actuator_gear[0]`: the transmission ratio. `length = gear·q`, `velocity = gear·q̇`, and the moment
     /// that carries the force back to the joint is the same `gear`.
     pub gear: f64,
@@ -63,12 +67,12 @@ pub struct Actuator {
 impl Actuator {
     /// `actuator_length` for a joint transmission.
     pub fn length(&self, q: &[f64]) -> f64 {
-        self.gear * q[self.joint]
+        self.moment.iter().map(|(d, m)| m * q[*d]).sum()
     }
 
     /// `actuator_velocity`.
     pub fn velocity(&self, qd: &[f64]) -> f64 {
-        self.gear * qd[self.joint]
+        self.moment.iter().map(|(d, m)| m * qd[*d]).sum()
     }
 
     /// `actuator_force`: the scalar force, before the transmission carries it to the joint.
@@ -107,7 +111,9 @@ pub fn qfrc_actuator(acts: &[Actuator], q: &[f64], qd: &[f64], ctrl: &[f64], dof
     let mut out = vec![0.0; dof_force_range.len()];
     for (i, a) in acts.iter().enumerate() {
         let f = a.force(a.length(q), a.velocity(qd), ctrl.get(i).copied().unwrap_or(0.0));
-        out[a.joint] += a.gear * f;
+        for (d, m) in &a.moment {
+            out[*d] += m * f;
+        }
     }
     for (o, r) in out.iter_mut().zip(dof_force_range) {
         if let Some([lo, hi]) = r {
@@ -127,10 +133,10 @@ pub fn resolve_dampratio(acts: &mut [Actuator], m0_diag: &[f64]) {
         if a.gainprm[0] != -a.biasprm[1] || a.biasprm[2] <= 0.0 {
             continue;
         }
-        // the inertia the transmission reflects: diag(M)/gear² summed over the moment's non-zeros, which for
-        // a joint transmission is the one dof it drives
-        let trn2 = a.gear * a.gear;
-        let mass = if trn2 > 1e-15 { m0_diag[a.joint] / trn2 } else { 0.0 };
+        // the inertia the transmission reflects, `1/(m·M⁻¹·mᵀ)` on `diag(M)`: for a joint transmission that
+        // is exactly `diag(M)_j/gear²`, and for a fixed tendon it is the several dofs it pulls on together
+        let acc0: f64 = a.moment.iter().map(|(d, m)| m * m / m0_diag[*d]).sum();
+        let mass = if acc0 > 1e-15 { 1.0 / acc0 } else { 0.0 };
         a.biasprm[2] = -(a.biasprm[2] * 2.0 * (a.gainprm[0] * mass).sqrt());
     }
 }
@@ -140,7 +146,7 @@ mod tests {
     use super::*;
 
     fn act(gain: ActGain, gainprm: [f64; 3], bias: ActBias, biasprm: [f64; 3]) -> Actuator {
-        Actuator { name: "a".into(), joint: 0, gear: 1.0, gain, gainprm, bias, biasprm, ctrlrange: None, forcerange: None }
+        Actuator { name: "a".into(), moment: vec![(0, 1.0)], gear: 1.0, gain, gainprm, bias, biasprm, ctrlrange: None, forcerange: None }
     }
 
     /// The three shortcut tags are the SAME law with different parameters, and that is the whole point of
@@ -178,6 +184,7 @@ mod tests {
     fn the_joint_caps_the_total_actuator_force_on_its_dof() {
         let mut a = act(ActGain::Fixed, [1.0, 0.0, 0.0], ActBias::None, [0.0; 3]);
         a.gear = 2.0;
+        a.moment = vec![(0, 2.0)];
         let b = a.clone();
         let q = [0.0];
         // two actuators, gear 2, controls 10 and 5: 2·10 + 2·5 = 30 before the joint has its say
@@ -197,7 +204,7 @@ mod tests {
             act(ActGain::Fixed, [5.0, 0.0, 0.0], ActBias::Affine, [0.0, 0.0, 3.0]),
         ];
         acts[0].gear = 2.0;
-        acts[1].joint = 0;
+        acts[0].moment = vec![(0, 2.0)];
         resolve_dampratio(&mut acts, &[0.8]);
         // mass = 0.8/4 = 0.2, damping = 2·2·sqrt(100·0.2)
         assert!((acts[0].biasprm[2] + 2.0 * 2.0 * (kp * 0.2f64).sqrt()).abs() < 1e-12, "{}", acts[0].biasprm[2]);
