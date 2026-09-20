@@ -131,6 +131,7 @@ fn main() {
     let (mut acc_ok, mut acc_tried, mut worst_acc) = (0usize, 0usize, 0.0f64);
     let (mut chain_ok, mut chain_tried, mut worst_chain, mut worst_chain_bias) = (0usize, 0usize, 0.0f64, 0.0f64);
     let (mut solved_nomesh, mut solved_ok_nomesh, mut worst_qacc_nomesh) = (0usize, 0usize, 0.0f64);
+    let mut solved_no_worse = 0usize;
     let (mut framed, mut frame_unpaired, mut tangent_differs) = (0usize, 0usize, 0usize);
     let (mut worst_con_normal, mut worst_con_normal_where) = (0.0f64, String::new());
     let (mut worst_con_tangent, mut worst_con_tangent_where) = (0.0f64, String::new());
@@ -639,13 +640,44 @@ fn main() {
                         worst_qacc = dq;
                         worst_qacc_where = format!("{} ({} contacts)", o.rel, contacts.len());
                     }
+                    // ⛔⛔ "our cost is no worse" is EVIDENCE OF NOTHING when the rows are our own. The
+                    // solve converged, so of course our answer minimises our problem; a wrong contact set
+                    // would pass this test every time. It is only evidence where the rows are known to be
+                    // MuJoCo's, which here means a state with NO CONTACTS — those rows are the joint rows
+                    // `examples/menagerie_rows` checks against MuJoCo, 236 of 236. `umi_gripper`, whose
+                    // eight dof-friction rows all sit at their bounds, is that case: run on MuJoCo's OWN
+                    // rows by `examples/menagerie_efc` it lands 3.2e-3 away at a cost no worse, so the
+                    // difference is MuJoCo's iteration limit and not this port.
+                    if dq >= 1e-6 && contacts.is_empty() {
+                        let cost_at = |a: &DVector<f64>| {
+                            let jar: Vec<f64> = (&set.jac * a - DVector::from_row_slice(&set.aref)).iter().copied().collect();
+                            let u = ferromotion_core::mujoco_constraint_update_blocks(&set.blocks, &set.d, &jar);
+                            let da = a - &a0;
+                            0.5 * (da.transpose() * &m * &da)[(0, 0)] + u.cost
+                        };
+                        if cost_at(&sol.qacc) <= cost_at(&DVector::from_row_slice(&s.qacc)) {
+                            solved_no_worse += 1;
+                        }
+                    }
                     if dq < 1e-6 {
                         solved_ok += 1;
                         if !any_mesh {
                             solved_ok_nomesh += 1;
                         }
                     } else if notes.len() < 12 || !any_mesh && notes.len() < 40 {
-                        notes.push(format!("{}: qacc off {dq:.2e} with {} contacts{}, {} rows, gradient {:.2e}", o.rel, contacts.len(), if any_mesh { " (mesh)" } else { " (NO mesh)" }, set.blocks.iter().map(|b| b.rows()).sum::<usize>(), sol.grad_norm));
+                        // ⭐ is the constrained answer wrong, or was the UNCONSTRAINED one already? The
+                        // smooth comparison above only runs where MuJoCo has no rows at all, so a model
+                        // that always has a limit or an equality never reaches it, and a wrong mass matrix
+                        // or actuator force there reads as a constraint-solver failure.
+                        let smooth = rel(a0.as_slice(), &s.qacc_smooth);
+                        notes.push(format!(
+                            "{}: qacc off {dq:.2e} with {} contacts{}, {} rows, gradient {:.2e}; unconstrained already off {smooth:.2e}",
+                            o.rel,
+                            contacts.len(),
+                            if any_mesh { " (mesh)" } else { " (NO mesh)" },
+                            set.blocks.iter().map(|b| b.rows()).sum::<usize>(),
+                            sol.grad_norm
+                        ));
                     }
                 }
                 Err(e) => {
@@ -660,7 +692,7 @@ fn main() {
     println!("states {states}");
     println!("  SMOOTH (mass matrix, bias, actuators, unconstrained acceleration — all from the file): {smooth_ok} of {smooth_tried} within 1e-6; worst qfrc_bias {worst_bias:.2e}, worst qacc_smooth (relative) {worst_smooth:.2e} on {worst_smooth_where}");
     println!("    and MuJoCo's own qacc_smooth back through OUR mass matrix: worst residual {worst_resid:.2e} on {worst_resid_where}");
-    println!("  CONSTRAINED (contacts found and solved by us): {solved_ok} of {solved} within 1e-6; worst qacc (relative) {worst_qacc:.2e} on {worst_qacc_where}");
+    println!("  CONSTRAINED (contacts found and solved by us): {solved_ok} of {solved} within 1e-6 ({solved_no_worse} more have NO contacts — rows this port checks separately — and reach a cost no worse than MuJoCo's own answer); worst qacc (relative) {worst_qacc:.2e} on {worst_qacc_where}");
     println!("    of those, with NO mesh geom in any contact: {solved_ok_nomesh} of {solved_nomesh}; worst qacc (relative) {worst_qacc_nomesh:.2e}");
     println!("  CONTACT FRAMES (the tangent pair, not only the normal): {framed} contacts paired with MuJoCo's ({frame_unpaired} states could not be paired by geom)");
     println!("    worst normal {worst_con_normal:.2e} on {worst_con_normal_where}; tangent pair rotated on {tangent_differs} of them, worst 1-|t·t'| {worst_con_tangent:.2e} on {worst_con_tangent_where}");
