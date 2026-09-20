@@ -1090,6 +1090,8 @@ pub struct MjcfTree {
     pub body_ipos: BTreeMap<String, Vector3<f64>>,
     /// Site frames, same form. Sites and bodies live in separate namespaces in MuJoCo and here.
     pub site_frames: BTreeMap<String, (usize, Iso)>,
+    /// The body each named site sits on.
+    pub site_body: BTreeMap<String, String>,
     /// Bodies and sites fixed to the world (no jointed ancestor), by world pose. Keys are `body:<name>` and
     /// `site:<name>`.
     pub world_fixed: BTreeMap<String, Iso>,
@@ -2353,6 +2355,11 @@ impl Walk<'_> {
                     let name = ch.attr("name").map(|s| s.to_string());
                     let sp = pose_of(ch, "site", self.defaults, childclass, self.c)?;
                     if let Some(name) = name {
+                        // which BODY the site sits on — a site-based `connect` needs it for the two
+                        // `body_invweight0` values its rows regularise against
+                        if let Some(b) = self.body_stack.last() {
+                            self.out.site_body.insert(name.clone(), b.clone());
+                        }
                         self.place("site", name, parent, carry * sp)?;
                     }
                 }
@@ -3542,6 +3549,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             body_frames: BTreeMap::new(),
             body_ipos: BTreeMap::new(),
             site_frames: BTreeMap::new(),
+            site_body: BTreeMap::new(),
             world_fixed: BTreeMap::new(),
             no_inertial: Vec::new(),
             inferred_from_geoms: Vec::new(),
@@ -3701,8 +3709,26 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
                     }
                 }
                 if el.name == "connect" {
+                    // ⭐ the SITE form: `<connect site1="a" site2="b"/>` says the two sites coincide, and
+                    // each side already carries its own point — there is no anchor to resolve at `qpos0`
+                    // and no second copy to derive. `toddlerbot` is written this way.
+                    if let (Some(s1), Some(s2)) = (el.attr("site1"), el.attr("site2")) {
+                        let at = |n: &str| -> Option<(Option<usize>, Vector3<f64>, String)> {
+                            match out.site_frames.get(n) {
+                                Some((ride, off)) => Some((Some(*ride), off.translation.vector, out.site_body.get(n).cloned().unwrap_or_default())),
+                                None => out.world_fixed.get(&format!("site:{n}")).map(|i| (None, i.translation.vector, String::new())),
+                            }
+                        };
+                        let (Some((r1, l1, b1)), Some((r2, l2, b2))) = (at(s1), at(s2)) else {
+                            out.equalities_unsupported.push((name, format!("a connect between sites '{s1}' and '{s2}', one of which is not in the model")));
+                            continue;
+                        };
+                        let diag_a = biw0(Some(b1.as_str())) + biw0(Some(b2.as_str()));
+                        out.equalities.push(MjcfEquality { name, kind: EqualityKind::Connect { side1: (r1, l1), side2: (r2, l2), diag_a }, solref, solimp });
+                        continue;
+                    }
                     let Some(anchor) = el.attr("anchor") else {
-                        out.equalities_unsupported.push((name, "a site anchor".into()));
+                        out.equalities_unsupported.push((name, "a connect with neither an anchor nor two sites".into()));
                         continue;
                     };
                     let anchor = vec3(anchor)?;
