@@ -507,8 +507,7 @@ impl MjcfTree {
     /// by MuJoCo, like every other `*_invweight0`.
     pub fn tendon_invweight0(&self) -> Vec<f64> {
         let nv = self.tree.joints.len();
-        let m = crate::tree_dynamics::tree_mass_matrix(&self.tree.joints, &self.tree.inertia, &self.tree.parent, &vec![0.0; nv]);
-        let Some(chol) = m.cholesky() else {
+        let Some(chol) = self.mass_matrix(&self.reference_q).cholesky() else {
             return vec![0.0; self.tendons.len()];
         };
         self.ten_moment(&vec![0.0; nv])
@@ -778,7 +777,10 @@ impl MjcfTree {
     /// `(M⁻¹)ᵢᵢ` at `qpos0` — the general case, before MuJoCo's simple-body shortcut.
     fn dof_invweight0_general(&self) -> Vec<f64> {
         let nv = self.tree.joints.len();
-        let m = crate::tree_dynamics::tree_mass_matrix(&self.tree.joints, &self.tree.inertia, &self.tree.parent, &vec![0.0; nv]);
+        // ⛔ `MjcfTree::mass_matrix`, not the tree's own: armature on a free or ball joint belongs on
+        // MuJoCo's diagonal, and every inverse weight is read off the matrix that has it there — at
+        // MuJoCo's `qpos0`, which is `reference_q` and not zero
+        let m = self.mass_matrix(&self.reference_q);
         // ⛔ a CHOLESKY solve, not a general inverse: the mass matrix is symmetric positive definite, and
         // on an ill-conditioned one — a mobile base with light links — the general inverse loses digits that
         // show up directly in every constraint row's regularisation. `google_robot` moved by 5e-9 relative.
@@ -809,9 +811,9 @@ impl MjcfTree {
     /// immovable body means.
     pub fn body_invweight0(&self) -> BTreeMap<String, crate::mujoco_contact::InvWeight> {
         let nv = self.tree.joints.len();
-        let zero = vec![0.0; nv];
-        let m = crate::tree_dynamics::tree_mass_matrix(&self.tree.joints, &self.tree.inertia, &self.tree.parent, &zero);
-        let Some(chol) = m.cholesky() else {
+        let zero = self.reference_q.clone();
+        let _ = nv;
+        let Some(chol) = self.mass_matrix(&zero).cholesky() else {
             return BTreeMap::new();
         };
         let minv = chol.solve(&nalgebra::DMatrix::identity(nv, nv));
@@ -1057,6 +1059,17 @@ pub struct MjcfTree {
     pub timestep: f64,
     /// `<option gravity>`, default `0 0 -9.81`.
     pub gravity: Vector3<f64>,
+    /// **MuJoCo's `qpos0`, in THIS port's coordinates.** ⛔⛔ It is NOT `q = 0`. A joint's `ref` is folded
+    /// into its origin here, so `q` IS `qpos` and the reference configuration is the vector of `ref` values;
+    /// a free body's reference pose is the one its `<body>` element states, which the free joint carries.
+    /// Everything MuJoCo evaluates "once, at `qpos0`" — every `*_invweight0`, a `dampratio`, a `connect`
+    /// anchor's second copy, a tendon's automatic resting length — has to be evaluated HERE.
+    /// `agility_cassie`'s knee and tarsus have `ref` of −0.785 and 1.012, and resolving its plantar rod's
+    /// anchor at `q = 0` instead put the two ends of a closed loop 41 cm apart.
+    pub reference_q: Vec<f64>,
+    /// The pose a free-jointed body's `<body>` element states — the free joint carries it, so it is not in
+    /// the tree's own geometry, and [`MjcfTree::reference_q`] is where it goes.
+    pub free_base_pose: BTreeMap<String, Iso>,
     /// `<option density>`, `<option viscosity>` and `<option wind>` — the ambient medium. With both density
     /// and viscosity zero there is no fluid force at all, which is MuJoCo's default.
     pub density: f64,
@@ -2411,7 +2424,11 @@ impl Walk<'_> {
             return Err(format!("body '{name}': a free joint must be the only joint of a child of the world"));
         }
         // the body frame relative to the enclosing frame — dropped entirely for a free body, whose pose IS qpos
-        let bpose = if has_free { Iso::identity() } else { pose_of(b, "body", self.defaults, None, self.c)? };
+        let stated_pose = pose_of(b, "body", self.defaults, None, self.c)?;
+        if has_free {
+            self.out.free_base_pose.insert(name.clone(), stated_pose);
+        }
+        let bpose = if has_free { Iso::identity() } else { stated_pose };
 
         let mut ride = parent; // tree joint the body frame currently rides on
         let mut pre = carry * bpose; // from that joint's frame to the body frame
@@ -3483,6 +3500,8 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             angle_scale: c.deg,
             timestep: 0.002,
             gravity: Vector3::new(0.0, 0.0, -9.81),
+            reference_q: Vec::new(),
+            free_base_pose: BTreeMap::new(),
             density: 0.0,
             viscosity: 0.0,
             wind: Vector3::zeros(),
@@ -3557,17 +3576,39 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             }
         }
     }
-    let (mut tendons, ten_unsupported) = parse_tendons(&root, &defaults, &c, &out.joints)?;
-    // `springlength = -1` means "however long the tendon is at qpos0", which MuJoCo resolves when it
-    // compiles. ⭐ For a FIXED tendon that is `Σ coef·qpos0`, and this tree folds every joint's `ref` into
-    // its origin, so `qpos0` is `q = 0` here and the resting length is exactly zero.
-    for t in &mut tendons {
-        if t.springlength[0] < 0.0 {
-            t.springlength = [0.0, 0.0];
+    // ⛔⛔ MuJoCo's `qpos0` in this port's coordinates, computed BEFORE anything that is "evaluated once at
+    // qpos0" reads it: the inverse weights, a `dampratio`, a `connect`'s second anchor, a tendon's automatic
+    // resting length. `q = 0` is not it whenever a joint states a `ref`.
+    {
+        let nv = out.tree.joints.len();
+        let mut rq = vec![0.0; nv];
+        for j in &out.joints {
+            match j.kind {
+                MjcfJointKind::Hinge | MjcfJointKind::Slide => rq[j.first] = j.reference,
+                MjcfJointKind::Ball => {}
+                MjcfJointKind::Free => {
+                    let pose = out.free_base_pose.get(&j.body).copied().unwrap_or_else(Iso::identity);
+                    rq[j.first..j.first + 3].copy_from_slice(pose.translation.vector.as_slice());
+                    let (roll, pitch, yaw) = pose.rotation.euler_angles();
+                    rq[j.first + 3] = yaw;
+                    rq[j.first + 4] = pitch;
+                    rq[j.first + 5] = roll;
+                }
+            }
         }
+        out.reference_q = rq;
     }
+    let (tendons, ten_unsupported) = parse_tendons(&root, &defaults, &c, &out.joints)?;
     out.tendons = tendons;
     out.tendons_unsupported = ten_unsupported;
+    // `springlength = -1` means "however long the tendon is at qpos0", which MuJoCo resolves when it
+    // compiles — and `qpos0` is `reference_q`, not zero
+    let l0 = out.ten_length(&out.reference_q);
+    for (i, t) in out.tendons.iter_mut().enumerate() {
+        if t.springlength[0] < 0.0 {
+            t.springlength = [l0[i], l0[i]];
+        }
+    }
     let (acts, unsupported) = parse_actuators(&root, &defaults, &c, &out.joints, &out.tendons)?;
     out.actuators = acts;
     out.actuators_unsupported = unsupported;
@@ -3576,7 +3617,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
     // which is `q = 0` here, because a joint's `ref` is folded into its origin.
     if out.actuators.iter().any(|a| a.biasprm[2] > 0.0) {
         let nv = out.tree.joints.len();
-        let m0 = crate::tree_dynamics::tree_mass_matrix(&out.tree.joints, &out.tree.inertia, &out.tree.parent, &vec![0.0; nv]);
+        let m0 = out.mass_matrix(&out.reference_q);
         let diag: Vec<f64> = (0..nv).map(|i| m0[(i, i)]).collect();
         crate::mujoco_actuator::resolve_dampratio(&mut out.actuators, &diag);
     }
@@ -3584,7 +3625,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
     {
         let by_name: HashMap<&str, &MjcfJoint> = out.joints.iter().map(|j| (j.name.as_str(), j)).collect();
         // the reference pose, where MuJoCo resolves a connect's second anchor and every inverse weight
-        let frames0 = crate::tree_frames(&out.tree, &vec![0.0; out.tree.joints.len()]);
+        let frames0 = crate::tree_frames(&out.tree, &out.reference_q);
         let invw = out.body_invweight0();
         let biw0 = |b: Option<&str>| b.and_then(|b| invw.get(b)).map(|w| w.tran).unwrap_or(0.0);
         for section in root.children_named("equality") {
@@ -4478,6 +4519,45 @@ mod tests {
         // without the velocity term the answer is wrong, and only while moving — the check that it is wired
         let still = moving.qacc_smooth_mujoco(&qm, &[0.0; 7], &[]).unwrap();
         assert!(still.iter().zip(&got).any(|(a, b)| (a - b).abs() > 1.0), "the velocity term does something");
+    }
+
+    /// **A BALL joint's mass matrix, through the same change of basis.** MuJoCo's three dofs are an angular
+    /// velocity; this port's are three Euler hinges. If `M_ours = Tᵀ·M_mujoco·T` holds here too, the map is
+    /// the same one a free joint needs, and a model with both — `agility_cassie` — is comparable.
+    #[test]
+    fn a_ball_joints_mass_matrix_is_mujocos_through_the_basis() {
+        let t = tree_from_mjcf_str(
+            r#"<mujoco><compiler angle="radian"/><option gravity="0 0 -9.81"/><worldbody>
+<body name="a" pos="0 0 1" euler="0.2 -0.1 0.3"><joint name="b1" type="ball"/>
+  <inertial pos="0.1 0.02 -0.03" quat="0.9 0.2 -0.3 0.1" mass="2" diaginertia="0.04 0.06 0.09"/>
+  <body name="c" pos="0.25 0 0"><joint name="h" type="hinge" axis="0 1 0"/>
+    <inertial pos="0.1 0 0" mass="0.8" diaginertia="0.01 0.012 0.015"/></body>
+</body></worldbody></mujoco>"#,
+        )
+        .unwrap();
+        let qpos = [0.8295613557843402, 0.3110855084191276, -0.4147806778921701, 0.20739033894608505, 0.35];
+        let q = t.q_from_qpos(&qpos, &[0, 4]).unwrap();
+        #[rustfmt::skip]
+        let mj: [[f64; 4]; 4] = [
+            [0.0699734011289112, 0.0019833795013850285, -0.004062662124843231, 0.0],
+            [0.0019833795013850285, 0.19515884203190065, -0.009204432132963989, 0.038787454256947594],
+            [-0.004062662124843231, -0.009204432132963989, 0.19821757386697844, 0.0],
+            [0.0, 0.038787454256947594, 0.0, 0.02000000000000001],
+        ];
+        let theirs = nalgebra::DMatrix::from_fn(4, 4, |r, c| mj[r][c]);
+        let tm = t.free_basis(&q);
+        let mapped = tm.transpose() * &theirs * &tm;
+        let ours = t.mass_matrix(&q);
+        for r in 0..4 {
+            for c in 0..4 {
+                assert!((ours[(r, c)] - mapped[(r, c)]).abs() < 1e-12, "M[{r},{c}] {} vs {}", ours[(r, c)], mapped[(r, c)]);
+            }
+        }
+        let want = [-6.46750362599345, 9.001436644526741, -6.399013262157424, 4.021208453117406];
+        let got = t.qacc_smooth_mujoco(&q, &[0.0; 4], &[]).unwrap();
+        for (i, w) in want.iter().enumerate() {
+            assert!((got[i] - w).abs() < 1e-9, "qacc_smooth[{i}] {} vs {w}", got[i]);
+        }
     }
 
     /// **The inertia-box fluid model, against MuJoCo's own numbers.** Every coefficient was fitted one term

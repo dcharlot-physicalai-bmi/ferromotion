@@ -88,10 +88,13 @@ fn main() {
             *counts.entry("the loader refuses the model").or_default() += 1;
             continue;
         };
+        // ⭐ a FREE base is allowed now: its six columns do not correspond, but they map — `J_mujoco = J·T⁻¹`
         let lined_up = t.joints.len() == c.joints.len()
-            && t.joints.iter().zip(&c.joints).all(|(a, b)| matches!((a.kind, b.1.as_str()), (MjcfJointKind::Hinge, "hinge") | (MjcfJointKind::Slide, "slide")));
+            && t.joints.iter().zip(&c.joints).all(|(a, b)| {
+                matches!((a.kind, b.1.as_str()), (MjcfJointKind::Hinge, "hinge") | (MjcfJointKind::Slide, "slide") | (MjcfJointKind::Free, "free") | (MjcfJointKind::Ball, "ball"))
+            });
         if !lined_up {
-            *counts.entry("a free or ball joint: the dof columns do not correspond").or_default() += 1;
+            *counts.entry("a joint order that does not correspond").or_default() += 1;
             continue;
         }
         let qposadr: Vec<usize> = c.joints.iter().map(|j| j.2).collect();
@@ -99,7 +102,7 @@ fn main() {
             *counts.entry("qpos does not map onto our coordinates").or_default() += 1;
             continue;
         };
-        let iw = t.dof_invweight0();
+        let iw = t.dof_invweight0_mujoco();
         if std::env::var("DUMP_IW").is_ok() {
             println!("IW {}: {:?}", c.rel, iw);
         }
@@ -107,7 +110,14 @@ fn main() {
             *counts.entry("an equality this port does not carry (connect, weld, tendon)").or_default() += 1;
             continue;
         }
-        let mine = t.joint_constraint_rows(&q, &c.qvel, &iw);
+        // MuJoCo's velocity is in MuJoCo's basis; a free base needs it brought over before any row reads it
+        let Some(tinv) = t.free_basis(&q).try_inverse() else {
+            *counts.entry("gimbal lock: the basis map is singular").or_default() += 1;
+            continue;
+        };
+        let qd: Vec<f64> = (&tinv * nalgebra::DVector::from_row_slice(&c.qvel)).iter().copied().collect();
+        let mut mine = t.joint_constraint_rows(&q, &qd, &iw);
+        mine.jac = &mine.jac * &tinv;
         // MuJoCo's order: equality, friction, limits, contacts — and this port builds the first three
         // ⛔ only where it MATTERS: a spatial tendon this loader does not carry contributes nothing to
         // `efc` unless MuJoCo gave it a row, and blocking on its mere presence throws away 27 states whose
@@ -159,6 +169,27 @@ fn main() {
             ok += 1;
         } else if notes.len() < 8 {
             notes.push(format!("{}: J off {dj:.2e}, aref off {da:.2e}, D off {dd:.2e} over {} rows", c.rel, theirs.len()));
+            if std::env::var("DUMP_EQ").is_ok() {
+                let frames = ferromotion_core::tree_frames(&t.tree, &q);
+                for (i, e) in t.equalities.iter().enumerate() {
+                    if let ferromotion_core::EqualityKind::Connect { side1, side2, diag_a } = &e.kind {
+                        let at = |(ride, local): &(Option<usize>, nalgebra::Vector3<f64>)| match ride {
+                            Some(r) => (frames[*r] * nalgebra::Point3::from(*local)).coords,
+                            None => *local,
+                        };
+                        let (p1, p2) = (at(side1), at(side2));
+                        println!("      connect {i} '{}': ride {:?}/{:?} p1 {:?} p2 {:?} |p1-p2| {:.3e} diag_a {diag_a}", e.name, side1.0, side2.0, p1.as_slice(), p2.as_slice(), (p1 - p2).norm());
+                    }
+                }
+            }
+            if std::env::var("DUMP_J").is_ok() {
+                for (k, &row) in theirs.iter().enumerate() {
+                    let cols: Vec<String> = (0..c.nv).filter(|&col| (mine.jac[(k, col)] - c.j[row][col]).abs() > 1e-9).map(|col| format!("[{col}] {:.6} vs {:.6}", mine.jac[(k, col)], c.j[row][col])).collect();
+                    if !cols.is_empty() {
+                        println!("      row {k} ({}) J differs at {} of {} columns: {}", c.types[row], cols.len(), c.nv, cols.join(", "));
+                    }
+                }
+            }
             for (k, &row) in theirs.iter().enumerate().take(3) {
                 notes.push(format!("      row {k} ({}): aref {} vs {}, D {} vs {}", c.types[row], mine.aref[k], c.aref[row], mine.d[k], c.d[row]));
             }

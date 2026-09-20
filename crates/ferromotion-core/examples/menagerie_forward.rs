@@ -209,7 +209,15 @@ fn main() {
             // ⛔ the tree's own mass matrix does not know that armature on a free or ball joint is a
             // diagonal in MUJOCO's basis; `MjcfTree::mass_matrix` maps it into this one
             let m = t.mass_matrix(&q);
-            let bias = tree_inverse_dynamics(joints, inertia, parent, &q, &s.qvel, &vec![0.0; nv], o.gravity);
+            // ⛔⛔ the oracle's `qvel` is in MUJOCO's basis. On a free or ball base it is not this port's,
+            // and feeding it straight in is wrong for every velocity-dependent term there is — the bias,
+            // the damping, and every row's `J·q̇`. `T⁻¹` is the identity when there is no such joint.
+            let Some(tinv) = t.free_basis(&q).try_inverse() else {
+                *skip.entry("gimbal lock: the Euler base's basis map is singular").or_default() += 1;
+                continue;
+            };
+            let qvel: Vec<f64> = (&tinv * DVector::from_row_slice(&s.qvel)).iter().copied().collect();
+            let bias = tree_inverse_dynamics(joints, inertia, parent, &q, &qvel, &vec![0.0; nv], o.gravity);
             // ⛔ `qfrc_bias` is a vector in the DOF basis, so it can only be compared where the bases agree
             let db = bias.iter().zip(&s.qfrc_bias).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
             if elementwise {
@@ -239,7 +247,7 @@ fn main() {
                 worst_passive = worst_passive.max(dp);
                 continue;
             }
-            let act = t.qfrc_actuator(&q, &s.qvel, &vec![0.0; t.actuators.len()]);
+            let act = t.qfrc_actuator(&q, &qvel, &vec![0.0; t.actuators.len()]);
             let Some(minv) = m.clone().try_inverse() else {
                 *skip.entry("singular mass matrix").or_default() += 1;
                 continue;
@@ -308,7 +316,7 @@ fn main() {
                 // ⛔ and only AT REST. The oracle's `qvel` is in MuJoCo's basis, so feeding it to this tree
                 // as if it were ours is wrong for the base's six — and at speed those six feed Coriolis
                 // terms into every chain dof. A resting state has no such coupling to get wrong.
-                let _ = rotational_armature;
+                let _ = (rotational_armature, &shared);
                 // ⭐⭐ the WHOLE acceleration, in MuJoCo's own coordinates — all six of the base's dofs
                 // included, at rest and moving. `v_mujoco = T·v_ours`, so `a_mujoco = T·a_ours + Ṫ·v_ours`,
                 // and armature and damping on the base go where MuJoCo puts them: on ITS diagonal.
@@ -324,14 +332,17 @@ fn main() {
                     notes.push(format!("{}: floating qacc_smooth off {dq:.2e} in MuJoCo's basis", o.rel));
                 }
                 worst_chain = worst_chain.max(dq);
-                let _ = &shared;
-                *skip.entry("a free or ball base: compared in MuJoCo's coordinates, not this port's").or_default() += 1;
-                continue;
             }
-            let ds = rel(a0.as_slice(), &s.qacc_smooth);
+            // ⛔ SMOOTH counts the models whose dofs correspond one for one; a free or ball base is counted
+            // on the FLOATING BASE line instead, against the same oracle in MuJoCo's coordinates. Counting
+            // it here as well would report one comparison twice and, worse, compare `a0` — which is in THIS
+            // port's basis — against an answer in MuJoCo's.
+            let ds = if elementwise { rel(a0.as_slice(), &s.qacc_smooth) } else { 0.0 };
             // ⭐ separate "our M is wrong" from "inverting M lost digits": put MuJoCo's own answer back
             // through OUR mass matrix. A residual near zero means the matrix agrees and only the solve drifted
-            let resid = {
+            let resid = if !elementwise {
+                0.0
+            } else {
                 let r = &m * DVector::from_row_slice(&s.qacc_smooth) - DVector::from_iterator(nv, (0..nv).map(|i| passive[i] + act[i] - bias[i]));
                 let scale = (0..nv).map(|i| (passive[i] + act[i] - bias[i]).abs()).fold(1.0, f64::max);
                 r.amax() / scale
@@ -340,12 +351,14 @@ fn main() {
                 worst_resid = resid;
                 worst_resid_where = o.rel.clone();
             }
-            smooth_tried += 1;
+            if elementwise {
+                smooth_tried += 1;
+            }
             if ds > worst_smooth {
                 worst_smooth = ds;
                 worst_smooth_where = o.rel.clone();
             }
-            if ds < 1e-6 {
+            if ds < 1e-6 && elementwise {
                 smooth_ok += 1;
             } else if notes.len() < 12 {
                 notes.push(format!("{}: qacc_smooth off {ds:.2e} (bias off {db:.2e})", o.rel));
@@ -518,11 +531,22 @@ fn main() {
                 // rows were lined up by where the contacts actually are.
                 let mut v: Vec<(usize, usize)> = Vec::new();
                 for (k, mine) in &ours_by_pair {
-                    let mut free: Vec<usize> = theirs_by_pair[k].clone();
-                    for &a in mine {
-                        let p = ourcon[a].2;
-                        let Some((at, _)) = free.iter().enumerate().min_by(|(_, x), (_, y)| (theirs_with_rows[**x].pos - p).norm().total_cmp(&(theirs_with_rows[**y].pos - p).norm())) else { continue };
-                        v.push((a, free.remove(at)));
+                    // ⛔ BEST FIRST, not in our emission order: with three contacts on one geom pair, taking
+                    // each of ours in turn and giving it its nearest free partner can chain into a
+                    // permutation, and then every row reads as wrong when only the pairing was. On
+                    // `google_barkour_v0` that alone reported `efc_D` 4.4e-1 out with the two sets equal.
+                    let (mut free_a, mut free_b): (Vec<usize>, Vec<usize>) = (mine.clone(), theirs_by_pair[k].clone());
+                    while !free_a.is_empty() && !free_b.is_empty() {
+                        let (mut bi, mut bj, mut best) = (0usize, 0usize, f64::INFINITY);
+                        for (i, &a) in free_a.iter().enumerate() {
+                            for (j, &b) in free_b.iter().enumerate() {
+                                let d = (theirs_with_rows[b].pos - ourcon[a].2).norm();
+                                if d < best {
+                                    (bi, bj, best) = (i, j, d);
+                                }
+                            }
+                        }
+                        v.push((free_a.remove(bi), free_b.remove(bj)));
                     }
                 }
                 v
@@ -566,9 +590,9 @@ fn main() {
             }
             solved += 1;
             // the whole row set, in MuJoCo's order: equality, friction, limits, then contacts
-            let mut set = t.joint_constraint_rows(&q, &s.qvel, &t.dof_invweight0());
+            let mut set = t.joint_constraint_rows(&q, &qvel, &t.dof_invweight0());
             let cone = if o.cone_pyramidal { ferromotion_core::Cone::Pyramidal } else { ferromotion_core::Cone::Elliptic };
-            match ferromotion_core::contact_rows(&contacts, nv, &s.qvel, cone, o.impratio, t.timestep) {
+            match ferromotion_core::contact_rows(&contacts, nv, &qvel, cone, o.impratio, t.timestep) {
                 Ok(cr) => {
                     // ⭐ the contact rows themselves, against MuJoCo's own — `efc_D` is where the inverse
                     // weights, the impedance and the cone adjustment all land, and `efc_aref` is where the
@@ -635,7 +659,17 @@ fn main() {
                 *skip.entry("we and MuJoCo disagree on how many constraint ROWS there are").or_default() += 1;
                 continue;
             }
-            match ferromotion_core::solve_constraints_newton_blocks(&m, &a0, &set.jac, &set.aref, &set.d, &set.blocks, 1e-13, 200) {
+            // ⛔ the solve happens in MUJOCO'S coordinates, because that is where its answer lives. A row's
+            // Jacobian maps by `J·T⁻¹`, the mass matrix by `T⁻ᵀ·M·T⁻¹`, and `aref` and `D` do not move at
+            // all — `J·q̇` is the same number in either basis. With no free or ball joint `T` is the identity
+            // and this is exactly the computation it was before.
+            let jac = &set.jac * &tinv;
+            let m_mj = tinv.transpose() * &m * &tinv;
+            let Some(a0_mj) = t.qacc_smooth_mujoco(&q, &s.qvel, &vec![0.0; t.actuators.len()]).map(DVector::from_vec) else {
+                *skip.entry("gimbal lock: the Euler base's basis map is singular").or_default() += 1;
+                continue;
+            };
+            match ferromotion_core::solve_constraints_newton_blocks(&m_mj, &a0_mj, &jac, &set.aref, &set.d, &set.blocks, 1e-13, 200) {
                 Ok(sol) => {
                     let dq = (0..nv).map(|i| (sol.qacc[i] - s.qacc[i]).abs() / s.qacc[i].abs().max(1.0)).fold(0.0, f64::max);
                     if !any_mesh {
@@ -656,10 +690,10 @@ fn main() {
                     // difference is MuJoCo's iteration limit and not this port.
                     if dq >= 1e-6 && contacts.is_empty() {
                         let cost_at = |a: &DVector<f64>| {
-                            let jar: Vec<f64> = (&set.jac * a - DVector::from_row_slice(&set.aref)).iter().copied().collect();
+                            let jar: Vec<f64> = (&jac * a - DVector::from_row_slice(&set.aref)).iter().copied().collect();
                             let u = ferromotion_core::mujoco_constraint_update_blocks(&set.blocks, &set.d, &jar);
-                            let da = a - &a0;
-                            0.5 * (da.transpose() * &m * &da)[(0, 0)] + u.cost
+                            let da = a - &a0_mj;
+                            0.5 * (da.transpose() * &m_mj * &da)[(0, 0)] + u.cost
                         };
                         if cost_at(&sol.qacc) <= cost_at(&DVector::from_row_slice(&s.qacc)) {
                             solved_no_worse += 1;
@@ -675,7 +709,7 @@ fn main() {
                         // smooth comparison above only runs where MuJoCo has no rows at all, so a model
                         // that always has a limit or an equality never reaches it, and a wrong mass matrix
                         // or actuator force there reads as a constraint-solver failure.
-                        let smooth = rel(a0.as_slice(), &s.qacc_smooth);
+                        let smooth = rel(a0_mj.as_slice(), &s.qacc_smooth);
                         notes.push(format!(
                             "{}: qacc off {dq:.2e} with {} contacts{}, {} rows, gradient {:.2e}; unconstrained already off {smooth:.2e}",
                             o.rel,
