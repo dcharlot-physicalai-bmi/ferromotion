@@ -21,10 +21,11 @@ struct OAct {
     bias: String,
     dyn_: String,
     gear: f64,
-    gainprm: [f64; 3],
-    biasprm: [f64; 3],
+    gainprm: [f64; 10],
+    biasprm: [f64; 10],
     ctrlrange: Option<[f64; 2]>,
     forcerange: Option<[f64; 2]>,
+    acc0: f64,
 }
 
 #[derive(Default)]
@@ -32,6 +33,8 @@ struct OState {
     qpos: Vec<f64>,
     qvel: Vec<f64>,
     ctrl: Vec<f64>,
+    /// one per ACTUATOR, zero where it carries no activation state
+    act: Vec<f64>,
     length: Vec<f64>,
     velocity: Vec<f64>,
     force: Vec<f64>,
@@ -71,20 +74,22 @@ fn main() {
                     bias: t[5].to_string(),
                     dyn_: t[6].to_string(),
                     gear: f(t[7]),
-                    gainprm: [f(t[8]), f(t[9]), f(t[10])],
-                    biasprm: [f(t[11]), f(t[12]), f(t[13])],
-                    ctrlrange: lim(t[14], t[15], t[16]),
-                    forcerange: lim(t[17], t[18], t[19]),
+                    gainprm: std::array::from_fn(|k| f(t[8 + k])),
+                    biasprm: std::array::from_fn(|k| f(t[18 + k])),
+                    ctrlrange: lim(t[28], t[29], t[30]),
+                    forcerange: lim(t[31], t[32], t[33]),
+                    acc0: f(t[34]),
                 });
             }
             "state" => models.last_mut().unwrap().states.push(OState::default()),
-            "qpos" | "qvel" | "ctrl" | "act_length" | "act_velocity" | "act_force" | "qfrc_actuator" => {
+            "qpos" | "qvel" | "ctrl" | "act" | "act_length" | "act_velocity" | "act_force" | "qfrc_actuator" => {
                 let v: Vec<f64> = t[1..].iter().map(|x| f(x)).collect();
                 let s = models.last_mut().unwrap().states.last_mut().unwrap();
                 match t[0] {
                     "qpos" => s.qpos = v,
                     "qvel" => s.qvel = v,
                     "ctrl" => s.ctrl = v,
+                    "act" => s.act = v,
                     "act_length" => s.length = v,
                     "act_velocity" => s.velocity = v,
                     "act_force" => s.force = v,
@@ -143,15 +148,29 @@ fn main() {
             let gain = match a.gain {
                 ActGain::Fixed => "fixed",
                 ActGain::Affine => "affine",
+                ActGain::Muscle => "muscle",
             };
             let bias = match a.bias {
                 ActBias::None => "none",
                 ActBias::Affine => "affine",
+                ActBias::Muscle => "muscle",
             };
-            let close = |x: [f64; 3], y: [f64; 3]| (0..3).all(|k| (x[k] - y[k]).abs() <= 1e-9 * y[k].abs().max(1.0));
+            let dyn_ = match a.dynamics {
+                ferromotion_core::mujoco_actuator::ActDyn::None => "none",
+                ferromotion_core::mujoco_actuator::ActDyn::Muscle => "muscle",
+            };
+            let close = |x: [f64; 10], y: [f64; 10]| (0..10).all(|k| (x[k] - y[k]).abs() <= 1e-9 * y[k].abs().max(1.0));
             let same = gain == e.gain
                 && bias == e.bias
-                && e.dyn_ == "none"
+                && dyn_ == e.dyn_
+                // ⛔ `acc0` is a compiled constant like the rest and a muscle's peak force can BE it.
+                // 1e-7, not 1e-9. ⛔ `flybody` still misses it at 6e-7, and the cause is NOT conditioning
+                // (MuJoCo's own `acc0` reproduces from a dense inverse of its own mass matrix to 1e-15,
+                // and `cond(M)` is only 1e3): a fruit fly's principal inertias run down to 7e-14, and
+                // MuJoCo diagonalises them with `mjuu_eig3`, which stops on an ABSOLUTE 1e-12. At that
+                // scale the stopping rule fires before the first sweep and what comes out depends on the
+                // iteration, not on the matrix. It is the documented `eig3` floor at its extreme.
+                && (a.acc0 - e.acc0).abs() <= 1e-7 * e.acc0.abs().max(1.0)
                 && (a.gear - e.gear).abs() < 1e-12
                 && close(a.gainprm, e.gainprm)
                 && close(a.biasprm, e.biasprm)
@@ -161,8 +180,8 @@ fn main() {
                 params_ok += 1;
             } else if notes.len() < 8 {
                 notes.push(format!(
-                    "{} '{}' ({}): gain {gain}/{} bias {bias}/{} gear {}/{} gainprm {:?}/{:?} biasprm {:?}/{:?} ctrl {:?}/{:?} force {:?}/{:?}",
-                    o.rel, e.name, e.trn, e.gain, e.bias, a.gear, e.gear, a.gainprm, e.gainprm, a.biasprm, e.biasprm, a.ctrlrange, e.ctrlrange, a.forcerange, e.forcerange
+                    "{} '{}' ({}): gain {gain}/{} bias {bias}/{} dyn {dyn_}/{} acc0 {:.9}/{:.9} gear {}/{} gainprm {:?}/{:?} biasprm {:?}/{:?} ctrl {:?}/{:?} force {:?}/{:?}",
+                    o.rel, e.name, e.trn, e.gain, e.bias, e.dyn_, a.acc0, e.acc0, a.gear, e.gear, a.gainprm, e.gainprm, a.biasprm, e.biasprm, a.ctrlrange, e.ctrlrange, a.forcerange, e.forcerange
                 ));
             }
             // and the force itself, at every sampled state
@@ -176,7 +195,7 @@ fn main() {
                 // ⛔ the moment for THIS state: a site transmission's turns with the model
                 let st = t.actuator_state_at(a, &q, &s.qvel);
                 let (l, v) = (st.length, st.velocity);
-                let force = a.force(l, v, s.ctrl[u]);
+                let force = a.force(l, v, s.ctrl[u], s.act.get(u).copied().unwrap_or(0.0));
                 let (dl, dv, df) = ((l - s.length[u]).abs(), (v - s.velocity[u]).abs(), (force - s.force[u]).abs());
                 worst_len = worst_len.max(dl);
                 worst_vel = worst_vel.max(dv);
@@ -189,7 +208,7 @@ fn main() {
                 }
                 // qfrc_actuator, but only where we carry EVERY actuator — a missing one is a missing term
                 if t.actuators_unsupported.is_empty() && u + 1 == o.acts.len() {
-                    let mine = t.qfrc_actuator(&q, &s.qvel, &s.ctrl);
+                    let mine = t.qfrc_actuator_act(&q, &s.qvel, &s.ctrl, &s.act);
                     let d = mine.iter().zip(&s.qfrc).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
                     if d > 1e-6 && notes.len() < 8 {
                         notes.push(format!("{}: qfrc ours {:?} vs MuJoCo {:?}", o.rel, mine, s.qfrc));

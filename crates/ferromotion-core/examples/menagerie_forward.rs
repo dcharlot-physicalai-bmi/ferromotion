@@ -174,6 +174,9 @@ fn main() {
             Ok(t) => t,
             Err(_) => {
                 *skip.entry("the loader refuses the model").or_default() += o.states.len();
+                if notes.len() < 60 {
+                    notes.push(format!("{}: loader refused: {}", o.rel, tree_from_mjcf(&xml, &|p: &str| std::fs::read(dir.join(p)).ok()).err().unwrap_or_default()));
+                }
                 continue;
             }
         };
@@ -221,6 +224,9 @@ fn main() {
             states += 1;
             if !t.actuators_unsupported.is_empty() {
                 *skip.entry("an actuator this port does not carry (muscle, tendon, adhesion, plugin)").or_default() += 1;
+                if notes.len() < 60 {
+                    notes.push(format!("{}: actuator refused: {:?}", o.rel, &t.actuators_unsupported[..t.actuators_unsupported.len().min(3)]));
+                }
                 continue;
             }
             let Ok(q) = t.q_from_qpos(&s.qpos, &qposadr) else {
@@ -267,6 +273,9 @@ fn main() {
             if dp > 1e-9 * (0..nv).map(|i| s.qfrc_passive[i].abs()).fold(1.0, f64::max) {
                 *skip.entry("a passive force this port does not carry (tendon, fluid)").or_default() += 1;
                 worst_passive = worst_passive.max(dp);
+                if notes.len() < 60 {
+                    notes.push(format!("{}: passive off {dp:.2e}", o.rel));
+                }
                 continue;
             }
             let act = t.qfrc_actuator(&q, &qvel, &vec![0.0; t.actuators.len()]);

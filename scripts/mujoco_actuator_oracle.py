@@ -47,8 +47,8 @@ for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
             "actuator", name(mujoco.mjtObj.mjOBJ_ACTUATOR, u) or f"act{u}", trn, tname or "?",
             GAIN[int(m.actuator_gaintype[u])], BIAS[int(m.actuator_biastype[u])], DYN[int(m.actuator_dyntype[u])],
             repr(float(m.actuator_gear[u, 0])),
-            *[repr(float(x)) for x in m.actuator_gainprm[u, :3]],
-            *[repr(float(x)) for x in m.actuator_biasprm[u, :3]],
+            *[repr(float(x)) for x in m.actuator_gainprm[u, :10]],
+            *[repr(float(x)) for x in m.actuator_biasprm[u, :10]],
             str(int(m.actuator_ctrllimited[u])), repr(float(m.actuator_ctrlrange[u, 0])), repr(float(m.actuator_ctrlrange[u, 1])),
             str(int(m.actuator_forcelimited[u])), repr(float(m.actuator_forcerange[u, 0])), repr(float(m.actuator_forcerange[u, 1])),
             repr(float(m.actuator_acc0[u])),
@@ -64,8 +64,15 @@ for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
             d.qvel[:] = rng.uniform(-0.3, 0.3, m.nv)
             # controls outside their range too, so the clamp is exercised rather than assumed
             d.ctrl[:] = rng.uniform(-2.0, 2.0, m.nu)
+            # ⛔ and the ACTIVATIONS, outside [0,1] as well: an actuator that carries a state is driven by
+            # `act`, not by `ctrl`, and with every activation left at zero a muscle's whole GAIN term is
+            # multiplied by nothing. The sweep would then pass on the passive curve alone.
+            d.act[:] = rng.uniform(-0.2, 1.2, m.na)
         mujoco.mj_forward(m, d)
         lines.append("state\t" + str(k))
+        # one activation per ACTUATOR, zero where it carries no state, so a port can index it like `ctrl`
+        actval = [float(d.act[int(m.actuator_actadr[u])]) if int(m.actuator_actadr[u]) >= 0 else 0.0 for u in range(m.nu)]
+        lines.append("\t".join(["act"] + [repr(x) for x in actval]))
         for tag, v in (("qpos", d.qpos), ("qvel", d.qvel), ("ctrl", d.ctrl), ("act_length", d.actuator_length),
                        ("act_velocity", d.actuator_velocity), ("act_force", d.actuator_force), ("qfrc_actuator", d.qfrc_actuator)):
             lines.append("\t".join([tag] + [repr(float(x)) for x in v]))

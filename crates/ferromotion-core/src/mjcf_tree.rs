@@ -635,7 +635,14 @@ impl MjcfTree {
 
     /// **`qfrc_actuator`** for this model at this state, with every transmission it carries.
     pub fn qfrc_actuator(&self, q: &[f64], qd: &[f64], ctrl: &[f64]) -> Vec<f64> {
-        crate::mujoco_actuator::qfrc_actuator_with(&self.actuators, &self.actuator_state(q, qd), ctrl, &self.dof_actuator_force_range())
+        self.qfrc_actuator_act(q, qd, ctrl, &[])
+    }
+
+    /// [`MjcfTree::qfrc_actuator`] with the ACTIVATIONS given — one entry per actuator, read only by the
+    /// ones that carry a state. An empty slice is every activation at zero, which is what `mj_resetData`
+    /// leaves and therefore what a state sampled by `mj_forward` on a fresh `mjData` has.
+    pub fn qfrc_actuator_act(&self, q: &[f64], qd: &[f64], ctrl: &[f64], act: &[f64]) -> Vec<f64> {
+        crate::mujoco_actuator::qfrc_actuator_with(&self.actuators, &self.actuator_state(q, qd), ctrl, act, &self.dof_actuator_force_range())
     }
 
     /// **`mj_inertiaBoxFluidModel`**: the ambient medium's drag on every body, from `<option density>`,
@@ -3063,9 +3070,12 @@ use ActErr::{Bad, Unsupported};
 #[derive(Clone, Debug)]
 struct ActRecord {
     gain: crate::mujoco_actuator::ActGain,
-    gainprm: [f64; 3],
+    gainprm: [f64; 10],
     bias: crate::mujoco_actuator::ActBias,
-    biasprm: [f64; 3],
+    biasprm: [f64; 10],
+    dynamics: crate::mujoco_actuator::ActDyn,
+    dynprm: [f64; 3],
+    lengthrange: [f64; 2],
     gear: f64,
     /// the whole `gear` vector: a site transmission reads all six, as a wrench in the site's frame
     gear6: [f64; 6],
@@ -3084,9 +3094,16 @@ impl Default for ActRecord {
     fn default() -> Self {
         Self {
             gain: crate::mujoco_actuator::ActGain::Fixed,
-            gainprm: [1.0, 0.0, 0.0],
+            gainprm: {
+                let mut p = [0.0; 10];
+                p[0] = 1.0;
+                p
+            },
             bias: crate::mujoco_actuator::ActBias::None,
-            biasprm: [0.0; 3],
+            biasprm: [0.0; 10],
+            dynamics: crate::mujoco_actuator::ActDyn::None,
+            dynprm: [1.0, 0.0, 0.0],
+            lengthrange: [0.0; 2],
             gear: 1.0,
             gear6: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             ctrlrange: [0.0; 2],
@@ -3117,9 +3134,10 @@ impl ActRecord {
         let num = |k: &str| -> Result<Option<f64>, ActErr> {
             at(k).map(|v| v.trim().parse::<f64>().map_err(|e| Bad(format!("actuator {k}: {e}")))).transpose()
         };
-        let vec3 = |k: &str, p: &mut [f64; 3]| -> Result<(), ActErr> {
+        let vecn = |k: &str, p: &mut [f64]| -> Result<(), ActErr> {
             if let Some(v) = at(k) {
-                for (i, x) in floats(v).map_err(Bad)?.iter().take(3).enumerate() {
+                let f = floats(v).map_err(Bad)?;
+                for (i, x) in f.iter().take(p.len()).enumerate() {
                     p[i] = *x;
                 }
             }
@@ -3143,20 +3161,25 @@ impl ActRecord {
             None => {}
             Some("fixed") => self.gain = crate::mujoco_actuator::ActGain::Fixed,
             Some("affine") => self.gain = crate::mujoco_actuator::ActGain::Affine,
+            Some("muscle") => self.gain = crate::mujoco_actuator::ActGain::Muscle,
             Some(o) => self.unsupported = Some(format!("gaintype '{o}'")),
         }
         match at("biastype") {
             None => {}
             Some("none") => self.bias = crate::mujoco_actuator::ActBias::None,
             Some("affine") => self.bias = crate::mujoco_actuator::ActBias::Affine,
+            Some("muscle") => self.bias = crate::mujoco_actuator::ActBias::Muscle,
             Some(o) => self.unsupported = Some(format!("biastype '{o}'")),
         }
         match at("dyntype") {
             None | Some("none") => {}
+            Some("muscle") => self.dynamics = crate::mujoco_actuator::ActDyn::Muscle,
             Some(o) => self.unsupported = Some(format!("dyntype '{o}' carries an activation state")),
         }
-        vec3("gainprm", &mut self.gainprm)?;
-        vec3("biasprm", &mut self.biasprm)?;
+        vecn("gainprm", &mut self.gainprm)?;
+        vecn("biasprm", &mut self.biasprm)?;
+        vecn("dynprm", &mut self.dynprm)?;
+        vecn("lengthrange", &mut self.lengthrange)?;
         let rng = |k: &str, lk: &str, r: &mut [f64; 2], lim: &mut Option<bool>| -> Result<(), ActErr> {
             if let Some(v) = at(k) {
                 let f = floats(v).map_err(Bad)?;
@@ -3210,11 +3233,45 @@ impl ActRecord {
             }
             "velocity" => {
                 let kv = num("kv")?.unwrap_or(self.gainprm[0]);
-                self.biasprm = [0.0; 3];
+                self.biasprm = [0.0; 10];
                 self.gainprm[0] = kv;
                 self.biasprm[2] = -kv;
                 self.gain = ActGain::Fixed;
                 self.bias = ActBias::Affine;
+            }
+            // ⛔⛔ the `<muscle>` shortcut does NOT write into `gainprm`/`biasprm` the way `<position>`
+            // writes `kp`: it REPLACES both vectors wholesale with MuJoCo's muscle defaults and then
+            // overwrites the named entries. A class that set `gainprm` for a motor and an element that
+            // says `<muscle/>` must end at the muscle defaults, not at a blend of the two.
+            //
+            // ⛔ and `force = -1` is the DEFAULT, not a sentinel for "unset": it means "scale me by
+            // `scale/acc0`", so a port that treats a negative force as an error refuses most muscles.
+            "muscle" => {
+                let mut prm = [0.75, 1.05, -1.0, 200.0, 0.5, 1.6, 1.5, 1.3, 1.2, 0.0];
+                if let Some(v) = at("range") {
+                    for (i, x) in floats(v).map_err(Bad)?.iter().take(2).enumerate() {
+                        prm[i] = *x;
+                    }
+                }
+                for (k, i) in [("force", 2), ("scale", 3), ("lmin", 4), ("lmax", 5), ("vmax", 6), ("fpmax", 7), ("fvmax", 8)] {
+                    if let Some(v) = num(k)? {
+                        prm[i] = v;
+                    }
+                }
+                self.gainprm = prm;
+                self.biasprm = prm;
+                self.dynprm = [0.01, 0.04, 0.0];
+                if let Some(v) = at("timeconst") {
+                    for (i, x) in floats(v).map_err(Bad)?.iter().take(2).enumerate() {
+                        self.dynprm[i] = *x;
+                    }
+                }
+                if let Some(v) = num("tausmooth")? {
+                    self.dynprm[2] = v;
+                }
+                self.gain = ActGain::Muscle;
+                self.bias = ActBias::Muscle;
+                self.dynamics = crate::mujoco_actuator::ActDyn::Muscle;
             }
             other => self.unsupported = Some(format!("<{other}>")),
         }
@@ -3491,6 +3548,12 @@ fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&s
         gainprm: rec.gainprm,
         bias: rec.bias,
         biasprm: rec.biasprm,
+        dynamics: rec.dynamics,
+        dynprm: rec.dynprm,
+        lengthrange: rec.lengthrange,
+        // ⛔ filled in by the loader once the tree exists: it is `‖M⁻¹·moment‖` at `qpos0`, so it cannot
+        // be resolved while reading the file, exactly like `dampratio`.
+        acc0: 0.0,
         ctrlrange,
         forcerange,
     })
@@ -3692,6 +3755,39 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
         let m0 = out.mass_matrix(&out.reference_q);
         let diag: Vec<f64> = (0..nv).map(|i| m0[(i, i)]).collect();
         crate::mujoco_actuator::resolve_dampratio(&mut out.actuators, &diag);
+    }
+    // ⛔ **`actuator_acc0`**, the other thing `mj_setConst` cannot do while reading the file: the
+    // acceleration a unit force on each transmission produces at `qpos0`, `‖M⁻¹·moment‖`. A muscle whose
+    // `force` is negative — MuJoCo's DEFAULT — reads it as `scale/acc0` and is its peak force, so getting
+    // it wrong scales the whole muscle rather than shifting it. MuJoCo computes it for EVERY actuator,
+    // muscle or not, and so does this — the moment of a spatial tendon is only known once the tree can be
+    // posed, so it cannot be done any earlier either.
+    if !out.actuators.is_empty() {
+        let nv = out.tree.joints.len();
+        if let Some(chol) = out.mass_matrix(&out.reference_q).cholesky() {
+            let state = out.actuator_state(&out.reference_q, &vec![0.0; nv]);
+            // ⛔⛔ `acc0` is a NORM of an acceleration, so it is BASIS-DEPENDENT. MuJoCo takes it in its
+            // own coordinates, and this port's free base is a different six. `M⁻¹·moment` maps across as
+            // `T·(M_ours⁻¹·moment_ours)`, and only where `T` is orthogonal do the two norms agree — which
+            // at the reference pose is exactly the case of an UNROTATED base, because there `T` is a
+            // permutation. Every Menagerie model happens to be that case, so the map changes nothing
+            // measurable here — it is carried because the identity it relies on is an accident of the
+            // corpus, not of the definition, and a model with a tilted base would be silently wrong.
+            let t = out.free_basis(&out.reference_q);
+            let acc0: Vec<f64> = state
+                .iter()
+                .map(|st| {
+                    let mut m = nalgebra::DVector::zeros(nv);
+                    for (d, v) in &st.moment {
+                        m[*d] += v;
+                    }
+                    (&t * chol.solve(&m)).norm()
+                })
+                .collect();
+            for (a, v) in out.actuators.iter_mut().zip(acc0) {
+                a.acc0 = v;
+            }
+        }
     }
     // <equality>: the `joint` coupling and `connect`; the rest are named rather than dropped
     {
@@ -5010,5 +5106,50 @@ mod tests {
         let r = t.body_iquat["empty"];
         assert!((r - q.to_rotation_matrix().into_inner()).norm() < 1e-7, "{r:?}");
         assert!((t.body_iquat["a"] - Matrix3::identity()).norm() < 1e-15);
+    }
+    /// ⛔⛔ The `<muscle>` shortcut REPLACES both parameter vectors with MuJoCo's muscle defaults, and a
+    /// `<general>` that names a class whose `<muscle>` declaration set them inherits the whole record —
+    /// gain type, bias type, dynamics and all nine parameters. That second case is how `ms_human_700`
+    /// writes all 700 of its muscles, so a loader that only handles the literal `<muscle>` tag carries
+    /// none of them. Every number verified against MuJoCo 3.13.0.
+    #[test]
+    fn a_muscle_is_carried_through_the_tag_and_through_a_class() {
+        let xml = r#"<mujoco>
+<default><default class="m"><muscle ctrllimited="true" ctrlrange="0 1" force="300" lmax="1.7"/></default></default>
+<worldbody><body><joint name="j" type="slide" axis="1 0 0"/><geom type="box" size="0.1 0.1 0.1"/></body></worldbody>
+<actuator>
+  <muscle name="plain" joint="j" lengthrange="0.1 0.4"/>
+  <general name="viaclass" class="m" joint="j" lengthrange="0.2 0.5"/>
+  <muscle name="tuned" joint="j" lengthrange="0.1 0.4" timeconst="0.02 0.05" tausmooth="0.3" range="0.6 1.2" vmax="2" fpmax="1.1" fvmax="1.4" scale="150" lmin="0.45"/>
+</actuator></mujoco>"#;
+        let t = tree_from_mjcf_str(xml).unwrap();
+        assert!(t.actuators_unsupported.is_empty(), "{:?}", t.actuators_unsupported);
+        let by: BTreeMap<&str, &crate::mujoco_actuator::Actuator> = t.actuators.iter().map(|a| (a.name.as_str(), a)).collect();
+        for a in t.actuators.iter() {
+            assert_eq!(a.gain, crate::mujoco_actuator::ActGain::Muscle, "{}", a.name);
+            assert_eq!(a.bias, crate::mujoco_actuator::ActBias::Muscle, "{}", a.name);
+            assert_eq!(a.dynamics, crate::mujoco_actuator::ActDyn::Muscle, "{}", a.name);
+            assert_eq!(a.gainprm, a.biasprm, "MuJoCo writes the same nine into both");
+            // a unit force on a slide joint carrying a 8 kg box: 1/8
+            assert!((a.acc0 - 0.125).abs() < 1e-12, "{} acc0 {}", a.name, a.acc0);
+        }
+        let plain = by["plain"];
+        assert_eq!(&plain.gainprm[..9], &[0.75, 1.05, -1.0, 200.0, 0.5, 1.6, 1.5, 1.3, 1.2]);
+        assert_eq!(plain.dynprm, [0.01, 0.04, 0.0]);
+        assert_eq!(plain.lengthrange, [0.1, 0.4]);
+        assert_eq!(plain.ctrlrange, None, "no ctrlrange stated and none inherited");
+        // the class's `force` and `lmax` land in the record the `<general>` inherits, defaults elsewhere
+        let via = by["viaclass"];
+        assert_eq!(&via.gainprm[..9], &[0.75, 1.05, 300.0, 200.0, 0.5, 1.7, 1.5, 1.3, 1.2]);
+        assert_eq!(via.lengthrange, [0.2, 0.5]);
+        assert_eq!(via.ctrlrange, Some([0.0, 1.0]));
+        let tuned = by["tuned"];
+        assert_eq!(&tuned.gainprm[..9], &[0.6, 1.2, -1.0, 150.0, 0.45, 1.6, 2.0, 1.1, 1.4]);
+        assert_eq!(tuned.dynprm, [0.02, 0.05, 0.3]);
+        // and the force follows the activation, not the control: a muscle at rest with ctrl 1 produces
+        // only its passive force, which at the optimum is zero
+        let (l, v) = (0.25, 0.0);
+        assert_eq!(tuned.force(l, v, 1.0, 0.0), 0.0);
+        assert!(tuned.force(l, v, 0.0, 1.0) < 0.0, "activation, not control, drives it");
     }
 }

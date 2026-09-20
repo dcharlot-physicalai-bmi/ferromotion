@@ -347,7 +347,7 @@ mod transport;
 pub mod transport_geometry;
 mod mjcf;
 mod mjcf_tree;
-mod mujoco_actuator;
+pub mod mujoco_actuator;
 mod mujoco_ccd;
 #[cfg(test)]
 mod mujoco_cone_cases;
