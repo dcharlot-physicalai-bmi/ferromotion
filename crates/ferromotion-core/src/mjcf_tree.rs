@@ -312,6 +312,31 @@ impl MjcfTree {
         m
     }
 
+    /// **`qfrc_passive` in MUJOCO'S OWN COORDINATES.** A generalised force maps by `T⁻ᵀ`, except that a
+    /// free or ball joint's DAMPING is not ours to map: MuJoCo applies `−dof_damping[i]·qvel[i]` per dof in
+    /// its own basis, so it is added here and [`MjcfTree::qfrc_passive`] leaves it out.
+    ///
+    /// With no free or ball joint this is [`MjcfTree::qfrc_passive`] unchanged.
+    pub fn qfrc_passive_mujoco(&self, q: &[f64], v_mujoco: &[f64]) -> Option<Vec<f64>> {
+        let tinv = self.free_basis(q).try_inverse()?;
+        let qd: Vec<f64> = (&tinv * nalgebra::DVector::from_row_slice(v_mujoco)).iter().copied().collect();
+        let mut out = tinv.transpose() * nalgebra::DVector::from_row_slice(&self.qfrc_passive(q, &qd));
+        for j in &self.joints {
+            let n = match j.kind {
+                MjcfJointKind::Free => 6,
+                MjcfJointKind::Ball => 3,
+                _ => continue,
+            };
+            if j.damping == 0.0 {
+                continue;
+            }
+            for k in 0..n {
+                out[j.first + k] -= j.damping * v_mujoco[j.first + k];
+            }
+        }
+        Some(out.iter().copied().collect())
+    }
+
     /// **`qacc_smooth` in MUJOCO'S OWN COORDINATES** — the unconstrained acceleration of a model with a free
     /// or ball joint, in the basis MuJoCo reports it in, from a velocity given in that basis.
     ///
@@ -352,30 +377,12 @@ impl MjcfTree {
             }
         }
         let bias = crate::tree_dynamics::tree_inverse_dynamics(&self.tree.joints, &self.tree.inertia, &self.tree.parent, q, &qd, &vec![0.0; nv], self.gravity);
-        let passive = self.qfrc_passive(q, &qd);
         let act = self.qfrc_actuator(q, &qd, ctrl);
         let tdot_v = self.free_basis_dot(q, &qd) * &v;
         let c_ours = nalgebra::DVector::from_iterator(nv, (0..nv).map(|i| bias[i])) - &m_rigid * (&tinv * tdot_v);
-        let tau_ours = nalgebra::DVector::from_iterator(nv, (0..nv).map(|i| passive[i] + act[i]));
         let m_mj = tinv.transpose() * &m_full * &tinv;
-        let mut rhs = tinv.transpose() * (tau_ours - c_ours);
-        // ⛔⛔ a free or ball joint's DAMPING is a per-dof force in MuJoCo's basis too, exactly like its
-        // armature: `qfrc_passive[i] -= dof_damping[i]·qvel[i]` with `qvel` MuJoCo's. Applying it to this
-        // port's Euler rates instead is wrong the moment the base turns, and `rainbow_robotics_rby1` —
-        // damping 5 on all six base dofs — was 1.6e-1 out until it moved here.
-        for j in &self.joints {
-            let n = match j.kind {
-                MjcfJointKind::Free => 6,
-                MjcfJointKind::Ball => 3,
-                _ => continue,
-            };
-            if j.damping == 0.0 {
-                continue;
-            }
-            for k in 0..n {
-                rhs[j.first + k] -= j.damping * v_mujoco[j.first + k];
-            }
-        }
+        let passive = self.qfrc_passive_mujoco(q, v_mujoco)?;
+        let rhs = nalgebra::DVector::from_row_slice(&passive) + tinv.transpose() * (nalgebra::DVector::from_iterator(nv, (0..nv).map(|i| act[i])) - c_ours);
         Some((m_mj.try_inverse()? * rhs).iter().copied().collect())
     }
 

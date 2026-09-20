@@ -129,7 +129,7 @@ fn main() {
     let mut skip: BTreeMap<&'static str, usize> = BTreeMap::new();
     let (mut states, mut smooth_ok, mut smooth_tried, mut solved, mut solved_ok) = (0usize, 0usize, 0usize, 0usize, 0usize);
     let (mut acc_ok, mut acc_tried, mut worst_acc) = (0usize, 0usize, 0.0f64);
-    let (mut chain_ok, mut chain_tried, mut worst_chain, mut worst_chain_bias) = (0usize, 0usize, 0.0f64, 0.0f64);
+    let (mut chain_ok, mut chain_tried, mut worst_chain) = (0usize, 0usize, 0.0f64);
     let (mut solved_nomesh, mut solved_ok_nomesh, mut worst_qacc_nomesh) = (0usize, 0usize, 0.0f64);
     let mut solved_no_worse = 0usize;
     let (mut framed, mut frame_unpaired, mut tangent_differs) = (0usize, 0usize, 0usize);
@@ -226,7 +226,13 @@ fn main() {
             // ⛔ compare `qfrc_passive` ITSELF before letting it into the acceleration. This port carries
             // joint damping, joint springs and gravcomp and nothing else — no tendon or fluid force — so
             // a model that uses one of those must be counted as not carried, not reported as a wrong answer.
-            let passive = t.qfrc_passive(&q, &s.qvel);
+            // ⛔ in MUJOCO's basis: a generalised force maps by T⁻ᵀ, and a free joint's DAMPING is a per-dof
+            // force in MuJoCo's coordinates that does not map at all. With no free or ball joint this is the
+            // ordinary `qfrc_passive`.
+            let Some(passive) = t.qfrc_passive_mujoco(&q, &s.qvel) else {
+                *skip.entry("gimbal lock: the Euler base's basis map is singular").or_default() += 1;
+                continue;
+            };
             let dp = (0..nv).map(|i| (passive[i] - s.qfrc_passive[i]).abs()).fold(0.0, f64::max);
             if dp > 1e-9 * (0..nv).map(|i| s.qfrc_passive[i].abs()).fold(1.0, f64::max) {
                 *skip.entry("a passive force this port does not carry (tendon, fluid)").or_default() += 1;
@@ -302,26 +308,24 @@ fn main() {
                 // ⛔ and only AT REST. The oracle's `qvel` is in MuJoCo's basis, so feeding it to this tree
                 // as if it were ours is wrong for the base's six — and at speed those six feed Coriolis
                 // terms into every chain dof. A resting state has no such coupling to get wrong.
-                if !s.qvel.iter().all(|v| *v == 0.0) {
-                    *skip.entry("a free or ball joint MOVING: its velocity is in a different basis too").or_default() += 1;
+                let _ = rotational_armature;
+                // ⭐⭐ the WHOLE acceleration, in MuJoCo's own coordinates — all six of the base's dofs
+                // included, at rest and moving. `v_mujoco = T·v_ours`, so `a_mujoco = T·a_ours + Ṫ·v_ours`,
+                // and armature and damping on the base go where MuJoCo puts them: on ITS diagonal.
+                let Some(a_mj) = t.qacc_smooth_mujoco(&q, &s.qvel, &vec![0.0; t.actuators.len()]) else {
+                    *skip.entry("gimbal lock: the Euler base's basis map is singular").or_default() += 1;
                     continue;
-                }
-                if rotational_armature {
-                    *skip.entry("armature on a free or ball joint: a diagonal in MuJoCo's basis is not one in ours").or_default() += 1;
-                    continue;
-                }
-                // the chain's own dofs, entry by entry, even though the base's six are not comparable
-                let dq = shared.iter().map(|&i| (a0[i] - s.qacc_smooth[i]).abs() / s.qacc_smooth[i].abs().max(1.0)).fold(0.0, f64::max);
-                let db = shared.iter().map(|&i| (bias[i] - s.qfrc_bias[i]).abs() / s.qfrc_bias[i].abs().max(1.0)).fold(0.0, f64::max);
+                };
+                let dq = (0..nv).map(|i| (a_mj[i] - s.qacc_smooth[i]).abs() / s.qacc_smooth[i].abs().max(1.0)).fold(0.0, f64::max);
                 chain_tried += 1;
                 if dq < 1e-6 {
                     chain_ok += 1;
                 } else if notes.len() < 12 {
-                    notes.push(format!("{}: chain qacc_smooth off {dq:.2e} (chain bias off {db:.2e})", o.rel));
+                    notes.push(format!("{}: floating qacc_smooth off {dq:.2e} in MuJoCo's basis", o.rel));
                 }
                 worst_chain = worst_chain.max(dq);
-                worst_chain_bias = worst_chain_bias.max(db);
-                *skip.entry("a free or ball joint: the base's six coordinates are in a different basis").or_default() += 1;
+                let _ = &shared;
+                *skip.entry("a free or ball base: compared in MuJoCo's coordinates, not this port's").or_default() += 1;
                 continue;
             }
             let ds = rel(a0.as_slice(), &s.qacc_smooth);
@@ -702,7 +706,7 @@ fn main() {
     println!("    worst efc_aref (relative) {worst_con_aref:.2e} on {worst_con_aref_where}");
     println!("    worst qfrc_passive on the states it blocked: {worst_passive:.2e}");
     println!("  BODY ACCELERATIONS in the world frame, at rest — basis-free, so a free or ball base is included: {acc_ok} of {acc_tried} within 1e-6; worst {worst_acc:.2e}");
-    println!("  CHAIN dofs of a free- or ball-based model, entry by entry: {chain_ok} of {chain_tried} within 1e-6; worst qacc_smooth {worst_chain:.2e}, worst qfrc_bias {worst_chain_bias:.2e}");
+    println!("  FLOATING BASE, every dof in MUJOCO'S coordinates (at rest AND moving): {chain_ok} of {chain_tried} within 1e-6; worst qacc_smooth {worst_chain:.2e}");
     println!("  not compared, by what blocks it:");
     let mut by: Vec<_> = skip.iter().collect();
     by.sort_by_key(|(_, v)| std::cmp::Reverse(**v));
