@@ -33,9 +33,22 @@ for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
     d = mujoco.MjData(m)
     models += 1
     name = lambda t, i: mujoco.mj_id2name(m, t, i)
-    lines.append(f"model\t{rel}\t{m.nq}\t{m.nv}\t{int(m.opt.cone)}\t{float(m.opt.impratio)!r}\t{float(m.opt.gravity[0])!r}\t{float(m.opt.gravity[1])!r}\t{float(m.opt.gravity[2])!r}")
+    # ⛔⛔ the SOLVER SETTINGS are part of the problem statement, not a tuning knob. 29 of Menagerie's
+    # 210 compilable models cap `iterations` (every `*_mjx.xml` at 1 or 5), so MuJoCo's `qacc` on
+    # them is ONE Newton iterate from a zero warm start, not the optimum of the rows it built. A
+    # port that solves to convergence is then compared against a number MuJoCo never claimed was
+    # converged, and the gap reads as a physics error. Recorded so the sweep can tell them apart.
+    lines.append(f"model\t{rel}\t{m.nq}\t{m.nv}\t{int(m.opt.cone)}\t{float(m.opt.impratio)!r}\t{float(m.opt.gravity[0])!r}\t{float(m.opt.gravity[1])!r}\t{float(m.opt.gravity[2])!r}\t{int(m.opt.iterations)}\t{int(m.opt.ls_iterations)}\t{int(m.opt.solver)}\t{float(m.opt.tolerance)!r}")
+    # ⭐ `body_invweight0` with the body, because every contact row's regularisation is built from the two
+    # bodies' translational entries. It is compiled ONCE at `qpos0`, so a port that recomputes it at the
+    # current state is exact on the reference pose and drifts everywhere else — a gate that only samples
+    # `qpos0` cannot see that, and `efc_D` is the only place it shows.
     for b in range(m.nbody):
-        lines.append("\t".join(["body", name(mujoco.mjtObj.mjOBJ_BODY, b) or f"body{b}"]))
+        # ⛔ an UNNAMED body is written with an empty name and left uncompared. Filling in `body{id}`
+        # pairs it with whatever the port happens to call its own unnamed bodies, which is a guess: the
+        # two numberings agree until they do not, and then the sweep compares two different bodies.
+        lines.append("\t".join(["body", name(mujoco.mjtObj.mjOBJ_BODY, b) or "",
+                                 repr(float(m.body_invweight0[b][0])), repr(float(m.body_invweight0[b][1]))]))
     for j in range(m.njnt):
         lines.append("\t".join(["joint", name(mujoco.mjtObj.mjOBJ_JOINT, j) or f"joint{j}", JT[int(m.jnt_type[j])], str(int(m.jnt_qposadr[j]))]))
     for k in range(K):
@@ -77,6 +90,20 @@ for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
         lines.append("\t".join(["bodyacc"] + [repr(float(x)) for x in acc]))
         for tag, v in (("qpos", d.qpos), ("qvel", d.qvel), ("qfrc_bias", d.qfrc_bias), ("qfrc_passive", d.qfrc_passive), ("qacc_smooth", d.qacc_smooth), ("qacc", d.qacc)):
             lines.append("\t".join([tag] + [repr(float(x)) for x in v]))
+        # ⭐ the SAME problem solved to convergence: what the rows MuJoCo built actually imply. On a
+        # model that does not cap the solver this is `qacc` to the last bit; on an `*_mjx.xml` it is
+        # 18-74% away from it. Restored afterwards so nothing downstream sees the raised limits.
+        it0, ls0 = int(m.opt.iterations), int(m.opt.ls_iterations)
+        qpos_k, qvel_k = d.qpos.copy(), d.qvel.copy()
+        m.opt.iterations, m.opt.ls_iterations = max(it0, 500), max(ls0, 50)
+        mujoco.mj_resetData(m, d)
+        d.qpos[:], d.qvel[:] = qpos_k, qvel_k
+        mujoco.mj_forward(m, d)
+        lines.append("\t".join(["qacc_converged"] + [repr(float(x)) for x in d.qacc]))
+        m.opt.iterations, m.opt.ls_iterations = it0, ls0
+        mujoco.mj_resetData(m, d)
+        d.qpos[:], d.qvel[:] = qpos_k, qvel_k
+        mujoco.mj_forward(m, d)
         # ⛔ the contact FRAME, not only its normal. Under a pyramidal cone the friction rows are
         # J_n ± μ_k·J_tk, so rotating the tangent pair about the normal rotates the pyramid and changes
         # the feasible force set: two ports can agree on every normal and still solve different problems.

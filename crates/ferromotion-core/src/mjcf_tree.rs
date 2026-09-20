@@ -2696,6 +2696,20 @@ impl Walk<'_> {
                 }
             }
         };
+        // ⛔⛔ **a body MuJoCo could not weigh keeps its OWN placement as its inertial frame.** With no
+        // `<inertial>` and nothing to infer from — a camera mount, a site holder, an attachment frame, or
+        // geoms that all carry `mass="0"` — the compiler leaves `body_ipos` and `body_iquat` holding the
+        // body's `pos` and `quat`, which describe where the body sits in its PARENT and are then read as an
+        // offset inside the body itself. `xipos` lands somewhere with no physical meaning, and every value
+        // taken there follows it: on `hello_robot_stretch` the camera's `body_invweight0` is 4.4x what the
+        // body frame gives, on `franka_emika_panda` the flange's is 1.56x.
+        //
+        // ⛔ The trigger is INFERRED AND WEIGHTLESS, not "zero mass": an explicit `<inertial mass="0">` is
+        // obeyed as written. And it fires BEFORE `boundmass`, so a floored mass still sits at `pos`.
+        if stated.is_none() && li.mass < 1e-15 {
+            li.com = stated_pose.translation.vector;
+            iframe = stated_pose.rotation.to_rotation_matrix().into_inner();
+        }
         // mjCBody::Compile: floors on the mass and on each principal inertia
         if self.c.boundmass > 0.0 {
             li.mass = li.mass.max(self.c.boundmass);
@@ -4969,6 +4983,32 @@ mod tests {
         // is that solver's precision on this tensor, not this loader's
         assert!((li.inertia - full).norm() < 1e-7 * full.norm(), "inertia {:?}", li.inertia);
     }
+    /// ⛔⛔ A body MuJoCo cannot weigh keeps its OWN `pos` and `quat` as its inertial frame — verified
+    /// against MuJoCo 3.13.0, which reports `body_ipos == body_pos` for an empty body, a body holding only
+    /// a site or camera, and a body whose geoms all state `mass="0"`, and `body_ipos` as WRITTEN for an
+    /// explicit `<inertial mass="0">`. The distinction is inferred-and-weightless, not zero mass.
+    #[test]
+    fn a_body_mujoco_cannot_weigh_keeps_its_own_placement_as_its_inertial_frame() {
+        let xml = r#"<mujoco><worldbody><body name="a" pos="0.1 0.2 0.3">
+  <joint type="hinge" axis="0 1 0"/>
+  <geom type="box" size="0.05 0.05 0.05"/>
+  <body name="empty" pos="0.7 -0.3 0.9" quat="0.3826834 0 0 0.9238795"/>
+  <body name="site_only" pos="0.3 0 0" quat="0 1 0 0"><site name="s"/></body>
+  <body name="zero_mass_geom" pos="0.4 0.1 0"><geom type="box" size="0.05 0.05 0.05" pos="0.2 0 0" mass="0"/></body>
+  <body name="explicit_zero" pos="0.6 0 0"><inertial pos="0 0 0" mass="0" diaginertia="0 0 0"/><geom type="sphere" size="0.02" mass="0"/></body>
+</body></worldbody></mujoco>"#;
+        let t = tree_from_mjcf_str(xml).unwrap();
+        let ipos = |n: &str| t.body_ipos[n];
+        assert!((ipos("empty") - Vector3::new(0.7, -0.3, 0.9)).norm() < 1e-15, "{:?}", ipos("empty"));
+        assert!((ipos("site_only") - Vector3::new(0.3, 0.0, 0.0)).norm() < 1e-15, "{:?}", ipos("site_only"));
+        assert!((ipos("zero_mass_geom") - Vector3::new(0.4, 0.1, 0.0)).norm() < 1e-15, "{:?}", ipos("zero_mass_geom"));
+        // stated, so obeyed as written even at zero mass — and the weighable body is unaffected
+        assert!(ipos("explicit_zero").norm() < 1e-15, "{:?}", ipos("explicit_zero"));
+        assert!(ipos("a").norm() < 1e-15, "{:?}", ipos("a"));
+        // the frame comes with it: `quat="0.3826834 0 0 0.9238795"` is a 135 degree turn about z
+        let q = UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(0.3826834, 0.0, 0.0, 0.9238795));
+        let r = t.body_iquat["empty"];
+        assert!((r - q.to_rotation_matrix().into_inner()).norm() < 1e-7, "{r:?}");
+        assert!((t.body_iquat["a"] - Matrix3::identity()).norm() < 1e-15);
+    }
 }
-
-

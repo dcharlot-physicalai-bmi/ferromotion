@@ -50,6 +50,9 @@ struct OState {
     qfrc_passive: Vec<f64>,
     qacc_smooth: Vec<f64>,
     qacc: Vec<f64>,
+    /// ⭐ the SAME rows solved to convergence. Equal to `qacc` bit for bit on a model that does not cap
+    /// the solver; on an `*_mjx.xml` it is the answer `qacc` was on its way to when MuJoCo stopped.
+    qacc_converged: Vec<f64>,
 }
 
 #[derive(Default)]
@@ -58,8 +61,15 @@ struct OModel {
     cone_pyramidal: bool,
     impratio: f64,
     gravity: Vector3<f64>,
-    bodies: Vec<String>,
+    /// name, then MuJoCo's compiled `body_invweight0` — translational, rotational
+    bodies: Vec<(String, f64, f64)>,
     joints: Vec<(String, String, usize)>,
+    /// ⛔⛔ `option/iterations` and `option/ls_iterations` are PART OF THE PROBLEM STATEMENT. 29 of
+    /// Menagerie's 210 compilable models cap them — every `*_mjx.xml` at 1 or 5 Newton iterations — and
+    /// MuJoCo's `qacc` there is one iterate from a zero warm start, 18-74% away from the optimum of the
+    /// very rows it built. Comparing a converged port against it reports a physics error that is not one.
+    iterations: usize,
+    ls_iterations: usize,
     states: Vec<OState>,
 }
 
@@ -82,9 +92,15 @@ fn main() {
                 cone_pyramidal: t[4] == "0",
                 impratio: f(t[5]),
                 gravity: Vector3::new(f(t[6]), f(t[7]), f(t[8])),
+                iterations: t.get(9).and_then(|x| x.parse().ok()).unwrap_or(usize::MAX),
+                ls_iterations: t.get(10).and_then(|x| x.parse().ok()).unwrap_or(usize::MAX),
                 ..Default::default()
             }),
-            "body" => models.last_mut().unwrap().bodies.push(t[1].to_string()),
+            "body" => models.last_mut().unwrap().bodies.push((
+                t[1].to_string(),
+                t.get(2).map(|x| f(x)).unwrap_or(f64::NAN),
+                t.get(3).map(|x| f(x)).unwrap_or(f64::NAN),
+            )),
             "joint" => models.last_mut().unwrap().joints.push((t[1].to_string(), t[2].to_string(), t[3].parse().unwrap())),
             "state" => models.last_mut().unwrap().states.push(OState {
                 nefc: t[2].parse().unwrap(),
@@ -108,7 +124,7 @@ fn main() {
                     aref: t[26 + n..26 + 2 * n].iter().map(|x| f(x)).collect(),
                 });
             }
-            "qpos" | "qfrc_bias" | "qfrc_passive" | "qacc_smooth" | "qacc" | "qvel" | "bodyacc" => {
+            "qpos" | "qfrc_bias" | "qfrc_passive" | "qacc_smooth" | "qacc" | "qacc_converged" | "qvel" | "bodyacc" => {
                 let v: Vec<f64> = t[1..].iter().map(|x| f(x)).collect();
                 let s = models.last_mut().unwrap().states.last_mut().unwrap();
                 match t[0] {
@@ -119,6 +135,7 @@ fn main() {
                     "qfrc_passive" => s.qfrc_passive = v,
                     "qacc_smooth" => s.qacc_smooth = v,
                     "qacc" => s.qacc = v,
+                    "qacc_converged" => s.qacc_converged = v,
                     _ => {}
                 }
             }
@@ -126,6 +143,9 @@ fn main() {
         }
     }
 
+    // ⭐ how often MuJoCo itself stopped short of the optimum of its own rows, and by how much
+    let (mut trunc_states, mut worst_trunc, mut worst_trunc_where) = (0usize, 0.0f64, String::new());
+    let (mut iw0_ok, mut iw0_tried, mut worst_iw0, mut worst_iw0_where) = (0usize, 0usize, 0.0f64, String::new());
     let mut skip: BTreeMap<&'static str, usize> = BTreeMap::new();
     let (mut states, mut smooth_ok, mut smooth_tried, mut solved, mut solved_ok) = (0usize, 0usize, 0usize, 0usize, 0usize);
     let (mut acc_ok, mut acc_tried, mut worst_acc) = (0usize, 0usize, 0.0f64);
@@ -270,7 +290,7 @@ fn main() {
             if s.qvel.iter().all(|v| *v == 0.0) && s.nefc == 0 && !s.bodyacc.is_empty() && !rotational_armature {
                 let mut worst = 0.0f64;
                 let mut worst_body = String::new();
-                for (b, name) in o.bodies.iter().enumerate() {
+                for (b, (name, _, _)) in o.bodies.iter().enumerate() {
                     // ⛔ a body WELDED TO THE WORLD is reported as exactly zero by MuJoCo, not as the
                     // +9.81 its own recursion would give — the static bodies are outside the acceleration
                     // tree. Comparing them would assert a convention, not a dynamic.
@@ -302,7 +322,7 @@ fn main() {
                 }
                 if std::env::var("DUMP_ACC").is_ok() {
                     println!("ACC {} state:", o.rel);
-                    for (b, name) in o.bodies.iter().enumerate().take(4) {
+                    for (b, (name, _, _)) in o.bodies.iter().enumerate().take(4) {
                         println!("  {name}: MuJoCo {:?}", &s.bodyacc[6 * b..6 * b + 6]);
                     }
                 }
@@ -377,6 +397,30 @@ fn main() {
             }
             let frames = tree_frames(&t.tree, &q);
             let biw = t.body_invweight0();
+            // ⭐ `body_invweight0` against MuJoCo's own, for every body — the number every contact row's
+            // `efc_D` divides by. Compared here rather than probed by hand, because it is compiled at
+            // `qpos0` and a port that reads the CURRENT state is exact on the reference pose: only a sweep
+            // that samples moved states can fail.
+            for (name, tran, rot) in &o.bodies {
+                let Some(w) = biw.get(name) else { continue };
+                if tran.is_nan() {
+                    continue;
+                }
+                iw0_tried += 1;
+                let e = (w.tran - tran).abs() / tran.abs().max(1e-9);
+                let er = (w.rot - rot).abs() / rot.abs().max(1e-9);
+                // 1e-7, not 1e-9: on `hello_robot_stretch`, a free base under a long chain, inverting the
+                // mass matrix costs about 2e-9 of relative accuracy and every body reads that noise.
+                if e.max(er) < 1e-7 {
+                    iw0_ok += 1;
+                } else if std::env::var("DUMP_IW0").is_ok() {
+                    println!("  {} IW0 {name}: tran {:.8e} vs {tran:.8e} (ratio {:.6}), rot {:.8e} vs {rot:.8e}", o.rel, w.tran, tran / w.tran, w.rot);
+                }
+                if e.max(er) > worst_iw0 {
+                    worst_iw0 = e.max(er);
+                    worst_iw0_where = format!("{} body {name}: tran {:.8e} vs {tran:.8e}, rot {:.8e} vs {rot:.8e}", o.rel, w.tran, w.rot);
+                }
+            }
             let mut contacts: Vec<ferromotion_core::ContactSpec> = Vec::new();
             // which geoms each of our contacts came from, and the frame we gave it — so the tangent pair can
             // be held against MuJoCo's, which a normal-only comparison cannot see
@@ -673,7 +717,23 @@ fn main() {
             };
             match ferromotion_core::solve_constraints_newton_blocks(&m_mj, &a0_mj, &jac, &set.aref, &set.d, &set.blocks, 1e-13, 200) {
                 Ok(sol) => {
-                    let dq = (0..nv).map(|i| (sol.qacc[i] - s.qacc[i]).abs() / s.qacc[i].abs().max(1.0)).fold(0.0, f64::max);
+                    // ⛔⛔ compare against the OPTIMUM OF THE ROWS MUJOCO BUILT, not against the iterate it
+                    // happened to stop on. On the 181 models that let the solver run these are the same
+                    // number to the last bit, and the sweep is unchanged. On the 29 that cap `iterations`
+                    // they are not, and the gap is MuJoCo's stopping rule, not this port's physics — so it
+                    // is counted and named below instead of being charged to the contact model.
+                    let target: &[f64] = if s.qacc_converged.len() == nv { &s.qacc_converged } else { &s.qacc };
+                    let truncated = (s.qacc_converged.len() == nv).then(|| {
+                        (0..nv).map(|i| (s.qacc[i] - s.qacc_converged[i]).abs() / s.qacc_converged[i].abs().max(1.0)).fold(0.0, f64::max)
+                    });
+                    if let Some(g) = truncated.filter(|g| *g >= 1e-6) {
+                        trunc_states += 1;
+                        if g > worst_trunc {
+                            worst_trunc = g;
+                            worst_trunc_where = format!("{} (iterations {}, ls_iterations {})", o.rel, o.iterations, o.ls_iterations);
+                        }
+                    }
+                    let dq = (0..nv).map(|i| (sol.qacc[i] - target[i]).abs() / target[i].abs().max(1.0)).fold(0.0, f64::max);
                     if !any_mesh {
                         solved_nomesh += 1;
                         worst_qacc_nomesh = worst_qacc_nomesh.max(dq);
@@ -697,7 +757,7 @@ fn main() {
                             let da = a - &a0_mj;
                             0.5 * (da.transpose() * &m_mj * &da)[(0, 0)] + u.cost
                         };
-                        if cost_at(&sol.qacc) <= cost_at(&DVector::from_row_slice(&s.qacc)) {
+                        if cost_at(&sol.qacc) <= cost_at(&DVector::from_row_slice(target)) {
                             solved_no_worse += 1;
                         }
                     }
@@ -736,11 +796,13 @@ fn main() {
     println!("    and MuJoCo's own qacc_smooth back through OUR mass matrix: worst residual {worst_resid:.2e} on {worst_resid_where}");
     println!("  CONSTRAINED (contacts found and solved by us): {solved_ok} of {solved} within 1e-6 ({solved_no_worse} more have NO contacts — rows this port checks separately — and reach a cost no worse than MuJoCo's own answer); worst qacc (relative) {worst_qacc:.2e} on {worst_qacc_where}");
     println!("    of those, with NO mesh geom in any contact: {solved_ok_nomesh} of {solved_nomesh}; worst qacc (relative) {worst_qacc_nomesh:.2e}");
+    println!("    ⛔ MuJoCo stopped its own solver short of the optimum of the rows it built on {trunc_states} of them (worst {worst_trunc:.2e} on {worst_trunc_where}); those are compared against its CONVERGED answer");
     println!("  CONTACT FRAMES (the tangent pair, not only the normal): {framed} contacts paired with MuJoCo's ({frame_unpaired} states could not be paired by geom)");
     println!("    worst normal {worst_con_normal:.2e} on {worst_con_normal_where}; tangent pair rotated on {tangent_differs} of them, worst 1-|t·t'| {worst_con_tangent:.2e} on {worst_con_tangent_where}");
     println!("    worst efc_D (relative) {worst_con_d:.2e} on {worst_con_d_where} ({con_rows_compared} contacts compared row by row; {reversed_pair} left out because MuJoCo wrote the geom pair the other way round)");
     println!("    worst efc_aref (relative) {worst_con_aref:.2e} on {worst_con_aref_where}");
     println!("    worst qfrc_passive on the states it blocked: {worst_passive:.2e}");
+    println!("  body_invweight0 (what every contact row's efc_D divides by, compiled at qpos0): {iw0_ok} of {iw0_tried} within 1e-7; worst {worst_iw0:.2e} on {worst_iw0_where}");
     println!("  BODY ACCELERATIONS in the world frame, at rest — basis-free, so a free or ball base is included: {acc_ok} of {acc_tried} within 1e-6; worst {worst_acc:.2e}");
     println!("  FLOATING BASE, every dof in MUJOCO'S coordinates (at rest AND moving): {chain_ok} of {chain_tried} within 1e-6; worst qacc_smooth {worst_chain:.2e}");
     println!("  not compared, by what blocks it:");
