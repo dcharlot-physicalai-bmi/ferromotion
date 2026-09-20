@@ -21,11 +21,28 @@ use ferromotion_core::{
 use nalgebra::{DVector, Vector3};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+/// One of MuJoCo's own contacts: which geoms, where, and — the part a normal-only comparison never sees —
+/// the whole `frame`.
+#[derive(Clone)]
+struct MjCon {
+    g1: usize,
+    g2: usize,
+    dist: f64,
+    pos: Vector3<f64>,
+    frame: [Vector3<f64>; 3],
+    dim: usize,
+    margin: f64,
+    /// the rows MuJoCo actually built for this contact, in its own order
+    d: Vec<f64>,
+    aref: Vec<f64>,
+}
+
 #[derive(Default)]
 struct OState {
     nefc: usize,
     ncontact: usize,
     ncon: usize,
+    contacts: Vec<MjCon>,
     qpos: Vec<f64>,
     qvel: Vec<f64>,
     bodyacc: Vec<f64>,
@@ -75,6 +92,22 @@ fn main() {
                 ncon: t[4].parse().unwrap(),
                 ..Default::default()
             }),
+            "contact" => {
+                let v: Vec<f64> = t[4..16].iter().map(|x| f(x)).collect();
+                let n: usize = t[25].parse().unwrap();
+                let s = models.last_mut().unwrap().states.last_mut().unwrap();
+                s.contacts.push(MjCon {
+                    g1: t[1].parse().unwrap(),
+                    g2: t[2].parse().unwrap(),
+                    dist: f(t[3]),
+                    pos: Vector3::new(v[0], v[1], v[2]),
+                    frame: [Vector3::new(v[3], v[4], v[5]), Vector3::new(v[6], v[7], v[8]), Vector3::new(v[9], v[10], v[11])],
+                    dim: t[16].parse().unwrap(),
+                    margin: f(t[17]),
+                    d: t[26..26 + n].iter().map(|x| f(x)).collect(),
+                    aref: t[26 + n..26 + 2 * n].iter().map(|x| f(x)).collect(),
+                });
+            }
             "qpos" | "qfrc_bias" | "qfrc_passive" | "qacc_smooth" | "qacc" | "qvel" | "bodyacc" => {
                 let v: Vec<f64> = t[1..].iter().map(|x| f(x)).collect();
                 let s = models.last_mut().unwrap().states.last_mut().unwrap();
@@ -98,6 +131,13 @@ fn main() {
     let (mut acc_ok, mut acc_tried, mut worst_acc) = (0usize, 0usize, 0.0f64);
     let (mut chain_ok, mut chain_tried, mut worst_chain, mut worst_chain_bias) = (0usize, 0usize, 0.0f64, 0.0f64);
     let (mut solved_nomesh, mut solved_ok_nomesh, mut worst_qacc_nomesh) = (0usize, 0usize, 0.0f64);
+    let (mut framed, mut frame_unpaired, mut tangent_differs) = (0usize, 0usize, 0usize);
+    let (mut worst_con_normal, mut worst_con_tangent, mut worst_con_tangent_where) = (0.0f64, 0.0f64, String::new());
+    let (mut worst_con_d, mut worst_con_d_where, mut worst_con_aref, mut worst_con_aref_where) = (0.0f64, String::new(), 0.0f64, String::new());
+    let (mut reversed_pair, mut con_rows_compared) = (0usize, 0usize);
+    // `MJ_CONTACT=frame` rebuilds each contact Jacobian from MuJoCo's own frame, `=all` from its frame,
+    // witness and depth as well: the difference between the three runs is the attribution.
+    let mjsub = std::env::var("MJ_CONTACT").ok();
     let (mut worst_smooth_where, mut worst_qacc_where, mut worst_resid_where) = (String::new(), String::new(), String::new());
     let (mut worst_bias, mut worst_smooth, mut worst_qacc, mut worst_resid, mut worst_passive) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
     let mut notes: Vec<String> = Vec::new();
@@ -313,7 +353,11 @@ fn main() {
                 continue;
             }
             let frames = tree_frames(&t.tree, &q);
+            let biw = t.body_invweight0();
             let mut contacts: Vec<ferromotion_core::ContactSpec> = Vec::new();
+            // which geoms each of our contacts came from, and the frame we gave it — so the tangent pair can
+            // be held against MuJoCo's, which a normal-only comparison cannot see
+            let mut ourcon: Vec<(usize, usize, Vector3<f64>, [Vector3<f64>; 3], f64)> = Vec::new();
             // ⭐ whether any contact in this state involves a MESH. The witness-point gap measured by
             // `menagerie_contacts` lives only there, so splitting the failures this way turns "the contacts
             // must be it" from an assertion into a count.
@@ -378,13 +422,14 @@ fn main() {
                         }
                         let point = c.pos;
                         let jac = contact_jacobian(joints, parent, &frames, gi.joint, gj.joint, point, &c.frame, c.dim);
-                        let iw = |g: &ferromotion_core::MjcfGeom| match g.joint {
-                            Some(k) => ferromotion_core::body_invweight(&minv, joints, parent, &frames, Some(k), ferromotion_core::body_com(&frames, inertia, k)),
-                            None => InvWeight { tran: 0.0, rot: 0.0 },
-                        };
+                        // ⛔ at `qpos0`, NOT here: MuJoCo computes `body_invweight0` when it compiles the
+                        // model and never recomputes it, so a contact's regularisation carries the reference
+                        // pose's inverse weights however far the model has moved since.
+                        let iw = |g: &ferromotion_core::MjcfGeom| biw.get(&g.body).copied().unwrap_or(InvWeight::STATIC);
                         if ci.kind == GeomType::Mesh || cj.kind == GeomType::Mesh {
                             any_mesh = true;
                         }
+                        ourcon.push((i, j, c.pos, c.frame, c.dist));
                         contacts.push(ferromotion_core::ContactSpec {
                             jac,
                             dist: c.dist,
@@ -409,12 +454,114 @@ fn main() {
                 }
                 continue;
             }
+            // ⛔ MuJoCo's contact frame is THREE vectors, and the contact sweep only ever compared the first.
+            // Under a pyramidal cone the friction rows are `J_n ± μ_k·J_tk`, so the tangent pair IS part of
+            // the law: rotate it about the normal and the pyramid rotates with it. Two ports can agree on
+            // every contact position, depth and normal and still be solving different problems.
+            let key = |a: usize, b: usize| (a.min(b), a.max(b));
+            let mut theirs_by_pair: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
+            for (k, c) in s.contacts.iter().enumerate() {
+                theirs_by_pair.entry(key(c.g1, c.g2)).or_default().push(k);
+            }
+            let mut ours_by_pair: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
+            for (k, c) in ourcon.iter().enumerate() {
+                ours_by_pair.entry(key(c.0, c.1)).or_default().push(k);
+            }
+            let paired: Option<Vec<(usize, usize)>> = (ours_by_pair.len() == theirs_by_pair.len()
+                && ours_by_pair.iter().all(|(k, v)| theirs_by_pair.get(k).is_some_and(|w| w.len() == v.len())))
+            .then(|| ours_by_pair.iter().flat_map(|(k, mine)| mine.iter().zip(&theirs_by_pair[k]).map(|(a, b)| (*a, *b))).collect());
+            match &paired {
+                Some(pairs) => {
+                    framed += pairs.len();
+                    for &(a, b) in pairs {
+                        let (mine, theirs) = (&ourcon[a], &s.contacts[b]);
+                        // MuJoCo may order the pair the other way round, and then its normal is ours negated
+                        let flip = if mine.0 == theirs.g1 { 1.0 } else { -1.0 };
+                        worst_con_normal = worst_con_normal.max((mine.3[0] * flip - theirs.frame[0]).norm());
+                        // the tangent pair spans a plane; what matters is how far it is ROTATED within it
+                        let dt = 1.0 - mine.3[1].dot(&theirs.frame[1]).abs();
+                        if dt > 1e-9 {
+                            tangent_differs += 1;
+                        }
+                        if dt > worst_con_tangent {
+                            worst_con_tangent = dt;
+                            worst_con_tangent_where = o.rel.clone();
+                        }
+                    }
+                }
+                None => frame_unpaired += 1,
+            }
+            if let (Some(pairs), Some(mode)) = (&paired, mjsub.as_deref()) {
+                for &(a, b) in pairs {
+                    let th = &s.contacts[b];
+                    let dim = contacts[a].condim;
+                    let pos = if mode == "all" { th.pos } else { ourcon[a].2 };
+                    contacts[a].jac = contact_jacobian(joints, parent, &frames, t.geoms[th.g1].joint, t.geoms[th.g2].joint, pos, &th.frame, dim);
+                    if mode == "all" {
+                        contacts[a].dist = th.dist;
+                        contacts[a].margin = th.margin;
+                    }
+                }
+            }
             solved += 1;
             // the whole row set, in MuJoCo's order: equality, friction, limits, then contacts
             let mut set = t.joint_constraint_rows(&q, &s.qvel, &t.dof_invweight0());
             let cone = if o.cone_pyramidal { ferromotion_core::Cone::Pyramidal } else { ferromotion_core::Cone::Elliptic };
             match ferromotion_core::contact_rows(&contacts, nv, &s.qvel, cone, o.impratio, t.timestep) {
-                Ok(cr) => set.append(cr),
+                Ok(cr) => {
+                    // ⭐ the contact rows themselves, against MuJoCo's own — `efc_D` is where the inverse
+                    // weights, the impedance and the cone adjustment all land, and `efc_aref` is where the
+                    // reference acceleration does. With the solver and the joint rows already pinned, a
+                    // disagreement in the end-to-end acceleration has to show up in one of these two.
+                    if let Some(pairs) = &paired {
+                        let mut start = vec![0usize; cr.blocks.len() + 1];
+                        for (k, b) in cr.blocks.iter().enumerate() {
+                            start[k + 1] = start[k] + b.rows();
+                        }
+                        for &(a, b) in pairs {
+                            let th = &s.contacts[b];
+                            let (lo, hi) = (start[a], start[a + 1]);
+                            if th.d.len() != hi - lo {
+                                continue;
+                            }
+                            if std::env::var("DUMP_CON").is_ok() {
+                                println!(
+                                    "  {} c{a} geoms {}({:?})+{}({:?}) dim {} dist {:.6e} vs {:.6e}\n      invweight {:?} {:?}\n      D    {:?}\n      D mj {:?}\n      aref    {:?}\n      aref mj {:?}",
+                                    o.rel, t.geoms[th.g1].name, t.geoms[th.g1].joint, t.geoms[th.g2].name, t.geoms[th.g2].joint, th.dim, ourcon[a].4, th.dist,
+                                    contacts[a].invweight[0], contacts[a].invweight[1],
+                                    &cr.d[lo..hi], th.d, &cr.aref[lo..hi], th.aref
+                                );
+                            }
+            // ⛔ only where MuJoCo wrote the geom pair in OUR order. Written the other way round its normal
+                            // is ours negated and so is its Jacobian difference — the two cancel on the normal
+                            // row, but a tangent row comes out negated, so its rows are the same constraint
+                            // written differently. Comparing those position by position reports a difference
+                            // that is not one, and comparing them as a multiset hides a sign error that would
+                            // be one. So they are counted and left out.
+                            if ourcon[a].0 != th.g1 {
+                                reversed_pair += 1;
+                                continue;
+                            }
+                            con_rows_compared += 1;
+                            let sorted = |v: &[f64]| v.to_vec();
+                            for (k, (&mine, &dd)) in sorted(&cr.d[lo..hi]).iter().zip(&sorted(&th.d)).enumerate() {
+                                let e = (mine - dd).abs() / dd.abs().max(1.0);
+                                if e > worst_con_d {
+                                    worst_con_d = e;
+                                    worst_con_d_where = format!("{} row {k} of a dim-{} contact: {mine:.6e} vs {dd:.6e}", o.rel, th.dim);
+                                }
+                            }
+                            for (k, (&mine, &aa)) in sorted(&cr.aref[lo..hi]).iter().zip(&sorted(&th.aref)).enumerate() {
+                                let e = (mine - aa).abs() / aa.abs().max(1.0);
+                                if e > worst_con_aref {
+                                    worst_con_aref = e;
+                                    worst_con_aref_where = format!("{} row {k} of a dim-{} contact: {mine:.6e} vs {aa:.6e}", o.rel, th.dim);
+                                }
+                            }
+                        }
+                    }
+                    set.append(cr)
+                }
                 Err(e) => {
                     *skip.entry("a contact row this port cannot build").or_default() += 1;
                     if notes.len() < 12 {
@@ -461,6 +608,10 @@ fn main() {
     println!("    and MuJoCo's own qacc_smooth back through OUR mass matrix: worst residual {worst_resid:.2e} on {worst_resid_where}");
     println!("  CONSTRAINED (contacts found and solved by us): {solved_ok} of {solved} within 1e-6; worst qacc (relative) {worst_qacc:.2e} on {worst_qacc_where}");
     println!("    of those, with NO mesh geom in any contact: {solved_ok_nomesh} of {solved_nomesh}; worst qacc (relative) {worst_qacc_nomesh:.2e}");
+    println!("  CONTACT FRAMES (the tangent pair, not only the normal): {framed} contacts paired with MuJoCo's ({frame_unpaired} states could not be paired by geom)");
+    println!("    worst normal {worst_con_normal:.2e}; tangent pair rotated on {tangent_differs} of them, worst 1-|t·t'| {worst_con_tangent:.2e} on {worst_con_tangent_where}");
+    println!("    worst efc_D (relative) {worst_con_d:.2e} on {worst_con_d_where} ({con_rows_compared} contacts compared row by row; {reversed_pair} left out because MuJoCo wrote the geom pair the other way round)");
+    println!("    worst efc_aref (relative) {worst_con_aref:.2e} on {worst_con_aref_where}");
     println!("    worst qfrc_passive on the states it blocked: {worst_passive:.2e}");
     println!("  BODY ACCELERATIONS in the world frame, at rest — basis-free, so a free or ball base is included: {acc_ok} of {acc_tried} within 1e-6; worst {worst_acc:.2e}");
     println!("  CHAIN dofs of a free- or ball-based model, entry by entry: {chain_ok} of {chain_tried} within 1e-6; worst qacc_smooth {worst_chain:.2e}, worst qfrc_bias {worst_chain_bias:.2e}");

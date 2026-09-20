@@ -264,7 +264,19 @@ pub fn contact_rows(contacts: &[ContactSpec], nv: usize, qvel: &[f64], cone: Con
         let mut aref: Vec<f64> = Vec::with_capacity(rows);
         for i in 0..rows {
             let jvel: f64 = (0..nv).map(|k| jac[(i, k)] * qvel[k]).sum();
-            let (a, rr) = row_reference(&c.solref, &c.solimp, c.dist, c.margin, da[i.min(da.len() - 1)], jvel, timestep);
+            // ⛔⛔ a row's POSITION is not the contact's depth. Under the PYRAMIDAL cone every row is
+            // `J_n ± μ_k·J_tk` and carries the normal, so every row is at `dist` and switches on at
+            // `includemargin`. Under the ELLIPTIC cone the friction rows are the tangents alone: MuJoCo gives
+            // them `efc_pos = 0` and `efc_margin = 0`, so their reference acceleration is pure damping,
+            // `−B·J·q̇`, with no spring pulling the contact out of penetration sideways.
+            //
+            // At rest the two readings are indistinguishable — both give `aref = 0` on a friction row — and
+            // the regularisation hides it too, because [`mujoco_cone_adjust`] overwrites every friction row's
+            // `R` from the normal's. It shows up only in a MOVING elliptic contact, and then it is the whole
+            // tangential reference.
+            let tangent_only = !pyramidal && c.condim > 1 && i > 0;
+            let (pos, margin) = if tangent_only { (0.0, 0.0) } else { (c.dist, c.margin) };
+            let (a, rr) = row_reference(&c.solref, &c.solimp, pos, margin, da[i.min(da.len() - 1)], jvel, timestep);
             aref.push(a);
             r.push(rr);
         }
@@ -1392,6 +1404,49 @@ mod tests {
         close(s.qacc[0], -13.24290563554995, 1e-10, "sliding qacc_x");
         close(s.qacc[2], 3.4329056355499494, 1e-10, "sliding qacc_z");
         close(s.qacc[4], 330.2449592865268, 1e-9, "sliding spin-up ω_y");
+    }
+
+    /// **An ELLIPTIC contact's friction rows have no position reference.** Under the pyramidal cone every
+    /// row is `J_n ± μ_k·J_tk` and carries the contact's depth, so every row's `aref` has the spring term
+    /// `−K·d·(dist − margin)`. Under the elliptic cone the friction rows are the tangents alone and MuJoCo
+    /// gives them `efc_pos = 0`: at rest their `aref` is exactly zero while the normal row's is not.
+    ///
+    /// The mutation this refuses: passing the contact's `dist` to every row. It is invisible in `efc_D`
+    /// (`mujoco_cone_adjust` overwrites every friction row's `R` from the normal's) and invisible in any
+    /// test that only ever looks at the normal row.
+    #[test]
+    fn an_elliptic_contacts_friction_rows_carry_no_depth() {
+        let nv = 3;
+        let jac = DMatrix::identity(3, nv);
+        let spec = |condim: usize| ContactSpec {
+            jac: jac.clone(),
+            dist: -0.01,
+            margin: 0.0,
+            condim,
+            friction: [1.0, 1.0, 0.005, 1e-4, 1e-4],
+            solref: SolRef::default(),
+            solimp: SolImp::default(),
+            invweight: [InvWeight::STATIC, InvWeight { tran: 1.0, rot: 1.0 }],
+        };
+        let at_rest = vec![0.0; nv];
+        let ell = contact_rows(&[spec(3)], nv, &at_rest, Cone::Elliptic, 1.0, 0.002).unwrap();
+        assert_eq!(ell.aref.len(), 3);
+        assert!(ell.aref[0].abs() > 1.0, "the normal row must still be pushed out: {}", ell.aref[0]);
+        assert_eq!(ell.aref[1], 0.0, "an elliptic friction row at rest has no reference at all");
+        assert_eq!(ell.aref[2], 0.0);
+        // the contrast that makes the rule a rule: every pyramidal row carries the same depth
+        let pyr = contact_rows(&[spec(3)], nv, &at_rest, Cone::Pyramidal, 1.0, 0.002).unwrap();
+        assert_eq!(pyr.aref.len(), 4);
+        for (i, a) in pyr.aref.iter().enumerate() {
+            assert!((a - pyr.aref[0]).abs() < 1e-12, "pyramidal row {i}: {a} vs {}", pyr.aref[0]);
+            assert!(a.abs() > 1.0, "pyramidal row {i} lost the depth: {a}");
+        }
+        // and moving, the elliptic friction row is pure damping: −B·J·q̇, with B from solref and solimp
+        let moving = vec![0.0, 0.5, 0.0];
+        let m = contact_rows(&[spec(3)], nv, &moving, Cone::Elliptic, 1.0, 0.002).unwrap();
+        let b = 2.0 / (SolImp::default().d_width * SolRef::default().0);
+        close(m.aref[1], -b * 0.5, 1e-12, "elliptic friction aref is -B·J·q̇");
+        assert_eq!(m.aref[2], 0.0, "the untravelled tangent stays at zero");
     }
 
     #[test]

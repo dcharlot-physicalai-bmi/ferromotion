@@ -71,7 +71,7 @@ use crate::dynamics::LinkInertia;
 use crate::kinematic_tree::KinematicTree;
 use crate::mjcf::{floats, parse_xml, vec3, El};
 use crate::{Iso, Joint};
-use nalgebra::{Matrix3, Translation3, Unit, UnitQuaternion, Vector3};
+use nalgebra::{Matrix3, Point3, Translation3, Unit, UnitQuaternion, Vector3};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// The MuJoCo joint kinds this loader carries, each as one or more single-DoF tree joints.
@@ -229,6 +229,41 @@ impl MjcfTree {
         }
     }
 
+    /// **`body_invweight0` for every body**, at `qpos0` — the contact half of the same rule `dof_invweight0`
+    /// obeys for joint rows: MuJoCo evaluates these ONCE, when the model is compiled, and every contact's
+    /// regularisation reads them for the rest of the simulation.
+    ///
+    /// ⛔ Evaluating them at the CURRENT state instead is the kind of mistake that hides: it is exact at
+    /// `qpos0`, so a sweep that samples the reference pose sees nothing, and the error grows with how far the
+    /// model has moved. It changes `efc_D` on every contact row, which changes the force the solver
+    /// distributes, while leaving the contact's position, normal and frame untouched.
+    ///
+    /// ⛔⛔ Keyed by BODY, not by dof. A jointless body is welded into the link it rides on and shares every
+    /// one of its dofs, but it has its own centre of mass, so `mj_jacBodyCom` gives it its own Jacobian and
+    /// MuJoCo its own inverse weight. Four fingertips welded onto one link are four different numbers, and
+    /// reading the link's instead gives every contact between them the same regularisation.
+    ///
+    /// A body welded to the world is absent from the map and takes [`InvWeight::STATIC`], which is what an
+    /// immovable body means.
+    pub fn body_invweight0(&self) -> BTreeMap<String, crate::mujoco_contact::InvWeight> {
+        let nv = self.tree.joints.len();
+        let zero = vec![0.0; nv];
+        let m = crate::tree_dynamics::tree_mass_matrix(&self.tree.joints, &self.tree.inertia, &self.tree.parent, &zero);
+        let Some(chol) = m.cholesky() else {
+            return BTreeMap::new();
+        };
+        let minv = chol.solve(&nalgebra::DMatrix::identity(nv, nv));
+        let frames = crate::tree_frames(&self.tree, &zero);
+        self.body_frames
+            .iter()
+            .map(|(name, (ride, pre))| {
+                let ipos = self.body_ipos.get(name).copied().unwrap_or_else(Vector3::zeros);
+                let com = (frames[*ride] * pre * Point3::from(ipos)).coords;
+                (name.clone(), crate::tree_jacobian::body_invweight(&minv, &self.tree.joints, &self.tree.parent, &frames, Some(*ride), com))
+            })
+            .collect()
+    }
+
     /// **`mj_makeConstraint` for the rows a joint alone produces**: dof friction first, then limits, which is
     /// MuJoCo's own order and therefore part of the problem statement — `mj_constraintUpdate_impl` reads a
     /// row's law from its position. Contacts are appended by the caller AFTER these.
@@ -348,6 +383,11 @@ pub struct MjcfTree {
     /// Every body's frame: the tree joint it rides on and the fixed offset from that joint's frame. Jointless
     /// bodies ride on their nearest jointed ancestor. Also mirrored into `tree.tip_offsets` under the body name.
     pub body_frames: BTreeMap<String, (usize, Iso)>,
+    /// Each body's own centre of mass in its OWN frame — MuJoCo's `body_ipos`. The tree merges a jointless
+    /// body into the ancestor it rides on, so after loading there is no other way back to it, and
+    /// [`MjcfTree::body_invweight0`] needs exactly this: two geoms welded onto the same link belong to
+    /// DIFFERENT bodies and get different inverse weights.
+    pub body_ipos: BTreeMap<String, Vector3<f64>>,
     /// Site frames, same form. Sites and bodies live in separate namespaces in MuJoCo and here.
     pub site_frames: BTreeMap<String, (usize, Iso)>,
     /// Bodies and sites fixed to the world (no jointed ancestor), by world pose. Keys are `body:<name>` and
@@ -1744,6 +1784,7 @@ impl Walk<'_> {
                 self.out.tree.link_names.insert(name.clone(), idx);
             }
         }
+        self.out.body_ipos.insert(name.clone(), li.com);
         self.place("body", name.clone(), ride, pre)?;
         self.body_stack.push(name);
         let r = self.children(b, ride, pre, childclass);
@@ -2393,6 +2434,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             },
             joints: Vec::new(),
             body_frames: BTreeMap::new(),
+            body_ipos: BTreeMap::new(),
             site_frames: BTreeMap::new(),
             world_fixed: BTreeMap::new(),
             no_inertial: Vec::new(),
@@ -3038,6 +3080,35 @@ mod tests {
         // the same model without a resolver names the file it wanted
         let e = tree_from_mjcf_str(main).unwrap_err();
         assert!(e.contains("sub/defaults.xml"), "{e}");
+    }
+
+    /// **Two geoms welded onto the same link belong to two different BODIES**, and MuJoCo gives each its own
+    /// `body_invweight0` — the mean diagonal of `J M⁻¹ Jᵀ` at THAT body's centre of mass.
+    ///
+    /// For one hinge about `z`, the point Jacobian at radius `r` is `(−y, x, 0)`, so the translational
+    /// inverse weight is `r²/(3M)` and two welded tips at radii 0.5 and 0.2 stand in the ratio 6.25 exactly.
+    /// The mutation this refuses: keying the inverse weights by the tree's dof instead of by the body. Both
+    /// tips ride the same dof, so they would come out equal, every contact between them would get the same
+    /// regularisation, and nothing about the load would look wrong.
+    #[test]
+    fn a_welded_body_has_its_own_inverse_weight() {
+        let xml = r#"<mujoco><compiler angle="radian"/><worldbody>
+<body name="link"><joint name="j" type="hinge" axis="0 0 1"/>
+  <inertial pos="0 0 0" mass="1" diaginertia="0.1 0.1 0.1"/>
+  <body name="far" pos="0.5 0 0"><inertial pos="0 0 0" mass="0.1" diaginertia="0.01 0.01 0.01"/></body>
+  <body name="near" pos="0.2 0 0"><inertial pos="0 0 0" mass="0.1" diaginertia="0.01 0.01 0.01"/></body>
+</body></worldbody></mujoco>"#;
+        let t = tree_from_mjcf_str(xml).unwrap();
+        let iw = t.body_invweight0();
+        let (far, near, link) = (iw["far"], iw["near"], iw["link"]);
+        assert!((far.tran / near.tran - 6.25).abs() < 1e-12, "r² scaling: {} vs {}", far.tran, near.tran);
+        assert_eq!(link.tran, 0.0, "the link's own centre of mass is ON the hinge axis");
+        // the angular Jacobian belongs to the dof, not to the body, so THAT part they do share
+        assert_eq!(far.rot, near.rot);
+        assert_eq!(far.rot, link.rot);
+        // a body welded to the world has no entry at all, and a contact on it takes InvWeight::STATIC
+        let fixed = tree_from_mjcf_str(r#"<mujoco><worldbody><body name="post"><geom type="sphere" size="0.1"/></body></worldbody></mujoco>"#).unwrap();
+        assert!(!fixed.body_invweight0().contains_key("post"), "a world-welded body is not movable");
     }
 
     #[test]

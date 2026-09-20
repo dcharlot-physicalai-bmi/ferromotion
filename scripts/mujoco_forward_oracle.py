@@ -5,7 +5,9 @@
 Per compilable model and per sampled state: the joints with their `qposadr`, `qpos`, `qvel`, MuJoCo's
 `qfrc_bias`, `qacc_smooth` and `qacc`, and the gates a port has to respect to be comparing the same thing —
 how many constraint rows are contacts rather than limits or equalities, whether any actuator or passive force
-is acting, the cone, and `impratio`. Tab separated, one record per line.
+is acting, the cone, and `impratio`. Every contact is dumped with its geom ids, `dist`, `pos` and the whole
+3x3 `frame`, so a port can be checked on the tangent pair and not only the normal. Tab separated, one record
+per line.
 """
 
 import glob
@@ -75,6 +77,20 @@ for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
         lines.append("\t".join(["bodyacc"] + [repr(float(x)) for x in acc]))
         for tag, v in (("qpos", d.qpos), ("qvel", d.qvel), ("qfrc_bias", d.qfrc_bias), ("qfrc_passive", d.qfrc_passive), ("qacc_smooth", d.qacc_smooth), ("qacc", d.qacc)):
             lines.append("\t".join([tag] + [repr(float(x)) for x in v]))
+        # ⛔ the contact FRAME, not only its normal. Under a pyramidal cone the friction rows are
+        # J_n ± μ_k·J_tk, so rotating the tangent pair about the normal rotates the pyramid and changes
+        # the feasible force set: two ports can agree on every normal and still solve different problems.
+        for ci in range(int(d.ncon)):
+            c = d.contact[ci]
+            # ⛔ a contact inside the gap band is in `d.contact` and has NO rows: `efc_address` is -1, and
+            # the rows of every LATER contact are still where `efc_address` says, not where counting says
+            a = int(c.efc_address)
+            n = 0 if a < 0 else (1 if int(c.dim) == 1 else (2 * (int(c.dim) - 1) if int(m.opt.cone) == int(mujoco.mjtCone.mjCONE_PYRAMIDAL) else int(c.dim)))
+            lines.append("\t".join(["contact", str(int(c.geom[0])), str(int(c.geom[1])), repr(float(c.dist))]
+                                   + [repr(float(x)) for x in c.pos] + [repr(float(x)) for x in c.frame]
+                                   + [str(int(c.dim)), repr(float(c.includemargin)), repr(float(c.mu))]
+                                   + [repr(float(x)) for x in c.friction] + [str(a), str(n)]
+                                   + [repr(float(x)) for x in d.efc_D[a:a + n]] + [repr(float(x)) for x in d.efc_aref[a:a + n]]))
 with open(out, "w") as fh:
     fh.write("\n".join(lines) + "\n")
 print(f"{models} models ({failed} would not compile), {K} states each -> {out}")
