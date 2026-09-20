@@ -384,6 +384,9 @@ fn main() {
                 })
                 .collect();
             let mut refused = false;
+            // ⭐ why a pair is NOT here: every gate records the pair it dropped, so a missing contact names
+            // the rule that removed it instead of leaving a count to be stared at
+            let mut why: BTreeMap<(usize, usize), String> = BTreeMap::new();
             for i in 0..t.geoms.len() {
                 for j in i + 1..t.geoms.len() {
                     let (gi, gj) = (&t.geoms[i], &t.geoms[j]);
@@ -392,19 +395,23 @@ fn main() {
                         refused = true;
                         continue;
                     }
+                    let key = (i.min(j), i.max(j));
                     let pair = pairs.get(&(gi.name.clone(), gj.name.clone())).map(|&k| &t.contact_pairs[k]);
                     let (margin, gap, params) = if let Some(p) = pair {
                         (p.margin, p.gap, PairParams { condim: p.condim, solref: p.solref, solimp: p.solimp, friction: p.friction, adhesion: p.adhesion })
                     } else {
                         if !can_collide(gi.params.contype, gi.params.conaffinity, gj.params.contype, gj.params.conaffinity) {
+                            why.insert(key, "contype/conaffinity".into());
                             continue;
                         }
                         let (w1, w2) = (weld_of(gi.joint), weld_of(gj.joint));
                         let pw = |j: Option<usize>| j.map(|k| (parent[k] + 1) as usize).unwrap_or(0);
                         if filter_body_pair(w1, pw(gi.joint), usize::from(w1 != 0), w2, pw(gj.joint), usize::from(w2 != 0), true) {
+                            why.insert(key, "the body filter (same weld, both static, or parent and child)".into());
                             continue;
                         }
                         if excludes.contains(&(gi.body.clone(), gj.body.clone())) {
+                            why.insert(key, "<contact><exclude>".into());
                             continue;
                         }
                         let (m, g) = margin_and_gap(&gi.params, &gj.params);
@@ -412,8 +419,14 @@ fn main() {
                     };
                     let Ok(pre) = collide_pair_with(&opts, margin + gap, ci, cj) else {
                         refused = true;
+                        why.insert(key, "a pair the collider refuses".into());
                         continue;
                     };
+                    if pre.is_empty() {
+                        why.insert(key, "no contact: the collider found them apart".into());
+                    } else {
+                        why.insert(key, format!("the collider found {} witness(es) at dist {:?}, includemargin {margin}", pre.len(), pre.iter().map(|p| p.dist).collect::<Vec<_>>()));
+                    }
                     for p in pre {
                         let c: ContactRecord = set_contact(&p, &params, margin);
                         // a contact inside the gap band is detected but not handed to the solver
@@ -447,10 +460,31 @@ fn main() {
                 *skip.entry("a geom pair this port refuses (height field)").or_default() += 1;
                 continue;
             }
-            if contacts.len() != s.ncon {
+            // ⛔ `d.ncon` counts contacts MuJoCo DETECTED, and a contact at `dist >= includemargin` is in
+            // that list with `efc_address = -1` and no rows at all. This port drops those, so the number to
+            // compare against is the number MuJoCo gave rows to — otherwise a model where the two fingers
+            // touch at exactly `dist = 0` reads as sixteen missing contacts when nothing is missing.
+            let theirs_with_rows: Vec<&MjCon> = s.contacts.iter().filter(|c| !c.d.is_empty()).collect();
+            if contacts.len() != theirs_with_rows.len() {
                 *skip.entry("we and MuJoCo disagree on how many contacts there are").or_default() += 1;
                 if notes.len() < 12 {
-                    notes.push(format!("{}: {} contacts, MuJoCo has {}", o.rel, contacts.len(), s.ncon));
+                    notes.push(format!("{}: {} contacts, MuJoCo has {} with rows ({} detected)", o.rel, contacts.len(), theirs_with_rows.len(), s.ncon));
+                }
+                // ⭐ WHICH pairs, not how many: a count says a collision pipeline disagrees, a pair says
+                // where. MuJoCo's own geom ids are in the oracle, and our geom order is MuJoCo's.
+                if std::env::var("DUMP_PAIRS").is_ok() {
+                    let mut mine: BTreeMap<(usize, usize), i32> = BTreeMap::new();
+                    for c in &ourcon {
+                        *mine.entry((c.0.min(c.1), c.0.max(c.1))).or_default() += 1;
+                    }
+                    for c in &theirs_with_rows {
+                        *mine.entry((c.g1.min(c.g2), c.g1.max(c.g2))).or_default() -= 1;
+                    }
+                    for ((a, b), n) in mine.iter().filter(|(_, n)| **n != 0) {
+                        let note = why.get(&(*a, *b)).cloned().unwrap_or_else(|| "no record".into());
+                        let who = if *n > 0 { format!("only ours — {note}") } else { format!("only MuJoCo's — {note}") };
+                        println!("  {}: geom{a} {} + geom{b} {} {} x{}", o.rel, t.geoms[*a].name, t.geoms[*b].name, who, n.abs());
+                    }
                 }
                 continue;
             }
@@ -460,7 +494,7 @@ fn main() {
             // every contact position, depth and normal and still be solving different problems.
             let key = |a: usize, b: usize| (a.min(b), a.max(b));
             let mut theirs_by_pair: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
-            for (k, c) in s.contacts.iter().enumerate() {
+            for (k, c) in theirs_with_rows.iter().enumerate() {
                 theirs_by_pair.entry(key(c.g1, c.g2)).or_default().push(k);
             }
             let mut ours_by_pair: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
@@ -474,7 +508,7 @@ fn main() {
                 Some(pairs) => {
                     framed += pairs.len();
                     for &(a, b) in pairs {
-                        let (mine, theirs) = (&ourcon[a], &s.contacts[b]);
+                        let (mine, theirs) = (&ourcon[a], theirs_with_rows[b]);
                         // MuJoCo may order the pair the other way round, and then its normal is ours negated
                         let flip = if mine.0 == theirs.g1 { 1.0 } else { -1.0 };
                         worst_con_normal = worst_con_normal.max((mine.3[0] * flip - theirs.frame[0]).norm());
@@ -493,7 +527,7 @@ fn main() {
             }
             if let (Some(pairs), Some(mode)) = (&paired, mjsub.as_deref()) {
                 for &(a, b) in pairs {
-                    let th = &s.contacts[b];
+                    let th = theirs_with_rows[b];
                     let dim = contacts[a].condim;
                     let pos = if mode == "all" { th.pos } else { ourcon[a].2 };
                     contacts[a].jac = contact_jacobian(joints, parent, &frames, t.geoms[th.g1].joint, t.geoms[th.g2].joint, pos, &th.frame, dim);
@@ -519,7 +553,7 @@ fn main() {
                             start[k + 1] = start[k] + b.rows();
                         }
                         for &(a, b) in pairs {
-                            let th = &s.contacts[b];
+                            let th = theirs_with_rows[b];
                             let (lo, hi) = (start[a], start[a + 1]);
                             if th.d.len() != hi - lo {
                                 continue;
