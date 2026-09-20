@@ -212,9 +212,9 @@ impl MjcfTree {
             .iter()
             .map(|t| match &t.path {
                 TendonPath::Fixed(j) => j.iter().map(|(d, c)| c * q[*d]).sum(),
-                TendonPath::Spatial(sites) => {
-                    let p = self.site_points(sites, frames.as_ref().expect("frames are built whenever a spatial tendon is present"));
-                    p.windows(2).map(|w| (w[1] - w[0]).norm()).sum()
+                TendonPath::Spatial(pts) => {
+                    let path = self.spatial_path(pts, frames.as_ref().expect("frames are built whenever a spatial tendon is present"));
+                    path.windows(2).map(|w| w[0].arc.unwrap_or_else(|| (w[1].pos - w[0].pos).norm())).sum()
                 }
             })
             .collect()
@@ -234,20 +234,19 @@ impl MjcfTree {
             .iter()
             .map(|t| match &t.path {
                 TendonPath::Fixed(j) => j.clone(),
-                TendonPath::Spatial(sites) => {
+                TendonPath::Spatial(pts) => {
                     let frames = frames.as_ref().expect("frames are built whenever a spatial tendon is present");
-                    let p = self.site_points(sites, frames);
-                    let jac: Vec<nalgebra::DMatrix<f64>> = sites
+                    let path = self.spatial_path(pts, frames);
+                    let jac: Vec<nalgebra::DMatrix<f64>> = path
                         .iter()
-                        .zip(&p)
-                        .map(|(n, pt)| match self.site_frames.get(n) {
-                            Some((ride, _)) => crate::tree_jacobian::tree_point_jacobian(&self.tree.joints, &self.tree.parent, frames, Some(*ride), *pt),
-                            None => nalgebra::DMatrix::zeros(3, nv),
-                        })
+                        .map(|p| crate::tree_jacobian::tree_point_jacobian(&self.tree.joints, &self.tree.parent, frames, p.ride, p.pos))
                         .collect();
                     let mut out = vec![0.0; nv];
-                    for i in 0..p.len() - 1 {
-                        let d = p[i + 1] - p[i];
+                    for i in 0..path.len().saturating_sub(1) {
+                        if path[i].arc.is_some() {
+                            continue;
+                        }
+                        let d = path[i + 1].pos - path[i].pos;
                         let n = d.norm();
                         if n < 1e-15 {
                             continue;
@@ -263,15 +262,62 @@ impl MjcfTree {
             .collect()
     }
 
-    /// The world positions of a path's sites; a site welded to the world is a fixed point.
-    fn site_points(&self, sites: &[String], frames: &[Iso]) -> Vec<Vector3<f64>> {
-        sites
-            .iter()
-            .map(|n| match self.site_frames.get(n) {
-                Some((ride, off)) => (frames[*ride] * off).translation.vector,
-                None => self.world_fixed.get(&format!("site:{n}")).map(|i| i.translation.vector).unwrap_or_else(Vector3::zeros),
-            })
-            .collect()
+    /// **Where a spatial tendon actually touches the world at this state** — every point of the path, and
+    /// whether the next one is the far side of the same obstacle. This is what MuJoCo publishes as
+    /// `d.wrap_xpos`, and comparing against it is the only way to see WHICH wrap a disagreement is in.
+    pub fn tendon_path_points(&self, i: usize, q: &[f64]) -> Vec<(Vector3<f64>, bool)> {
+        let TendonPath::Spatial(pts) = &self.tendons[i].path else { return Vec::new() };
+        let frames = crate::tree_frames(&self.tree, q);
+        self.spatial_path(pts, &frames).iter().map(|p| (p.pos, p.arc.is_some())).collect()
+    }
+
+    /// The pose of a named site in the world, and the tree dof it rides on (`None` when welded to the world).
+    fn site_ride(&self, name: &str, frames: &[Iso]) -> (Option<usize>, Iso) {
+        match self.site_frames.get(name) {
+            Some((ride, off)) => (Some(*ride), frames[*ride] * off),
+            None => (None, self.world_fixed.get(&format!("site:{name}")).copied().unwrap_or_else(Iso::identity)),
+        }
+    }
+
+    /// **A spatial tendon's path, resolved at this state**: every point the cable touches, the dof it rides
+    /// on, and — for the pair of points an obstacle contributes — the ARC between them.
+    ///
+    /// ⛔ The arc is a length, not a segment: it adds to `ten_length` and contributes NOTHING to the moment.
+    /// At a tangency the cable's direction is along the surface, so by the envelope theorem the sliding of
+    /// the tangent point is first-order invisible and the derivative is the straight runs alone — which is
+    /// what lets a wrapped tendon's Jacobian be written without differentiating the tangency condition.
+    fn spatial_path(&self, pts: &[WrapPoint], frames: &[Iso]) -> Vec<PathPoint> {
+        let mut out: Vec<PathPoint> = Vec::new();
+        let mut pending: Option<&WrapPoint> = None;
+        for p in pts {
+            match p {
+                WrapPoint::Geom { .. } => pending = Some(p),
+                WrapPoint::Site(n) => {
+                    let (ride, pose) = self.site_ride(n, frames);
+                    let here = pose.translation.vector;
+                    if let Some(WrapPoint::Geom { geom, sidesite }) = pending.take() {
+                        let prev = out.last().expect("a geom is never first in the path").pos;
+                        if let Some(g) = self.geoms.iter().find(|g| &g.name == geom) {
+                            let gp = match g.joint {
+                                Some(j) => frames[j] * g.pose,
+                                None => g.pose,
+                            };
+                            let side = sidesite.as_ref().map(|s| self.site_ride(s, frames).1.translation.vector);
+                            let radius = g.size[0];
+                            let cyl = matches!(g.kind, crate::mujoco_collision::GeomType::Cylinder);
+            // MuJoCo wraps a sphere or an infinite cylinder and nothing else
+                            let wraps = matches!(g.kind, crate::mujoco_collision::GeomType::Sphere) || cyl;
+                            if let Some(([w0, w1], arc)) = wraps.then(|| wrap_obstacle(prev, here, &gp, radius, cyl, side)).flatten() {
+                                out.push(PathPoint { ride: g.joint, pos: w0, arc: Some(arc) });
+                                out.push(PathPoint { ride: g.joint, pos: w1, arc: None });
+                            }
+                        }
+                    }
+                    out.push(PathPoint { ride, pos: here, arc: None });
+                }
+            }
+        }
+        out
     }
 
     /// **`tendon_invweight0`**: `J M⁻¹ Jᵀ` at `qpos0` for each fixed tendon's (constant) Jacobian row — the
@@ -854,9 +900,23 @@ pub struct MjcfTree {
 pub enum TendonPath {
     /// `<fixed>`: `(tree dof, coefficient)` in file order. The Jacobian row IS these coefficients.
     Fixed(Vec<(usize, f64)>),
-    /// `<spatial>`: the sites the cable runs through, in order. `L = Σ |pᵢ₊₁ − pᵢ|`, and the moment is
-    /// `Σ ûᵢᵀ(Jᵢ₊₁ − Jᵢ)` — a function of the state, not of the file.
-    Spatial(Vec<String>),
+    /// `<spatial>`: the path, in order. `L = Σ |pᵢ₊₁ − pᵢ|` over the straight runs plus each obstacle's
+    /// arc, and the moment is `Σ ûᵢᵀ(Jᵢ₊₁ − Jᵢ)` over the straight runs alone — a function of the state,
+    /// not of the file.
+    Spatial(Vec<WrapPoint>),
+}
+
+/// One element of a `<spatial>` tendon's path.
+#[derive(Clone, Debug)]
+pub enum WrapPoint {
+    Site(String),
+    /// A sphere or an infinite cylinder the cable bends around. ⛔ `sidesite` picks WHICH WAY round, and
+    /// 240 of `ms_human_700`'s 252 wrap geoms give one — without it the shorter way is taken, which for a
+    /// muscle routed deliberately the long way round a bone is the wrong side entirely.
+    Geom {
+        geom: String,
+        sidesite: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -1541,6 +1601,122 @@ pub(crate) fn obj_as_mujoco_reads_it(text: &str) -> Result<crate::TriMesh3, Stri
         return Err("OBJ has no faces".into());
     }
     Ok(crate::TriMesh3 { verts, tris })
+}
+
+/// One point a spatial tendon touches: where it is, which dof carries it, and — when the next point is the
+/// far side of the same obstacle — the arc length between the two.
+struct PathPoint {
+    ride: Option<usize>,
+    pos: Vector3<f64>,
+    arc: Option<f64>,
+}
+
+/// **`mju_wrap`**: where a cable leaving `x0` for `x1` first touches an obstacle and where it leaves it.
+///
+/// Returns the two tangent points in the world and the arc length between them, or `None` when the straight
+/// run misses the obstacle entirely — which is most of the time, and is why a wrapped tendon's length is not
+/// a smooth function of the state.
+///
+/// The construction is two-dimensional. For a SPHERE the plane is the one through `x0`, `x1` and the centre,
+/// and the answer lifts straight back. For a CYLINDER it is the geom's own xy-plane, the radius is `size[0]`
+/// and the axis is infinite, so the two tangent points get their heights by interpolating `z` along the
+/// 2-D path — which is what makes the arc a helix and not a circle.
+///
+/// ⛔ There are always TWO solutions, one each way round. `sidesite` picks between them; without one the
+/// shorter path wins. Measured against MuJoCo 3.13.0, which stores its own answer in `d.wrap_xpos`.
+fn wrap_obstacle(x0: Vector3<f64>, x1: Vector3<f64>, pose: &Iso, radius: f64, cylinder: bool, side: Option<Vector3<f64>>) -> Option<([Vector3<f64>; 2], f64)> {
+    let c = pose.translation.vector;
+    let (e1, e2, axis) = if cylinder {
+        let m = pose.rotation.to_rotation_matrix().into_inner();
+        (m.column(0).into_owned(), m.column(1).into_owned(), Some(m.column(2).into_owned()))
+    } else {
+        // the plane through the two endpoints and the centre; collinear means no plane, so no wrap
+        let n = (x1 - x0).cross(&(x0 - c));
+        if n.norm() < 1e-12 {
+            return None;
+        }
+        let n = n.normalize();
+        let e1 = (x1 - x0 - n * (x1 - x0).dot(&n)).normalize();
+        (e1, n.cross(&e1), None)
+    };
+    let to2 = |p: Vector3<f64>| [(p - c).dot(&e1), (p - c).dot(&e2)];
+    let (p0, p1) = (to2(x0), to2(x1));
+    let (d0, d1) = ((p0[0] * p0[0] + p0[1] * p0[1]).sqrt(), (p1[0] * p1[0] + p1[1] * p1[1]).sqrt());
+    if d0 <= radius || d1 <= radius {
+        return None;
+    }
+    let dif = [p1[0] - p0[0], p1[1] - p0[1]];
+    let a = dif[0] * dif[0] + dif[1] * dif[1];
+    if a < 1e-24 {
+        return None;
+    }
+    let side2 = side.map(to2);
+    let b = p0[0] * dif[0] + p0[1] * dif[1];
+    let det = b * b - a * (d0 * d0 - radius * radius);
+    let crosses = det > 0.0 && (-b - det.max(0.0).sqrt()) / a <= 1.0 && (-b + det.max(0.0).sqrt()) / a >= 0.0;
+    match side2 {
+        // ⛔⛔ a `sidesite` does not merely choose between two wraps — it DEMANDS a side, and the cable is
+        // pulled all the way round when it is on the wrong one, however far off the obstacle sits. The test
+        // is the CLOSEST POINT OF THE RUN, clamped to its ends: if it lies on the opposite side of the
+        // obstacle's centre from the side site, the cable is on the wrong side and must come round.
+        //
+        // Measured on MuJoCo 3.13.0: an obstacle two-thirds of a segment length PAST the end still wraps
+        // when the side site is across from it, and one sitting right beside the run does not when the side
+        // site agrees with where the cable already is. Requiring an intersection loses `iit_softfoot`'s
+        // wraps entirely; requiring the obstacle to be alongside the run loses `ms_human_700`'s knee.
+        Some(sp) => {
+            let t = (-b / a).clamp(0.0, 1.0);
+            let near = [p0[0] + t * dif[0], p0[1] + t * dif[1]];
+            if !crosses && near[0] * sp[0] + near[1] * sp[1] >= 0.0 {
+                return None;
+            }
+        }
+        None if !crosses => return None,
+        None => {}
+    }
+    // the tangent points from a point at distance `d`, one each way round
+    let tang = |p: [f64; 2], d: f64, sgn: f64| -> [f64; 2] {
+        let ca = radius / d;
+        let sa = sgn * (1.0 - ca * ca).max(0.0).sqrt();
+        let k = radius / d;
+        [(ca * p[0] - sa * p[1]) * k, (sa * p[0] + ca * p[1]) * k]
+    };
+    let arc_of = |t0: [f64; 2], t1: [f64; 2]| -> f64 {
+        let (a0, a1) = (t0[1].atan2(t0[0]), t1[1].atan2(t1[0]));
+        let mut da = (a1 - a0).abs();
+        if da > std::f64::consts::PI {
+            da = std::f64::consts::TAU - da;
+        }
+        radius * da
+    };
+    let dist = |p: [f64; 2], q: [f64; 2]| ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2)).sqrt();
+    let cands = [(tang(p0, d0, 1.0), tang(p1, d1, -1.0)), (tang(p0, d0, -1.0), tang(p1, d1, 1.0))];
+    let pick = match side2 {
+        // the side point chooses: the wrap whose midpoint on the circle is nearer to it
+        Some(sp) => {
+            let score = |(t0, t1): ([f64; 2], [f64; 2])| dist([(t0[0] + t1[0]) * 0.5, (t0[1] + t1[1]) * 0.5], sp);
+            usize::from(score(cands[1]) < score(cands[0]))
+        }
+        None => {
+            let total = |(t0, t1): ([f64; 2], [f64; 2])| dist(p0, t0) + arc_of(t0, t1) + dist(t1, p1);
+            usize::from(total(cands[1]) < total(cands[0]))
+        }
+    };
+    let (t0, t1) = cands[pick];
+    let arc2d = arc_of(t0, t1);
+    let lift = |t: [f64; 2], h: f64| c + e1 * t[0] + e2 * t[1] + axis.map(|ax| ax * h).unwrap_or_else(Vector3::zeros);
+    let Some(ax) = axis else {
+        return Some(([lift(t0, 0.0), lift(t1, 0.0)], arc2d));
+    };
+    // a cylinder is infinite along its axis: the heights follow the 2-D path, so the arc is a helix
+    let (h0, h1) = ((x0 - c).dot(&ax), (x1 - c).dot(&ax));
+    let (s0, s1) = (dist(p0, t0), dist(p0, t0) + arc2d);
+    let total = s1 + dist(t1, p1);
+    if total < 1e-15 {
+        return None;
+    }
+    let (z0, z1) = (h0 + (h1 - h0) * s0 / total, h0 + (h1 - h0) * s1 / total);
+    Some(([lift(t0, z0), lift(t1, z1)], (arc2d * arc2d + (z1 - z0) * (z1 - z0)).sqrt()))
 }
 
 /// One geom's contribution to its body: mass, centre in the body frame, inertia about that centre in the
@@ -2770,18 +2946,30 @@ fn parse_tendons(root: &El, defaults: &Defaults, c: &Compiler, joints: &[MjcfJoi
             };
             let mut path: Option<TendonPath> = None;
             if el.name == "spatial" {
-                // ⛔ a wrapping geom or a pulley changes the path's length in a way a list of sites cannot
-                // express; say so rather than compute a cable that runs through the obstacle
-                if let Some(other) = el.children.iter().find(|x| x.name != "site") {
+                // ⛔ a pulley splits the tendon into branches with their own divisors, which is a different
+                // object from a path; say so rather than pretend the branches are one cable
+                if let Some(other) = el.children.iter().find(|x| x.name != "site" && x.name != "geom") {
                     unsupported.push((name.clone(), format!("a spatial tendon with <{}>", other.name)));
                     continue;
                 }
-                let sites: Vec<String> = el.children.iter().filter(|x| x.name == "site").filter_map(|x| x.attr("site").map(|s| s.to_string())).collect();
-                if sites.len() < 2 {
-                    unsupported.push((name.clone(), "a spatial tendon with fewer than two sites".into()));
+                let mut pts: Vec<WrapPoint> = Vec::new();
+                for c in &el.children {
+                    match c.name.as_str() {
+                        "site" => pts.push(WrapPoint::Site(c.attr("site").unwrap_or_default().to_string())),
+                        "geom" => pts.push(WrapPoint::Geom { geom: c.attr("geom").unwrap_or_default().to_string(), sidesite: c.attr("sidesite").map(|s| s.to_string()) }),
+                        _ => {}
+                    }
+                }
+                // MuJoCo requires a wrapping geom to sit BETWEEN two sites, and never two in a row
+                let bad = pts.len() < 2
+                    || !matches!(pts.first(), Some(WrapPoint::Site(_)))
+                    || !matches!(pts.last(), Some(WrapPoint::Site(_)))
+                    || pts.windows(2).any(|w| matches!((&w[0], &w[1]), (WrapPoint::Geom { .. }, WrapPoint::Geom { .. })));
+                if bad {
+                    unsupported.push((name.clone(), "a spatial path that is not sites with single geoms between them".into()));
                     continue;
                 }
-                path = Some(TendonPath::Spatial(sites));
+                path = Some(TendonPath::Spatial(pts));
             }
             let mut links: Vec<(usize, f64)> = Vec::new();
             for j in el.children.iter().filter(|x| x.name == "joint") {
@@ -3878,19 +4066,74 @@ mod tests {
         for (k, want) in [-2.1022457570735895, -17.5276185468612].iter().enumerate() {
             assert!((passive[k] - want).abs() < 1e-10, "qfrc_passive[{k}] {} vs {want}", passive[k]);
         }
-        // a wrapping geom is named, not run straight through
-        let wrapped = tree_from_mjcf_str(
+        // a PULLEY still is not carried: it splits the cable into branches with their own divisors, which
+        // is a different object from a path, and naming it is better than quietly halving a force
+        let pulley = tree_from_mjcf_str(
             r#"<mujoco><compiler angle="radian"/><worldbody>
   <site name="anchor" pos="0 0 1"/>
   <body name="a"><joint name="j1" type="slide" axis="1 0 0"/><inertial pos="0 0 0" mass="1" diaginertia="0.01 0.01 0.01"/>
-    <geom name="pulley" type="sphere" size="0.1"/><site name="s1" pos="0.2 0 0"/></body>
+    <site name="s1" pos="0.2 0 0"/><site name="s2" pos="0.3 0 0"/></body>
 </worldbody>
-<tendon><spatial name="over"><site site="anchor"/><geom geom="pulley"/><site site="s1"/></spatial></tendon></mujoco>"#,
+<tendon><spatial name="split"><site site="anchor"/><pulley divisor="2"/><site site="s1"/><site site="s2"/></spatial></tendon></mujoco>"#,
         )
         .unwrap();
-        assert_eq!(wrapped.tendons.len(), 0);
-        assert_eq!(wrapped.tendons_unsupported.len(), 1, "{:?}", wrapped.tendons_unsupported);
+        assert_eq!(pulley.tendons.len(), 0);
+        assert_eq!(pulley.tendons_unsupported.len(), 1, "{:?}", pulley.tendons_unsupported);
     }
+
+    /// **A tendon wrapping a sphere and a cylinder, against MuJoCo's own numbers.** 291 of Menagerie's 881
+    /// spatial tendons bend around a geom; every muscle in `ms_human_700` that crosses a joint does.
+    #[test]
+    fn a_spatial_tendon_wraps_a_sphere_and_a_cylinder() {
+        let t = tree_from_mjcf_str(WRAP_MODEL).unwrap();
+        assert!(t.tendons_unsupported.is_empty(), "{:?}", t.tendons_unsupported);
+        let q = [0.35, 0.12];
+        let (len, mom) = (t.ten_length(&q), t.ten_moment(&q));
+        let want: [(f64, [f64; 2]); 2] = [
+            (1.2200391927982945, [-0.05058065845892602, 0.9632246154822138]),
+            (1.217413004230632, [-0.026493351837825998, 0.9684715020258167]),
+        ];
+        for (i, (wl, wj)) in want.iter().enumerate() {
+            assert!((len[i] - wl).abs() < 1e-9, "tendon {i} length {} vs {wl}", len[i]);
+            for (k, w) in wj.iter().enumerate() {
+                let got = mom[i].iter().find(|(d, _)| *d == k).map(|(_, m)| *m).unwrap_or(0.0);
+                assert!((got - w).abs() < 1e-9, "tendon {i} J[{k}] {got} vs {w}");
+            }
+        }
+        // ⛔ and the OTHER way round. A `sidesite` on the far side of both obstacles must send the cable
+        // there instead — same model, same state, a longer path and a different sign on the first dof.
+        let flipped = tree_from_mjcf_str(&WRAP_MODEL.replace(r#"<site name="up" pos="0 0.5 0"/>"#, r#"<site name="down" pos="0 -0.5 0"/>"#).replace(r#"<geom geom="ball"/>"#, r#"<geom geom="ball" sidesite="down"/>"#).replace(r#"<geom geom="drum"/>"#, r#"<geom geom="drum" sidesite="down"/>"#)).unwrap();
+        let (len, mom) = (flipped.ten_length(&q), flipped.ten_moment(&q));
+        let want: [(f64, [f64; 2]); 2] = [
+            (1.2848340762814132, [0.047479985220722644, 0.994814026993209]),
+            (1.270119237142905, [-0.05860572178093858, 0.9986136828818115]),
+        ];
+        for (i, (wl, wj)) in want.iter().enumerate() {
+            assert!((len[i] - wl).abs() < 1e-9, "sided tendon {i} length {} vs {wl}", len[i]);
+            for (k, w) in wj.iter().enumerate() {
+                let got = mom[i].iter().find(|(d, _)| *d == k).map(|(_, m)| *m).unwrap_or(0.0);
+                assert!((got - w).abs() < 1e-9, "sided tendon {i} J[{k}] {got} vs {w}");
+            }
+        }
+    }
+
+    const WRAP_MODEL: &str = r#"<mujoco><compiler angle="radian"/><option gravity="0 0 0"/><worldbody>
+  <site name="a0" pos="-0.4 0.05 0.3"/>
+  <body name="arm" pos="0 0 0.28" euler="0.1 -0.2 0.3"><joint name="j1" type="hinge" axis="0 1 0"/>
+    <inertial pos="0.1 0 0" mass="1" diaginertia="0.01 0.01 0.01"/>
+    <geom name="ball" type="sphere" size="0.12" pos="0.02 0.01 0"/>
+    <geom name="drum" type="cylinder" size="0.1 0.3" pos="0.05 -0.02 0.02" euler="0.3 0.2 -0.1"/>
+    <site name="up" pos="0 0.5 0"/>
+    <body name="fore" pos="0.5 0 0"><joint name="j2" type="slide" axis="1 0 0"/>
+      <inertial pos="0.1 0 0" mass="0.6" diaginertia="0.01 0.01 0.01"/>
+      <site name="a1" pos="0.2 -0.1 -0.03"/>
+    </body>
+  </body>
+</worldbody>
+<tendon>
+  <spatial name="sph"><site site="a0"/><geom geom="ball"/><site site="a1"/></spatial>
+  <spatial name="cyl"><site site="a0"/><geom geom="drum"/><site site="a1"/></spatial>
+</tendon></mujoco>"#;
 
     /// **A site transmission, against MuJoCo's own numbers.** `gear` is a WRENCH in the site's frame, so
     /// the moment turns with the model and cannot be resolved when the file is read — every quadrotor in
