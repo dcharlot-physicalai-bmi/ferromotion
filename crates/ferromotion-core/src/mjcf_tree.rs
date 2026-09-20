@@ -159,10 +159,14 @@ impl MjcfTree {
     /// springs are added separately, and a port that folds damping into the recursion's actuator terms is
     /// exactly right at rest and wrong the moment the model moves.
     ///
-    /// ⚠ Short of tendon and fluid forces, which this loader does not carry. `gravcomp` IS included, the
-    /// way MuJoCo includes it: `d.qfrc_passive` carries `d.qfrc_gravcomp`.
+    /// ⚠ Short of a tendon's own spring and damper where the tendon is SPATIAL, and of the per-geom
+    /// `fluidshape` model. `gravcomp` is included the way MuJoCo includes it (`d.qfrc_passive` carries
+    /// `d.qfrc_gravcomp`), and so is the inertia-box fluid model — see [`MjcfTree::qfrc_fluid`].
     pub fn qfrc_passive(&self, q: &[f64], qd: &[f64]) -> Vec<f64> {
         let mut out = self.qfrc_gravcomp(q);
+        for (o, f) in out.iter_mut().zip(self.qfrc_fluid(q, qd)) {
+            *o += f;
+        }
         // a tendon's spring and damper, carried back through its constant Jacobian. ⛔ `springlength` is a
         // BAND: between its two values the tendon is slack and pulls nothing at all, which a single resting
         // length cannot express and a model that states two values is relying on.
@@ -227,6 +231,71 @@ impl MjcfTree {
                 j.dot(&chol.solve(&j))
             })
             .collect()
+    }
+
+    /// **`mj_inertiaBoxFluidModel`**: the ambient medium's drag on every body, from `<option density>`,
+    /// `<option viscosity>` and `<option wind>`.
+    ///
+    /// Each body is replaced by the box with its mass and its inertia — full sides
+    /// `bᵢ = √(6·(I_j + I_k − I_i)/m)` — and the four terms are written in the body's INERTIAL frame, on the
+    /// velocity `mj_objectVelocity` reports there:
+    ///
+    /// - viscous torque `−π·d³·ν·ω` and viscous force `−3π·d·ν·v`, with `d` the mean of the three sides —
+    ///   Stokes drag on the equivalent sphere;
+    /// - blunt drag force `−½·ρ·b_j·b_k·|vᵢ|·vᵢ` on each face, and torque
+    ///   `−ρ·bᵢ·(b_j⁴ + b_k⁴)·|ωᵢ|·ωᵢ / 64`.
+    ///
+    /// `wind` is subtracted from the LINEAR velocity only; it does not spin anything.
+    ///
+    /// ⛔ Every coefficient here was fitted against MuJoCo 3.13.0 one term at a time — angular viscous,
+    /// linear viscous, blunt force, blunt torque, then all four together on a body with a rotated inertial
+    /// frame and an offset centre of mass, where it agrees to 1.1e-16.
+    ///
+    /// ⚠ The per-geom `fluidshape="ellipsoid"` model is NOT this and is not carried. No Menagerie model
+    /// uses it.
+    pub fn qfrc_fluid(&self, q: &[f64], qd: &[f64]) -> Vec<f64> {
+        let nv = self.tree.joints.len();
+        let mut out = vec![0.0; nv];
+        if self.density == 0.0 && self.viscosity == 0.0 {
+            return out;
+        }
+        let frames = crate::tree_frames(&self.tree, q);
+        for (name, (ride, pre)) in &self.body_frames {
+            let mass = self.body_mass.get(name).copied().unwrap_or(0.0);
+            let Some(inertia) = self.body_iinertia.get(name) else { continue };
+            if mass <= 0.0 {
+                continue;
+            }
+            let body = frames[*ride] * pre;
+            let rot = body.rotation.to_rotation_matrix().into_inner() * self.body_iquat[name];
+            let ipos = self.body_ipos.get(name).copied().unwrap_or_else(Vector3::zeros);
+            let com = (body * Point3::from(ipos)).coords;
+            let jp = crate::tree_jacobian::tree_point_jacobian(&self.tree.joints, &self.tree.parent, &frames, Some(*ride), com);
+            let ja = crate::tree_jacobian::tree_angular_jacobian(&self.tree.joints, &self.tree.parent, &frames, Some(*ride));
+            let vel = |j: &nalgebra::DMatrix<f64>| Vector3::new((0..nv).map(|k| j[(0, k)] * qd[k]).sum(), (0..nv).map(|k| j[(1, k)] * qd[k]).sum(), (0..nv).map(|k| j[(2, k)] * qd[k]).sum());
+            let w = rot.transpose() * vel(&ja);
+            let v = rot.transpose() * (vel(&jp) - self.wind);
+            let b = [0, 1, 2].map(|i| (6.0 * (inertia[(i + 1) % 3] + inertia[(i + 2) % 3] - inertia[i]).max(1e-15) / mass).sqrt());
+            let diam = (b[0] + b[1] + b[2]) / 3.0;
+            let (mut force, mut torque) = (Vector3::zeros(), Vector3::zeros());
+            if self.viscosity > 0.0 {
+                torque -= w * (std::f64::consts::PI * diam * diam * diam * self.viscosity);
+                force -= v * (3.0 * std::f64::consts::PI * diam * self.viscosity);
+            }
+            if self.density > 0.0 {
+                for i in 0..3 {
+                    force[i] -= 0.5 * self.density * b[(i + 1) % 3] * b[(i + 2) % 3] * v[i].abs() * v[i];
+                    let (p, r) = (b[(i + 1) % 3], b[(i + 2) % 3]);
+                    torque[i] -= self.density * b[i] * (p.powi(4) + r.powi(4)) * w[i].abs() * w[i] / 64.0;
+                }
+            }
+            // `mj_applyFT` at the body's centre of mass, in the world
+            let (fw, tw) = (rot * force, rot * torque);
+            for k in 0..nv {
+                out[k] += (0..3).map(|r| jp[(r, k)] * fw[r] + ja[(r, k)] * tw[r]).sum::<f64>();
+            }
+        }
+        out
     }
 
     /// **`mj_gravcomp`**: `<body gravcomp>` as an upward force `−gravcomp·mass·g` applied at that body's
@@ -597,6 +666,15 @@ pub struct MjcfTree {
     pub timestep: f64,
     /// `<option gravity>`, default `0 0 -9.81`.
     pub gravity: Vector3<f64>,
+    /// `<option density>`, `<option viscosity>` and `<option wind>` — the ambient medium. With both density
+    /// and viscosity zero there is no fluid force at all, which is MuJoCo's default.
+    pub density: f64,
+    pub viscosity: f64,
+    pub wind: Vector3<f64>,
+    /// Each body's PRINCIPAL inertia and the orientation of its inertial frame in its body frame —
+    /// MuJoCo's `body_inertia` and `body_iquat`. The fluid model is written in that frame and nowhere else.
+    pub body_iinertia: BTreeMap<String, [f64; 3]>,
+    pub body_iquat: BTreeMap<String, Matrix3<f64>>,
     /// Each body's mass after MuJoCo's `boundmass` floor, and its `<body gravcomp>` where it is non-zero —
     /// together with [`MjcfTree::body_ipos`] these are what [`MjcfTree::qfrc_gravcomp`] needs.
     pub body_mass: BTreeMap<String, f64>,
@@ -1590,17 +1668,19 @@ fn pose_of(el: &El, kind: &str, defaults: &Defaults, childclass: Option<&str>, c
     Ok(Iso::from_parts(Translation3::from(p), orientation(&get_orient, c)?))
 }
 
-fn inertial_of(el: &El, c: &Compiler) -> Result<LinkInertia, String> {
+#[allow(clippy::type_complexity)]
+fn inertial_of(el: &El, c: &Compiler) -> Result<(LinkInertia, [f64; 3], Matrix3<f64>), String> {
     let mass = el.attr("mass").ok_or("inertial needs mass")?.trim().parse::<f64>().map_err(|e| e.to_string())?;
     let com = el.attr("pos").map(vec3).transpose()?.unwrap_or_else(Vector3::zeros);
     let get = |k: &str| el.attr(k).map(|s| s.to_string());
     let rm = *orientation(&get, c)?.to_rotation_matrix().matrix();
-    let ic = if let Some(d) = el.attr("diaginertia") {
+    let (ic, principal, iframe) = if let Some(d) = el.attr("diaginertia") {
         let v = floats(d)?;
         if v.len() != 3 {
             return Err("diaginertia needs 3 numbers".into());
         }
-        Matrix3::from_diagonal(&Vector3::new(v[0], v[1], v[2]))
+        // stated diagonal: this IS `body_inertia`, and `body_iquat` is the orientation as written
+        (Matrix3::from_diagonal(&Vector3::new(v[0], v[1], v[2])), [v[0], v[1], v[2]], rm)
     } else if let Some(f) = el.attr("fullinertia") {
         let v = floats(f)?;
         if v.len() != 6 {
@@ -1612,15 +1692,16 @@ fn inertial_of(el: &El, c: &Compiler) -> Result<LinkInertia, String> {
         // off-diagonal term of 8.3e-7 is 2.3e-7 RELATIVE. Keeping the exact input instead leaves the mass
         // matrix out by 1.1e-7 relative at the root of `franka_emika_panda` — invisible in `qfrc_bias`,
         // because at that pose joint 1's axis is vertical and gravity exerts no torque about it.
-        mujoco_stored_inertia(&Matrix3::new(v[0], v[3], v[4], v[3], v[1], v[5], v[4], v[5], v[2]))
+        let (d, r) = mujoco_stored_inertia_parts(&Matrix3::new(v[0], v[3], v[4], v[3], v[1], v[5], v[4], v[5], v[2]));
+        (r * Matrix3::from_diagonal(&Vector3::new(d[0], d[1], d[2])) * r.transpose(), d, rm * r)
     } else if mass == 0.0 {
         // MuJoCo accepts `<inertial pos="0 0 0" mass="0"/>` (Menagerie's rby1 uses it for its world body):
         // a massless body has no tensor to state
-        Matrix3::zeros()
+        (Matrix3::zeros(), [0.0; 3], rm)
     } else {
         return Err("inertial needs diaginertia or fullinertia".into());
     };
-    Ok(LinkInertia { mass, com, inertia: rm * ic * rm.transpose() })
+    Ok((LinkInertia { mass, com, inertia: rm * ic * rm.transpose() }, principal, iframe))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1977,11 +2058,11 @@ impl Walk<'_> {
         // inertia: a jointed body owns its last joint's link; a jointless one welds into the ancestor it rides on.
         // `inertiafromgeom`: auto = the <inertial> if stated, else the geoms; true = always the geoms; false = never
         let stated = b.child("inertial");
-        let mut li = match (stated, self.c.inertiafromgeom) {
+        let (mut li, mut principal, mut iframe) = match (stated, self.c.inertiafromgeom) {
             (Some(el), InertiaFromGeom::Auto | InertiaFromGeom::False) => inertial_of(el, self.c).map_err(|e| format!("body '{name}': {e}"))?,
             (None, InertiaFromGeom::False) => {
                 self.out.no_inertial.push(name.clone());
-                LinkInertia::zero()
+                (LinkInertia::zero(), [0.0; 3], Matrix3::identity())
             }
             (_, _) => {
                 if stated.is_none() {
@@ -1992,7 +2073,7 @@ impl Walk<'_> {
                         self.out.inferred_from_geoms.push(name.clone());
                         li
                     }
-                    None => LinkInertia::zero(),
+                    None => (LinkInertia::zero(), [0.0; 3], Matrix3::identity()),
                 }
             }
         };
@@ -2004,6 +2085,10 @@ impl Walk<'_> {
             let eig = li.inertia.symmetric_eigen();
             let floored = eig.eigenvalues.map(|e| e.max(self.c.boundinertia));
             li.inertia = eig.eigenvectors * Matrix3::from_diagonal(&floored) * eig.eigenvectors.transpose();
+            // the floor rewrites the principal values, so the stored pair has to follow it
+            let (d, r) = mujoco_stored_inertia_parts(&li.inertia);
+            principal = d;
+            iframe = r;
         }
         if ride >= 0 {
             let idx = ride as usize;
@@ -2015,6 +2100,11 @@ impl Walk<'_> {
         }
         self.out.body_ipos.insert(name.clone(), li.com);
         self.out.body_mass.insert(name.clone(), li.mass);
+        // MuJoCo keeps a body's inertia as a DIAGONAL plus the frame it is diagonal in; the fluid model
+        // reads both, and these are the two halves as the compiler computed them — not a second
+        // diagonalisation of the tensor they were reassembled into
+        self.out.body_iinertia.insert(name.clone(), principal);
+        self.out.body_iquat.insert(name.clone(), iframe);
         // `<body gravcomp>` is a plain body attribute: no default class carries it, and it does not inherit
         if let Some(v) = b.attr("gravcomp") {
             let g = v.trim().parse::<f64>().map_err(|e| format!("body '{name}' gravcomp: {e}"))?;
@@ -2292,7 +2382,8 @@ impl Walk<'_> {
     }
 
     /// `mjCBody::InertiaFromGeom`: the body's inertia from the geoms MuJoCo would weigh, in the body frame.
-    fn inertia_from_geoms(&mut self, b: &El, childclass: Option<&str>, body: &str) -> Result<Option<LinkInertia>, String> {
+    #[allow(clippy::type_complexity)]
+    fn inertia_from_geoms(&mut self, b: &El, childclass: Option<&str>, body: &str) -> Result<Option<(LinkInertia, [f64; 3], Matrix3<f64>)>, String> {
         let mut parts = Vec::new();
         for g in b.children.iter().filter(|c| c.name == "geom") {
             if let Some(gm) = self.geom_mass(g, childclass, body)? {
@@ -2309,7 +2400,8 @@ impl Walk<'_> {
             let d = p.com - com;
             inertia += p.inertia + p.mass * (Matrix3::identity() * d.dot(&d) - d * d.transpose());
         }
-        Ok(Some(LinkInertia { mass, com, inertia: mujoco_stored_inertia(&inertia) }))
+        let (d, r) = mujoco_stored_inertia_parts(&inertia);
+        Ok(Some((LinkInertia { mass, com, inertia: r * Matrix3::from_diagonal(&Vector3::new(d[0], d[1], d[2])) * r.transpose() }, d, r)))
     }
 
     fn body_count(&self) -> usize {
@@ -2500,10 +2592,13 @@ impl ActRecord {
 /// `google_robot` declares four `<inertial>` elements for twelve bodies, so eight go through the geom path;
 /// round-tripping only the stated ones left its root dof's inverse weight out by 2.1e-9, which lands
 /// straight in every constraint row's regularisation.
-fn mujoco_stored_inertia(full: &Matrix3<f64>) -> Matrix3<f64> {
+/// The two halves MuJoCo actually stores: `body_inertia` (the eigenvalues) and `body_iquat` (the frame they
+/// are diagonal in). ⛔ Recovering them by diagonalising the reassembled tensor a second time is NOT the
+/// same number — `mjuu_eig3` stops on an absolute 1e-12, and a second pass moves the principal values by
+/// enough to shift a fluid force by 5e-10 relative. Take them where they are computed.
+fn mujoco_stored_inertia_parts(full: &Matrix3<f64>) -> ([f64; 3], Matrix3<f64>) {
     let (eigval, quat) = eig3_mujoco(full);
-    let r = quat_to_rotation(&quat);
-    r * Matrix3::from_diagonal(&Vector3::new(eigval[0], eigval[1], eigval[2])) * r.transpose()
+    (eigval, quat_to_rotation(&quat))
 }
 
 /// **`<tendon>`**: the `<fixed>` tendons, with their defaults class applied. A `<spatial>` tendon is
@@ -2787,6 +2882,11 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             angle_scale: c.deg,
             timestep: 0.002,
             gravity: Vector3::new(0.0, 0.0, -9.81),
+            density: 0.0,
+            viscosity: 0.0,
+            wind: Vector3::zeros(),
+            body_iinertia: BTreeMap::new(),
+            body_iquat: BTreeMap::new(),
             body_mass: BTreeMap::new(),
             body_gravcomp: BTreeMap::new(),
             tendons: Vec::new(),
@@ -2846,6 +2946,14 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
         }
         if let Some(v) = el.attr("gravity") {
             out.gravity = vec3(v).map_err(|e| format!("<option gravity>: {e}"))?;
+        }
+        if let Some(v) = el.attr("wind") {
+            out.wind = vec3(v).map_err(|e| format!("<option wind>: {e}"))?;
+        }
+        for (k, dst) in [("density", &mut out.density), ("viscosity", &mut out.viscosity)] {
+            if let Some(v) = el.attr(k) {
+                *dst = v.trim().parse::<f64>().map_err(|e| format!("<option {k}>: {e}"))?;
+            }
         }
     }
     let (mut tendons, ten_unsupported) = parse_tendons(&root, &defaults, &c, &out.joints)?;
@@ -3546,6 +3654,43 @@ mod tests {
         for i in 0..nv {
             assert!((passive[i] - 0.5 * bias[i]).abs() < 1e-12, "dof {i}: {} vs half of {}", passive[i], bias[i]);
         }
+    }
+
+    /// **The inertia-box fluid model, against MuJoCo's own numbers.** Every coefficient was fitted one term
+    /// at a time — angular viscous, linear viscous, blunt force, blunt torque — and then checked together on
+    /// a body with a rotated inertial frame and an offset centre of mass, where the two agree to 1.1e-16.
+    ///
+    /// ⛔ `wind` makes the force NON-ZERO AT REST, which is the one state a sweep of static poses samples:
+    /// a port that omitted the whole model, or that dropped only the wind, would look identical at `q̇ = 0`
+    /// without it. Both states are checked here for that reason.
+    #[test]
+    fn the_inertia_box_fluid_model_is_mujocos() {
+        let xml = r#"<mujoco><compiler angle="radian"/>
+<option gravity="0 0 0" density="1.3" viscosity="0.7" wind="0.5 -0.3 0.2"/>
+<worldbody>
+  <body name="a" pos="0 0 0.5" euler="0.1 -0.2 0.3"><joint name="j1" type="hinge" axis="0 1 0"/>
+    <inertial pos="0.2 0.05 -0.03" euler="0.2 0.5 -0.1" mass="1.5" diaginertia="0.03 0.05 0.07"/>
+    <body name="b" pos="0.4 0 0" euler="0.3 0.1 -0.2"><joint name="j2" type="slide" axis="1 0 0"/>
+      <inertial pos="0.1 -0.02 0.04" euler="-0.3 0.2 0.4" mass="0.8" diaginertia="0.01 0.014 0.02"/>
+    </body>
+  </body>
+  <body name="fixed" pos="1 0 0.5"><inertial pos="0 0 0" mass="3" diaginertia="0.1 0.1 0.1"/></body>
+</worldbody></mujoco>"#;
+        let t = tree_from_mjcf_str(xml).unwrap();
+        assert_eq!((t.density, t.viscosity), (1.3, 0.7));
+        let q = [0.4, 0.15];
+        let moving = t.qfrc_passive(&q, &[0.9, -0.6]);
+        for (i, want) in [-1.6053610426517502, 1.863097416870217].iter().enumerate() {
+            assert!((moving[i] - want).abs() < 1e-12, "dof {i} moving: {} vs {want}", moving[i]);
+        }
+        // at rest the WIND still blows, and a body welded to the world still contributes nothing
+        let at_rest = t.qfrc_passive(&q, &[0.0, 0.0]);
+        for (i, want) in [-0.5802116054482513, 0.7616013062115348].iter().enumerate() {
+            assert!((at_rest[i] - want).abs() < 1e-12, "dof {i} at rest: {} vs {want}", at_rest[i]);
+        }
+        // with no medium there is no force at all, whatever the state
+        let still = tree_from_mjcf_str(&xml.replace(r#"density="1.3" viscosity="0.7" wind="0.5 -0.3 0.2""#, "")).unwrap();
+        assert_eq!(still.qfrc_passive(&q, &[0.9, -0.6]), vec![0.0, 0.0]);
     }
 
     /// **A `connect` equality's three rows, against MuJoCo's own numbers.** This is the closed kinematic
