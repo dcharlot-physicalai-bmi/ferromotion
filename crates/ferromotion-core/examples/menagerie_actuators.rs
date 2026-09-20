@@ -99,6 +99,7 @@ fn main() {
     let (mut states, mut state_ok) = (0usize, 0usize);
     let (mut worst_len, mut worst_vel, mut worst_force, mut worst_qfrc) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     let mut left_out: BTreeMap<String, usize> = BTreeMap::new();
+    let mut blocked_models: Vec<String> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
     let mut worst_qfrc_where = String::new();
     for o in &models {
@@ -121,6 +122,14 @@ fn main() {
         seen += 1;
         for (_, why) in &t.actuators_unsupported {
             *left_out.entry(why.clone()).or_default() += 1;
+        }
+        // ⭐ and which MODELS each reason costs: a reason with 1,762 actuators in one model and a reason
+        // with 16 across three are not the same size of gap, and only the model count says so
+        if !t.actuators_unsupported.is_empty() {
+            let mut why: Vec<&str> = t.actuators_unsupported.iter().map(|(_, w)| w.as_str()).collect();
+            why.sort_unstable();
+            why.dedup();
+            blocked_models.push(format!("{}: {}", o.rel, why.join(", ")));
         }
         // which of MuJoCo's actuators we claim: by name, since the ones we leave out shift the indices
         let ours: BTreeMap<&str, usize> = t.actuators.iter().enumerate().map(|(i, a)| (a.name.as_str(), i)).collect();
@@ -164,7 +173,10 @@ fn main() {
                 let qposadr: Vec<usize> = o.joints.iter().map(|j| j.2).collect();
                 let Ok(q) = t.q_from_qpos(&s.qpos, &qposadr) else { continue };
                 states += 1;
-                let (l, v) = (a.length(&q), a.velocity(&s.qvel));
+                // ⛔ the moment for THIS state: a site transmission's turns with the model
+                let mom = t.actuator_moment_at(a, &q);
+                let mom = &mom;
+                let (l, v) = (a.length_with(mom, &q), a.velocity_with(mom, &s.qvel));
                 let force = a.force(l, v, s.ctrl[u]);
                 let (dl, dv, df) = ((l - s.length[u]).abs(), (v - s.velocity[u]).abs(), (force - s.force[u]).abs());
                 worst_len = worst_len.max(dl);
@@ -178,7 +190,7 @@ fn main() {
                 }
                 // qfrc_actuator, but only where we carry EVERY actuator — a missing one is a missing term
                 if t.actuators_unsupported.is_empty() && u + 1 == o.acts.len() {
-                    let mine = ferromotion_core::qfrc_actuator(&t.actuators, &q, &s.qvel, &s.ctrl, &t.dof_actuator_force_range());
+                    let mine = t.qfrc_actuator(&q, &s.qvel, &s.ctrl);
                     let d = mine.iter().zip(&s.qfrc).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
                     if d > 1e-6 && notes.len() < 8 {
                         notes.push(format!("{}: qfrc ours {:?} vs MuJoCo {:?}", o.rel, mine, s.qfrc));
@@ -201,6 +213,12 @@ fn main() {
         v.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
         for (why, n) in v {
             println!("    {n:>5}  {why}");
+        }
+    }
+    if !blocked_models.is_empty() {
+        println!("  models with an actuator not carried: {}", blocked_models.len());
+        for b in &blocked_models {
+            println!("    {b}");
         }
     }
     for n in &notes {

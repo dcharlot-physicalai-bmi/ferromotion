@@ -230,7 +230,7 @@ fn main() {
                 worst_passive = worst_passive.max(dp);
                 continue;
             }
-            let act = ferromotion_core::qfrc_actuator(&t.actuators, &q, &s.qvel, &vec![0.0; t.actuators.len()], &t.dof_actuator_force_range());
+            let act = t.qfrc_actuator(&q, &s.qvel, &vec![0.0; t.actuators.len()]);
             let Some(minv) = m.clone().try_inverse() else {
                 *skip.entry("singular mass matrix").or_default() += 1;
                 continue;

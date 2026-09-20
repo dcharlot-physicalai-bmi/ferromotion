@@ -40,6 +40,13 @@ pub enum ActBias {
     Affine,
 }
 
+/// `<general site="..." gear="fx fy fz tx ty tz">`: a wrench applied at a site, in that site's frame.
+#[derive(Clone, Debug)]
+pub struct SiteTransmission {
+    pub site: String,
+    pub gear: [f64; 6],
+}
+
 /// One actuator, with its parameters resolved as MuJoCo's compiler resolves them.
 #[derive(Clone, Debug)]
 pub struct Actuator {
@@ -50,6 +57,11 @@ pub struct Actuator {
     /// whole of MuJoCo's transmission lives here: `length = m·q`, `velocity = m·q̇`, and the same `m` carries
     /// the force back.
     pub moment: Vec<(usize, f64)>,
+    /// A SITE transmission instead: a fixed wrench in a site's frame, whose moment turns with the model and
+    /// is therefore rebuilt per state by [`crate::MjcfTree::actuator_moments`]. `moment` is empty here, and
+    /// the actuator's length and velocity are ZERO — MuJoCo defines them so, and a gain or bias that reads
+    /// length reads zero.
+    pub site: Option<SiteTransmission>,
     /// `actuator_gear[0]`: the transmission ratio. `length = gear·q`, `velocity = gear·q̇`, and the moment
     /// that carries the force back to the joint is the same `gear`.
     pub gear: f64,
@@ -67,12 +79,28 @@ pub struct Actuator {
 impl Actuator {
     /// `actuator_length` for a joint transmission.
     pub fn length(&self, q: &[f64]) -> f64 {
-        self.moment.iter().map(|(d, m)| m * q[*d]).sum()
+        self.length_with(&self.moment, q)
+    }
+
+    /// `actuator_length` from a moment supplied for THIS state, which is what a site transmission needs.
+    /// ⛔ A site transmission's length is ZERO however the model is posed — MuJoCo defines it so — while its
+    /// VELOCITY is the ordinary `moment·q̇` and is not zero. A port that zeroes both gets a velocity servo
+    /// on a thruster exactly backwards.
+    pub fn length_with(&self, moment: &[(usize, f64)], q: &[f64]) -> f64 {
+        if self.site.is_some() {
+            return 0.0;
+        }
+        moment.iter().map(|(d, m)| m * q[*d]).sum()
     }
 
     /// `actuator_velocity`.
     pub fn velocity(&self, qd: &[f64]) -> f64 {
-        self.moment.iter().map(|(d, m)| m * qd[*d]).sum()
+        self.velocity_with(&self.moment, qd)
+    }
+
+    /// `actuator_velocity` from a moment supplied for this state.
+    pub fn velocity_with(&self, moment: &[(usize, f64)], qd: &[f64]) -> f64 {
+        moment.iter().map(|(d, m)| m * qd[*d]).sum()
     }
 
     /// `actuator_force`: the scalar force, before the transmission carries it to the joint.
@@ -108,10 +136,18 @@ impl Actuator {
 ///
 /// `dof_force_range` is one entry per degree of freedom; `None` where the joint is unlimited.
 pub fn qfrc_actuator(acts: &[Actuator], q: &[f64], qd: &[f64], ctrl: &[f64], dof_force_range: &[Option<[f64; 2]>]) -> Vec<f64> {
+    qfrc_actuator_with(acts, &[], q, qd, ctrl, dof_force_range)
+}
+
+/// [`qfrc_actuator`] with the moments supplied from outside, which a SITE transmission needs: its gear is a
+/// wrench in the site's frame, so its moment turns with the model and cannot be resolved when the file is
+/// read. `moments[i]`, where given, replaces `acts[i].moment`.
+pub fn qfrc_actuator_with(acts: &[Actuator], moments: &[Vec<(usize, f64)>], q: &[f64], qd: &[f64], ctrl: &[f64], dof_force_range: &[Option<[f64; 2]>]) -> Vec<f64> {
     let mut out = vec![0.0; dof_force_range.len()];
     for (i, a) in acts.iter().enumerate() {
-        let f = a.force(a.length(q), a.velocity(qd), ctrl.get(i).copied().unwrap_or(0.0));
-        for (d, m) in &a.moment {
+        let mom = moments.get(i).unwrap_or(&a.moment);
+        let f = a.force(a.length_with(mom, q), a.velocity_with(mom, qd), ctrl.get(i).copied().unwrap_or(0.0));
+        for (d, m) in mom {
             out[*d] += m * f;
         }
     }
@@ -146,7 +182,7 @@ mod tests {
     use super::*;
 
     fn act(gain: ActGain, gainprm: [f64; 3], bias: ActBias, biasprm: [f64; 3]) -> Actuator {
-        Actuator { name: "a".into(), moment: vec![(0, 1.0)], gear: 1.0, gain, gainprm, bias, biasprm, ctrlrange: None, forcerange: None }
+        Actuator { name: "a".into(), moment: vec![(0, 1.0)], site: None, gear: 1.0, gain, gainprm, bias, biasprm, ctrlrange: None, forcerange: None }
     }
 
     /// The three shortcut tags are the SAME law with different parameters, and that is the whole point of

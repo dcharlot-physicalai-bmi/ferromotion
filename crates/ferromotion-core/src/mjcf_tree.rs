@@ -233,6 +233,52 @@ impl MjcfTree {
             .collect()
     }
 
+    /// **`actuator_moment` for every actuator**, at this state. A joint or fixed-tendon transmission carries
+    /// its moment from the file; a SITE transmission's is a wrench in the site's frame and turns with the
+    /// model, so it is rebuilt here: `mj_jacSite` at the site, and `gear` rotated into the world.
+    pub fn actuator_moments(&self, q: &[f64]) -> Vec<Vec<(usize, f64)>> {
+        let nv = self.tree.joints.len();
+        if self.actuators.iter().all(|a| a.site.is_none()) {
+            return self.actuators.iter().map(|a| a.moment.clone()).collect();
+        }
+        let _ = nv;
+        let frames = crate::tree_frames(&self.tree, q);
+        self.actuators.iter().map(|a| self.moment_of(a, &frames)).collect()
+    }
+
+    /// One actuator's moment at a state whose frames are already built — the per-actuator half of
+    /// [`MjcfTree::actuator_moments`], so a caller inside a loop does not pay for every other actuator.
+    pub fn actuator_moment_at(&self, a: &crate::mujoco_actuator::Actuator, q: &[f64]) -> Vec<(usize, f64)> {
+        if a.site.is_none() {
+            return a.moment.clone();
+        }
+        self.moment_of(a, &crate::tree_frames(&self.tree, q))
+    }
+
+    fn moment_of(&self, a: &crate::mujoco_actuator::Actuator, frames: &[Iso]) -> Vec<(usize, f64)> {
+        let nv = self.tree.joints.len();
+        let Some(st) = &a.site else { return a.moment.clone() };
+        // a site welded to the world moves nothing, whatever wrench is applied to it
+        let Some((ride, off)) = self.site_frames.get(&st.site) else { return Vec::new() };
+        let pose = frames[*ride] * off;
+        let rot = pose.rotation.to_rotation_matrix().into_inner();
+        let f = rot * Vector3::new(st.gear[0], st.gear[1], st.gear[2]);
+        let t = rot * Vector3::new(st.gear[3], st.gear[4], st.gear[5]);
+        let jp = crate::tree_jacobian::tree_point_jacobian(&self.tree.joints, &self.tree.parent, frames, Some(*ride), pose.translation.vector);
+        let ja = crate::tree_jacobian::tree_angular_jacobian(&self.tree.joints, &self.tree.parent, frames, Some(*ride));
+        (0..nv)
+            .filter_map(|k| {
+                let m: f64 = (0..3).map(|r| jp[(r, k)] * f[r] + ja[(r, k)] * t[r]).sum();
+                (m != 0.0).then_some((k, m))
+            })
+            .collect()
+    }
+
+    /// **`qfrc_actuator`** for this model at this state, with every transmission it carries.
+    pub fn qfrc_actuator(&self, q: &[f64], qd: &[f64], ctrl: &[f64]) -> Vec<f64> {
+        crate::mujoco_actuator::qfrc_actuator_with(&self.actuators, &self.actuator_moments(q), q, qd, ctrl, &self.dof_actuator_force_range())
+    }
+
     /// **`mj_inertiaBoxFluidModel`**: the ambient medium's drag on every body, from `<option density>`,
     /// `<option viscosity>` and `<option wind>`.
     ///
@@ -2434,6 +2480,8 @@ struct ActRecord {
     bias: crate::mujoco_actuator::ActBias,
     biasprm: [f64; 3],
     gear: f64,
+    /// the whole `gear` vector: a site transmission reads all six, as a wrench in the site's frame
+    gear6: [f64; 6],
     ctrlrange: [f64; 2],
     ctrllimited: Option<bool>,
     forcerange: [f64; 2],
@@ -2453,6 +2501,7 @@ impl Default for ActRecord {
             bias: crate::mujoco_actuator::ActBias::None,
             biasprm: [0.0; 3],
             gear: 1.0,
+            gear6: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             ctrlrange: [0.0; 2],
             ctrllimited: None,
             forcerange: [0.0; 2],
@@ -2496,7 +2545,12 @@ impl ActRecord {
             }
         }
         if let Some(g) = at("gear") {
-            self.gear = floats(g).map_err(Bad)?.first().copied().unwrap_or(1.0);
+            let v = floats(g).map_err(Bad)?;
+            self.gear = v.first().copied().unwrap_or(1.0);
+            self.gear6 = [0.0; 6];
+            for (o, x) in self.gear6.iter_mut().zip(&v) {
+                *o = *x;
+            }
         }
         match at("gaintype") {
             None => {}
@@ -2749,6 +2803,7 @@ fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&s
         return Err(Unsupported(why));
     }
     let (kind, target) = rec.trn.ok_or_else(|| Unsupported("no transmission named".into()))?;
+    let mut site = None;
     // ⛔ a TENDON transmission is the same actuator with a different moment: `length = gear·L`, and the
     // force comes back through `gear·coef` on every joint the tendon names, not through one dof. Everything
     // downstream — gain, bias, the clamps — is untouched, which is exactly MuJoCo's factoring.
@@ -2763,6 +2818,16 @@ fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&s
         "tendon" => {
             let t = *ten_by_name.get(target.as_str()).ok_or_else(|| Unsupported(format!("tendon '{target}' is not one this loader carries")))?;
             (None, t.joints.iter().map(|(d, c)| (*d, rec.gear * c)).collect())
+        }
+        // ⛔ a SITE transmission has no length at all — MuJoCo reports `actuator_length = 0` and
+        // `actuator_velocity = 0` — and its moment is not a constant: the gear is a wrench in the SITE's
+        // frame, so it turns with the model and has to be rebuilt at every state.
+        "site" => {
+            if el.attr("refsite").is_some() {
+                return Err(Unsupported("a site transmission relative to another site".into()));
+            }
+            site = Some(crate::mujoco_actuator::SiteTransmission { site: target.clone(), gear: rec.gear6 });
+            (None, Vec::new())
         }
         _ => return Err(Unsupported(format!("a {kind} transmission"))),
     };
@@ -2797,6 +2862,7 @@ fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&s
     Ok(Actuator {
         name: name.to_string(),
         moment,
+        site,
         gear: rec.gear,
         gain: rec.gain,
         gainprm: rec.gainprm,
@@ -3653,6 +3719,44 @@ mod tests {
         let passive = half.qfrc_passive(&q, &vec![0.0; nv]);
         for i in 0..nv {
             assert!((passive[i] - 0.5 * bias[i]).abs() < 1e-12, "dof {i}: {} vs half of {}", passive[i], bias[i]);
+        }
+    }
+
+    /// **A site transmission, against MuJoCo's own numbers.** `gear` is a WRENCH in the site's frame, so
+    /// the moment turns with the model and cannot be resolved when the file is read — every quadrotor in
+    /// Menagerie is actuated this way.
+    ///
+    /// ⛔ `actuator_length` is ZERO however the model is posed, and `actuator_velocity` is NOT: it is the
+    /// ordinary `moment·q̇`. Zeroing both would put a velocity servo on a thruster exactly backwards, and
+    /// nothing in a `<motor>` — fixed gain, no bias — would show it.
+    #[test]
+    fn a_site_transmission_is_a_wrench_in_the_sites_frame() {
+        let t = tree_from_mjcf_str(
+            r#"<mujoco><compiler angle="radian"/><option gravity="0 0 0"/><worldbody>
+  <body name="a" pos="0 0 0.5" euler="0.1 -0.2 0.3"><joint name="j1" type="hinge" axis="0 1 0"/>
+    <inertial pos="0.2 0 0" mass="1.5" diaginertia="0.03 0.05 0.07"/>
+    <body name="b" pos="0.4 0 0" euler="0.3 0.1 -0.2"><joint name="j2" type="slide" axis="1 0 0"/>
+      <inertial pos="0.1 0 0" mass="0.8" diaginertia="0.01 0.014 0.02"/>
+      <site name="tip" pos="0.15 -0.03 0.02" euler="0.4 -0.1 0.25"/>
+    </body>
+  </body>
+</worldbody>
+<actuator><motor name="thrust" site="tip" gear="0 0 1 0.02 -0.01 0.03" ctrlrange="-5 5"/></actuator></mujoco>"#,
+        )
+        .unwrap();
+        assert!(t.actuators_unsupported.is_empty(), "{:?}", t.actuators_unsupported);
+        let (q, qd) = ([0.4, 0.15], [0.9, -0.6]);
+        let mom = &t.actuator_moments(&q)[0];
+        for (k, want) in [-0.5622785719716145, -0.09983341664682814].iter().enumerate() {
+            let got = mom.iter().find(|(d, _)| *d == k).map(|(_, m)| *m).unwrap_or(0.0);
+            assert!((got - want).abs() < 1e-12, "moment[{k}] {got} vs {want}");
+        }
+        let a = &t.actuators[0];
+        assert_eq!(a.length_with(mom, &q), 0.0, "a site transmission has no length");
+        assert!((a.velocity_with(mom, &qd) + 0.44615066449714825).abs() < 1e-9, "{}", a.velocity_with(mom, &qd));
+        let f = t.qfrc_actuator(&q, &qd, &[2.5]);
+        for (k, want) in [-1.4056964299290362, -0.24958354161707036].iter().enumerate() {
+            assert!((f[k] - want).abs() < 1e-12, "qfrc[{k}] {} vs {want}", f[k]);
         }
     }
 
