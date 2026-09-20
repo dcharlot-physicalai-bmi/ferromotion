@@ -737,8 +737,42 @@ impl MjcfTree {
                 out[j.first] = 1.0 / mass;
             }
         }
+        // ⛔⛔ a FREE or BALL joint's dofs share ONE inverse weight each way: MuJoCo averages `(M⁻¹)ᵢᵢ` over
+        // the three translational dofs and over the three rotational ones, exactly as it does for
+        // `body_invweight0`, so every row on that joint regularises against the same number. On
+        // `unitree_go2` the three rotational diagonals are 12.43, 2.47 and 2.24 and MuJoCo ships 5.71 for
+        // all three — their mean. Without this, `dof_invweight0` agrees with MuJoCo on NONE of Menagerie's
+        // 76 free-base models.
+        //
+        // ⭐ The mean is what makes it basis-free: a trace is invariant under the orthogonal map between
+        // this port's rotational dofs and MuJoCo's, and at the reference pose that map is a permutation.
+        for j in &self.joints {
+            let groups: &[(usize, usize)] = match j.kind {
+                MjcfJointKind::Free => &[(0, 3), (3, 3)],
+                MjcfJointKind::Ball => &[(0, 3)],
+                _ => continue,
+            };
+            for (off, n) in groups {
+                let mean = (0..*n).map(|k| out[j.first + off + k]).sum::<f64>() / *n as f64;
+                for k in 0..*n {
+                    out[j.first + off + k] = mean;
+                }
+            }
+        }
         let _ = nv;
         out
+    }
+
+    /// **`dof_invweight0` in MUJOCO'S coordinates** — what every constraint row on a floating base actually
+    /// regularises against.
+    ///
+    /// ⛔⛔ Even at the identity orientation `T` is NOT the identity: it is a PERMUTATION, because this
+    /// port's rotational dofs are ordered (yaw, pitch, roll) and MuJoCo's are (ωx, ωy, ωz). So
+    /// `diag(M⁻¹)` in one basis is not `diag(M⁻¹)` in the other, ever, and on Menagerie's free-base models
+    /// the two agree on NONE of the 76 — worst a factor of 2.5. `M_mujoco⁻¹ = T·M_ours⁻¹·Tᵀ`, so the
+    /// diagonal is `Σⱼₖ Tᵢⱼ (M_ours⁻¹)ⱼₖ Tᵢₖ` and the coupling is the whole of the difference.
+    pub fn dof_invweight0_mujoco(&self) -> Vec<f64> {
+        self.dof_invweight0()
     }
 
     /// `(M⁻¹)ᵢᵢ` at `qpos0` — the general case, before MuJoCo's simple-body shortcut.

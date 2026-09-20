@@ -24,6 +24,8 @@ struct Case {
     nv: usize,
     joints: Vec<(String, String, usize)>,
     armature: Vec<f64>,
+    invweight0: Vec<f64>,
+    qpos0: Vec<f64>,
     states: Vec<State>,
 }
 
@@ -56,6 +58,8 @@ fn main() {
             "model" => cases.push(Case { rel: t[1].to_string(), nv: t[3].parse().unwrap(), ..Default::default() }),
             "joint" => cases.last_mut().unwrap().joints.push((t[1].to_string(), t[2].to_string(), t[3].parse().unwrap())),
             "armature" => cases.last_mut().unwrap().armature = t[1..].iter().map(|x| f(x)).collect(),
+            "invweight0" => cases.last_mut().unwrap().invweight0 = t[1..].iter().map(|x| f(x)).collect(),
+            "qpos0" => cases.last_mut().unwrap().qpos0 = t[1..].iter().map(|x| f(x)).collect(),
             "state" => cases.last_mut().unwrap().states.push(State::default()),
             "M" => cases.last_mut().unwrap().states.last_mut().unwrap().m.push(t[1..].iter().map(|x| f(x)).collect()),
             "qpos" | "qvel" | "xquat" | "xpos" | "xipos" | "subtreecom" | "smooth" => {
@@ -78,6 +82,7 @@ fn main() {
 
     let (mut seen, mut ok) = (0usize, 0usize);
     let (mut acc_seen, mut acc_ok, mut acc_worst, mut acc_where) = (0usize, 0usize, 0.0f64, String::new());
+    let (mut iw_seen, mut iw_ok, mut iw_worst, mut iw_where) = (0usize, 0usize, 0.0f64, String::new());
     let mut acc_skip: BTreeMap<&'static str, usize> = BTreeMap::new();
     let (mut worst, mut worst_where) = (0.0f64, String::new());
     let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
@@ -104,6 +109,25 @@ fn main() {
         }
         let nv = c.nv;
         let qposadr: Vec<usize> = c.joints.iter().map(|j| j.2).collect();
+        // ⛔ `dof_invweight0` is computed at MuJoCo's OWN qpos0, in MuJoCo's basis, and every constraint row
+        // regularises against it. This port's tree drops a free body's initial pose into the joint, so its
+        // `q = 0` is the identity orientation whatever the file said — worth knowing how far that goes.
+        {
+            iw_seen += 1;
+            let ours = t.dof_invweight0_mujoco();
+            let e = (0..nv).map(|i| (ours[i] - c.invweight0[i]).abs() / c.invweight0[i].abs().max(1e-9)).fold(0.0, f64::max);
+            if e < 1e-9 {
+                iw_ok += 1;
+            } else {
+                if e > iw_worst {
+                    iw_worst = e;
+                    iw_where = c.rel.clone();
+                }
+                if std::env::var("DUMP_IW").is_ok() && notes.len() < 3 {
+                    notes.push(format!("{}: invweight0 ours {:?}\n                theirs {:?}", c.rel, &ours[..8.min(nv)], &c.invweight0[..8.min(nv)]));
+                }
+            }
+        }
         for s in &c.states {
             let Ok(q) = t.q_from_qpos(&s.qpos, &qposadr) else {
                 *counts.entry("qpos does not map onto our coordinates").or_default() += 1;
@@ -174,6 +198,7 @@ fn main() {
     println!("free-base states whose mass matrix was compared: {seen}");
     println!("  MuJoCo's M mapped into our basis, entry by entry: {ok}");
     println!("  worst relative difference {worst:.2e} on {worst_where}");
+    println!("  dof_invweight0 at qpos0, in MuJoCo's basis: {iw_ok} of {iw_seen} models; worst {iw_worst:.2e} on {iw_where}");
     println!("  qacc_smooth in MUJOCO'S basis, at rest AND moving: {acc_ok} of {acc_seen} within 1e-6; worst {acc_worst:.2e} on {acc_where}");
     for (k, n) in &acc_skip {
         println!("    {n:>5}  {k}");

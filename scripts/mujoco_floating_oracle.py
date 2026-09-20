@@ -41,6 +41,9 @@ for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
     for j in range(m.njnt):
         lines.append("\t".join(["joint", mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_JOINT, j) or f"joint{j}", JT[int(m.jnt_type[j])], str(int(m.jnt_qposadr[j]))]))
     lines.append("\t".join(["armature"] + [repr(float(x)) for x in m.dof_armature]))
+    # the constraint rows regularise against these, and MuJoCo computes them at ITS qpos0 in ITS basis
+    lines.append("\t".join(["invweight0"] + [repr(float(x)) for x in m.dof_invweight0]))
+    lines.append("\t".join(["qpos0"] + [repr(float(x)) for x in m.qpos0]))
     for k in range(K):
         mujoco.mj_resetData(m, d)
         if k:
