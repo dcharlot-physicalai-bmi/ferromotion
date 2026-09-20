@@ -14,8 +14,8 @@
 //! cargo run --release --example menagerie_floating -- <menagerie root> <floating oracle txt> [substring]
 //! ```
 
-use ferromotion_core::{tree_from_mjcf, tree_inverse_dynamics, MjcfJointKind};
-use nalgebra::{DMatrix, DVector};
+use ferromotion_core::{tree_from_mjcf, MjcfJointKind};
+use nalgebra::DMatrix;
 use std::collections::BTreeMap;
 
 #[derive(Default)]
@@ -132,29 +132,21 @@ fn main() {
             // ⭐ and now the acceleration itself, in MuJoCo's basis. At REST `a_mujoco = T·a_ours` exactly —
             // the velocity-dependent half of the change of basis is `Ṫ·v`, which is zero — so a floating
             // base's `qacc_smooth` becomes comparable entry by entry for the first time.
-            if s.qvel.iter().all(|v| *v == 0.0) {
-                if !t.actuators_unsupported.is_empty() || !t.tendons_unsupported.is_empty() {
-                    *acc_skip.entry("an actuator or tendon this port does not carry").or_default() += 1;
-                } else if let Some(minv) = ours.clone().try_inverse() {
-                    let _ = &tmat;
-                    acc_seen += 1;
-                    let zero = vec![0.0; nv];
-                    let bias = tree_inverse_dynamics(&t.tree.joints, &t.tree.inertia, &t.tree.parent, &q, &zero, &zero, t.gravity);
-                    let passive = t.qfrc_passive(&q, &zero);
-                    let act = t.qfrc_actuator(&q, &zero, &vec![0.0; t.actuators.len()]);
-                    let a_ours = &minv * DVector::from_iterator(nv, (0..nv).map(|i| passive[i] + act[i] - bias[i]));
-                    let a_mj = &tmat * a_ours;
-                    let e = (0..nv).map(|i| (a_mj[i] - s.smooth[i]).abs() / s.smooth[i].abs().max(1.0)).fold(0.0, f64::max);
-                    if e > acc_worst {
-                        acc_worst = e;
-                        acc_where = c.rel.clone();
-                    }
-                    if e < 1e-6 {
-                        acc_ok += 1;
-                    }
+            if !t.actuators_unsupported.is_empty() || !t.tendons_unsupported.is_empty() {
+                *acc_skip.entry("an actuator or tendon this port does not carry").or_default() += 1;
+            } else if let Some(a_mj) = t.qacc_smooth_mujoco(&q, &s.qvel, &vec![0.0; t.actuators.len()]) {
+                acc_seen += 1;
+                let e = (0..nv).map(|i| (a_mj[i] - s.smooth[i]).abs() / s.smooth[i].abs().max(1.0)).fold(0.0, f64::max);
+                let moving = s.qvel.iter().any(|v| *v != 0.0);
+                if e > acc_worst {
+                    acc_worst = e;
+                    acc_where = format!("{}{}", c.rel, if moving { " (moving)" } else { " (at rest)" });
                 }
-            } else {
-                *acc_skip.entry("a moving base: the basis change has a velocity term this sweep omits").or_default() += 1;
+                if e < 1e-6 {
+                    acc_ok += 1;
+                } else {
+                    *acc_skip.entry(if moving { "differs while moving" } else { "differs at rest" }).or_default() += 1;
+                }
             }
             if d / scale < 1e-9 {
                 ok += 1;
@@ -182,7 +174,7 @@ fn main() {
     println!("free-base states whose mass matrix was compared: {seen}");
     println!("  MuJoCo's M mapped into our basis, entry by entry: {ok}");
     println!("  worst relative difference {worst:.2e} on {worst_where}");
-    println!("  qacc_smooth in MUJOCO'S basis, at rest: {acc_ok} of {acc_seen} within 1e-6; worst {acc_worst:.2e} on {acc_where}");
+    println!("  qacc_smooth in MUJOCO'S basis, at rest AND moving: {acc_ok} of {acc_seen} within 1e-6; worst {acc_worst:.2e} on {acc_where}");
     for (k, n) in &acc_skip {
         println!("    {n:>5}  {k}");
     }

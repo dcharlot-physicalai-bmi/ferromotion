@@ -237,6 +237,42 @@ impl MjcfTree {
         t
     }
 
+    /// **`Ṫ`, the time derivative of [`MjcfTree::free_basis`]** — the half of the change of basis that only
+    /// exists when something is turning.
+    ///
+    /// `v_mujoco = T(q)·v_ours` differentiates to `a_mujoco = T·a_ours + Ṫ·v_ours`, and `Ṫ` depends on the
+    /// PITCH and ROLL rates alone: the Euler-rate columns are
+    /// `[(−sθ, sφcθ, cφcθ), (0, cφ, −sφ), (1, 0, 0)]`, and the yaw does not appear in any of them.
+    ///
+    /// ⛔ At rest this is identically zero, which is why a static sweep can compare a floating base without
+    /// it and a moving one cannot.
+    pub fn free_basis_dot(&self, q: &[f64], qd: &[f64]) -> nalgebra::DMatrix<f64> {
+        let nv = self.tree.joints.len();
+        let mut t = nalgebra::DMatrix::zeros(nv, nv);
+        for j in &self.joints {
+            let rot = match j.kind {
+                MjcfJointKind::Free => j.first + 3,
+                MjcfJointKind::Ball => j.first,
+                _ => continue,
+            };
+            let (pitch, roll) = (q[rot + 1], q[rot + 2]);
+            let (dpitch, droll) = (qd[rot + 1], qd[rot + 2]);
+            let (st, ct, sp, cp) = (pitch.sin(), pitch.cos(), roll.sin(), roll.cos());
+            // ∂E/∂θ·θ̇ + ∂E/∂φ·φ̇, column by column
+            let de = [
+                [-ct * dpitch, -sp * st * dpitch + cp * ct * droll, -cp * st * dpitch - sp * ct * droll],
+                [0.0, -sp * droll, -cp * droll],
+                [0.0, 0.0, 0.0],
+            ];
+            for (k, col) in de.iter().enumerate() {
+                for (r, v) in col.iter().enumerate() {
+                    t[(rot + r, rot + k)] = *v;
+                }
+            }
+        }
+        t
+    }
+
     /// **The mass matrix, with armature where MuJoCo puts it.**
     ///
     /// ⛔⛔ `dof_armature` is a DIAGONAL in MuJoCo's basis, and a diagonal there is not one here. On a hinge
@@ -274,6 +310,73 @@ impl MjcfTree {
         }
         let _ = nv;
         m
+    }
+
+    /// **`qacc_smooth` in MUJOCO'S OWN COORDINATES** — the unconstrained acceleration of a model with a free
+    /// or ball joint, in the basis MuJoCo reports it in, from a velocity given in that basis.
+    ///
+    /// `q` is in this port's coordinates ([`MjcfTree::q_from_qpos`]); `v_mujoco` and the answer are in
+    /// MuJoCo's. With no free or ball joint `T` is the identity and this is the ordinary computation.
+    ///
+    /// The derivation, because the velocity term is easy to drop: from `v_mujoco = T·v_ours` and
+    /// `M_ours·a_ours + C_ours = τ_ours`,
+    ///
+    /// ```text
+    /// M_mujoco = T⁻ᵀ·M_ours·T⁻¹              (plus the armature, which is a diagonal HERE)
+    /// C_mujoco = T⁻ᵀ·(C_ours − M_rigid·T⁻¹·Ṫ·v_ours)
+    /// ```
+    ///
+    /// ⛔ `M_rigid` in that correction is the mass matrix WITHOUT the free joint's armature: armature is a
+    /// constant diagonal in MuJoCo's basis, so it contributes no velocity term there, however state-dependent
+    /// it looks in ours.
+    ///
+    /// ⛔ Undefined at gimbal lock, where `T` is singular — the Euler base's one real limitation, and the
+    /// reason this returns an `Option`.
+    pub fn qacc_smooth_mujoco(&self, q: &[f64], v_mujoco: &[f64], ctrl: &[f64]) -> Option<Vec<f64>> {
+        let nv = self.tree.joints.len();
+        let t = self.free_basis(q);
+        let tinv = t.clone().try_inverse()?;
+        let v = &tinv * nalgebra::DVector::from_row_slice(v_mujoco);
+        let qd: Vec<f64> = v.iter().copied().collect();
+        let m_full = self.mass_matrix(q);
+        // the rigid-body half: `mass_matrix` differs from the tree's own only by where the armature sits
+        let mut m_rigid = crate::tree_dynamics::tree_mass_matrix(&self.tree.joints, &self.tree.inertia, &self.tree.parent, q);
+        for j in &self.joints {
+            let (first, n) = match j.kind {
+                MjcfJointKind::Free => (j.first + 3, 3),
+                MjcfJointKind::Ball => (j.first, 3),
+                _ => continue,
+            };
+            for r in 0..n {
+                m_rigid[(first + r, first + r)] -= j.armature;
+            }
+        }
+        let bias = crate::tree_dynamics::tree_inverse_dynamics(&self.tree.joints, &self.tree.inertia, &self.tree.parent, q, &qd, &vec![0.0; nv], self.gravity);
+        let passive = self.qfrc_passive(q, &qd);
+        let act = self.qfrc_actuator(q, &qd, ctrl);
+        let tdot_v = self.free_basis_dot(q, &qd) * &v;
+        let c_ours = nalgebra::DVector::from_iterator(nv, (0..nv).map(|i| bias[i])) - &m_rigid * (&tinv * tdot_v);
+        let tau_ours = nalgebra::DVector::from_iterator(nv, (0..nv).map(|i| passive[i] + act[i]));
+        let m_mj = tinv.transpose() * &m_full * &tinv;
+        let mut rhs = tinv.transpose() * (tau_ours - c_ours);
+        // ⛔⛔ a free or ball joint's DAMPING is a per-dof force in MuJoCo's basis too, exactly like its
+        // armature: `qfrc_passive[i] -= dof_damping[i]·qvel[i]` with `qvel` MuJoCo's. Applying it to this
+        // port's Euler rates instead is wrong the moment the base turns, and `rainbow_robotics_rby1` —
+        // damping 5 on all six base dofs — was 1.6e-1 out until it moved here.
+        for j in &self.joints {
+            let n = match j.kind {
+                MjcfJointKind::Free => 6,
+                MjcfJointKind::Ball => 3,
+                _ => continue,
+            };
+            if j.damping == 0.0 {
+                continue;
+            }
+            for k in 0..n {
+                rhs[j.first + k] -= j.damping * v_mujoco[j.first + k];
+            }
+        }
+        Some((m_mj.try_inverse()? * rhs).iter().copied().collect())
     }
 
     /// **`ten_length`** for every tendon. A FIXED tendon is `L = Σ coefₖ·qₖ`; a SPATIAL one is the length
@@ -4310,6 +4413,30 @@ mod tests {
         // ⛔ and the armature is NOT a diagonal here: putting it on this port's own diagonal instead is what
         // made a free-based model's acceleration 8.2e-2 out, and nothing about the pose says so
         assert!(ours[(3, 4)].abs() > 1e-6, "the base block is coupled: {}", ours[(3, 4)]);
+
+        // ⛔⛔ MOVING, with damping too. `a_mujoco = T·a_ours + Ṫ·v_ours` — and a free joint's DAMPING is a
+        // per-dof force in MuJoCo's basis exactly like its armature, so both halves of the change of basis
+        // are exercised here and neither is at rest. Numbers from MuJoCo 3.13.0 on the same model.
+        let moving = tree_from_mjcf_str(
+            r#"<mujoco><compiler angle="radian"/><option gravity="0 0 -9.81"/><worldbody>
+<body name="base" pos="0 0 1"><joint name="root" type="free" armature="0.02" damping="1.5"/>
+  <inertial pos="0.05 -0.02 0.01" quat="0.9 0.2 -0.3 0.1" mass="3" diaginertia="0.05 0.08 0.11"/>
+  <body name="arm" pos="0.2 0 0"><joint name="j1" type="hinge" axis="0 1 0" armature="0.004" damping="0.2"/>
+    <inertial pos="0.1 0 0" mass="1.2" diaginertia="0.01 0.012 0.014"/>
+  </body>
+</body></worldbody></mujoco>"#,
+        )
+        .unwrap();
+        let qm = moving.q_from_qpos(&qpos, &[0, 7]).unwrap();
+        let v = [0.4, -0.3, 0.25, 0.7, -0.5, 0.9, -0.6];
+        let got = moving.qacc_smooth_mujoco(&qm, &v, &[]).unwrap();
+        let want = [-0.40776163054058184, 1.0160972487730715, -9.159571401180923, -11.697022186283133, 4.64153544898943, -8.757526118453406, -1.8570604740614982];
+        for (i, w) in want.iter().enumerate() {
+            assert!((got[i] - w).abs() < 1e-9, "moving qacc_smooth[{i}] {} vs {w}", got[i]);
+        }
+        // without the velocity term the answer is wrong, and only while moving — the check that it is wired
+        let still = moving.qacc_smooth_mujoco(&qm, &[0.0; 7], &[]).unwrap();
+        assert!(still.iter().zip(&got).any(|(a, b)| (a - b).abs() > 1.0), "the velocity term does something");
     }
 
     /// **The inertia-box fluid model, against MuJoCo's own numbers.** Every coefficient was fitted one term
