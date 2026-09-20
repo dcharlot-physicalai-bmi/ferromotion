@@ -237,7 +237,7 @@ impl MjcfTree {
     /// q)` for `side = ∓1`, with the row's Jacobian `−side`. Both sides can be active at once on a joint
     /// whose range is narrower than twice its margin, and a port that emits one row per joint is wrong there
     /// in a way no single-limit test can see.
-    pub fn joint_constraint_rows(&self, q: &[f64], qd: &[f64], dof_invweight0: &[f64]) -> AssembledRows {
+    pub fn joint_constraint_rows(&self, q: &[f64], qd: &[f64], dof_invweight0: &[f64]) -> crate::mujoco_contact::AssembledRows {
         use crate::mujoco_contact::{row_reference, EfcBlock, SolImp, SolRef};
         let nv = self.tree.joints.len();
         let (mut blocks, mut rows, mut aref, mut d) = (Vec::new(), Vec::<Vec<f64>>::new(), Vec::new(), Vec::new());
@@ -303,7 +303,7 @@ impl MjcfTree {
             }
         }
         let jac = nalgebra::DMatrix::from_fn(rows.len(), nv, |r, c| rows[r][c]);
-        AssembledRows { blocks, jac, aref, d }
+        crate::mujoco_contact::AssembledRows { blocks, jac, aref, d }
     }
 
     /// One entry per degree of freedom: the joint's cap on the total actuator force through it, for
@@ -336,16 +336,6 @@ pub struct MjcfEquality {
     pub polycoef: [f64; 5],
     pub solref: [f64; 2],
     pub solimp: [f64; 5],
-}
-
-/// **Constraint rows as `mj_makeConstraint` builds them**: the blocks that say what law each row obeys, the
-/// Jacobian, `efc_aref` and `efc_D`, ready for [`crate::solve_constraints_newton_blocks`].
-#[derive(Clone, Debug)]
-pub struct AssembledRows {
-    pub blocks: Vec<crate::mujoco_contact::EfcBlock>,
-    pub jac: nalgebra::DMatrix<f64>,
-    pub aref: Vec<f64>,
-    pub d: Vec<f64>,
 }
 
 /// A branched MJCF model as a [`KinematicTree`], plus the bookkeeping MuJoCo-level parity needs.

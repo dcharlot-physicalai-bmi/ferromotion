@@ -186,6 +186,101 @@ pub fn mujoco_cone_rows(cone: Cone, condim: usize) -> usize {
     }
 }
 
+/// **Constraint rows as `mj_makeConstraint` builds them**: the blocks that say what law each row obeys, the
+/// Jacobian, `efc_aref` and `efc_D`, ready for [`solve_constraints_newton_blocks`].
+#[derive(Clone, Debug, Default)]
+pub struct AssembledRows {
+    pub blocks: Vec<EfcBlock>,
+    pub jac: DMatrix<f64>,
+    pub aref: Vec<f64>,
+    pub d: Vec<f64>,
+}
+
+impl AssembledRows {
+    /// Put `other`'s rows after these. ⛔ MuJoCo's order is equality, friction, limits, contacts, and a
+    /// row's LAW is read from its position — so this is not a set union, it is a concatenation with a
+    /// meaning, and the caller is responsible for appending in that order.
+    pub fn append(&mut self, other: AssembledRows) {
+        let (n, m, nv) = (self.jac.nrows(), other.jac.nrows(), self.jac.ncols().max(other.jac.ncols()));
+        let mut jac = DMatrix::zeros(n + m, nv);
+        jac.view_mut((0, 0), (n, self.jac.ncols())).copy_from(&self.jac);
+        jac.view_mut((n, 0), (m, other.jac.ncols())).copy_from(&other.jac);
+        self.jac = jac;
+        self.blocks.extend(other.blocks);
+        self.aref.extend(other.aref);
+        self.d.extend(other.d);
+    }
+}
+
+/// **One contact, as `mj_instantiateContact` needs it.**
+#[derive(Clone, Debug)]
+pub struct ContactSpec {
+    /// `condim × nv`: normal, the two tangents, then the torsional and rolling rows at condim 4 and 6.
+    pub jac: DMatrix<f64>,
+    pub dist: f64,
+    /// `mjContact.includemargin`.
+    pub margin: f64,
+    pub condim: usize,
+    /// MuJoCo's unpacked 5-vector `(slide, slide, spin, roll, roll)`.
+    pub friction: [f64; 5],
+    pub solref: SolRef,
+    pub solimp: SolImp,
+    /// The two geoms' bodies' inverse weights.
+    pub invweight: [InvWeight; 2],
+}
+
+/// **`mj_instantiateContact`**: a contact's rows, in the shape its cone demands.
+///
+/// A frictionless contact is one row. A PYRAMIDAL one is `2(condim−1)` rows, a pair of opposing pyramid
+/// edges `J_n ± μ_k J_tk` per friction direction — the cone written as a box, which is what lets a
+/// box-constrained solver handle friction at all. An ELLIPTIC one is `condim` rows and is the cone itself.
+///
+/// ⛔ The regularisation is not per row: [`mujoco_cone_adjust`] rewrites a frictional contact's `R` so the
+/// friction directions carry `impratio` times the normal's stiffness, and returns the `mu` of the
+/// REGULARISED cone, which is what the solver's projection uses and is not `friction[0]`.
+pub fn contact_rows(contacts: &[ContactSpec], nv: usize, qvel: &[f64], cone: Cone, impratio: f64, timestep: f64) -> Result<AssembledRows, String> {
+    let mut out = AssembledRows { jac: DMatrix::zeros(0, nv), ..Default::default() };
+    for c in contacts {
+        if c.jac.ncols() != nv || c.jac.nrows() < c.condim.min(3) {
+            return Err("contact Jacobian has the wrong shape".into());
+        }
+        let pyramidal = cone == Cone::Pyramidal && c.condim > 1;
+        let rows = mujoco_cone_rows(if c.condim == 1 { Cone::Pyramidal } else { cone }, c.condim);
+        let mut jac = DMatrix::zeros(rows, nv);
+        if c.condim == 1 {
+            jac.row_mut(0).copy_from(&c.jac.row(0));
+        } else if pyramidal {
+            let jn = c.jac.row(0);
+            for k in 0..c.condim - 1 {
+                let jt = c.jac.row(1 + k);
+                jac.row_mut(2 * k).copy_from(&(jn + c.friction[k] * jt));
+                jac.row_mut(2 * k + 1).copy_from(&(jn - c.friction[k] * jt));
+            }
+        } else {
+            jac.view_mut((0, 0), (c.condim, nv)).copy_from(&c.jac.view((0, 0), (c.condim, nv)));
+        }
+        let da = mujoco_diag_approx(c.invweight[0], c.invweight[1], c.condim, &c.friction, pyramidal);
+        let mut r: Vec<f64> = Vec::with_capacity(rows);
+        let mut aref: Vec<f64> = Vec::with_capacity(rows);
+        for i in 0..rows {
+            let jvel: f64 = (0..nv).map(|k| jac[(i, k)] * qvel[k]).sum();
+            let (a, rr) = row_reference(&c.solref, &c.solimp, c.dist, c.margin, da[i.min(da.len() - 1)], jvel, timestep);
+            aref.push(a);
+            r.push(rr);
+        }
+        let mu = mujoco_cone_adjust(&mut r, if c.condim == 1 { Cone::Pyramidal } else { cone }, c.condim, &c.friction, impratio);
+        let first = out.jac.nrows();
+        let mut grown = DMatrix::zeros(first + rows, nv);
+        grown.view_mut((0, 0), (first, nv)).copy_from(&out.jac);
+        grown.view_mut((first, 0), (rows, nv)).copy_from(&jac);
+        out.jac = grown;
+        out.aref.extend(aref);
+        out.d.extend(r.iter().map(|x| 1.0 / x.max(1e-15)));
+        out.blocks.push(EfcBlock::Contact(ConeContact { cone: if c.condim == 1 { Cone::Pyramidal } else { cone }, condim: c.condim, mu, friction: c.friction }));
+    }
+    Ok(out)
+}
+
 /// **One constraint row's `efc_R` and `efc_aref`** — `mj_makeImpedance` followed by `mj_referenceConstraint`,
 /// which is where every row type meets, whatever built it.
 ///

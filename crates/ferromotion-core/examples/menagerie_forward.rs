@@ -16,7 +16,7 @@
 //! the remaining work and hiding it inside an average would be a lie about coverage.
 
 use ferromotion_core::{
-    can_collide, collide_pair_with, contact_jacobian, contact_param, filter_body_pair, margin_and_gap, set_contact, tree_frames, tree_from_mjcf, tree_inverse_dynamics, tree_mass_matrix, CollideOptions, CollisionGeom, ContactRecord, GeomPose, GeomType, InvWeight, MjContact, MjcfJointKind, PairParams, SolImp, SolRef,
+    can_collide, collide_pair_with, contact_jacobian, contact_param, filter_body_pair, margin_and_gap, set_contact, tree_frames, tree_from_mjcf, tree_inverse_dynamics, tree_mass_matrix, CollideOptions, CollisionGeom, ContactRecord, GeomPose, GeomType, InvWeight, MjcfJointKind, PairParams, SolImp, SolRef,
 };
 use nalgebra::{DVector, Vector3};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -26,7 +26,6 @@ struct OState {
     nefc: usize,
     ncontact: usize,
     ncon: usize,
-    dims: Vec<usize>,
     qpos: Vec<f64>,
     qvel: Vec<f64>,
     bodyacc: Vec<f64>,
@@ -40,6 +39,7 @@ struct OState {
 struct OModel {
     rel: String,
     cone_pyramidal: bool,
+    impratio: f64,
     gravity: Vector3<f64>,
     bodies: Vec<String>,
     joints: Vec<(String, String, usize)>,
@@ -63,6 +63,7 @@ fn main() {
             "model" => models.push(OModel {
                 rel: t[1].to_string(),
                 cone_pyramidal: t[4] == "0",
+                impratio: f(t[5]),
                 gravity: Vector3::new(f(t[6]), f(t[7]), f(t[8])),
                 ..Default::default()
             }),
@@ -72,7 +73,6 @@ fn main() {
                 nefc: t[2].parse().unwrap(),
                 ncontact: t[3].parse().unwrap(),
                 ncon: t[4].parse().unwrap(),
-                dims: if t[7] == "-" { Vec::new() } else { t[7].split(',').map(|x| x.parse().unwrap()).collect() },
                 ..Default::default()
             }),
             "qpos" | "qfrc_bias" | "qfrc_passive" | "qacc_smooth" | "qacc" | "qvel" | "bodyacc" => {
@@ -97,6 +97,7 @@ fn main() {
     let (mut states, mut smooth_ok, mut smooth_tried, mut solved, mut solved_ok) = (0usize, 0usize, 0usize, 0usize, 0usize);
     let (mut acc_ok, mut acc_tried, mut worst_acc) = (0usize, 0usize, 0.0f64);
     let (mut chain_ok, mut chain_tried, mut worst_chain, mut worst_chain_bias) = (0usize, 0usize, 0.0f64, 0.0f64);
+    let (mut solved_nomesh, mut solved_ok_nomesh, mut worst_qacc_nomesh) = (0usize, 0usize, 0.0f64);
     let (mut worst_smooth_where, mut worst_qacc_where, mut worst_resid_where) = (String::new(), String::new(), String::new());
     let (mut worst_bias, mut worst_smooth, mut worst_qacc, mut worst_resid, mut worst_passive) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
     let mut notes: Vec<String> = Vec::new();
@@ -302,20 +303,21 @@ fn main() {
                 notes.push(format!("{}: qacc_smooth off {ds:.2e} (bias off {db:.2e})", o.rel));
             }
             // --- the constrained half, only where MuJoCo's constraint set is one this port claims
-            if s.nefc != s.ncontact {
-                *skip.entry("a constraint row that is not a contact (dof friction, equality, limit)").or_default() += 1;
+            // ⛔ an equality this port cannot build is a MISSING ROW, not a small error: the solve would be
+            // unconstrained where MuJoCo holds a linkage together
+            if !t.equalities_unsupported.is_empty() {
+                *skip.entry("an equality this port does not build (connect, weld, tendon)").or_default() += 1;
                 continue;
             }
-            if !o.cone_pyramidal {
-                *skip.entry("an elliptic cone (the assembled solve here is pyramidal)").or_default() += 1;
-                continue;
-            }
-            if s.dims.iter().any(|&d| d != 1 && d != 3) {
-                *skip.entry("condim 4 or 6 in the assembled solve").or_default() += 1;
+            if s.nefc != s.ncontact + t.equalities.len() + s.nefc.saturating_sub(s.ncontact) && false {
                 continue;
             }
             let frames = tree_frames(&t.tree, &q);
-            let mut contacts: Vec<MjContact> = Vec::new();
+            let mut contacts: Vec<ferromotion_core::ContactSpec> = Vec::new();
+            // ⭐ whether any contact in this state involves a MESH. The witness-point gap measured by
+            // `menagerie_contacts` lives only there, so splitting the failures this way turns "the contacts
+            // must be it" from an assertion into a count.
+            let mut any_mesh = false;
             let opts = CollideOptions::default();
             let geoms: Vec<Option<CollisionGeom>> = t
                 .geoms
@@ -375,17 +377,20 @@ fn main() {
                             continue;
                         }
                         let point = c.pos;
-                        let jac = contact_jacobian(joints, parent, &frames, gi.joint, gj.joint, point, &c.frame, 3);
+                        let jac = contact_jacobian(joints, parent, &frames, gi.joint, gj.joint, point, &c.frame, c.dim);
                         let iw = |g: &ferromotion_core::MjcfGeom| match g.joint {
                             Some(k) => ferromotion_core::body_invweight(&minv, joints, parent, &frames, Some(k), ferromotion_core::body_com(&frames, inertia, k)),
                             None => InvWeight { tran: 0.0, rot: 0.0 },
                         };
-                        contacts.push(MjContact {
+                        if ci.kind == GeomType::Mesh || cj.kind == GeomType::Mesh {
+                            any_mesh = true;
+                        }
+                        contacts.push(ferromotion_core::ContactSpec {
                             jac,
                             dist: c.dist,
                             margin: c.includemargin,
                             condim: c.dim,
-                            friction: [c.friction[0], c.friction[1]],
+                            friction: c.friction,
                             solref: SolRef(c.solref[0], c.solref[1]),
                             solimp: SolImp { d0: c.solimp[0], d_width: c.solimp[1], width: c.solimp[2], midpoint: c.solimp[3], power: c.solimp[4] },
                             invweight: [iw(gi), iw(gj)],
@@ -405,19 +410,41 @@ fn main() {
                 continue;
             }
             solved += 1;
-            let qvel = DVector::from_row_slice(&s.qvel);
-            let iters: usize = std::env::var("PGS_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(4000);
-            match ferromotion_core::solve_contacts_mujoco(&m, &a0, &qvel, &contacts, true, 1.0, 1e-12, iters) {
+            // the whole row set, in MuJoCo's order: equality, friction, limits, then contacts
+            let mut set = t.joint_constraint_rows(&q, &s.qvel, &t.dof_invweight0());
+            let cone = if o.cone_pyramidal { ferromotion_core::Cone::Pyramidal } else { ferromotion_core::Cone::Elliptic };
+            match ferromotion_core::contact_rows(&contacts, nv, &s.qvel, cone, o.impratio, t.timestep) {
+                Ok(cr) => set.append(cr),
+                Err(e) => {
+                    *skip.entry("a contact row this port cannot build").or_default() += 1;
+                    if notes.len() < 12 {
+                        notes.push(format!("{}: {e}", o.rel));
+                    }
+                    continue;
+                }
+            }
+            if set.blocks.iter().map(|b| b.rows()).sum::<usize>() != s.nefc {
+                *skip.entry("we and MuJoCo disagree on how many constraint ROWS there are").or_default() += 1;
+                continue;
+            }
+            match ferromotion_core::solve_constraints_newton_blocks(&m, &a0, &set.jac, &set.aref, &set.d, &set.blocks, 1e-13, 200) {
                 Ok(sol) => {
                     let dq = (0..nv).map(|i| (sol.qacc[i] - s.qacc[i]).abs() / s.qacc[i].abs().max(1.0)).fold(0.0, f64::max);
+                    if !any_mesh {
+                        solved_nomesh += 1;
+                        worst_qacc_nomesh = worst_qacc_nomesh.max(dq);
+                    }
                     if dq > worst_qacc {
                         worst_qacc = dq;
                         worst_qacc_where = format!("{} ({} contacts)", o.rel, contacts.len());
                     }
                     if dq < 1e-6 {
                         solved_ok += 1;
-                    } else if notes.len() < 12 {
-                        notes.push(format!("{}: qacc off {dq:.2e} with {} contacts, {} rows, solver residual {:.2e}", o.rel, contacts.len(), sol.r.len(), sol.residual));
+                        if !any_mesh {
+                            solved_ok_nomesh += 1;
+                        }
+                    } else if notes.len() < 12 || !any_mesh && notes.len() < 40 {
+                        notes.push(format!("{}: qacc off {dq:.2e} with {} contacts{}, {} rows, gradient {:.2e}", o.rel, contacts.len(), if any_mesh { " (mesh)" } else { " (NO mesh)" }, set.blocks.iter().map(|b| b.rows()).sum::<usize>(), sol.grad_norm));
                     }
                 }
                 Err(e) => {
@@ -433,6 +460,7 @@ fn main() {
     println!("  SMOOTH (mass matrix, bias, actuators, unconstrained acceleration — all from the file): {smooth_ok} of {smooth_tried} within 1e-6; worst qfrc_bias {worst_bias:.2e}, worst qacc_smooth (relative) {worst_smooth:.2e} on {worst_smooth_where}");
     println!("    and MuJoCo's own qacc_smooth back through OUR mass matrix: worst residual {worst_resid:.2e} on {worst_resid_where}");
     println!("  CONSTRAINED (contacts found and solved by us): {solved_ok} of {solved} within 1e-6; worst qacc (relative) {worst_qacc:.2e} on {worst_qacc_where}");
+    println!("    of those, with NO mesh geom in any contact: {solved_ok_nomesh} of {solved_nomesh}; worst qacc (relative) {worst_qacc_nomesh:.2e}");
     println!("    worst qfrc_passive on the states it blocked: {worst_passive:.2e}");
     println!("  BODY ACCELERATIONS in the world frame, at rest — basis-free, so a free or ball base is included: {acc_ok} of {acc_tried} within 1e-6; worst {worst_acc:.2e}");
     println!("  CHAIN dofs of a free- or ball-based model, entry by entry: {chain_ok} of {chain_tried} within 1e-6; worst qacc_smooth {worst_chain:.2e}, worst qfrc_bias {worst_chain_bias:.2e}");
