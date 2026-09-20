@@ -303,11 +303,24 @@ pub fn contact_rows(contacts: &[ContactSpec], nv: usize, qvel: &[f64], cone: Con
 /// `R` is the regularisation `(1 − d)/d · Ā` and `aref = −B·J·q̇ − K·d·(pos − margin)`: the acceleration the
 /// row is asked to reach, which is what makes the solve a spring-damper rather than a hard projection.
 pub fn row_reference(solref: &SolRef, solimp: &SolImp, pos: f64, margin: f64, diag_a: f64, jvel: f64, timestep: f64) -> (f64, f64) {
+    row_reference_at(solref, solimp, pos, pos, margin, diag_a, jvel, timestep)
+}
+
+/// [`row_reference`] with the impedance taken at a DIFFERENT position from the spring.
+///
+/// ⛔⛔ A multi-row equality is one constraint, and MuJoCo gives its rows ONE impedance, taken at the NORM
+/// of the whole residual vector. A `connect` whose error is `(−0.085, 0, −0.123)` gives all three rows the
+/// impedance of 0.1499, not of their own components — the middle row would otherwise be at `d0` while its
+/// neighbours were at `d_width`, and `efc_D` would differ across rows of one ball joint. Measured on
+/// MuJoCo 3.13.0 with a `width` wide enough for the impedance not to be saturated, which is the only
+/// setting where the three readings (norm, own component, largest component) differ.
+#[allow(clippy::too_many_arguments)]
+pub fn row_reference_at(solref: &SolRef, solimp: &SolImp, imp_pos: f64, pos: f64, margin: f64, diag_a: f64, jvel: f64, timestep: f64) -> (f64, f64) {
     // ⛔ "integrator safety": in the standard `(timeconst, dampratio)` format MuJoCo floors the time constant
     // at TWO TIMESTEPS, because a reference stiffer than the integrator can follow is unstable. A model that
     // asks for 0.001 s at a 0.002 s timestep gets 0.004 s, and nothing in the file says so.
     let solref = if solref.0 > 0.0 && solref.1 > 0.0 { SolRef(solref.0.max(2.0 * timestep), solref.1) } else { *solref };
-    let k = mujoco_kbip(&solref, solimp, pos, margin);
+    let k = mujoco_kbip(&solref, solimp, imp_pos, margin);
     let r = ((1.0 - k[2]) * diag_a / k[2]).max(1e-15);
     (-k[1] * jvel - k[0] * k[2] * (pos - margin), r)
 }

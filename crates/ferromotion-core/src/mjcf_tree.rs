@@ -264,6 +264,34 @@ impl MjcfTree {
         out
     }
 
+    /// **MuJoCo's "simple body"** and its mass: a body whose inertial frame IS its body frame, which has no
+    /// children, is a child of the world or of a dof-less child of the world, and whose every joint is a
+    /// slide along a coordinate axis anchored at the origin.
+    ///
+    /// ⛔⛔ Such a body's inverse weights are NOT computed — MuJoCo writes `1/mass`, ignoring the armature
+    /// and every coupling, and it does so for BOTH `dof_invweight0` and the translational half of
+    /// `body_invweight0`. On `body_invweight0` the difference is a clean factor of THREE, because the value
+    /// it replaces is a mean over the three world axes and a body on one slide moves along only one of them.
+    /// It is not a fallback: it is the number MuJoCo ships.
+    fn simple_bodies(&self) -> BTreeMap<&str, f64> {
+        let mut dofs: BTreeMap<&str, Vec<&MjcfJoint>> = BTreeMap::new();
+        for j in &self.joints {
+            dofs.entry(j.body.as_str()).or_default().push(j);
+        }
+        let has_child = |b: &str| self.body_parent.values().any(|p| p == b);
+        let mut out = BTreeMap::new();
+        for (body, js) in &dofs {
+            let parent = self.body_parent.get(*body).map(|s| s.as_str()).unwrap_or("world");
+            let near_world = parent == "world" || (!dofs.contains_key(parent) && self.body_parent.get(parent).map(|s| s.as_str()).unwrap_or("world") == "world");
+            let li = &self.tree.inertia[js[0].first];
+            let frames_agree = li.com.norm() == 0.0 && (0..3).all(|r| (0..3).all(|c| r == c || li.inertia[(r, c)] == 0.0));
+            if js.iter().all(|j| j.aligned_slide) && !has_child(body) && near_world && frames_agree && li.mass > 0.0 {
+                out.insert(*body, li.mass);
+            }
+        }
+        out
+    }
+
     /// **`dof_invweight0`**: the diagonal of `J M⁻¹ Jᵀ` for each degree of freedom at `qpos0`, which for a
     /// single-dof joint is `(M⁻¹)ᵢᵢ`. It is the scale every joint constraint row regularises against, and
     /// MuJoCo computes it ONCE at the reference configuration — not at the current state — so a row's
@@ -279,20 +307,9 @@ impl MjcfTree {
         // A body qualifies when its inertial frame IS its body frame, it has no children, it is a child of
         // the world or of a dof-less child of the world, and every one of its joints is a slide along a
         // coordinate axis anchored at the origin.
-        let mut dofs: BTreeMap<&str, Vec<&MjcfJoint>> = BTreeMap::new();
-        for j in &self.joints {
-            dofs.entry(j.body.as_str()).or_default().push(j);
-        }
-        let has_child = |b: &str| self.body_parent.values().any(|p| p == b);
-        for (body, js) in &dofs {
-            let parent = self.body_parent.get(*body).map(|s| s.as_str()).unwrap_or("world");
-            let near_world = parent == "world" || (!dofs.contains_key(parent) && self.body_parent.get(parent).map(|s| s.as_str()).unwrap_or("world") == "world");
-            let li = &self.tree.inertia[js[0].first];
-            let frames_agree = li.com.norm() == 0.0 && (0..3).all(|r| (0..3).all(|c| r == c || li.inertia[(r, c)] == 0.0));
-            if js.iter().all(|j| j.aligned_slide) && !has_child(body) && near_world && frames_agree && li.mass > 0.0 {
-                for j in js {
-                    out[j.first] = 1.0 / li.mass;
-                }
+        for (body, mass) in self.simple_bodies() {
+            for j in self.joints.iter().filter(|j| j.body == body) {
+                out[j.first] = 1.0 / mass;
             }
         }
         let _ = nv;
@@ -340,12 +357,17 @@ impl MjcfTree {
         };
         let minv = chol.solve(&nalgebra::DMatrix::identity(nv, nv));
         let frames = crate::tree_frames(&self.tree, &zero);
+        let simple = self.simple_bodies();
         self.body_frames
             .iter()
             .map(|(name, (ride, pre))| {
                 let ipos = self.body_ipos.get(name).copied().unwrap_or_else(Vector3::zeros);
                 let com = (frames[*ride] * pre * Point3::from(ipos)).coords;
-                (name.clone(), crate::tree_jacobian::body_invweight(&minv, &self.tree.joints, &self.tree.parent, &frames, Some(*ride), com))
+                let mut w = crate::tree_jacobian::body_invweight(&minv, &self.tree.joints, &self.tree.parent, &frames, Some(*ride), com);
+                if let Some(mass) = simple.get(name.as_str()) {
+                    w.tran = 1.0 / mass;
+                }
+                (name.clone(), w)
             })
             .collect()
     }
@@ -371,28 +393,65 @@ impl MjcfTree {
             blocks.push(block);
         };
         // --- equality first: MuJoCo counts `ne` from the front, and a row's law is its position
+        // a `connect` needs the CURRENT frames; a joint coupling does not, so only pay for them when asked
+        let frames = self.equalities.iter().any(|e| matches!(e.kind, EqualityKind::Connect { .. })).then(|| crate::tree_frames(&self.tree, q));
         for e in &self.equalities {
-            let mut jac = vec![0.0; nv];
-            let c = e.polycoef;
-            let (pos, diag) = match e.joint2 {
-                Some(j2) => {
-                    let y = q[j2] - e.reference.1;
-                    // q₁ − ref₁ − (c₀ + c₁y + c₂y² + c₃y³ + c₄y⁴), and the Jacobian carries the derivative
-                    let poly = c[0] + c[1] * y + c[2] * y * y + c[3] * y * y * y + c[4] * y * y * y * y;
-                    let deriv = c[1] + 2.0 * c[2] * y + 3.0 * c[3] * y * y + 4.0 * c[4] * y * y * y;
-                    jac[e.joint1] += 1.0;
-                    jac[j2] -= deriv;
-                    (q[e.joint1] - e.reference.0 - poly, dof_invweight0[e.joint1] + dof_invweight0[j2])
+            match &e.kind {
+                EqualityKind::Joint { joint1, joint2, reference, polycoef: c } => {
+                    let mut jac = vec![0.0; nv];
+                    let (pos, diag) = match *joint2 {
+                        Some(j2) => {
+                            let y = q[j2] - reference.1;
+                            // q₁ − ref₁ − (c₀ + c₁y + c₂y² + c₃y³ + c₄y⁴), and the Jacobian carries the derivative
+                            let poly = c[0] + c[1] * y + c[2] * y * y + c[3] * y * y * y + c[4] * y * y * y * y;
+                            let deriv = c[1] + 2.0 * c[2] * y + 3.0 * c[3] * y * y + 4.0 * c[4] * y * y * y;
+                            jac[*joint1] += 1.0;
+                            jac[j2] -= deriv;
+                            (q[*joint1] - reference.0 - poly, dof_invweight0[*joint1] + dof_invweight0[j2])
+                        }
+                        None => {
+                            jac[*joint1] = 1.0;
+                            (q[*joint1] - reference.0 - c[0], dof_invweight0[*joint1])
+                        }
+                    };
+                    let jvel: f64 = (0..nv).map(|k| jac[k] * qd[k]).sum();
+                    // ⛔ an equality has NO margin: it is violated by however far it is from zero, both ways
+                    let (a, r) = row_reference(&solr(e.solref), &soli(e.solimp), pos, 0.0, diag, jvel, self.timestep);
+                    push(jac, a, r, EfcBlock::Equality { rows: 1 });
                 }
-                None => {
-                    jac[e.joint1] = 1.0;
-                    (q[e.joint1] - e.reference.0 - c[0], dof_invweight0[e.joint1])
+                EqualityKind::Connect { side1, side2, diag_a } => {
+                    let frames = frames.as_ref().expect("frames are built whenever a connect is present");
+                    let at = |(ride, local): &(Option<usize>, Vector3<f64>)| -> (Vector3<f64>, nalgebra::DMatrix<f64>) {
+                        let p = match ride {
+                            Some(r) => (frames[*r] * Point3::from(*local)).coords,
+                            None => *local,
+                        };
+                        (p, crate::tree_jacobian::tree_point_jacobian(&self.tree.joints, &self.tree.parent, frames, *ride, p))
+                    };
+                    let ((p1, j1), (p2, j2)) = (at(side1), at(side2));
+                    // ⛔ `J̇·q̇`: a connect is NONLINEAR in q, so the residual's second derivative is
+                    // `J·q̈ + J̇·q̇` and the reference has to carry the second term. Zero at rest, which is
+                    // why a static sweep cannot see it missing.
+                    let bias = |(ride, local): &(Option<usize>, Vector3<f64>), p: Vector3<f64>| match ride {
+                        Some(_) => {
+                            let _ = local;
+                            crate::tree_jacobian::tree_point_bias_acceleration(&self.tree.joints, &self.tree.parent, frames, qd, *ride, p)
+                        }
+                        None => Vector3::zeros(),
+                    };
+                    let jdotqd = bias(side1, p1) - bias(side2, p2);
+                    // one constraint, one impedance: taken at the NORM of the whole residual, not per row
+                    let norm = -(p1 - p2).norm();
+                    // three rows in WORLD axes; each body's Jacobian is taken at its OWN anchor, which is
+                    // the same point only while the constraint is satisfied
+                    for r in 0..3 {
+                        let jac: Vec<f64> = (0..nv).map(|k| j1[(r, k)] - j2[(r, k)]).collect();
+                        let jvel: f64 = (0..nv).map(|k| jac[k] * qd[k]).sum();
+                        let (a, rr) = crate::mujoco_contact::row_reference_at(&solr(e.solref), &soli(e.solimp), norm, p1[r] - p2[r], 0.0, *diag_a, jvel, self.timestep);
+                        push(jac, a - jdotqd[r], rr, EfcBlock::Equality { rows: 1 });
+                    }
                 }
-            };
-            let jvel: f64 = (0..nv).map(|k| jac[k] * qd[k]).sum();
-            // ⛔ an equality has NO margin: it is violated by however far it is from zero, in both directions
-            let (a, r) = row_reference(&solr(e.solref), &soli(e.solimp), pos, 0.0, diag, jvel, self.timestep);
-            push(jac, a, r, EfcBlock::Equality { rows: 1 });
+            }
         }
         // --- dof friction, in dof order
         for j in &self.joints {
@@ -468,16 +527,40 @@ impl MjcfTree {
 #[derive(Clone, Debug)]
 pub struct MjcfEquality {
     pub name: String,
-    /// The driven joint: the row constrains ITS value.
-    pub joint1: usize,
-    /// The driving joint, if any. With none, the constraint pins `joint1` to a constant.
-    pub joint2: Option<usize>,
-    /// Each joint's `ref`. MuJoCo writes the coupling in `qpos − qpos0`, so the references are part of it.
-    pub reference: (f64, f64),
-    /// `polycoef`: `q₁ − ref₁ = c₀ + c₁·y + c₂·y² + c₃·y³ + c₄·y⁴` with `y = q₂ − ref₂`.
-    pub polycoef: [f64; 5],
+    pub kind: EqualityKind,
     pub solref: [f64; 2],
     pub solimp: [f64; 5],
+}
+
+/// Which equality, and everything its rows need. ⛔ `<weld>` is absent on purpose: no Menagerie model uses
+/// one, and its rotational residual is a quaternion difference this port has not measured against MuJoCo.
+#[derive(Clone, Debug)]
+pub enum EqualityKind {
+    /// `<equality joint>`: a polynomial coupling between two single-dof joints. ONE row.
+    Joint {
+        /// The driven joint: the row constrains ITS value.
+        joint1: usize,
+        /// The driving joint, if any. With none, the constraint pins `joint1` to a constant.
+        joint2: Option<usize>,
+        /// Each joint's `ref`. MuJoCo writes the coupling in `qpos − qpos0`, so the references are part of it.
+        reference: (f64, f64),
+        /// `q₁ − ref₁ = c₀ + c₁·y + c₂·y² + c₃·y³ + c₄·y⁴` with `y = q₂ − ref₂`.
+        polycoef: [f64; 5],
+    },
+    /// `<equality connect>`: a ball joint between two bodies at a shared point — the closed kinematic loop a
+    /// tree cannot express, and what every four-bar gripper in Menagerie is built from. THREE rows, in world
+    /// axes, whose residual is `p₁ − p₂` and whose Jacobian is each body's point Jacobian at ITS OWN anchor.
+    ///
+    /// ⛔ MJCF states the anchor in body1's frame only. MuJoCo's compiler resolves it to a world point at
+    /// `qpos0` and stores body2's local copy; a port that uses body1's anchor for both bodies is exactly
+    /// right at `qpos0` and wrong everywhere else. Each side here is `(the tree dof it rides, the anchor in
+    /// THAT frame)`, with `None` for a body welded to the world.
+    Connect {
+        side1: (Option<usize>, Vector3<f64>),
+        side2: (Option<usize>, Vector3<f64>),
+        /// `mj_diagApprox`: the two bodies' translational `body_invweight0`, summed, cached at load.
+        diag_a: f64,
+    },
 }
 
 /// A branched MJCF model as a [`KinematicTree`], plus the bookkeeping MuJoCo-level parity needs.
@@ -2788,9 +2871,13 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
         let diag: Vec<f64> = (0..nv).map(|i| m0[(i, i)]).collect();
         crate::mujoco_actuator::resolve_dampratio(&mut out.actuators, &diag);
     }
-    // <equality>: only the `joint` coupling is carried; the rest are named rather than dropped
+    // <equality>: the `joint` coupling and `connect`; the rest are named rather than dropped
     {
         let by_name: HashMap<&str, &MjcfJoint> = out.joints.iter().map(|j| (j.name.as_str(), j)).collect();
+        // the reference pose, where MuJoCo resolves a connect's second anchor and every inverse weight
+        let frames0 = crate::tree_frames(&out.tree, &vec![0.0; out.tree.joints.len()]);
+        let invw = out.body_invweight0();
+        let biw0 = |b: Option<&str>| b.and_then(|b| invw.get(b)).map(|w| w.tran).unwrap_or(0.0);
         for section in root.children_named("equality") {
             for el in &section.children {
                 let name = el.attr("name").map(|s| s.to_string()).unwrap_or_else(|| format!("equality{}", out.equalities.len() + out.equalities_unsupported.len()));
@@ -2799,8 +2886,54 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
                 if get("active").as_deref() == Some("false") {
                     continue;
                 }
-                if el.name != "joint" {
+                if el.name != "joint" && el.name != "connect" {
                     out.equalities_unsupported.push((name, format!("<{}>", el.name)));
+                    continue;
+                }
+                let mut solref = [0.02, 1.0];
+                if let Some(v) = get("solref") {
+                    for (i, x) in floats(&v)?.iter().take(2).enumerate() {
+                        solref[i] = *x;
+                    }
+                }
+                let mut solimp = [0.9, 0.95, 0.001, 0.5, 2.0];
+                if let Some(v) = get("solimp") {
+                    for (i, x) in floats(&v)?.iter().take(5).enumerate() {
+                        solimp[i] = *x;
+                    }
+                }
+                if el.name == "connect" {
+                    let Some(anchor) = el.attr("anchor") else {
+                        out.equalities_unsupported.push((name, "a site anchor".into()));
+                        continue;
+                    };
+                    let anchor = vec3(anchor)?;
+                    let side = |b: Option<&str>| -> Result<Option<(Option<usize>, Iso)>, String> {
+                        // the world, named or omitted: no dof to ride, and its frame IS the world's
+                        let Some(b) = b.filter(|b| *b != "world") else { return Ok(Some((None, Iso::identity()))) };
+                        if let Some((ride, pre)) = out.body_frames.get(b) {
+                            return Ok(Some((Some(*ride), frames0[*ride] * pre)));
+                        }
+                        match out.world_fixed.get(&format!("body:{b}")) {
+                            Some(iso) => Ok(Some((None, *iso))),
+                            None => Err(format!("equality '{name}': no body named '{b}'")),
+                        }
+                    };
+                    let (Some((ride1, world1)), Some((ride2, world2))) = (side(el.attr("body1"))?, side(el.attr("body2"))?) else {
+                        continue;
+                    };
+                    // ⛔ the anchor is stated in body1's frame; body2's copy is the SAME WORLD POINT at
+                    // `qpos0`, which is how MuJoCo stores it and the only reading that moves correctly
+                    let p0 = world1 * Point3::from(anchor);
+                    let local = |ride: Option<usize>, w: Iso| match ride {
+                        Some(r) => (Some(r), (frames0[r].inverse() * p0).coords),
+                        None => {
+                            let _ = w;
+                            (None, p0.coords)
+                        }
+                    };
+                    let diag_a = biw0(el.attr("body1")) + biw0(el.attr("body2"));
+                    out.equalities.push(MjcfEquality { name, kind: EqualityKind::Connect { side1: local(ride1, world1), side2: local(ride2, world2), diag_a }, solref, solimp });
                     continue;
                 }
                 let j1 = el.attr("joint1").ok_or_else(|| format!("equality '{name}': needs joint1"))?;
@@ -2822,24 +2955,14 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
                         polycoef[i] = *x;
                     }
                 }
-                let mut solref = [0.02, 1.0];
-                if let Some(v) = get("solref") {
-                    for (i, x) in floats(&v)?.iter().take(2).enumerate() {
-                        solref[i] = *x;
-                    }
-                }
-                let mut solimp = [0.9, 0.95, 0.001, 0.5, 2.0];
-                if let Some(v) = get("solimp") {
-                    for (i, x) in floats(&v)?.iter().take(5).enumerate() {
-                        solimp[i] = *x;
-                    }
-                }
                 out.equalities.push(MjcfEquality {
                     name,
-                    joint1: a.first,
-                    joint2: b.map(|b| b.first),
-                    reference: (a.reference, b.map(|b| b.reference).unwrap_or(0.0)),
-                    polycoef,
+                    kind: EqualityKind::Joint {
+                        joint1: a.first,
+                        joint2: b.map(|b| b.first),
+                        reference: (a.reference, b.map(|b| b.reference).unwrap_or(0.0)),
+                        polycoef,
+                    },
                     solref,
                     solimp,
                 });
@@ -3422,6 +3545,65 @@ mod tests {
         let passive = half.qfrc_passive(&q, &vec![0.0; nv]);
         for i in 0..nv {
             assert!((passive[i] - 0.5 * bias[i]).abs() < 1e-12, "dof {i}: {} vs half of {}", passive[i], bias[i]);
+        }
+    }
+
+    /// **A `connect` equality's three rows, against MuJoCo's own numbers.** This is the closed kinematic
+    /// loop a tree cannot express — every four-bar gripper in Menagerie is built from it.
+    ///
+    /// ⛔ The anchor is stated in body1's frame ONLY. MuJoCo resolves it to a world point at `qpos0` and
+    /// stores body2's local copy, so the two sides track different points as the model moves and the
+    /// residual `p₁ − p₂` is what closes the loop. A port that uses body1's anchor for both is exactly right
+    /// at `qpos0`, which is the one pose a careless test would sample.
+    ///
+    /// Numbers from MuJoCo 3.13.0 on exactly this model, at a pose and a velocity away from the reference.
+    #[test]
+    fn a_connect_equalitys_rows_are_mujocos() {
+        let xml = r#"<mujoco><compiler angle="radian"/><option timestep="0.002"/><worldbody>
+<body name="a" pos="0 0 0.5"><joint name="j1" type="hinge" axis="0 1 0"/>
+  <inertial pos="0.2 0 0" mass="1.5" diaginertia="0.03 0.02 0.04"/>
+  <body name="b" pos="0.4 0 0"><joint name="j2" type="hinge" axis="0 1 0"/>
+    <inertial pos="0.15 0 0" mass="0.7" diaginertia="0.01 0.012 0.008"/>
+  </body>
+</body>
+<body name="c" pos="0.3 0.2 0.5"><joint name="j3" type="slide" axis="1 0 0"/>
+  <inertial pos="0 0 0" mass="0.9" diaginertia="0.02 0.02 0.02"/>
+</body></worldbody>
+<equality><connect name="cn" body1="b" body2="c" anchor="0.05 -0.02 0.03" solref="0.01 0.9" solimp="0.8 0.93 0.002 0.4 3"/></equality>
+</mujoco>"#;
+        let t = tree_from_mjcf_str(xml).unwrap();
+        assert!(t.equalities_unsupported.is_empty(), "{:?}", t.equalities_unsupported);
+        let (q, qd) = ([0.3, -0.2, 0.07], [0.4, -0.25, 0.1]);
+        let set = t.joint_constraint_rows(&q, &qd, &t.dof_invweight0());
+        assert_eq!(set.blocks.len(), 3, "a connect is three rows");
+        let want_j = [[-0.09334963, 0.02485845, -1.0], [0.0, 0.0, 0.0], [-0.43487981, -0.05274521, 0.0]];
+        let want_pos = [-0.08512019358645151, -1.0408340855860843e-17, -0.12334962853853648];
+        let want_aref = [1160.8983288148454, 1.3816993038445295e-13, 1672.0118010798021];
+        for r in 0..3 {
+            for k in 0..3 {
+                assert!((set.jac[(r, k)] - want_j[r][k]).abs() < 1e-8, "J[{r},{k}] {} vs {}", set.jac[(r, k)], want_j[r][k]);
+            }
+            assert!((set.aref[r] - want_aref[r]).abs() < 1e-6 * want_aref[r].abs().max(1.0), "aref[{r}] {}", set.aref[r]);
+            // every row of one connect shares a diagonal: the two bodies' translational invweight0, summed
+            assert!((set.d[r] - 9.105824175824182).abs() < 1e-8, "D[{r}] {}", set.d[r]);
+        }
+        let _ = want_pos;
+        // ⛔ the same model with a `width` wide enough that the impedance is NOT saturated — the only
+        // setting where "the norm of the residual" and "this row's own component" give different numbers.
+        // All three rows share one `efc_D`, because a ball joint is one constraint.
+        let wide = tree_from_mjcf_str(&xml.replace(r#"solimp="0.8 0.93 0.002 0.4 3""#, r#"solimp="0.1 0.95 0.5 0.5 2""#)).unwrap();
+        let w = wide.joint_constraint_rows(&q, &qd, &wide.dof_invweight0());
+        for r in 0..3 {
+            assert!((w.d[r] - 0.23180246194304452).abs() < 1e-9, "D[{r}] {}", w.d[r]);
+        }
+        for (r, want) in [324.5641467374884, 3.598399633537263e-14, 460.2746976464331].iter().enumerate() {
+            assert!((w.aref[r] - want).abs() < 1e-6 * want.abs().max(1.0), "aref[{r}] {} vs {want}", w.aref[r]);
+        }
+        // and at qpos0 the loop is closed, which is exactly where the wrong reading also looks right
+        let z = [0.0, 0.0, 0.0];
+        let at0 = t.joint_constraint_rows(&z, &z, &t.dof_invweight0());
+        for r in 0..3 {
+            assert!(at0.aref[r].abs() < 1e-9, "row {r} at qpos0: {}", at0.aref[r]);
         }
     }
 

@@ -38,6 +38,56 @@ pub fn tree_point_jacobian(joints: &[Joint], parent: &[isize], frames: &[Iso], j
     j
 }
 
+/// **`J̇·q̇` for a point rigidly attached to a link** — the acceleration that point already has when
+/// `q̈ = 0`, from the chain's own rotation alone.
+///
+/// ⛔⛔ A constraint that is NONLINEAR in `q` needs this and a linear one does not. `d²/dt²(p₁ − p₂) =
+/// J·q̈ + J̇·q̇`, so driving the residual to a reference acceleration means asking for `J·q̈ = aref − J̇·q̇`.
+/// MuJoCo folds the correction into `efc_aref` for an `<equality connect>` and NOT for a joint limit, a
+/// friction row, a joint coupling (all linear, `J̇ = 0`) or — measured, not assumed — a contact.
+///
+/// At rest it is identically zero, so a sweep that samples only static states cannot see it missing.
+///
+/// The recursion is the classical one, in world coordinates: each frame carries its parent's motion to its
+/// own origin (`α × r + ω × (ω × r)`), a revolute joint adds `ω_P × axis·q̇` to the angular acceleration
+/// because its axis is being swung by the parent, and a prismatic joint adds the Coriolis term
+/// `2·ω_P × axis·q̇`.
+pub fn tree_point_bias_acceleration(joints: &[Joint], parent: &[isize], frames: &[Iso], qd: &[f64], joint: Option<usize>, point: Vector3<f64>) -> Vector3<f64> {
+    let mut chain: Vec<usize> = Vec::new();
+    let mut k = joint.map(|b| b as isize).unwrap_or(-1);
+    while k >= 0 {
+        chain.push(k as usize);
+        k = parent[k as usize];
+    }
+    chain.reverse();
+    let (mut w, mut v, mut al, mut a) = (Vector3::zeros(), Vector3::zeros(), Vector3::zeros(), Vector3::zeros());
+    let mut o: Vector3<f64> = Vector3::zeros();
+    for &idx in &chain {
+        let f = frames[idx];
+        let ok = f.translation.vector;
+        let r = ok - o;
+        let axis = f.rotation.to_rotation_matrix() * joints[idx].axis.into_inner();
+        let u = qd[idx];
+        let v_at = v + w.cross(&r);
+        let a_at = a + al.cross(&r) + w.cross(&w.cross(&r));
+        match joints[idx].kind {
+            JointKind::Revolute => {
+                al += w.cross(&axis) * u;
+                w += axis * u;
+                v = v_at;
+                a = a_at;
+            }
+            JointKind::Prismatic => {
+                v = v_at + axis * u;
+                a = a_at + 2.0 * w.cross(&(axis * u));
+            }
+        }
+        o = ok;
+    }
+    let r = point - o;
+    a + al.cross(&r) + w.cross(&w.cross(&r))
+}
+
 /// **The `3 × nv` Jacobian of a body's angular velocity.** A prismatic joint contributes nothing.
 pub fn tree_angular_jacobian(joints: &[Joint], parent: &[isize], frames: &[Iso], joint: Option<usize>) -> DMatrix<f64> {
     let mut j = DMatrix::zeros(3, joints.len());
