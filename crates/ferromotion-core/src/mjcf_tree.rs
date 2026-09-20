@@ -2218,7 +2218,14 @@ impl Walk<'_> {
                     other => return Err(format!("joint '{jname}': unknown type '{other}'")),
                 }
             };
-            let get = |k: &str| self.defaults.get(j, "joint", k, childclass).map(|s| s.to_string());
+            // ⛔⛔ `<freejoint/>` DOES NOT TAKE THE JOINT DEFAULTS, and `<joint type="free"/>` does. The same
+            // joint written the two ways gets different `armature`, `damping` and `frictionloss` — MuJoCo
+            // gives the shortcut element only `name`, `group` and `align`, and reads nothing from a class.
+            // On `booster_t1`, whose default class says `armature="0.005"`, inheriting it added 0.005 to all
+            // six base dofs and the model came out 5 g heavy: `M[0][0]` read 31.619357 against MuJoCo's
+            // 31.614357, which is the whole of a 1.6e-4 error in the mass matrix of a 32 kg humanoid.
+            let shortcut = j.name == "freejoint";
+            let get = |k: &str| if shortcut { j.attr(k).map(|s| s.to_string()) } else { self.defaults.get(j, "joint", k, childclass).map(|s| s.to_string()) };
             let anchor = if kind == MjcfJointKind::Free {
                 Vector3::zeros()
             } else {
