@@ -1681,11 +1681,19 @@ fn wrap_obstacle(x0: Vector3<f64>, x1: Vector3<f64>, pose: &Iso, radius: f64, cy
         let k = radius / d;
         [(ca * p[0] - sa * p[1]) * k, (sa * p[0] + ca * p[1]) * k]
     };
+    // ⛔⛔ the arc is NOT "the shorter way round". Which way the cable turns is fixed by how it arrives: it
+    // leaves `p0` on a tangent, so at the touch point it is already travelling one way around the circle and
+    // cannot reverse. A cable that comes in at one angle and leaves at another 147° away may well take the
+    // 213° arc, and on `ms_human_700`'s rectus femoris it does — taking the short arc instead lost 28 mm of
+    // a 690 mm tendon and put the wrap points 1.7 mm out along the cylinder's axis, because the heights
+    // interpolate along that same path.
     let arc_of = |t0: [f64; 2], t1: [f64; 2]| -> f64 {
+        let din = [t0[0] - p0[0], t0[1] - p0[1]];
+        let ccw = t0[0] * din[1] - t0[1] * din[0] > 0.0;
         let (a0, a1) = (t0[1].atan2(t0[0]), t1[1].atan2(t1[0]));
-        let mut da = (a1 - a0).abs();
-        if da > std::f64::consts::PI {
-            da = std::f64::consts::TAU - da;
+        let mut da = if ccw { a1 - a0 } else { a0 - a1 };
+        while da < 0.0 {
+            da += std::f64::consts::TAU;
         }
         radius * da
     };
