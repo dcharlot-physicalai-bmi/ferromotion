@@ -62,6 +62,9 @@ fn main() {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut bad: BTreeMap<String, usize> = BTreeMap::new();
     let (mut seen_kind, mut ok_kind): (BTreeMap<String, usize>, BTreeMap<String, usize>) = (BTreeMap::new(), BTreeMap::new());
+    // ⭐ how CLOSE the ones that do not match are: a wrap that picks the other side is out by centimetres,
+    // one that differs in the last digits of a tangency is not, and a single pass/fail count hides which
+    let mut ladder = [0usize; 4];
     let mut notes: Vec<String> = Vec::new();
     for c in &cases {
         if filter.as_ref().is_some_and(|fl| !c.rel.contains(fl.as_str())) {
@@ -102,11 +105,16 @@ fn main() {
                     worst_len_where = format!("{} / {name} ({kind})", c.rel);
                 }
                 *seen_kind.entry(kind.clone()).or_default() += 1;
+                for (i, tol) in [1e-9, 1e-6, 1e-4, 1e-2].iter().enumerate() {
+                    if dl < *tol {
+                        ladder[i] += 1;
+                    }
+                }
                 if dl < 1e-9 {
                     ok_len += 1;
                     *ok_kind.entry(kind.clone()).or_default() += 1;
                 } else {
-                    *bad.entry(format!("{} ({kind})", c.rel.split('/').next().unwrap_or(""))).or_default() += 1;
+                    *bad.entry(format!("{} ({kind}, {})", c.rel.split('/').next().unwrap_or(""), if len[i] < s.len[u] { "ours SHORTER: we under-wrap" } else { "ours LONGER: we over-wrap" })).or_default() += 1;
                     if notes.len() < 6 {
                         notes.push(format!("{} / {name} ({kind}): length {} vs {}", c.rel, len[i], s.len[u]));
                     }
@@ -141,6 +149,7 @@ fn main() {
     for (k, n) in &seen_kind {
         println!("    {k}: {} of {n}", ok_kind.get(k).copied().unwrap_or(0));
     }
+    println!("    within 1e-9 {}, 1e-6 {}, 1e-4 {}, 1e-2 {} — of {compared}", ladder[0], ladder[1], ladder[2], ladder[3]);
     println!("  ten_J·qvel matching, over three random velocities each: {ok_vel}; worst {worst_vel:.2e} on {worst_vel_where}");
     if !counts.is_empty() {
         println!("  not compared:");
