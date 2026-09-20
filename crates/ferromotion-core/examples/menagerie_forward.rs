@@ -220,12 +220,12 @@ fn main() {
             // the oracle samples with `ctrl = 0`; a position servo still pushes, because its bias is the
             // servo law and the model is not at its setpoint
             // ⛔ compare `qfrc_passive` ITSELF before letting it into the acceleration. This port carries
-            // joint damping and joint springs and nothing else — no gravcomp, no tendon or fluid force — so
+            // joint damping, joint springs and gravcomp and nothing else — no tendon or fluid force — so
             // a model that uses one of those must be counted as not carried, not reported as a wrong answer.
             let passive = t.qfrc_passive(&q, &s.qvel);
             let dp = (0..nv).map(|i| (passive[i] - s.qfrc_passive[i]).abs()).fold(0.0, f64::max);
             if dp > 1e-9 * (0..nv).map(|i| s.qfrc_passive[i].abs()).fold(1.0, f64::max) {
-                *skip.entry("a passive force this port does not carry (gravcomp, tendon, fluid)").or_default() += 1;
+                *skip.entry("a passive force this port does not carry (tendon, fluid)").or_default() += 1;
                 worst_passive = worst_passive.max(dp);
                 continue;
             }

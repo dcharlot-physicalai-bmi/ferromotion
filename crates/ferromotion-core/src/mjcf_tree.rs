@@ -159,10 +159,10 @@ impl MjcfTree {
     /// springs are added separately, and a port that folds damping into the recursion's actuator terms is
     /// exactly right at rest and wrong the moment the model moves.
     ///
-    /// ⚠ Short of `gravcomp` and of tendon and fluid forces, which this loader does not carry. Nine
-    /// Menagerie files set `gravcomp`; on those the result is missing that term.
+    /// ⚠ Short of tendon and fluid forces, which this loader does not carry. `gravcomp` IS included, the
+    /// way MuJoCo includes it: `d.qfrc_passive` carries `d.qfrc_gravcomp`.
     pub fn qfrc_passive(&self, q: &[f64], qd: &[f64]) -> Vec<f64> {
-        let mut out = vec![0.0; self.tree.joints.len()];
+        let mut out = self.qfrc_gravcomp(q);
         for j in &self.joints {
             if !matches!(j.kind, MjcfJointKind::Hinge | MjcfJointKind::Slide) {
                 continue;
@@ -173,6 +173,41 @@ impl MjcfTree {
                 // `springref` is in `qpos`, and this tree's `q` is `qpos` because `ref` is folded into the
                 // joint's origin — so the rest position is `springref` with no further shift
                 out[i] -= j.stiffness * (q[i] - j.springref);
+            }
+        }
+        out
+    }
+
+    /// **`mj_gravcomp`**: `<body gravcomp>` as an upward force `−gravcomp·mass·g` applied at that body's
+    /// centre of mass, mapped through the body's point Jacobian. `gravcomp = 1` cancels the body's weight
+    /// exactly; MuJoCo allows more, which over-compensates.
+    ///
+    /// ⛔ It is applied per BODY, at the body's own centre of mass — so a jointless body welded onto a link
+    /// contributes its own term at its own position, not the link's. That is what [`MjcfTree::body_ipos`]
+    /// and [`MjcfTree::body_mass`] are for.
+    ///
+    /// ⛔ MuJoCo keeps this in its own field, `d.qfrc_gravcomp`, AND adds it into `d.qfrc_passive`. Nine
+    /// Menagerie models set it, all of them arms whose controllers expect gravity to be handled for them.
+    pub fn qfrc_gravcomp(&self, q: &[f64]) -> Vec<f64> {
+        let nv = self.tree.joints.len();
+        let mut out = vec![0.0; nv];
+        if self.body_gravcomp.is_empty() {
+            return out;
+        }
+        let frames = crate::tree_frames(&self.tree, q);
+        for (name, &gc) in &self.body_gravcomp {
+            // a body welded to the world has no dof to push against, and MuJoCo's force on it goes nowhere
+            let Some((ride, pre)) = self.body_frames.get(name) else { continue };
+            let mass = self.body_mass.get(name).copied().unwrap_or(0.0);
+            if mass == 0.0 {
+                continue;
+            }
+            let ipos = self.body_ipos.get(name).copied().unwrap_or_else(Vector3::zeros);
+            let com = (frames[*ride] * pre * Point3::from(ipos)).coords;
+            let jac = crate::tree_jacobian::tree_point_jacobian(&self.tree.joints, &self.tree.parent, &frames, Some(*ride), com);
+            let f = self.gravity * (-gc * mass);
+            for (i, o) in out.iter_mut().enumerate() {
+                *o += jac.column(i).dot(&f);
             }
         }
         out
@@ -405,6 +440,12 @@ pub struct MjcfTree {
     /// `<option timestep>`, default 0.002. Needed where a constraint row is built, because MuJoCo floors a
     /// reference time constant at two timesteps.
     pub timestep: f64,
+    /// `<option gravity>`, default `0 0 -9.81`.
+    pub gravity: Vector3<f64>,
+    /// Each body's mass after MuJoCo's `boundmass` floor, and its `<body gravcomp>` where it is non-zero —
+    /// together with [`MjcfTree::body_ipos`] these are what [`MjcfTree::qfrc_gravcomp`] needs.
+    pub body_mass: BTreeMap<String, f64>,
+    pub body_gravcomp: BTreeMap<String, f64>,
     /// Each body's MJCF parent body (`world` for the children of the worldbody) — what MuJoCo's contact
     /// filtering reads through `body_parentid` and `body_weldid`.
     pub body_parent: BTreeMap<String, String>,
@@ -1785,6 +1826,14 @@ impl Walk<'_> {
             }
         }
         self.out.body_ipos.insert(name.clone(), li.com);
+        self.out.body_mass.insert(name.clone(), li.mass);
+        // `<body gravcomp>` is a plain body attribute: no default class carries it, and it does not inherit
+        if let Some(v) = b.attr("gravcomp") {
+            let g = v.trim().parse::<f64>().map_err(|e| format!("body '{name}' gravcomp: {e}"))?;
+            if g != 0.0 {
+                self.out.body_gravcomp.insert(name.clone(), g);
+            }
+        }
         self.place("body", name.clone(), ride, pre)?;
         self.body_stack.push(name);
         let r = self.children(b, ride, pre, childclass);
@@ -2441,6 +2490,9 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             inferred_from_geoms: Vec::new(),
             angle_scale: c.deg,
             timestep: 0.002,
+            gravity: Vector3::new(0.0, 0.0, -9.81),
+            body_mass: BTreeMap::new(),
+            body_gravcomp: BTreeMap::new(),
             body_parent: BTreeMap::new(),
             mesh_hulls: BTreeMap::new(),
             mesh_raw: BTreeMap::new(),
@@ -2493,6 +2545,9 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
     for el in root.children_named("option") {
         if let Some(v) = el.attr("timestep") {
             out.timestep = v.trim().parse::<f64>().map_err(|e| format!("<option timestep>: {e}"))?;
+        }
+        if let Some(v) = el.attr("gravity") {
+            out.gravity = vec3(v).map_err(|e| format!("<option gravity>: {e}"))?;
         }
     }
     let (acts, unsupported) = parse_actuators(&root, &defaults, &c, &out.joints)?;
@@ -3080,6 +3135,68 @@ mod tests {
         // the same model without a resolver names the file it wanted
         let e = tree_from_mjcf_str(main).unwrap_err();
         assert!(e.contains("sub/defaults.xml"), "{e}");
+    }
+
+    /// **`gravcomp = 1` holds an arm up by itself.** The test is the physical statement, not the formula:
+    /// with no damping, no spring and no actuator, a fully gravity-compensated arm at rest has zero smooth
+    /// acceleration in every dof and at every pose. That is `qfrc_passive == qfrc_bias`, and it can only
+    /// hold if the force is applied at each body's OWN centre of mass with each body's OWN mass.
+    ///
+    /// The second body is welded (no joint of its own), which is where a port that works per-link rather
+    /// than per-body goes wrong: it would apply one force at the merged link's centre of mass, and the arm
+    /// would sag or lift.
+    #[test]
+    fn gravcomp_one_holds_the_arm_up_by_itself() {
+        let xml = r#"<mujoco><compiler angle="radian"/><option gravity="0 0 -9.81"/><worldbody>
+<body name="upper" gravcomp="1"><joint name="s" type="hinge" axis="0 1 0"/>
+  <inertial pos="0.15 0 0" mass="2" diaginertia="0.02 0.02 0.02"/>
+  <body name="fore" pos="0.3 0 0" gravcomp="1"><joint name="e" type="hinge" axis="0 1 0"/>
+    <inertial pos="0.2 0 0" mass="1" diaginertia="0.01 0.01 0.01"/>
+    <body name="tool" pos="0.4 0.05 0" gravcomp="1">
+      <inertial pos="0.05 0 0.02" mass="0.5" diaginertia="0.001 0.001 0.001"/>
+    </body>
+  </body>
+</body></worldbody></mujoco>"#;
+        let t = tree_from_mjcf_str(xml).unwrap();
+        assert_eq!(t.body_gravcomp.len(), 3, "all three bodies ask for compensation");
+        let nv = t.tree.joints.len();
+        for pose in [[0.0, 0.0], [0.7, -1.1], [-1.3, 0.4]] {
+            let q = pose.to_vec();
+            let bias = crate::tree_dynamics::tree_inverse_dynamics(&t.tree.joints, &t.tree.inertia, &t.tree.parent, &q, &vec![0.0; nv], &vec![0.0; nv], t.gravity);
+            let passive = t.qfrc_passive(&q, &vec![0.0; nv]);
+            for i in 0..nv {
+                assert!((passive[i] - bias[i]).abs() < 1e-12, "dof {i} at {pose:?}: passive {} vs bias {}", passive[i], bias[i]);
+            }
+            // and it is not vacuous: without gravity compensation the arm does not hold itself up
+            assert!(bias.iter().any(|b| b.abs() > 1.0), "the arm should be loaded at {pose:?}");
+        }
+        // ⛔ holding the arm up does NOT by itself pin WHERE the force is applied: for one hinge the
+        // generalised force is linear in the centre of mass, so summing the bodies of a link at the link's
+        // own centre gives the same answer whenever they share a `gravcomp`. What separates the two is a
+        // link whose bodies DISAGREE — here a compensated body at x = 0.3 welded beside an uncompensated
+        // one at x = 0.8, with the joint's own mass sitting on the axis where it exerts no torque.
+        let mixed = tree_from_mjcf_str(
+            r#"<mujoco><compiler angle="radian"/><option gravity="0 0 -9.81"/><worldbody>
+<body name="link"><joint name="h" type="hinge" axis="0 1 0"/>
+  <inertial pos="0 0 0" mass="1" diaginertia="0.01 0.01 0.01"/>
+  <body name="a" pos="0.3 0 0" gravcomp="1"><inertial pos="0 0 0" mass="2" diaginertia="0.01 0.01 0.01"/></body>
+  <body name="b" pos="0.8 0 0"><inertial pos="0 0 0" mass="1" diaginertia="0.01 0.01 0.01"/></body>
+</body></worldbody></mujoco>"#,
+        )
+        .unwrap();
+        assert_eq!(mixed.body_gravcomp.len(), 1, "only 'a' asks for compensation");
+        let g = mixed.qfrc_gravcomp(&[0.0]);
+        // torque about +y of an upward force m·g at x = 0.3 is −0.3·m·g; 'b' contributes nothing at all
+        assert!((g[0] + 0.3 * 2.0 * 9.81).abs() < 1e-12, "{}", g[0]);
+
+        // half compensation leaves exactly half the load
+        let half = tree_from_mjcf_str(&xml.replace("gravcomp=\"1\"", "gravcomp=\"0.5\"")).unwrap();
+        let q = vec![0.7, -1.1];
+        let bias = crate::tree_dynamics::tree_inverse_dynamics(&half.tree.joints, &half.tree.inertia, &half.tree.parent, &q, &vec![0.0; nv], &vec![0.0; nv], half.gravity);
+        let passive = half.qfrc_passive(&q, &vec![0.0; nv]);
+        for i in 0..nv {
+            assert!((passive[i] - 0.5 * bias[i]).abs() < 1e-12, "dof {i}: {} vs half of {}", passive[i], bias[i]);
+        }
     }
 
     /// **Two geoms welded onto the same link belong to two different BODIES**, and MuJoCo gives each its own
