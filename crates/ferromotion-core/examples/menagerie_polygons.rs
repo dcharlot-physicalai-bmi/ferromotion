@@ -19,6 +19,11 @@ struct Mesh {
     polys: Vec<(Vec<f64>, Vec<usize>)>,
     /// whether any geom that uses this mesh can collide — the subject list this sweep is entitled to
     collides: bool,
+    /// MuJoCo's `mesh_pos` and `mesh_quat`: the mesh's own centre of mass and principal frame
+    com: [f64; 3],
+    quat: [f64; 4],
+    /// MuJoCo's triangle count after IT triangulated the file's faces
+    nface: usize,
 }
 
 fn main() {
@@ -41,6 +46,9 @@ fn main() {
                 nvert: t[3].parse().unwrap(),
                 polys: Vec::new(),
                 collides: t.get(5).is_some_and(|x| *x == "1"),
+                nface: t.get(6).and_then(|x| x.parse().ok()).unwrap_or(0),
+                com: std::array::from_fn(|k| t.get(7 + k).map(|x| f(x)).unwrap_or(f64::NAN)),
+                quat: std::array::from_fn(|k| t.get(10 + k).map(|x| f(x)).unwrap_or(f64::NAN)),
             }),
             "poly" => {
                 let normal = vec![f(t[1]), f(t[2]), f(t[3])];
@@ -62,6 +70,9 @@ fn main() {
     let mut notes: Vec<String> = Vec::new();
     let (mut hull_vert_same, mut hull_vert_tried, mut hull_vert_diff) = (0usize, 0usize, 0usize);
     let mut no_hull_but_collides: BTreeSet<String> = BTreeSet::new();
+    let (mut props_ok, mut props_tried, mut worst_props, mut worst_props_where) = (0usize, 0usize, 0.0f64, String::new());
+    let (mut face_ok, mut face_tried, mut face_notes) = (0usize, 0usize, Vec::<String>::new());
+    let mut frame_differs = 0usize;
     let (mut hull_only_ours, mut hull_only_theirs) = (0usize, 0usize);
     let (mut normal_same_line, mut normal_other_line, mut worst_line, mut worst_line_where) = (0usize, 0usize, 0.0f64, String::new());
     let (mut flip_ours_inward, mut flip_theirs_inward, mut flip_ambiguous) = (0usize, 0usize, 0usize);
@@ -79,6 +90,43 @@ fn main() {
             *counts.entry("the loader refuses the model").or_default() += 1;
             continue;
         };
+        // ⭐⭐ the mesh's OWN mass properties, before any body reads them. `mesh_pos` is the centre of
+        // mass the compiler's volume integral produced and `mesh_quat` the principal frame it found; every
+        // `body_ipos` is built from these, so this is the level at which a residual in the integral is
+        // visible at all — and it covers EVERY mesh, not only the ones a collider reads.
+        for m in list {
+            // ⛔ the TRIANGLE COUNT first: a mesh file may hold quads and n-gons, and two readers that
+            // triangulate them differently integrate different solids over the same vertices. The com
+            // comparison below cannot tell that apart from an arithmetic difference; this can.
+            if let Some(raw) = t.mesh_raw.get(&m.name).filter(|_| m.nface != 0) {
+                face_tried += 1;
+                if raw.tris.len() == m.nface {
+                    face_ok += 1;
+                } else {
+                    face_notes.push(format!("{rel} / {}: {} triangles here, {} in MuJoCo", m.name, raw.tris.len(), m.nface));
+                }
+            }
+            if let (Some(d), false) = (t.mesh_props.get(&m.name), m.com[0].is_nan()) {
+                props_tried += 1;
+                let scale = m.com.iter().fold(0.0f64, |a, b| a.max(b.abs())).max(1e-6);
+                let e = (0..3).map(|k| (d.com[k] - m.com[k]).abs() / scale).fold(0.0, f64::max);
+                if e < 1e-9 {
+                    props_ok += 1;
+                }
+                if e > worst_props {
+                    worst_props = e;
+                    worst_props_where = format!("{rel} / {} ({} verts)", m.name, m.nvert);
+                }
+                // ⚠ the principal FRAME, as a rotation and only up to sign. A frame whose axes are
+                // PERMUTED describes the same inertia when the principal values permute with it, and
+                // nothing here knows the values — so this is counted, not called a failure.
+                let q = nalgebra::Quaternion::new(d.quat[0], d.quat[1], d.quat[2], d.quat[3]);
+                let dot: f64 = (0..4).map(|k| q[if k == 0 { 3 } else { k - 1 }] * m.quat[k]).sum();
+                if dot.abs() < 1.0 - 1e-9 {
+                    frame_differs += 1;
+                }
+            }
+        }
         for m in list {
             // only meshes this port actually builds a hull for: a visual-only mesh has no collider
             let Some(hull) = t.mesh_hulls.get(&m.name) else {
@@ -280,6 +328,12 @@ fn main() {
     for x in no_hull_but_collides.iter().take(8) {
         println!("      {x}");
     }
+    println!("  the TRIANGLE COUNT after each side triangulated the file's faces: {face_ok} of {face_tried} agree");
+    for n in face_notes.iter().take(6) {
+        println!("      {n}");
+    }
+    println!("  ⭐⭐ the mesh's OWN centre of mass (MuJoCo's `mesh_pos`, what the compiler's volume integral produced): {props_ok} of {props_tried} within 1e-9; worst {worst_props:.2e} on {worst_props_where}");
+    println!("    and the principal FRAME as a rotation: {frame_differs} of {props_tried} differ, which counts a PERMUTATION of equal principal values as a difference and so is an upper bound");
     println!("collision meshes compared: {seen}");
     println!("  same polygon COUNT as MuJoCo: {same_count}");
     println!("  of the reversed ones, only OURS points inward: {flip_ours_inward}; only MUJOCO'S does: {flip_theirs_inward} (a MuJoCo defect, not a convention — see the note above); undecided: {flip_ambiguous}");

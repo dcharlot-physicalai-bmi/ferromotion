@@ -1153,6 +1153,10 @@ pub struct MjcfTree {
     /// the mesh file's own frame — for placing them under a frame chosen elsewhere (MuJoCo's `mesh_pos`,
     /// `mesh_quat` when comparing against it).
     pub mesh_raw: BTreeMap<String, crate::TriMesh3>,
+    /// **What MuJoCo's mesh compiler produced for every mesh** — volume, centre of mass and principal
+    /// frame, which it publishes as `mesh_pos` and `mesh_quat`. Every body's `ipos` and inertia is built
+    /// from these, so this is the level at which a mesh-integral residual can be seen at all.
+    pub mesh_props: BTreeMap<String, MeshData>,
     /// Every geom, in file order — the order MuJoCo numbers them in.
     pub geoms: Vec<MjcfGeom>,
     /// `<actuator>` entries, resolved into MuJoCo's gain/bias form, in file order — the same order as
@@ -1513,19 +1517,23 @@ pub(crate) enum MeshInertia {
 }
 
 /// What MuJoCo's `mjCMesh::Process` produces and its geoms consume.
-#[derive(Clone, Copy)]
-struct MeshData {
+///
+/// ⭐ MuJoCo publishes `com` and `quat` as `mesh_pos` and `mesh_quat`, so these are directly comparable
+/// to the reference — and they sit UPSTREAM of every body's `ipos` and inertia, which is where a residual
+/// in the mesh integral first becomes visible.
+#[derive(Clone, Copy, Debug)]
+pub struct MeshData {
     /// volume (or area, for a shell): what the density multiplies
-    volume: f64,
-    /// centre of mass in the mesh frame (`pos_`)
-    com: Vector3<f64>,
-    /// principal frame (`quat_`), MuJoCo `(w x y z)`
-    quat: [f64; 4],
+    pub volume: f64,
+    /// centre of mass in the mesh frame (`pos_`, published as `mesh_pos`)
+    pub com: Vector3<f64>,
+    /// principal frame (`quat_`, published as `mesh_quat`), MuJoCo `(w x y z)`
+    pub quat: [f64; 4],
     /// the equivalent inertia box half-sizes (`boxsz_`)
-    boxsz: [f64; 3],
+    pub boxsz: [f64; 3],
     /// axis-aligned bounds in the mesh frame after centring at the CoM and rotating into the principal frame
     /// (`aamm_`), which is what `fitaabb` fits
-    aamm: [f64; 6],
+    pub aamm: [f64; 6],
 }
 
 /// What [`Walk::geom_spec`] resolves: MuJoCo's own `geom_type`, `geom_size` and pose for one geom.
@@ -3649,6 +3657,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             body_parent: BTreeMap::new(),
             mesh_hulls: BTreeMap::new(),
             mesh_raw: BTreeMap::new(),
+            mesh_props: BTreeMap::new(),
             geoms: Vec::new(),
             actuators: Vec::new(),
             actuators_unsupported: Vec::new(),
@@ -3694,6 +3703,9 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
         let hull = crate::mujoco_hull::MeshHull::with_max_verts(stored, cap).ok_or_else(|| format!("mesh '{name}': no 3-D convex hull (MuJoCo refuses such a collision mesh)"))?;
         out.mesh_hulls.insert(name.clone(), hull);
         out.mesh_raw.insert(name.clone(), walk.mesh_raw[name].clone());
+    }
+    for (name, d) in &walk.mesh_cache {
+        out.mesh_props.insert(name.clone(), *d);
     }
     for el in root.children_named("option") {
         if let Some(v) = el.attr("timestep") {

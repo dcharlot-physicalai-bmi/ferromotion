@@ -46,7 +46,12 @@ for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
             and (int(m.geom_contype[g]) or int(m.geom_conaffinity[g]))
             for g in range(m.ngeom)
         ))
-        lines.append(f"mesh\t{rel}\t{name}\t{int(m.mesh_vertnum[i])}\t{npoly}\t{collides}")
+        # ⭐ `mesh_pos` and `mesh_quat` are the mesh's own CENTRE OF MASS and principal frame — what the
+        # compiler's volume integral produced, before any body reads it. Every `body_ipos` is built from
+        # these, so a residual in the integral is visible HERE and nowhere earlier.
+        lines.append("\t".join([f"mesh\t{rel}\t{name}\t{int(m.mesh_vertnum[i])}\t{npoly}\t{collides}\t{int(m.mesh_facenum[i])}"]
+                                + [repr(float(x)) for x in m.mesh_pos[i]]
+                                + [repr(float(x)) for x in m.mesh_quat[i]]))
         adr = int(m.mesh_polyadr[i])
         for p in range(adr, adr + npoly):
             va, vn = int(m.mesh_polyvertadr[p]), int(m.mesh_polyvertnum[p])
