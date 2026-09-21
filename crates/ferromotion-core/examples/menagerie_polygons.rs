@@ -54,6 +54,8 @@ fn main() {
     let mut notes: Vec<String> = Vec::new();
     let (mut hull_vert_same, mut hull_vert_tried, mut hull_vert_diff) = (0usize, 0usize, 0usize);
     let (mut hull_only_ours, mut hull_only_theirs) = (0usize, 0usize);
+    let (mut normal_same_line, mut normal_other_line, mut worst_line, mut worst_line_where) = (0usize, 0usize, 0.0f64, String::new());
+    let (mut flip_ours_inward, mut flip_theirs_inward, mut flip_ambiguous) = (0usize, 0usize, 0usize);
     let (mut plane_same, mut plane_tried, mut plane_only_ours, mut plane_only_theirs) = (0usize, 0usize, 0usize, 0usize);
     let (mut support_same, mut support_tried, mut worst_support) = (0usize, 0usize, 0.0f64);
     let (mut worst_support_where, mut different_body) = (String::new(), Vec::<String>::new());
@@ -72,6 +74,10 @@ fn main() {
             // only meshes this port actually builds a hull for: a visual-only mesh has no collider
             let Some(hull) = t.mesh_hulls.get(&m.name) else { continue };
             seen += 1;
+            if std::env::var("DUMP_HULL").is_ok() {
+                let exact = ferromotion_core::try_convex_hull_3d(&hull.verts).map(|h| h.verts.len());
+                println!("  {rel} / {}: mesh verts {}, hull verts {}, max_verts {:?}, polygons {}, UNCAPPED hull verts {exact:?}", m.name, hull.verts.len(), hull.hull_verts.len(), hull.max_verts, hull.polygons.len());
+            }
             if hull.verts.len() != m.nvert {
                 *counts.entry("the mesh itself has a different vertex count").or_default() += 1;
                 continue;
@@ -196,6 +202,52 @@ fn main() {
                     }
                     if dot < -0.99 {
                         normal_flipped += 1;
+                        // ⛔⛔ "flipped" is only a convention if both are consistent. An outward normal is
+                        // NOT a convention — the polytope determines it — so whichever of the two points
+                        // inward is wrong, and on this corpus that is MUJOCO'S, on about 5% of polygons.
+                        // Verified with MuJoCo's own data and nothing of ours: of 315,431 polygons across
+                        // 804 meshes, 16,164 put one of MuJoCo's OWN hull corners more than 1e-3 of the
+                        // part outside the polygon's own plane, worst 2.53 — a whole polytope width, which
+                        // only a reversed normal produces. `aloha/d405_solid poly3899` is outward under
+                        // `−n` (2.5e-5) and 2.53 out under `+n`; a clean 8-vertex box compiled through the
+                        // same path has all six outward, so the convention and the indexing are right and
+                        // the reversals are real.
+                        // ⛔ the test is SUPPORT, not a centroid: a normal is outward exactly when every
+                        // hull vertex is on or behind its own plane. A centroid test needs the centroid to
+                        // be interior and says nothing on a sliver.
+                        //
+                        // ⛔⛔ and the threshold is 1e-3 OF THE PART, not 1e-9. MuJoCo stores mesh vertices
+                        // as `float` and its own polygon planes miss its own vertices by up to 2.4e-5 of
+                        // the part's size, so at 1e-9 the test reports 11,291 inward normals that are only
+                        // storage precision. A normal that is genuinely reversed puts a vertex a whole
+                        // polytope width outside its plane, which is nowhere near either number.
+                        let v0 = hull.verts[p.verts[0]];
+                        let extent = hull.verts.iter().map(|v| v.amax()).fold(0.0, f64::max).max(1e-9);
+                        let outward = |nn: [f64; 3]| {
+                            let d = nn[0] * v0.x + nn[1] * v0.y + nn[2] * v0.z;
+                            let slack = hull.hull_verts.iter().map(|&i| nn[0] * hull.verts[i].x + nn[1] * hull.verts[i].y + nn[2] * hull.verts[i].z - d).fold(f64::NEG_INFINITY, f64::max);
+                            slack <= 1e-3 * extent
+                        };
+                        let (mine_out, theirs_out) = (outward([p.normal.x, p.normal.y, p.normal.z]), outward([n[0], n[1], n[2]]));
+                        match (mine_out, theirs_out) {
+                            (true, false) => flip_theirs_inward += 1,
+                            (false, true) => flip_ours_inward += 1,
+                            _ => flip_ambiguous += 1,
+                        }
+                    }
+                    // ⭐ the line the normal lies ON, separately from its sign: a shared face whose
+                    // normal points along the same line is a WINDING convention and nothing more, and one
+                    // that does not is a different plane through the same vertices — which can only happen
+                    // where the polygon is not planar, or where the normal was taken from a degenerate
+                    // corner. The two need different fixes, so they are counted apart.
+                    if dot.abs() > 0.999_999 {
+                        normal_same_line += 1;
+                    } else {
+                        normal_other_line += 1;
+                        if 1.0 - dot.abs() > worst_line {
+                            worst_line = 1.0 - dot.abs();
+                            worst_line_where = format!("{rel} / {} ({} corners, 1-|n·n'| {:.2e})", m.name, p.verts.len(), 1.0 - dot.abs());
+                        }
                     }
                     if d > worst_normal && dot > 0.0 {
                         worst_normal = d;
@@ -207,6 +259,8 @@ fn main() {
     }
     println!("collision meshes compared: {seen}");
     println!("  same polygon COUNT as MuJoCo: {same_count}");
+    println!("  of the reversed ones, only OURS points inward: {flip_ours_inward}; only MUJOCO'S does: {flip_theirs_inward} (a MuJoCo defect, not a convention — see the note above); undecided: {flip_ambiguous}");
+    println!("  shared faces whose normal lies on the SAME LINE (a winding convention): {normal_same_line}; on a DIFFERENT line (a different plane through the same corners): {normal_other_line}, worst 1-|n·n'| {worst_line:.2e} on {worst_line_where}");
     println!("  same polygon SET (every face, by its vertices): {same_faces}");
     println!("  ⭐⭐ same SUPPORT FUNCTION over 256 directions (the polytope itself, faces and vertex lists aside): {support_same} of {support_tried}; worst {worst_support:.2e} relative to the mesh's own size on {worst_support_where}");
     println!("  ⭐ same set of SUPPORTING PLANES (merge-invariant: the same polytope however its faces are grouped): {plane_same} of {plane_tried}; {plane_only_ours} planes only ours, {plane_only_theirs} only MuJoCo's");
