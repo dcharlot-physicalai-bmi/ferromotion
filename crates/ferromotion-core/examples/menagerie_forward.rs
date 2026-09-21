@@ -48,6 +48,11 @@ struct OState {
     bodyacc: Vec<f64>,
     qfrc_bias: Vec<f64>,
     qfrc_passive: Vec<f64>,
+    /// the four parts MuJoCo keeps `qfrc_passive` in — a total cannot say which one a port is missing
+    qfrc_spring: Vec<f64>,
+    qfrc_damper: Vec<f64>,
+    qfrc_gravcomp: Vec<f64>,
+    qfrc_fluid: Vec<f64>,
     qacc_smooth: Vec<f64>,
     qacc: Vec<f64>,
     /// ⭐ the SAME rows solved to convergence. Equal to `qacc` bit for bit on a model that does not cap
@@ -126,7 +131,7 @@ fn main() {
                     aref: t[26 + n..26 + 2 * n].iter().map(|x| f(x)).collect(),
                 });
             }
-            "qpos" | "qfrc_bias" | "qfrc_passive" | "qacc_smooth" | "qacc" | "qacc_converged" | "qvel" | "bodyacc" => {
+            "qpos" | "qfrc_bias" | "qfrc_passive" | "qfrc_spring" | "qfrc_damper" | "qfrc_gravcomp" | "qfrc_fluid" | "qacc_smooth" | "qacc" | "qacc_converged" | "qvel" | "bodyacc" => {
                 let v: Vec<f64> = t[1..].iter().map(|x| f(x)).collect();
                 let s = models.last_mut().unwrap().states.last_mut().unwrap();
                 match t[0] {
@@ -135,6 +140,10 @@ fn main() {
                     "qfrc_bias" => s.qfrc_bias = v,
                     "bodyacc" => s.bodyacc = v,
                     "qfrc_passive" => s.qfrc_passive = v,
+                    "qfrc_spring" => s.qfrc_spring = v,
+                    "qfrc_damper" => s.qfrc_damper = v,
+                    "qfrc_gravcomp" => s.qfrc_gravcomp = v,
+                    "qfrc_fluid" => s.qfrc_fluid = v,
                     "qacc_smooth" => s.qacc_smooth = v,
                     "qacc" => s.qacc = v,
                     "qacc_converged" => s.qacc_converged = v,
@@ -164,6 +173,8 @@ fn main() {
     let dofless: usize = models.iter().map(|o| named(o).filter(|(.., i)| i.len() == 12 && i[11] != 0.0).count()).sum();
     let mut inertia_notes: Vec<String> = Vec::new();
     let mut refused_bodies = 0usize;
+    let (mut worst_ipos, mut worst_ipos_where) = (0.0f64, String::new());
+    let (mut passive_gravcomp_only, mut worst_passive_gravcomp) = (0usize, 0.0f64);
     let mut skip: BTreeMap<&'static str, usize> = BTreeMap::new();
     let (mut states, mut smooth_ok, mut smooth_tried, mut solved, mut solved_ok) = (0usize, 0usize, 0usize, 0usize, 0usize);
     let (mut acc_ok, mut acc_tried, mut worst_acc) = (0usize, 0usize, 0.0f64);
@@ -291,8 +302,17 @@ fn main() {
                 inertia_tried += 1;
                 let scale = inert[1].abs().max(inert[2].abs()).max(inert[3].abs()).max(1e-12);
                 let mut e = (mass - inert[0]).abs() / inert[0].abs().max(1e-9);
+                // ⭐ `ipos` tracked on its own as well as folded in: it is what `qfrc_gravcomp` and the
+                // inertia-box fluid model read, and neither of them touches the inertia TENSOR. A residual
+                // in one is a completely different bug from a residual in the other.
+                let mut eip = 0.0f64;
                 for k in 0..3 {
-                    e = e.max((ipos[k] - inert[8 + k]).abs() / ipos.norm().max(1e-6));
+                    eip = eip.max((ipos[k] - inert[8 + k]).abs() / ipos.norm().max(1e-6));
+                }
+                e = e.max(eip);
+                if eip > worst_ipos {
+                    worst_ipos = eip;
+                    worst_ipos_where = format!("{} body {name}: {:?} vs {:?}", o.rel, ipos.as_slice(), &inert[8..11]);
                 }
                 // ⛔ the principal values are a SET paired with a frame, not a sequence: MuJoCo's
                 // eigen-solver and this port's can return the same tensor with the axes in a different
@@ -391,11 +411,37 @@ fn main() {
                 continue;
             };
             let dp = (0..nv).map(|i| (passive[i] - s.qfrc_passive[i]).abs()).fold(0.0, f64::max);
-            if dp > 1e-9 * (0..nv).map(|i| s.qfrc_passive[i].abs()).fold(1.0, f64::max) {
+            // ⭐ `qfrc_passive` is a SUM of four terms MuJoCo keeps apart, so a residual can be
+            // ATTRIBUTED instead of guessed at — and the attribution decides whether the state is
+            // comparable at all. A term this port does not carry means the answer would be wrong for a
+            // reason the sweep cannot see; a residual in a term it DOES carry is a number, and the state
+            // is worth comparing with it named.
+            let dgc = t
+                .free_basis(&q)
+                .try_inverse()
+                .map(|tinv| {
+                    let g = tinv.transpose() * DVector::from_vec(t.qfrc_gravcomp(&q));
+                    (0..nv.min(g.len())).map(|i| (g[i] - s.qfrc_gravcomp.get(i).copied().unwrap_or(0.0)).abs()).fold(0.0, f64::max)
+                })
+                .unwrap_or(f64::NAN);
+            let explained_by_gravcomp = (dp - dgc).abs() <= 0.01 * dp;
+            if dp > 1e-9 * (0..nv).map(|i| s.qfrc_passive[i].abs()).fold(1.0, f64::max) && explained_by_gravcomp {
+                passive_gravcomp_only += 1;
+                worst_passive_gravcomp = worst_passive_gravcomp.max(dp);
+            }
+            if dp > 1e-9 * (0..nv).map(|i| s.qfrc_passive[i].abs()).fold(1.0, f64::max) && !explained_by_gravcomp {
                 *skip.entry("a passive force this port does not carry (tendon, fluid)").or_default() += 1;
                 worst_passive = worst_passive.max(dp);
+                // ⭐ `qfrc_passive` is a SUM of four terms and MuJoCo keeps them apart, so the residual can
+                // be attributed instead of guessed at. `qfrc_gravcomp` is the one this port computes on its
+                // own; the rest are named so a missing term is named rather than lumped into "tendon,
+                // fluid" whether or not the model has either.
+                let part = |v: &Vec<f64>| v.iter().map(|x| x.abs()).fold(0.0, f64::max);
                 if notes.len() < 60 {
-                    notes.push(format!("{}: passive off {dp:.2e}", o.rel));
+                    notes.push(format!(
+                        "{}: passive off {dp:.2e} — MuJoCo's parts: spring {:.2e}, damper {:.2e}, gravcomp {:.2e} (ours off {dgc:.2e}), fluid {:.2e}",
+                        o.rel, part(&s.qfrc_spring), part(&s.qfrc_damper), part(&s.qfrc_gravcomp), part(&s.qfrc_fluid)
+                    ));
                 }
                 continue;
             }
@@ -908,12 +954,14 @@ fn main() {
     println!("    worst efc_D (relative) {worst_con_d:.2e} on {worst_con_d_where} ({con_rows_compared} contacts compared row by row; {reversed_pair} left out because MuJoCo wrote the geom pair the other way round)");
     println!("    worst efc_aref (relative) {worst_con_aref:.2e} on {worst_con_aref_where}");
     println!("    worst qfrc_passive on the states it blocked: {worst_passive:.2e}");
+    println!("    {passive_gravcomp_only} states were let through with a passive residual traced ENTIRELY to qfrc_gravcomp — a term this port carries, worst {worst_passive_gravcomp:.2e}; spring, damper and fluid are exact on them");
     println!(
         "  DENOMINATOR: {bodies_in_corpus} named, non-world bodies in the corpus; {refused_bodies} are in a model the loader refuses, leaving {} — the inertia gate saw {inertia_tried}. {dofless} of those have a WELD WITH NO DOFS and so no inverse weight at all; the inverse-weight gate saw {iw0_tried} of the {} that remain.",
         bodies_in_corpus - refused_bodies,
         bodies_in_corpus - refused_bodies - dofless
     );
     println!("  the inertia MuJoCo STORES (mass, the three principal values, their frame, ipos): {inertia_ok} of {inertia_tried} within 1e-9; worst {worst_inertia:.2e} on {worst_inertia_where}");
+    println!("    the inertial POSITION alone, which is what gravcomp and the fluid model read: worst {worst_ipos:.2e} on {worst_ipos_where}");
     println!("    of those, {inertia_permuted} have the same tensor with the principal axes in a DIFFERENT ORDER — equivalent, because the frame permutes with them");
     println!("    of the rest, {inertia_at_eig3_floor} are inside what mjuu_eig3's ABSOLUTE 1e-12 stop allows for their own size, and {inertia_above_floor} are not:");
     for n in &inertia_notes {

@@ -105,7 +105,11 @@ for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
             mujoco.mj_objectAcceleration(m, d, mujoco.mjtObj.mjOBJ_XBODY, b, res, 0)
             acc.extend(res)
         lines.append("\t".join(["bodyacc"] + [repr(float(x)) for x in acc]))
-        for tag, v in (("qpos", d.qpos), ("qvel", d.qvel), ("qfrc_bias", d.qfrc_bias), ("qfrc_passive", d.qfrc_passive), ("qacc_smooth", d.qacc_smooth), ("qacc", d.qacc)):
+        # ⭐ `qfrc_passive` is a SUM, and MuJoCo keeps its parts: a port that misses it by 3e-4 is missing
+        # one of these four, and the total cannot say which.
+        for tag, v in (("qpos", d.qpos), ("qvel", d.qvel), ("qfrc_bias", d.qfrc_bias), ("qfrc_passive", d.qfrc_passive),
+                       ("qfrc_spring", d.qfrc_spring), ("qfrc_damper", d.qfrc_damper), ("qfrc_gravcomp", d.qfrc_gravcomp), ("qfrc_fluid", d.qfrc_fluid),
+                       ("qacc_smooth", d.qacc_smooth), ("qacc", d.qacc)):
             lines.append("\t".join([tag] + [repr(float(x)) for x in v]))
         # ⭐ the SAME problem solved to convergence: what the rows MuJoCo built actually imply. On a
         # model that does not cap the solver this is `qacc` to the last bit; on an `*_mjx.xml` it is
