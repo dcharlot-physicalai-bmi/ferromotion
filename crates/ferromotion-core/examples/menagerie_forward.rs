@@ -159,6 +159,9 @@ fn main() {
     let (mut iw0_ok, mut iw0_tried, mut worst_iw0, mut worst_iw0_where) = (0usize, 0usize, 0.0f64, String::new());
     let (mut inertia_ok, mut inertia_tried, mut worst_inertia, mut worst_inertia_where) = (0usize, 0usize, 0.0f64, String::new());
     let (mut inertia_permuted, mut inertia_at_eig3_floor, mut inertia_above_floor) = (0usize, 0usize, 0usize);
+    // ⛔ how CLOSE the worst case comes to the bound. A bound nothing approaches is not a bound, it is a
+    // number chosen to cover the data — this one is reached to within a factor of a few, or it is wrong.
+    let mut tightest = 0.0f64;
     // ⛔⛔ the DENOMINATOR, counted from the oracle rather than from whatever reached the gate. A gate
     // whose denominator cannot be derived from the corpus is selecting its own subjects: this one used to
     // sit inside the per-state loop and reported "11,031 of 11,031" while silently skipping every model
@@ -339,17 +342,28 @@ fn main() {
                 if e < 1e-9 {
                     inertia_ok += 1;
                 } else {
-                    // ⛔ `mjuu_eig3` stops on an ABSOLUTE 1e-12, so on a body whose largest principal
-                    // value is itself near 1e-12 the stopping rule fires before the solver has done
-                    // anything and what comes out depends on the iteration. `1e-12 / scale` is the
-                    // relative accuracy that floor allows, so a residual under it is the floor and not
-                    // this port — counted apart rather than folded into one number.
-                    if e <= 1e-12 / scale {
+                    // ⛔⛔ `mjuu_eig3` has TWO stopping rules and the second is far the coarser. It
+                    // stops when the largest off-diagonal falls below an ABSOLUTE 1e-12 — which bounds
+                    // the discarded part of the tensor by `1e-12 / scale` — and ALSO the moment the next
+                    // Jacobi rotation would have `c > 1 - 1e-12`, i.e. an angle below `√(2e-12)` = 1.4e-6
+                    // radians. A residual rotation θ between two axes moves the rebuilt tensor by
+                    // `|λi − λj|·θ`, so the second rule allows `√(2e-12)·(λmax − λmin) / scale` — two
+                    // hundred times more than the first on a body whose principal values are close.
+                    //
+                    // `flexiv_rizon4/base` is exactly that: principal values within 4% of each other,
+                    // matching MuJoCo's to 2.5e-13, and a rebuilt tensor 3.8e-8 out against an allowance
+                    // of 5.9e-8. Reading only the first rule called it a failure.
+                    let spread = a[2] - a[0];
+                    let floor = (1e-12f64 / scale).max((2e-12f64).sqrt() * spread / scale);
+                    if e > 0.0 {
+                        tightest = tightest.max(e / floor);
+                    }
+                    if e <= floor {
                         inertia_at_eig3_floor += 1;
                     } else {
                         inertia_above_floor += 1;
                         if inertia_above_floor <= 6 {
-                            inertia_notes.push(format!("{} body {name}: off {e:.2e}, largest principal {scale:.3e} (eig3's floor allows {:.2e})", o.rel, 1e-12 / scale));
+                            inertia_notes.push(format!("{} body {name}: off {e:.2e}, largest principal {scale:.3e}, spread {spread:.3e} (eig3's two floors allow {floor:.2e})", o.rel));
                         }
                     }
                 }
@@ -966,8 +980,8 @@ fn main() {
     );
     println!("  the inertia MuJoCo STORES (mass, the three principal values, their frame, ipos): {inertia_ok} of {inertia_tried} within 1e-9; worst {worst_inertia:.2e} on {worst_inertia_where}");
     println!("    the inertial POSITION alone, which is what gravcomp and the fluid model read: worst {worst_ipos:.2e} on {worst_ipos_where}");
-    println!("    of those, {inertia_permuted} have the same tensor with the principal axes in a DIFFERENT ORDER — equivalent, because the frame permutes with them");
-    println!("    of the rest, {inertia_at_eig3_floor} are inside what mjuu_eig3's ABSOLUTE 1e-12 stop allows for their own size, and {inertia_above_floor} are not:");
+    println!("    {inertia_permuted} of all {inertia_tried} have the same tensor with the principal axes in a DIFFERENT ORDER — equivalent, because the frame permutes with them, and counted here whether or not they pass");
+    println!("    of the rest, {inertia_at_eig3_floor} are inside what mjuu_eig3's two stopping rules allow for their own principal values, and {inertia_above_floor} are not (worst case reaches {tightest:.2} of its own allowance):");
     for n in &inertia_notes {
         println!("      {n}");
     }
