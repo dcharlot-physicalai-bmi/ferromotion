@@ -123,22 +123,36 @@ fn main() {
                 };
                 compared += 1;
                 let dl = (len[i] - s.len[u]).abs();
-                // ⭐⭐ WHERE the two paths part company, for the ones whose length disagrees. MuJoCo
-                // publishes the resolved path — `wrap_obj` says whether each point is a site or the GEOM
-                // the cable wrapped — so a disagreement can be named ("MuJoCo wrapped this obstacle and
-                // this port did not") instead of being recorded as a number of centimetres.
+                // ⭐⭐ WHERE the two paths part company, by WHAT each of them wrapped and not how many.
+                // MuJoCo publishes the resolved path — `wrap_obj` is `-1` for a site and otherwise the
+                // GEOM the cable wrapped — and this port now reports the same through `tendon_wraps`, so
+                // the two are compared obstacle by obstacle.
+                //
+                // ⛔ Comparing COUNTS instead called two paths "the same obstacles, a different arc" when
+                // they were wrapping different obstacles entirely, with tangent points 9 cm apart. A count
+                // cannot tell identity, and the bucket it fills is the one that decides what to fix next.
                 if let Some(theirs) = s.wraps.get(&u).filter(|_| dl > 1e-9 && kind == "spatial") {
-                    {
-                        let their_wraps = theirs.iter().filter(|(o, _)| *o >= 0).count() / 2;
-                        let our_wraps = t.tendon_path_points(i, &q).iter().filter(|(_, arc)| *arc).count() / 2;
-                        *wrap_shape
-                            .entry(match our_wraps.cmp(&their_wraps) {
-                                std::cmp::Ordering::Equal => "the same obstacles wrapped, a different arc on them",
-                                std::cmp::Ordering::Less => "MuJoCo wrapped an obstacle this port left alone",
-                                std::cmp::Ordering::Greater => "this port wrapped an obstacle MuJoCo left alone",
-                            })
-                            .or_default() += 1;
+                    let mut their_seq: Vec<String> = Vec::new();
+                    let mut k = 0;
+                    while k < theirs.len() {
+                        if theirs[k].0 >= 0 {
+                            their_seq.push(t.geoms.get(theirs[k].0 as usize).map(|g| g.name.clone()).unwrap_or_default());
+                            k += 2;
+                        } else {
+                            k += 1;
+                        }
                     }
+                    let ours_seq: Vec<String> = t.tendon_wraps(i, &q).into_iter().map(|(g, _)| g).collect();
+                    let only_theirs = their_seq.iter().filter(|g| !ours_seq.contains(g)).count();
+                    let only_ours = ours_seq.iter().filter(|g| !their_seq.contains(g)).count();
+                    *wrap_shape
+                        .entry(match (only_theirs, only_ours) {
+                            (0, 0) => "the SAME obstacles, a different arc on them",
+                            (_, 0) => "MuJoCo wrapped an obstacle this port left alone",
+                            (0, _) => "this port wrapped an obstacle MuJoCo left alone",
+                            _ => "each wrapped an obstacle the other did not",
+                        })
+                        .or_default() += 1;
                 }
                 if dl > worst_len {
                     worst_len = dl;

@@ -501,6 +501,20 @@ impl MjcfTree {
     /// **Where a spatial tendon actually touches the world at this state** — every point of the path, and
     /// whether the next one is the far side of the same obstacle. This is what MuJoCo publishes as
     /// `d.wrap_xpos`, and comparing against it is the only way to see WHICH wrap a disagreement is in.
+    /// **Which obstacles a spatial tendon actually wraps at this state, and where it touches them** — the
+    /// obstacle's name with its two tangent points, in path order. MuJoCo publishes the same thing in
+    /// `d.wrap_obj`/`d.wrap_xpos`, so the two paths can be compared by WHAT they wrapped and not merely by
+    /// how many: two paths that wrap the same number of obstacles can be wrapping different ones.
+    pub fn tendon_wraps(&self, i: usize, q: &[f64]) -> Vec<(String, [Vector3<f64>; 2])> {
+        let TendonPath::Spatial(pts) = &self.tendons[i].path else { return Vec::new() };
+        let frames = crate::tree_frames(&self.tree, q);
+        let path = self.spatial_path(pts, &frames);
+        path.windows(2)
+            .filter(|w| w[0].arc.is_some())
+            .filter_map(|w| w[0].obstacle.clone().map(|g| (g, [w[0].pos, w[1].pos])))
+            .collect()
+    }
+
     pub fn tendon_path_points(&self, i: usize, q: &[f64]) -> Vec<(Vector3<f64>, bool)> {
         let TendonPath::Spatial(pts) = &self.tendons[i].path else { return Vec::new() };
         let frames = crate::tree_frames(&self.tree, q);
@@ -544,12 +558,12 @@ impl MjcfTree {
             // MuJoCo wraps a sphere or an infinite cylinder and nothing else
                             let wraps = matches!(g.kind, crate::mujoco_collision::GeomType::Sphere) || cyl;
                             if let Some(([w0, w1], arc)) = wraps.then(|| wrap_obstacle(prev, here, &gp, radius, cyl, side)).flatten() {
-                                out.push(PathPoint { ride: g.joint, pos: w0, arc: Some(arc) });
-                                out.push(PathPoint { ride: g.joint, pos: w1, arc: None });
+                                out.push(PathPoint { ride: g.joint, pos: w0, arc: Some(arc), obstacle: Some(geom.clone()) });
+                                out.push(PathPoint { ride: g.joint, pos: w1, arc: None, obstacle: Some(geom.clone()) });
                             }
                         }
                     }
-                    out.push(PathPoint { ride, pos: here, arc: None });
+                    out.push(PathPoint { ride, pos: here, arc: None, obstacle: None });
                 }
             }
         }
@@ -1923,6 +1937,10 @@ struct PathPoint {
     ride: Option<usize>,
     pos: Vector3<f64>,
     arc: Option<f64>,
+    /// the obstacle this point lies on, set on the FIRST of an arc's two tangent points. A comparison
+    /// against MuJoCo needs the obstacle's IDENTITY: two paths that wrap the same NUMBER of obstacles can
+    /// be wrapping different ones, and a count cannot tell those apart.
+    obstacle: Option<String>,
 }
 
 /// **`mju_wrap`**: where a cable leaving `x0` for `x1` first touches an obstacle and where it leaves it.
