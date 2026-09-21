@@ -1887,6 +1887,18 @@ pub(crate) fn obj_as_mujoco_reads_it(text: &str) -> Result<crate::TriMesh3, Stri
                             tris.push([poly[1], poly[2], poly[3]]);
                         }
                     }
+                    // ⛔⛔ **MuJoCo DROPS a face with more than 100 vertices.** Not an error, not a
+                    // fallback — the face is silently absent from the mesh. Measured by bisection on
+                    // synthetic OBJ files: a 100-gon yields its 98 triangles and a 101-gon yields none,
+                    // and the cap is on the VERTEX COUNT, not on the line (a 100-gon written with 6-digit
+                    // indices, 701 characters, still triangulates).
+                    //
+                    // It matters once: `hello_robot_stretch_3/link_SG3_gripper_body` holds one 215-gon
+                    // among 23,103 faces. Fanning it gave this port 23,776 triangles against MuJoCo's
+                    // 23,575 — a DIFFERENT SOLID over the same 14,083 vertices — which moved that mesh's
+                    // centre of mass by 2.7e-3, the body's `ipos` by 2.5e-3 (the worst in Menagerie), its
+                    // `qfrc_gravcomp` by 3.6e-4, and its constrained acceleration by 1.4e-2.
+                    101.. => {}
                     _ => tris.extend(triangulate_as_tinyobj(&poly, &verts)),
                 }
             }
@@ -5163,5 +5175,38 @@ mod tests {
         let (l, v) = (0.25, 0.0);
         assert_eq!(tuned.force(l, v, 1.0, 0.0), 0.0);
         assert!(tuned.force(l, v, 0.0, 1.0) < 0.0, "activation, not control, drives it");
+    }
+    /// ⛔⛔ **MuJoCo DROPS an OBJ face with more than 100 vertices** — silently, not as an error and not
+    /// with a fallback. Found by bisection against MuJoCo 3.13.0 on synthetic files: a 100-gon yields its
+    /// 98 triangles and a 101-gon yields none. The cap is on the VERTEX COUNT, not the line: a 100-gon
+    /// written with 6-digit indices, 701 characters long, still triangulates.
+    ///
+    /// It decides one mesh in Menagerie — `hello_robot_stretch_3/link_SG3_gripper_body` has a 215-gon —
+    /// and through it that model's centre of mass, gravity compensation and constrained acceleration.
+    #[test]
+    fn an_obj_face_with_more_than_a_hundred_vertices_is_dropped_as_mujoco_drops_it() {
+        let ngon = |n: usize| -> String {
+            let mut s = String::new();
+            for k in 0..n {
+                let a = std::f64::consts::TAU * (k as f64) / (n as f64);
+                s.push_str(&format!("v {} {} 0\n", a.cos(), a.sin()));
+            }
+            // one triangle apart from the n-gon, so the count below is unambiguous
+            s.push_str("v 0 0 1\nv 1 0 1\nv 0 1 1\n");
+            s.push_str("f ");
+            for k in 0..n {
+                s.push_str(&format!("{} ", k + 1));
+            }
+            s.push('\n');
+            s.push_str(&format!("f {} {} {}\n", n + 1, n + 2, n + 3));
+            s
+        };
+        let tris = |n: usize| obj_as_mujoco_reads_it(&ngon(n)).expect("parses").tris.len();
+        assert_eq!(tris(100), 98 + 1, "a 100-gon is fanned into 98 triangles");
+        assert_eq!(tris(101), 1, "a 101-gon is DROPPED, leaving only the separate triangle");
+        assert_eq!(tris(215), 1, "and so is the 215-gon that decides hello_robot_stretch_3");
+        // the boundary is exactly there, and small faces are untouched
+        assert_eq!(tris(99), 97 + 1);
+        assert_eq!(tris(5), 3 + 1);
     }
 }
