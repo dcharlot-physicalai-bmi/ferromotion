@@ -101,7 +101,7 @@ fn main() {
                 t[1].to_string(),
                 t.get(2).map(|x| f(x)).unwrap_or(f64::NAN),
                 t.get(3).map(|x| f(x)).unwrap_or(f64::NAN),
-                t.get(4..15).map(|v| v.iter().map(|x| f(x)).collect()).unwrap_or_default(),
+                t.get(4..16).map(|v| v.iter().map(|x| f(x)).collect()).unwrap_or_default(),
             )),
             "joint" => models.last_mut().unwrap().joints.push((t[1].to_string(), t[2].to_string(), t[3].parse().unwrap())),
             "state" => models.last_mut().unwrap().states.push(OState {
@@ -150,7 +150,20 @@ fn main() {
     let (mut iw0_ok, mut iw0_tried, mut worst_iw0, mut worst_iw0_where) = (0usize, 0usize, 0.0f64, String::new());
     let (mut inertia_ok, mut inertia_tried, mut worst_inertia, mut worst_inertia_where) = (0usize, 0usize, 0.0f64, String::new());
     let (mut inertia_permuted, mut inertia_at_eig3_floor, mut inertia_above_floor) = (0usize, 0usize, 0usize);
+    // ⛔⛔ the DENOMINATOR, counted from the oracle rather than from whatever reached the gate. A gate
+    // whose denominator cannot be derived from the corpus is selecting its own subjects: this one used to
+    // sit inside the per-state loop and reported "11,031 of 11,031" while silently skipping every model
+    // an earlier check refused — including the one furthest off.
+    fn named(o: &OModel) -> impl Iterator<Item = &(String, f64, f64, Vec<f64>)> {
+        o.bodies.iter().filter(|(n, ..)| !n.is_empty() && n != "world")
+    }
+    let bodies_in_corpus: usize = models.iter().map(|o| named(o).count()).sum();
+    // and the two things that legitimately remove a body from a gate, counted from the ORACLE so the
+    // accounting closes without trusting the port: welded to the world (no dofs, so no inverse weight),
+    // and belonging to a model this loader refuses
+    let dofless: usize = models.iter().map(|o| named(o).filter(|(.., i)| i.len() == 12 && i[11] != 0.0).count()).sum();
     let mut inertia_notes: Vec<String> = Vec::new();
+    let mut refused_bodies = 0usize;
     let mut skip: BTreeMap<&'static str, usize> = BTreeMap::new();
     let (mut states, mut smooth_ok, mut smooth_tried, mut solved, mut solved_ok) = (0usize, 0usize, 0usize, 0usize, 0usize);
     let (mut acc_ok, mut acc_tried, mut worst_acc) = (0usize, 0usize, 0.0f64);
@@ -179,6 +192,7 @@ fn main() {
             Ok(t) => t,
             Err(_) => {
                 *skip.entry("the loader refuses the model").or_default() += o.states.len();
+                refused_bodies += o.bodies.iter().filter(|(n, ..)| !n.is_empty() && n != "world").count();
                 if notes.len() < 60 {
                     notes.push(format!("{}: loader refused: {}", o.rel, tree_from_mjcf(&xml, &|p: &str| std::fs::read(dir.join(p)).ok()).err().unwrap_or_default()));
                 }
@@ -234,8 +248,18 @@ fn main() {
             // `efc_D` divides by. Compared here rather than probed by hand, because it is compiled at
             // `qpos0` and a port that reads the CURRENT state is exact on the reference pose: only a sweep
             // that samples moved states can fail.
-            for (name, tran, rot, _) in &o.bodies {
-                let Some(w) = biw.get(name) else { continue };
+            for (name, tran, rot, inert) in &o.bodies {
+                if name.is_empty() {
+                    continue;
+                }
+                let Some(w) = biw.get(name) else {
+                    // ⛔ a body whose WELD has dofs and still has no inverse weight is a hole in the
+                    // gate's subject list, not a convention — named so the denominator closes.
+                    if inert.len() == 12 && inert[11] == 0.0 {
+                        println!("  ⛔ {} body {name} has dofs and no inverse weight — unaccounted for", o.rel);
+                    }
+                    continue;
+                };
                 if tran.is_nan() {
                     continue;
                 }
@@ -259,7 +283,7 @@ fn main() {
             // and of the fluid model, so a residual here explains several sweep lines at once — and a
             // sweep that only compares the mass matrix cannot say WHICH body it came from.
             for (name, _, _, inert) in &o.bodies {
-                if inert.len() != 11 {
+                if inert.len() != 12 {
                     continue;
                 }
                 let (Some(&mass), Some(&ipos), Some(&iq)) = (t.body_mass.get(name), t.body_ipos.get(name), t.body_iquat.get(name)) else { continue };
@@ -884,6 +908,11 @@ fn main() {
     println!("    worst efc_D (relative) {worst_con_d:.2e} on {worst_con_d_where} ({con_rows_compared} contacts compared row by row; {reversed_pair} left out because MuJoCo wrote the geom pair the other way round)");
     println!("    worst efc_aref (relative) {worst_con_aref:.2e} on {worst_con_aref_where}");
     println!("    worst qfrc_passive on the states it blocked: {worst_passive:.2e}");
+    println!(
+        "  DENOMINATOR: {bodies_in_corpus} named, non-world bodies in the corpus; {refused_bodies} are in a model the loader refuses, leaving {} — the inertia gate saw {inertia_tried}. {dofless} of those have a WELD WITH NO DOFS and so no inverse weight at all; the inverse-weight gate saw {iw0_tried} of the {} that remain.",
+        bodies_in_corpus - refused_bodies,
+        bodies_in_corpus - refused_bodies - dofless
+    );
     println!("  the inertia MuJoCo STORES (mass, the three principal values, their frame, ipos): {inertia_ok} of {inertia_tried} within 1e-9; worst {worst_inertia:.2e} on {worst_inertia_where}");
     println!("    of those, {inertia_permuted} have the same tensor with the principal axes in a DIFFERENT ORDER — equivalent, because the frame permutes with them");
     println!("    of the rest, {inertia_at_eig3_floor} are inside what mjuu_eig3's ABSOLUTE 1e-12 stop allows for their own size, and {inertia_above_floor} are not:");

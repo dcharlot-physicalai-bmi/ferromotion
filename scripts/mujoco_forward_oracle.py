@@ -55,7 +55,17 @@ for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
                                  repr(float(m.body_mass[b])),
                                  *[repr(float(x)) for x in m.body_inertia[b]],
                                  *[repr(float(x)) for x in m.body_iquat[b]],
-                                 *[repr(float(x)) for x in m.body_ipos[b]]]))
+                                 *[repr(float(x)) for x in m.body_ipos[b]],
+                                 # ⛔ whether the body's WELD has no dofs — the exact condition under which
+                                 # MuJoCo leaves `body_invweight0` at zero, so a port that keeps no entry
+                                 # for it agrees. Recorded so the gate's denominator can be RECONCILED
+                                 # against the corpus instead of asserted.
+                                 # ⛔⛔ "welded to the world" is NOT the same test: a MOCAP body is its own
+                                 # weld (`body_weldid[b] == b`), has no dofs, and MuJoCo gives it a ZERO
+                                 # inverse weight anyway. `franka_emika_panda/mjx_single_cube` has one, it
+                                 # carries a colliding geom, and it is the single body the weld-to-world
+                                 # test could not account for.
+                                 str(int(m.body_dofnum[m.body_weldid[b]] == 0))]))
     for j in range(m.njnt):
         lines.append("\t".join(["joint", name(mujoco.mjtObj.mjOBJ_JOINT, j) or f"joint{j}", JT[int(m.jnt_type[j])], str(int(m.jnt_qposadr[j]))]))
     for k in range(K):
