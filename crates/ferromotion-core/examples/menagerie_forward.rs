@@ -701,8 +701,12 @@ fn main() {
                     }
                     for ((a, b), n) in mine.iter().filter(|(_, n)| **n != 0) {
                         let note = why.get(&(*a, *b)).cloned().unwrap_or_else(|| "no record".into());
-                        let who = if *n > 0 { format!("only ours — {note}") } else { format!("only MuJoCo's — {note}") };
-                        println!("  {}: geom{a} {} + geom{b} {} {} x{}", o.rel, t.geoms[*a].name, t.geoms[*b].name, who, n.abs());
+                        // ⛔ this is a COUNT DIFFERENCE on a pair, not a missing pair, and saying "only
+                        // ours" invites the second reading — it did, and cost a diagnosis. A pair with
+                        // four contacts here and one in MuJoCo is the multi-contact manifold disagreeing,
+                        // which is a different bug from a pair one collider never tested.
+                        let who = if *n > 0 { format!("{} MORE here", n.abs()) } else { format!("{} MORE in MuJoCo", n.abs()) };
+                        println!("  {}: geom{a} {} + geom{b} {}: {who} — {note}", o.rel, t.geoms[*a].name, t.geoms[*b].name);
                     }
                 }
                 continue;
