@@ -61,8 +61,9 @@ struct OModel {
     cone_pyramidal: bool,
     impratio: f64,
     gravity: Vector3<f64>,
-    /// name, then MuJoCo's compiled `body_invweight0` — translational, rotational
-    bodies: Vec<(String, f64, f64)>,
+    /// name, then MuJoCo's compiled `body_invweight0` (translational, rotational), then the inertia it
+    /// actually STORES: mass, the three principal values, the quaternion they are diagonal in, and `ipos`
+    bodies: Vec<(String, f64, f64, Vec<f64>)>,
     joints: Vec<(String, String, usize)>,
     /// ⛔⛔ `option/iterations` and `option/ls_iterations` are PART OF THE PROBLEM STATEMENT. 29 of
     /// Menagerie's 210 compilable models cap them — every `*_mjx.xml` at 1 or 5 Newton iterations — and
@@ -100,6 +101,7 @@ fn main() {
                 t[1].to_string(),
                 t.get(2).map(|x| f(x)).unwrap_or(f64::NAN),
                 t.get(3).map(|x| f(x)).unwrap_or(f64::NAN),
+                t.get(4..15).map(|v| v.iter().map(|x| f(x)).collect()).unwrap_or_default(),
             )),
             "joint" => models.last_mut().unwrap().joints.push((t[1].to_string(), t[2].to_string(), t[3].parse().unwrap())),
             "state" => models.last_mut().unwrap().states.push(OState {
@@ -146,6 +148,9 @@ fn main() {
     // ⭐ how often MuJoCo itself stopped short of the optimum of its own rows, and by how much
     let (mut trunc_states, mut worst_trunc, mut worst_trunc_where) = (0usize, 0.0f64, String::new());
     let (mut iw0_ok, mut iw0_tried, mut worst_iw0, mut worst_iw0_where) = (0usize, 0usize, 0.0f64, String::new());
+    let (mut inertia_ok, mut inertia_tried, mut worst_inertia, mut worst_inertia_where) = (0usize, 0usize, 0.0f64, String::new());
+    let (mut inertia_permuted, mut inertia_at_eig3_floor, mut inertia_above_floor) = (0usize, 0usize, 0usize);
+    let mut inertia_notes: Vec<String> = Vec::new();
     let mut skip: BTreeMap<&'static str, usize> = BTreeMap::new();
     let (mut states, mut smooth_ok, mut smooth_tried, mut solved, mut solved_ok) = (0usize, 0usize, 0usize, 0usize, 0usize);
     let (mut acc_ok, mut acc_tried, mut worst_acc) = (0usize, 0usize, 0.0f64);
@@ -218,6 +223,98 @@ fn main() {
         // A body with two joints has a ride dof whose parent is its own previous dof, and that reads as
         // unrelated to the body it hangs off.
         let welds = t.body_welds();
+        // ⛔ these two are COMPILED quantities — they do not depend on the state, and comparing them
+        // inside the state loop both recomputed them per state and skipped them entirely on a model
+        // that some later gate refused. `hello_robot_stretch_3` is blocked on a passive force it has
+        // and this port does not, and that silently took its inertia and its inverse weights out of
+        // the comparison too — the one model whose mass matrix is furthest off.
+        {
+            let biw = t.body_invweight0();
+            // ⭐ `body_invweight0` against MuJoCo's own, for every body — the number every contact row's
+            // `efc_D` divides by. Compared here rather than probed by hand, because it is compiled at
+            // `qpos0` and a port that reads the CURRENT state is exact on the reference pose: only a sweep
+            // that samples moved states can fail.
+            for (name, tran, rot, _) in &o.bodies {
+                let Some(w) = biw.get(name) else { continue };
+                if tran.is_nan() {
+                    continue;
+                }
+                iw0_tried += 1;
+                let e = (w.tran - tran).abs() / tran.abs().max(1e-9);
+                let er = (w.rot - rot).abs() / rot.abs().max(1e-9);
+                // 1e-7, not 1e-9: on `hello_robot_stretch`, a free base under a long chain, inverting the
+                // mass matrix costs about 2e-9 of relative accuracy and every body reads that noise.
+                if e.max(er) < 1e-7 {
+                    iw0_ok += 1;
+                } else if std::env::var("DUMP_IW0").is_ok() {
+                    println!("  {} IW0 {name}: tran {:.8e} vs {tran:.8e} (ratio {:.6}), rot {:.8e} vs {rot:.8e}", o.rel, w.tran, tran / w.tran, w.rot);
+                }
+                if e.max(er) > worst_iw0 {
+                    worst_iw0 = e.max(er);
+                    worst_iw0_where = format!("{} body {name}: tran {:.8e} vs {tran:.8e}, rot {:.8e} vs {rot:.8e}", o.rel, w.tran, w.rot);
+                }
+            }
+            // ⭐ **the inertia MuJoCo STORES**, body by body: mass, the three principal values, the frame
+            // they are diagonal in, and `ipos`. This is upstream of the mass matrix, of every `*_invweight0`
+            // and of the fluid model, so a residual here explains several sweep lines at once — and a
+            // sweep that only compares the mass matrix cannot say WHICH body it came from.
+            for (name, _, _, inert) in &o.bodies {
+                if inert.len() != 11 {
+                    continue;
+                }
+                let (Some(&mass), Some(&ipos), Some(&iq)) = (t.body_mass.get(name), t.body_ipos.get(name), t.body_iquat.get(name)) else { continue };
+                let Some(&pr) = t.body_iinertia.get(name) else { continue };
+                inertia_tried += 1;
+                let scale = inert[1].abs().max(inert[2].abs()).max(inert[3].abs()).max(1e-12);
+                let mut e = (mass - inert[0]).abs() / inert[0].abs().max(1e-9);
+                for k in 0..3 {
+                    e = e.max((ipos[k] - inert[8 + k]).abs() / ipos.norm().max(1e-6));
+                }
+                // ⛔ the principal values are a SET paired with a frame, not a sequence: MuJoCo's
+                // eigen-solver and this port's can return the same tensor with the axes in a different
+                // order, and a component-by-component comparison calls that a failure. It is not — the
+                // frame permutes with them and everything downstream reads the pair. `link_gripper_slider`
+                // on `hello_robot_stretch` is exactly that: identical tensor, axes 1 and 3 swapped.
+                let (mut a, mut b) = (pr, [inert[1], inert[2], inert[3]]);
+                a.sort_by(f64::total_cmp);
+                b.sort_by(f64::total_cmp);
+                for k in 0..3 {
+                    e = e.max((a[k] - b[k]).abs() / scale);
+                }
+                if pr.iter().zip(&inert[1..4]).any(|(x, y)| (x - y).abs() > 1e-9 * scale) {
+                    inertia_permuted += 1;
+                }
+                // the frame, as a rotation: a quaternion and its negation are the same frame, and so is one
+                // whose principal axes are permuted when two principal values are equal — compare what the
+                // tensor they rebuild says instead
+                let q = nalgebra::UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(inert[4], inert[5], inert[6], inert[7]));
+                let rt = q.to_rotation_matrix().into_inner();
+                let full = |r: &nalgebra::Matrix3<f64>, d: &[f64]| r * nalgebra::Matrix3::from_diagonal(&nalgebra::Vector3::new(d[0], d[1], d[2])) * r.transpose();
+                let et = (full(&iq, &pr) - full(&rt, &inert[1..4])).abs().max() / scale;
+                e = e.max(et);
+                if e < 1e-9 {
+                    inertia_ok += 1;
+                } else {
+                    // ⛔ `mjuu_eig3` stops on an ABSOLUTE 1e-12, so on a body whose largest principal
+                    // value is itself near 1e-12 the stopping rule fires before the solver has done
+                    // anything and what comes out depends on the iteration. `1e-12 / scale` is the
+                    // relative accuracy that floor allows, so a residual under it is the floor and not
+                    // this port — counted apart rather than folded into one number.
+                    if e <= 1e-12 / scale {
+                        inertia_at_eig3_floor += 1;
+                    } else {
+                        inertia_above_floor += 1;
+                        if inertia_above_floor <= 6 {
+                            inertia_notes.push(format!("{} body {name}: off {e:.2e}, largest principal {scale:.3e} (eig3's floor allows {:.2e})", o.rel, 1e-12 / scale));
+                        }
+                    }
+                }
+                if e >= 1e-9 && e > worst_inertia {
+                    worst_inertia = e;
+                    worst_inertia_where = format!("{} body {name}: mass {mass:.9} vs {:.9}, principal {pr:?} vs {:?}, tensor off {et:.2e}", o.rel, inert[0], &inert[1..4]);
+                }
+            }
+        }
         let excludes: HashSet<(String, String)> = t.contact_excludes.iter().flat_map(|(a, b)| [(a.clone(), b.clone()), (b.clone(), a.clone())]).collect();
         let pairs: HashMap<(String, String), usize> = t.contact_pairs.iter().enumerate().flat_map(|(i, p)| [((p.geom1.clone(), p.geom2.clone()), i), ((p.geom2.clone(), p.geom1.clone()), i)]).collect();
         for s in &o.states {
@@ -299,7 +396,7 @@ fn main() {
             if s.qvel.iter().all(|v| *v == 0.0) && s.nefc == 0 && !s.bodyacc.is_empty() && !rotational_armature {
                 let mut worst = 0.0f64;
                 let mut worst_body = String::new();
-                for (b, (name, _, _)) in o.bodies.iter().enumerate() {
+                for (b, (name, _, _, _)) in o.bodies.iter().enumerate() {
                     // ⛔ a body WELDED TO THE WORLD is reported as exactly zero by MuJoCo, not as the
                     // +9.81 its own recursion would give — the static bodies are outside the acceleration
                     // tree. Comparing them would assert a convention, not a dynamic.
@@ -331,7 +428,7 @@ fn main() {
                 }
                 if std::env::var("DUMP_ACC").is_ok() {
                     println!("ACC {} state:", o.rel);
-                    for (b, (name, _, _)) in o.bodies.iter().enumerate().take(4) {
+                    for (b, (name, _, _, _)) in o.bodies.iter().enumerate().take(4) {
                         println!("  {name}: MuJoCo {:?}", &s.bodyacc[6 * b..6 * b + 6]);
                     }
                 }
@@ -406,30 +503,6 @@ fn main() {
             }
             let frames = tree_frames(&t.tree, &q);
             let biw = t.body_invweight0();
-            // ⭐ `body_invweight0` against MuJoCo's own, for every body — the number every contact row's
-            // `efc_D` divides by. Compared here rather than probed by hand, because it is compiled at
-            // `qpos0` and a port that reads the CURRENT state is exact on the reference pose: only a sweep
-            // that samples moved states can fail.
-            for (name, tran, rot) in &o.bodies {
-                let Some(w) = biw.get(name) else { continue };
-                if tran.is_nan() {
-                    continue;
-                }
-                iw0_tried += 1;
-                let e = (w.tran - tran).abs() / tran.abs().max(1e-9);
-                let er = (w.rot - rot).abs() / rot.abs().max(1e-9);
-                // 1e-7, not 1e-9: on `hello_robot_stretch`, a free base under a long chain, inverting the
-                // mass matrix costs about 2e-9 of relative accuracy and every body reads that noise.
-                if e.max(er) < 1e-7 {
-                    iw0_ok += 1;
-                } else if std::env::var("DUMP_IW0").is_ok() {
-                    println!("  {} IW0 {name}: tran {:.8e} vs {tran:.8e} (ratio {:.6}), rot {:.8e} vs {rot:.8e}", o.rel, w.tran, tran / w.tran, w.rot);
-                }
-                if e.max(er) > worst_iw0 {
-                    worst_iw0 = e.max(er);
-                    worst_iw0_where = format!("{} body {name}: tran {:.8e} vs {tran:.8e}, rot {:.8e} vs {rot:.8e}", o.rel, w.tran, w.rot);
-                }
-            }
             let mut contacts: Vec<ferromotion_core::ContactSpec> = Vec::new();
             // which geoms each of our contacts came from, and the frame we gave it — so the tangent pair can
             // be held against MuJoCo's, which a normal-only comparison cannot see
@@ -811,6 +884,12 @@ fn main() {
     println!("    worst efc_D (relative) {worst_con_d:.2e} on {worst_con_d_where} ({con_rows_compared} contacts compared row by row; {reversed_pair} left out because MuJoCo wrote the geom pair the other way round)");
     println!("    worst efc_aref (relative) {worst_con_aref:.2e} on {worst_con_aref_where}");
     println!("    worst qfrc_passive on the states it blocked: {worst_passive:.2e}");
+    println!("  the inertia MuJoCo STORES (mass, the three principal values, their frame, ipos): {inertia_ok} of {inertia_tried} within 1e-9; worst {worst_inertia:.2e} on {worst_inertia_where}");
+    println!("    of those, {inertia_permuted} have the same tensor with the principal axes in a DIFFERENT ORDER — equivalent, because the frame permutes with them");
+    println!("    of the rest, {inertia_at_eig3_floor} are inside what mjuu_eig3's ABSOLUTE 1e-12 stop allows for their own size, and {inertia_above_floor} are not:");
+    for n in &inertia_notes {
+        println!("      {n}");
+    }
     println!("  body_invweight0 (what every contact row's efc_D divides by, compiled at qpos0): {iw0_ok} of {iw0_tried} within 1e-7; worst {worst_iw0:.2e} on {worst_iw0_where}");
     println!("  BODY ACCELERATIONS in the world frame, at rest — basis-free, so a free or ball base is included: {acc_ok} of {acc_tried} within 1e-6; worst {worst_acc:.2e}");
     println!("  FLOATING BASE, every dof in MUJOCO'S coordinates (at rest AND moving): {chain_ok} of {chain_tried} within 1e-6; worst qacc_smooth {worst_chain:.2e}");

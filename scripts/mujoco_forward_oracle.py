@@ -47,8 +47,15 @@ for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
         # ⛔ an UNNAMED body is written with an empty name and left uncompared. Filling in `body{id}`
         # pairs it with whatever the port happens to call its own unnamed bodies, which is a guess: the
         # two numberings agree until they do not, and then the sweep compares two different bodies.
+        # ⭐ and the inertia MuJoCo actually STORES: the mass, the three principal values and the frame
+        # they are diagonal in. Not the tensor the file states — the compiler diagonalises with `mjuu_eig3`
+        # and keeps the eigendecomposition, so this is what the dynamics read.
         lines.append("\t".join(["body", name(mujoco.mjtObj.mjOBJ_BODY, b) or "",
-                                 repr(float(m.body_invweight0[b][0])), repr(float(m.body_invweight0[b][1]))]))
+                                 repr(float(m.body_invweight0[b][0])), repr(float(m.body_invweight0[b][1])),
+                                 repr(float(m.body_mass[b])),
+                                 *[repr(float(x)) for x in m.body_inertia[b]],
+                                 *[repr(float(x)) for x in m.body_iquat[b]],
+                                 *[repr(float(x)) for x in m.body_ipos[b]]]))
     for j in range(m.njnt):
         lines.append("\t".join(["joint", name(mujoco.mjtObj.mjOBJ_JOINT, j) or f"joint{j}", JT[int(m.jnt_type[j])], str(int(m.jnt_qposadr[j]))]))
     for k in range(K):
