@@ -29,6 +29,8 @@ struct Case {
 struct State {
     qpos: Vec<f64>,
     len: Vec<f64>,
+    /// MuJoCo's resolved path per tendon: `-1` a site, `-2` a pulley, otherwise the GEOM it wrapped
+    wraps: BTreeMap<usize, Vec<(i64, [f64; 3])>>,
     vel: Vec<(Vec<f64>, Vec<f64>)>,
 }
 
@@ -51,6 +53,12 @@ fn main() {
             "tendon" => cases.last_mut().unwrap().tendons.push((t[1].to_string(), t[2].to_string())),
             "state" => cases.last_mut().unwrap().states.push(State { qpos: t[1..].iter().map(|x| f(x)).collect(), ..Default::default() }),
             "len" => cases.last_mut().unwrap().states.last_mut().unwrap().len = t[1..].iter().map(|x| f(x)).collect(),
+            // MuJoCo's own path: (which object the point came from, where it is), in order
+            "wrap" => {
+                let i: usize = t[1].parse().unwrap();
+                let pts: Vec<(i64, [f64; 3])> = t[2..].chunks(4).filter(|c| c.len() == 4).map(|c| (c[0].parse().unwrap(), [f(c[1]), f(c[2]), f(c[3])])).collect();
+                cases.last_mut().unwrap().states.last_mut().unwrap().wraps.insert(i, pts);
+            }
             "qvel" => cases.last_mut().unwrap().states.last_mut().unwrap().vel.push((t[1..].iter().map(|x| f(x)).collect(), Vec::new())),
             "tenvel" => cases.last_mut().unwrap().states.last_mut().unwrap().vel.last_mut().unwrap().1 = t[1..].iter().map(|x| f(x)).collect(),
             _ => {}
@@ -67,6 +75,7 @@ fn main() {
     let mut ladder = [0usize; 4];
     let mut notes: Vec<String> = Vec::new();
     let mut unexplained: BTreeSet<String> = BTreeSet::new();
+    let mut wrap_shape: BTreeMap<&'static str, usize> = BTreeMap::new();
     let (mut skipped_tendons, mut refused_tendons) = (0usize, 0usize);
     for c in &cases {
         if filter.as_ref().is_some_and(|fl| !c.rel.contains(fl.as_str())) {
@@ -114,6 +123,23 @@ fn main() {
                 };
                 compared += 1;
                 let dl = (len[i] - s.len[u]).abs();
+                // ⭐⭐ WHERE the two paths part company, for the ones whose length disagrees. MuJoCo
+                // publishes the resolved path — `wrap_obj` says whether each point is a site or the GEOM
+                // the cable wrapped — so a disagreement can be named ("MuJoCo wrapped this obstacle and
+                // this port did not") instead of being recorded as a number of centimetres.
+                if let Some(theirs) = s.wraps.get(&u).filter(|_| dl > 1e-9 && kind == "spatial") {
+                    {
+                        let their_wraps = theirs.iter().filter(|(o, _)| *o >= 0).count() / 2;
+                        let our_wraps = t.tendon_path_points(i, &q).iter().filter(|(_, arc)| *arc).count() / 2;
+                        *wrap_shape
+                            .entry(match our_wraps.cmp(&their_wraps) {
+                                std::cmp::Ordering::Equal => "the same obstacles wrapped, a different arc on them",
+                                std::cmp::Ordering::Less => "MuJoCo wrapped an obstacle this port left alone",
+                                std::cmp::Ordering::Greater => "this port wrapped an obstacle MuJoCo left alone",
+                            })
+                            .or_default() += 1;
+                    }
+                }
                 if dl > worst_len {
                     worst_len = dl;
                     worst_len_where = format!("{} / {name} ({kind})", c.rel);
@@ -168,6 +194,12 @@ fn main() {
         println!("      {u}");
     }
     println!("  tendon-states compared: {compared}");
+    if !wrap_shape.is_empty() {
+        println!("  of the spatial ones whose LENGTH disagrees, what the two paths actually did:");
+        for (k, n) in &wrap_shape {
+            println!("      {n:>5}  {k}");
+        }
+    }
     println!("  length matching MuJoCo: {ok_len}; worst {worst_len:.2e} on {worst_len_where}");
     for (k, n) in &seen_kind {
         println!("    {k}: {} of {n}", ok_kind.get(k).copied().unwrap_or(0));

@@ -53,6 +53,21 @@ for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
         mujoco.mj_forward(m, d)
         lines.append("\t".join(["state"] + [repr(float(x)) for x in d.qpos]))
         lines.append("\t".join(["len"] + [repr(float(x)) for x in d.ten_length]))
+        # ⭐⭐ the PATH MuJoCo actually took: `ten_wrapadr`/`ten_wrapnum` index `wrap_xpos` and `wrap_obj`,
+        # and `wrap_obj` says where each point came from — `-1` a site, `-2` a pulley, otherwise the GEOM
+        # the cable wrapped. A length that disagrees says only that; this says whether MuJoCo wrapped an
+        # obstacle the port left alone, or the other way round, and where it touched.
+        wxp = np.asarray(d.wrap_xpos).reshape(-1, 3)
+        wob = np.asarray(d.wrap_obj).reshape(-1)
+        for t in range(m.ntendon):
+            a0, n0 = int(d.ten_wrapadr[t]), int(d.ten_wrapnum[t])
+            if n0 <= 0:
+                continue
+            row = ["wrap", str(t)]
+            for q in range(a0, a0 + n0):
+                row.append(str(int(wob[q])))
+                row.extend(repr(float(x)) for x in wxp[q])
+            lines.append("\t".join(row))
         # ⛔ `ten_J` is stored SPARSE on anything bigger than a gripper and its index arrays are not exposed
         # in the Python bindings, so the Jacobian is checked by what it DOES: `ten_velocity = ten_J·q̇` for
         # three random velocities. A wrong row survives one projection with probability zero.
