@@ -107,6 +107,8 @@ fn main() {
     let mut blocked_models: Vec<String> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
     let mut worst_qfrc_where = String::new();
+    let (mut unexplained, mut unexplained_notes, mut unnamed) = (0usize, Vec::<String>::new(), 0usize);
+    let mut unnamed_by_index = 0usize;
     for o in &models {
         if filter.as_ref().is_some_and(|fl| !o.rel.contains(fl.as_str())) {
             continue;
@@ -138,11 +140,37 @@ fn main() {
         }
         // which of MuJoCo's actuators we claim: by name, since the ones we leave out shift the indices
         let ours: BTreeMap<&str, usize> = t.actuators.iter().enumerate().map(|(i, a)| (a.name.as_str(), i)).collect();
+        // ⭐ MuJoCo leaves an unnamed actuator unnamed, so it cannot be paired by name — `google_robot`
+        // has 42. Pairing it by INDEX is sound only once the ordering is PROVED rather than assumed:
+        // the two lists must be the same length and every NAMED actuator must already sit at the same
+        // index in both. Then the unnamed ones are the remaining positions and there is no guess left.
+        let order_proved = t.actuators.len() == o.acts.len()
+            && o.acts.iter().enumerate().all(|(u, e)| e.name.is_empty() || t.actuators.get(u).is_some_and(|a| a.name == e.name));
         // the dof vectors only correspond when every joint is a hinge or a slide in the same order
         let lined_up = t.joints.len() == o.joints.len()
             && t.joints.iter().zip(&o.joints).all(|(a, b)| matches!((a.kind, b.1.as_str()), (MjcfJointKind::Hinge, "hinge") | (MjcfJointKind::Slide, "slide")));
         for (u, e) in o.acts.iter().enumerate() {
-            let Some(&i) = ours.get(e.name.as_str()) else { continue };
+            if e.name.is_empty() {
+                if !order_proved {
+                    unnamed += 1;
+                    continue;
+                }
+                unnamed_by_index += 1;
+            }
+            let by_index = e.name.is_empty().then_some(u);
+            let Some(&i) = by_index.as_ref().or(ours.get(e.name.as_str())) else {
+                // ⛔ an actuator MuJoCo compiled that this port does not have BY NAME. It is only
+                // accounted for if the loader named a reason for it; anything else is a hole in the
+                // gate's subject list, and a gate whose denominator cannot be derived from the corpus is
+                // selecting its own subjects.
+                if !t.actuators_unsupported.iter().any(|(n, _)| n == &e.name) {
+                    unexplained += 1;
+                    if unexplained <= 8 {
+                        unexplained_notes.push(format!("{} '{}' ({}): MuJoCo has it, this port neither carries it nor names a reason", o.rel, e.name, e.trn));
+                    }
+                }
+                continue;
+            };
             carried += 1;
             let a = &t.actuators[i];
             let gain = match a.gain {
@@ -222,6 +250,13 @@ fn main() {
         }
     }
     println!("models {seen} (loader refused {refused})");
+    let in_corpus: usize = models.iter().map(|o| o.acts.len()).sum();
+    let named_reason: usize = left_out.values().sum();
+    let refused_acts: usize = in_corpus - carried - named_reason - unnamed - unexplained;
+    println!("  DENOMINATOR: {in_corpus} actuators in the corpus; {carried} carried, {named_reason} left out with a REASON named by the loader, {unnamed} UNNAMED by MuJoCo and unpairable, {refused_acts} in a model the loader refuses, {unexplained} unexplained ({unnamed_by_index} unnamed ones paired by INDEX, on models where the ordering is proved)");
+    for n in &unexplained_notes {
+        println!("      {n}");
+    }
     println!("  actuators carried {carried}, compiled parameters identical {params_ok}");
     println!("  force evaluations {states}, matching MuJoCo {state_ok}; worst length {worst_len:.2e}, velocity {worst_vel:.2e}, force {worst_force:.2e}");
     println!("  worst qfrc_actuator, over models where every actuator is carried: {worst_qfrc:.2e} on {worst_qfrc_where}");

@@ -44,7 +44,11 @@ for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
         tgt = int(m.actuator_trnid[u, 0])
         tname = name(mujoco.mjtObj.mjOBJ_JOINT, tgt) if trn in ("joint", "jointinparent") else str(tgt)
         lines.append("\t".join([
-            "actuator", name(mujoco.mjtObj.mjOBJ_ACTUATOR, u) or f"act{u}", trn, tname or "?",
+            # ⛔ an UNNAMED actuator is written with an EMPTY name. Filling in `act{u}` pairs it with
+            # whatever the port happens to call its own unnamed actuators — `google_robot` has 42, this
+            # port calls them `actuator{n}`, and the sweep silently compared none of them while the
+            # denominator said nothing.
+            "actuator", name(mujoco.mjtObj.mjOBJ_ACTUATOR, u) or "", trn, tname or "?",
             GAIN[int(m.actuator_gaintype[u])], BIAS[int(m.actuator_biastype[u])], DYN[int(m.actuator_dyntype[u])],
             repr(float(m.actuator_gear[u, 0])),
             *[repr(float(x)) for x in m.actuator_gainprm[u, :10]],
