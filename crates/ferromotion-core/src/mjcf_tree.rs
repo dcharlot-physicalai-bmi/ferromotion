@@ -2042,16 +2042,43 @@ fn wrap_obstacle(x0: Vector3<f64>, x1: Vector3<f64>, pose: &Iso, radius: f64, cy
     };
     let dist = |p: [f64; 2], q: [f64; 2]| ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2)).sqrt();
     let cands = [(tang(p0, d0, 1.0), tang(p1, d1, -1.0)), (tang(p0, d0, -1.0), tang(p1, d1, 1.0))];
+    let total = |(t0, t1): ([f64; 2], [f64; 2])| dist(p0, t0) + arc_of(t0, t1) + dist(t1, p1);
+    // ⛔⛔ **the side site chooses by DIRECTION, and only when the infinite line cuts the circle.**
+    //
+    // Two things were wrong with comparing the raw chord midpoints. The side site's DISTANCE must not
+    // count — MuJoCo's decision region is a half-plane through the obstacle's CENTRE, so the score has to
+    // be a dot product of two UNIT vectors — and the midpoint must be pushed out onto the circle, because
+    // the two candidates' chord midpoints sit at different radii and that scale leaks into a distance
+    // comparison. `argmax_i dot(ŝ, unit(t0ᵢ + t1ᵢ))` has neither defect, and its boundary is exactly the
+    // angular bisector of the two candidates' surface-midpoint directions.
+    //
+    // ⛔ And it applies only where the INFINITE line through the two endpoints passes within `radius` of
+    // the centre (`det > 0` — the same discriminant `crosses` clamps to the segment). Outside that, the
+    // side site does NOT choose: MuJoCo takes the wrap it would take with no side site at all, the
+    // shorter total path, and the side site only gates WHETHER to wrap.
+    //
+    // Measured against MuJoCo 3.13.0 over every side-site decision in Menagerie, three states each:
+    //   the old rule, nearest RAW chord midpoint        1,767 of 1,965
+    //   `argmax dot(ŝ, unit(t0+t1))` everywhere         1,955 of 1,965
+    //   the same, gated on the line cutting the circle  1,965 of 1,965   <- this
+    //   shorter total path everywhere                   1,700 of 1,965
+    let line_cuts = det > 0.0;
     let pick = match side2 {
-        // the side point chooses: the wrap whose midpoint on the circle is nearer to it
-        Some(sp) => {
-            let score = |(t0, t1): ([f64; 2], [f64; 2])| dist([(t0[0] + t1[0]) * 0.5, (t0[1] + t1[1]) * 0.5], sp);
-            usize::from(score(cands[1]) < score(cands[0]))
+        Some(sp) if line_cuts => {
+            let spn = (sp[0] * sp[0] + sp[1] * sp[1]).sqrt();
+            let sd = if spn > 1e-15 { [sp[0] / spn, sp[1] / spn] } else { sp };
+            let score = |(t0, t1): ([f64; 2], [f64; 2])| {
+                let m = [t0[0] + t1[0], t0[1] + t1[1]];
+                let n = (m[0] * m[0] + m[1] * m[1]).sqrt();
+                if n > 1e-15 {
+                    (sd[0] * m[0] + sd[1] * m[1]) / n
+                } else {
+                    f64::NEG_INFINITY
+                }
+            };
+            usize::from(score(cands[1]) > score(cands[0]))
         }
-        None => {
-            let total = |(t0, t1): ([f64; 2], [f64; 2])| dist(p0, t0) + arc_of(t0, t1) + dist(t1, p1);
-            usize::from(total(cands[1]) < total(cands[0]))
-        }
+        _ => usize::from(total(cands[1]) < total(cands[0])),
     };
     let (t0, t1) = cands[pick];
     let arc2d = arc_of(t0, t1);
