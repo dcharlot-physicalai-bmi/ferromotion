@@ -38,7 +38,15 @@ for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
             continue
         seen.add(key)
         npoly = int(m.mesh_polynum[i])
-        lines.append(f"mesh\t{rel}\t{name}\t{int(m.mesh_vertnum[i])}\t{npoly}")
+        # ⛔ whether any geom that USES this mesh can collide. MuJoCo hulls every mesh; a port only needs
+        # the ones a collider reads, so this is what makes the sweep's denominator reconcilable instead of
+        # "788 of 2,386 and no explanation".
+        collides = int(any(
+            int(m.geom_dataid[g]) == i and int(m.geom_type[g]) == int(mujoco.mjtGeom.mjGEOM_MESH)
+            and (int(m.geom_contype[g]) or int(m.geom_conaffinity[g]))
+            for g in range(m.ngeom)
+        ))
+        lines.append(f"mesh\t{rel}\t{name}\t{int(m.mesh_vertnum[i])}\t{npoly}\t{collides}")
         adr = int(m.mesh_polyadr[i])
         for p in range(adr, adr + npoly):
             va, vn = int(m.mesh_polyvertadr[p]), int(m.mesh_polyvertnum[p])

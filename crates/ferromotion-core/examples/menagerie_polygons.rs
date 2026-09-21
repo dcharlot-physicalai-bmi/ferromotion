@@ -17,6 +17,8 @@ struct Mesh {
     name: String,
     nvert: usize,
     polys: Vec<(Vec<f64>, Vec<usize>)>,
+    /// whether any geom that uses this mesh can collide — the subject list this sweep is entitled to
+    collides: bool,
 }
 
 fn main() {
@@ -33,7 +35,13 @@ fn main() {
     for line in text.lines() {
         let t: Vec<&str> = line.split('\t').collect();
         match t[0] {
-            "mesh" => meshes.push(Mesh { rel: t[1].to_string(), name: t[2].to_string(), nvert: t[3].parse().unwrap(), polys: Vec::new() }),
+            "mesh" => meshes.push(Mesh {
+                rel: t[1].to_string(),
+                name: t[2].to_string(),
+                nvert: t[3].parse().unwrap(),
+                polys: Vec::new(),
+                collides: t.get(5).is_some_and(|x| *x == "1"),
+            }),
             "poly" => {
                 let normal = vec![f(t[1]), f(t[2]), f(t[3])];
                 let verts: Vec<usize> = t[4..].iter().map(|x| x.parse().unwrap()).collect();
@@ -53,6 +61,7 @@ fn main() {
     let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut notes: Vec<String> = Vec::new();
     let (mut hull_vert_same, mut hull_vert_tried, mut hull_vert_diff) = (0usize, 0usize, 0usize);
+    let mut no_hull_but_collides: BTreeSet<String> = BTreeSet::new();
     let (mut hull_only_ours, mut hull_only_theirs) = (0usize, 0usize);
     let (mut normal_same_line, mut normal_other_line, mut worst_line, mut worst_line_where) = (0usize, 0usize, 0.0f64, String::new());
     let (mut flip_ours_inward, mut flip_theirs_inward, mut flip_ambiguous) = (0usize, 0usize, 0usize);
@@ -72,7 +81,15 @@ fn main() {
         };
         for m in list {
             // only meshes this port actually builds a hull for: a visual-only mesh has no collider
-            let Some(hull) = t.mesh_hulls.get(&m.name) else { continue };
+            let Some(hull) = t.mesh_hulls.get(&m.name) else {
+                // ⛔ MuJoCo hulls EVERY mesh; this port hulls the ones a collider reads. That is a
+                // legitimate subject list, but only while it is the same one — a mesh a geom can collide
+                // with and we have no hull for is a hole, not an optimisation.
+                if m.collides {
+                    no_hull_but_collides.insert(format!("{rel} / {}", m.name));
+                }
+                continue;
+            };
             seen += 1;
             if std::env::var("DUMP_HULL").is_ok() {
                 let exact = ferromotion_core::try_convex_hull_3d(&hull.verts).map(|h| h.verts.len());
@@ -256,6 +273,12 @@ fn main() {
                 }
             }
         }
+    }
+    let in_corpus = meshes.len();
+    let colliding = meshes.iter().filter(|m| m.collides).count();
+    println!("  DENOMINATOR: {in_corpus} meshes MuJoCo builds polygons for; {colliding} are used by a geom that can COLLIDE, and this port hulls those. {seen} compared, {} used by a collider with no hull here:", no_hull_but_collides.len());
+    for x in no_hull_but_collides.iter().take(8) {
+        println!("      {x}");
     }
     println!("collision meshes compared: {seen}");
     println!("  same polygon COUNT as MuJoCo: {same_count}");

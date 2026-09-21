@@ -14,7 +14,7 @@
 //! ```
 
 use ferromotion_core::{tree_from_mjcf, MjcfJointKind};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Default)]
 struct Case {
@@ -66,6 +66,8 @@ fn main() {
     // one that differs in the last digits of a tangency is not, and a single pass/fail count hides which
     let mut ladder = [0usize; 4];
     let mut notes: Vec<String> = Vec::new();
+    let mut unexplained: BTreeSet<String> = BTreeSet::new();
+    let (mut skipped_tendons, mut refused_tendons) = (0usize, 0usize);
     for c in &cases {
         if filter.as_ref().is_some_and(|fl| !c.rel.contains(fl.as_str())) {
             continue;
@@ -75,6 +77,7 @@ fn main() {
         let Ok(xml) = std::fs::read_to_string(&model) else { continue };
         let Ok(t) = tree_from_mjcf(&xml, &|p: &str| std::fs::read(dir.join(p)).ok()) else {
             *counts.entry("the loader refuses the model".into()).or_default() += 1;
+            refused_tendons += c.tendons.len();
             continue;
         };
         models += 1;
@@ -88,6 +91,9 @@ fn main() {
             && t.joints.iter().zip(&c.joints).all(|(a, b)| matches!((a.kind, b.1.as_str()), (MjcfJointKind::Hinge, "hinge") | (MjcfJointKind::Slide, "slide")));
         if !lined_up {
             *counts.entry("a free or ball joint: the dof columns do not correspond".into()).or_default() += 1;
+            // ⛔ in TENDONS, not in models: the two are not the same unit, and an accounting that mixes
+            // them cannot close. 22 models is 60 tendons here.
+            skipped_tendons += c.tendons.len();
             continue;
         }
         // ours by name, so a tendon MuJoCo has and we do not simply is not compared
@@ -97,7 +103,15 @@ fn main() {
             let Ok(q) = t.q_from_qpos(&s.qpos, &qposadr) else { continue };
             let (len, mom) = (t.ten_length(&q), t.ten_moment(&q));
             for (u, (name, kind)) in c.tendons.iter().enumerate() {
-                let Some(&i) = ours.get(name.as_str()) else { continue };
+                let Some(&i) = ours.get(name.as_str()) else {
+                    // ⛔ a tendon MuJoCo has that this port does not carry BY NAME. It is accounted for
+                    // only if the loader named a reason; anything else is a hole in the subject list, and
+                    // a gate whose denominator cannot be derived from the corpus is selecting its own.
+                    if !t.tendons_unsupported.iter().any(|(n, _)| n == name) {
+                        unexplained.insert(format!("{} / {name} ({kind})", c.rel));
+                    }
+                    continue;
+                };
                 compared += 1;
                 let dl = (len[i] - s.len[u]).abs();
                 if dl > worst_len {
@@ -144,6 +158,15 @@ fn main() {
         let _ = c.nv;
     }
     println!("models with tendons: {models} ({tendons} tendons)");
+    let in_corpus: usize = cases.iter().map(|c| c.tendons.len()).sum();
+    println!(
+        "  DENOMINATOR: {in_corpus} tendons in the corpus; {refused_tendons} in a model the loader refuses, {skipped_tendons} in a model whose dof columns do not correspond, {} unexplained — leaving {} compared at each of 3 states, which is the {compared} tendon-states below",
+        unexplained.len(),
+        in_corpus - refused_tendons - skipped_tendons
+    );
+    for u in unexplained.iter().take(8) {
+        println!("      {u}");
+    }
     println!("  tendon-states compared: {compared}");
     println!("  length matching MuJoCo: {ok_len}; worst {worst_len:.2e} on {worst_len_where}");
     for (k, n) in &seen_kind {
