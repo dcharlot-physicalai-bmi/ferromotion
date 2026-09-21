@@ -1979,6 +1979,17 @@ fn wrap_obstacle(x0: Vector3<f64>, x1: Vector3<f64>, pose: &Iso, radius: f64, cy
         // site agrees with where the cable already is. Requiring an intersection loses `iit_softfoot`'s
         // wraps entirely; requiring the obstacle to be alongside the run loses `ms_human_700`'s knee.
         Some(sp) => {
+            // ⛔⛔ **TRIED AND REJECTED, 2026-09-21: forcing the wrap when the side site is INSIDE the
+            // obstacle.** MuJoCo does do that — mapped by sweeping the side site over a grid with the
+            // chord held clear of a sphere, the wrap region is the half-plane beyond the centre and the
+            // boundary dips to the circle's NEAR edge, so the whole disc wraps. Across every sidesite
+            // decision in Menagerie it takes the per-decision agreement from 3,615 of 3,807 to 3,719:
+            // 136 missed wraps down to 8, for 24 more wraps MuJoCo does not make.
+            //
+            // ⛔⛔ And it makes the ANSWER WORSE: tendon lengths matching fall 9,198 → 9,172 of 9,495,
+            // and the tendons whose path shape disagrees rise 297 → 323. The extra wraps are ones this
+            // port then computes a WRONG ARC for, so not wrapping was compensating. Do not re-apply the
+            // clause on its own — the arc for a side site inside the obstacle has to be right first.
             let t = (-b / a).clamp(0.0, 1.0);
             let near = [p0[0] + t * dif[0], p0[1] + t * dif[1]];
             if !crosses && near[0] * sp[0] + near[1] * sp[1] >= 0.0 {
