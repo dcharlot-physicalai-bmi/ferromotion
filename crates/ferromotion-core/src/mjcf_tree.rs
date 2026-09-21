@@ -425,7 +425,13 @@ impl MjcfTree {
             .keys()
             .map(|b| {
                 let w = weld_of(b, &dofs, &self.body_parent);
-                let pw = match self.body_parent.get(b) {
+                // ⛔⛔ the parent of the WELD, not the parent of the BODY. MuJoCo's filter asks
+                // `body_weldid[body_parentid[body_weldid[b]]]`, and for a JOINTLESS body those are
+                // different bodies: `aloha`'s `left/gripper_base` hangs off `left/gripper_link`, so the
+                // parent of the body is its own weld and the pair with `left/wrist_link` never looks like
+                // parent and child. MuJoCo filters it; this port collided it, at 3.7 mm of penetration.
+                // For a body that HAS joints the two readings coincide, which is why it hid.
+                let pw = match self.body_parent.get(w) {
                     Some(p) if p != "world" => weld_of(p.as_str(), &dofs, &self.body_parent),
                     _ => "world",
                 };
@@ -4777,6 +4783,10 @@ mod tests {
     ///
     /// On `hello_robot_stretch` the rubber tips have two joints each and collided with the fingers they hang
     /// off — a contact MuJoCo never produces, in every sampled state.
+    ///
+    /// ⛔⛔ And the question is asked of the WELD's parent, not the body's: the two coincide for a body
+    /// that has joints and diverge for one that does not, which is why reading it the wrong way survived a
+    /// whole corpus sweep. It cost 31 states of contact-count disagreement on its own.
     #[test]
     fn a_body_with_two_joints_is_still_its_parents_child() {
         let t = tree_from_mjcf_str(
@@ -4798,12 +4808,20 @@ mod tests {
         assert_eq!(tip.2, 2, "the tip has two dofs of its own");
         assert_eq!(tip.1, upper.0, "the tip's PARENT weld is the upper body, not the tip's own first dof");
         assert_eq!(cap.0, tip.0, "a jointless child welds into the body it hangs off");
-        assert_eq!(cap.1, tip.0, "its PARENT weld is the tip, because the tip is the body it hangs off");
+        // ⛔⛔ the parent of the WELD, not of the BODY. The cap welds into the tip, so its parent weld is
+        // the TIP'S parent — `upper` — and not the tip itself. MuJoCo: `body_weldid[body_parentid[
+        // body_weldid[b]]]`, which prints `upper` for the cap on this very model.
+        assert_eq!(cap.1, upper.0, "the cap welds into the tip, so its parent weld is the TIP's parent");
         let f = |a: (usize, usize, usize), b: (usize, usize, usize)| crate::mujoco_collision::filter_body_pair(a.0, a.1, a.2, b.0, b.1, b.2, true);
         assert!(f(upper, tip), "parent and child by weld");
         assert!(f(tip, cap), "the same weld body");
-        // ⛔ and a GRANDCHILD is not filtered — MuJoCo looks one weld up, not all the way
-        assert!(!f(upper, cap), "the cap welds into the tip, and the tip's parent is not the cap's business");
+        // ⛔⛔ and therefore a JOINTLESS GRANDCHILD *IS* filtered against its grandparent, because welding
+        // into its parent makes it that parent — which is a child. Verified against MuJoCo 3.13.0 on this
+        // exact tree with the cap moved to `pos="-0.06 0 0"`, where it sits at the origin fully inside
+        // `g_upper`: `d.ncon` is ZERO. An earlier reading of this test asserted the opposite and was wrong;
+        // it was the reason `aloha` collided `left/wrist_link` with `left/gripper_base` at 3.7 mm of
+        // penetration in every sampled state.
+        assert!(f(upper, cap), "welding into the tip makes the cap a CHILD of upper, and children are filtered");
     }
 
     /// **The inertia-box fluid model, against MuJoCo's own numbers.** Every coefficient was fitted one term

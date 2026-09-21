@@ -85,6 +85,7 @@ fn main() {
     }
 
     let (mut seen, mut refused, mut ngeom, mut count_ok, mut params_ok, mut placed) = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+    let (mut order_ok, mut order_tried, mut order_bad, mut order_notes) = (0usize, 0usize, 0usize, Vec::<String>::new());
     let (mut worst_pos, mut worst_rot, mut worst_size) = (0.0f64, 0.0f64, 0.0f64);
     let mut refusals: Vec<String> = Vec::new();
     // one worst example per failure kind, so a single noisy category cannot hide the others
@@ -135,6 +136,23 @@ fn main() {
         let q = names_match.then(|| t.q_from_qpos(&o.qpos0, &o.joints.iter().map(|j| j.2).collect::<Vec<_>>()).ok()).flatten();
         let frames = q.as_ref().map(|q| ferromotion_core::tree_frames(&t.tree, q));
 
+        // ⛔⛔ this sweep, and the contact sweep's report of WHICH geom pairs disagree, both pair geoms
+        // BY INDEX. That assumption is load-bearing and was never checked: if the two orders drift, every
+        // comparison below is between two different geoms and the pair names in the contact report are
+        // fiction. Checked here, where the names are already to hand.
+        if t.geoms.len() != o.geoms.len() {
+            order_bad += 1;
+            order_notes.push(format!("{}: {} geoms here, {} in MuJoCo", o.rel, t.geoms.len(), o.geoms.len()));
+        } else {
+            order_tried += 1;
+            match t.geoms.iter().zip(&o.geoms).position(|(g, e)| !e.name.is_empty() && g.name != e.name) {
+                None => order_ok += 1,
+                Some(k) => {
+                    order_bad += 1;
+                    order_notes.push(format!("{}: geom {k} is '{}' here and '{}' in MuJoCo", o.rel, t.geoms[k].name, o.geoms[k].name));
+                }
+            }
+        }
         for (i, g) in t.geoms.iter().enumerate() {
             ngeom += 1;
             let e = &o.geoms[i];
@@ -198,6 +216,10 @@ fn main() {
         println!("  refused {r}");
     }
     println!("  geom COUNT identical: {count_ok} of {seen}");
+    println!("  ⛔ geom ORDER identical to MuJoCo's, name by name — the assumption every by-index comparison here rests on: {order_ok} of {order_tried}, {order_bad} models where it does not hold");
+    for n in order_notes.iter().take(8) {
+        println!("      {n}");
+    }
     println!("  geoms compared {ngeom}: contact parameters identical {params_ok}, placed at qpos0 {placed}");
     println!("  worst size {worst_size:.2e}, worst world position {worst_pos:.2e} m, worst rotation {worst_rot:.2e}");
     for (kind, n) in &counts {
