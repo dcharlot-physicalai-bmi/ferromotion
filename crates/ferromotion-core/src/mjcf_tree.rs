@@ -884,7 +884,7 @@ impl MjcfTree {
     /// MuJoCo its own inverse weight. Four fingertips welded onto one link are four different numbers, and
     /// reading the link's instead gives every contact between them the same regularisation.
     ///
-    /// A body welded to the world is absent from the map and takes [`InvWeight::STATIC`], which is what an
+    /// A body welded to the world is absent from the map and takes [`InvWeight::STATIC`](crate::mujoco_contact::InvWeight::STATIC), which is what an
     /// immovable body means.
     pub fn body_invweight0(&self) -> BTreeMap<String, crate::mujoco_contact::InvWeight> {
         let nv = self.tree.joints.len();
