@@ -1,7 +1,7 @@
 //! **Is 25 samples enough to estimate a supremum?**
 //!
 //! `smoothing_tube` bounds the penalty-vs-rigid gap by sampling 25 entry speeds and taking the max. That is formally a
-//! lower bound on the supremum, which is why it can refute and never certify. This program asks the separate, practical
+//! lower bound on the supremum, which is why it can never certify. This program asks the separate, practical
 //! question: is it a *good* lower bound, or is the true supremum somewhere else entirely?
 //!
 //! The question is answerable now because [`AffineContact`](ferromotion_core::AffineContact) solves the contact in
@@ -116,6 +116,7 @@ fn main() {
     println!("    it. A dense sample remains a lower bound, which is exactly why certify() still refuses it.");
     println!("  - This is an analytic PROXY for the tube's gap (2% apart at 1e6), so it describes the gap's shape, not");
     println!("    the tube's bound.");
-    println!("  - The obstacle to a closing certificate was never the sampling. It is the fixed-step discretisation");
-    println!("    shift, which is 3x the constraint margin on its own.");
+    println!("  - The obstacle to a closing certificate was never the sampling. First it is the timing term: the gap is");
+    println!("    a time offset of one contact, which no per-step box can hold (withdrawn verdicts, 97a7307). Besides");
+    println!("    that, the fixed-step discretisation shift is 3x the constraint margin on its own.");
 }

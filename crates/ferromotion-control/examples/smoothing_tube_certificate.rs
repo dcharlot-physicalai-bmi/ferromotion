@@ -15,10 +15,17 @@
 //! belong, and produced tube widths of `1e21` from a closed loop whose spectral radius was `0.5`. It was removed
 //! rather than tuned into looking sensible.
 //!
+//! ⛔ Both verdicts this program once reported were WITHDRAWN (`97a7307`): the Certified at `k = 1e6` and the Refuted
+//! at `k = 1e4`. The penalty trajectory the gap is measured from leaves the tube one control step after the bounce,
+//! because the gap is a time offset that no per-step box can hold. The program now runs
+//! [`escaping_sample`](ferromotion_control::escaping_sample) beside the conditional verdict, as the module requires
+//! before any verdict is quoted, and `certify` no longer refutes on the envelope.
+//!
 //! Run with `cargo run --release -p ferromotion-control --example smoothing_tube_certificate`.
 
 use ferromotion_control::{
-    certify, nominal_activity, propagate_tube, GapBound, GapEvidence, HalfSpace, TubeStep, TubeVerdict, Zonotope,
+    certify, escaping_sample, nominal_activity, propagate_tube, GapBound, GapEvidence, HalfSpace, TubeStep, TubeVerdict,
+    Zonotope,
 };
 use ferromotion_core::{AdaptiveOptions, AdaptivePenalty, AffineContact, BouncingMass, PenaltyMass, GRAVITY};
 use nalgebra::{DMatrix, DVector};
@@ -93,7 +100,7 @@ fn run_stiffness(k: f64) {
     }
 
     // The gap the tube has to absorb: how far the smoothed one-step map lands from the rigid one, sampled around the
-    // nominal impact state. Sampled, so this can refute but never certify - which is the point of the last section.
+    // nominal impact state. Sampled, so this can never certify - which is the point of the last section.
     let gap = sampled_gap(&penalty, &rigid, x_pre, window);
     let contact_duration = AffineContact::new(GRAVITY, k, d)
         .and_then(|c| c.solve(v))
@@ -115,8 +122,8 @@ fn run_stiffness(k: f64) {
     // workspace yet bounds how far the true hybrid transition departs from its saltation-composed linearisation.
     let asserted_residual = GapBound::assume_bound(&DVector::zeros(2), 0.0, 0.0).expect("residual");
     // The flight steps' zero gap is justified by "both models integrate the same quadratic" — which holds only above
-    // the plane. Measured on this very fixture, the first three flight steps have reachable sets containing h < 0, so
-    // the justification fails there and the zero is false. Attaching the precondition makes certify() say so.
+    // the plane. It failed on this fixture while the whole gap was injected at one step; spread over the contact, it
+    // passes. Attaching the precondition makes certify() check it either way.
     let above_plane = HalfSpace::new(DVector::from_vec(vec![-1.0, 0.0]), 0.0);
 
     // A small spread of entry states, so the tube starts with a real width and its growth is meaningful.
@@ -133,9 +140,9 @@ fn run_stiffness(k: f64) {
     let mut truth_width = f64::NAN;
     for (name, m) in [("exact saltation", &exact), ("fixed-step autodiff", &fixed), ("tolerance-driven", &tol)] {
         // The disturbance set is PER STEP: R_{k+1} = A R_k (+) W. The measured gap accumulated over the whole
-        // contact, so it is divided across the steps the contact spans (duration known exactly from the closed form).
-        // Injecting it at one step over-states the one-step disturbance and puts spurious below-plane states in the
-        // tube - the error that briefly cost this result. `divided_by` preserves the evidence; `assume_bound` would
+        // contact, so it is spread across the steps the contact spans (duration known exactly from the closed form).
+        // That keeps the tube above the plane; it does NOT make W bound the one-step mismatch, which is a time offset
+        // (97a7307), and the reality check below shows it. `divided_by` preserves the evidence; `assume_bound` would
         // launder a sampled gap into a certificate.
         let n_contact = ((contact_duration / DT).ceil().max(1.0) as usize).min(HORIZON);
         let per_step = gap.divided_by(n_contact as f64).expect("per-step gap");
@@ -204,6 +211,14 @@ fn run_stiffness(k: f64) {
             if slack < 10.0 * tube.final_width() { "genuinely active" } else { "UNREACHABLE: the certificate would be vacuous" }
         );
         println!("  (conditional on a Lipschitz argument this module does not supply)");
+        // Before quoting that verdict: is the trajectory the gap was measured from inside the tube at all?
+        match escaping_sample(&nominal, &tube, &penalty_trajectory(&penalty, &nominal)) {
+            Some((step, ratio)) => println!(
+                "  reality check: the penalty trajectory leaves this tube at step {step}, {ratio:.1}x its half-width, so \
+                 the verdict above does not hold (withdrawn in 97a7307)"
+            ),
+            None => println!("  reality check: the penalty trajectory stays inside this tube (necessary, not sufficient)"),
+        }
     }
 
     println!();
@@ -218,6 +233,25 @@ fn nominal_after_impact(rigid: &BouncingMass, v: f64, steps: usize) -> Vec<DVect
         let h = v_plus * t - 0.5 * GRAVITY * t * t;
         let vel = v_plus - GRAVITY * t;
         out.push(DVector::from_vec(vec![h.max(0.0), vel]));
+    }
+    out
+}
+
+/// The penalty model's own trajectory from the impact, sampled every control step, for the reality check. Step 0 is
+/// the impact instant, where the rigid state is two-valued (`-v` before, `+e v` after), so it is replaced by the
+/// nominal, the tube's centre, and the comparison starts one step later: the shipped certificate lab's convention.
+/// Advanced on the model's own internal step, so sample times do not drift when `DT` is not a whole number of them.
+fn penalty_trajectory(penalty: &PenaltyMass, nominal: &[DVector<f64>]) -> Vec<DVector<f64>> {
+    let mut x = [0.0, -impact_speed()];
+    let mut done = 0usize;
+    let mut out = Vec::with_capacity(nominal.len());
+    for (i, n) in nominal.iter().enumerate() {
+        let target = (i as f64 * DT / penalty.dt).round() as usize;
+        if target > done {
+            x = penalty.rollout(x, (target - done) as f64 * penalty.dt);
+            done = target;
+        }
+        out.push(if i == 0 { n.clone() } else { DVector::from_vec(vec![x[0], x[1]]) });
     }
     out
 }
