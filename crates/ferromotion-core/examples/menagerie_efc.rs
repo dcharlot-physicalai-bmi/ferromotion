@@ -28,8 +28,12 @@
 //! which rebuilds each state and scores both answers with `mj_constraintUpdate`. Measured against MuJoCo
 //! 3.13.0 on Menagerie: of the 40 states where the two answers differ by more than 1e-6, ZERO cost more
 //! under MuJoCo's own cost function. MuJoCo's solver stalls short of the optimum of its own rows — not
-//! only on the models that cap `iterations`, but on `robot_soccer_kit`, `hello_robot_stretch`, `flybody`,
-//! `umi_gripper`, `i2rt_yam` and `rainbow_robotics_rby1`, which all leave the default 100 in place.
+//! only on the models that cap `iterations`, but on `robot_soccer_kit`, `hello_robot_stretch`,
+//! `hello_robot_stretch_3`, `flybody`, `umi_gripper` and `i2rt_yam`, which all leave the default 100 in place.
+//!
+//! ⛔ CORRECTED 2026-09-24: an earlier version of this header also named `rainbow_robotics_rby1` here, and
+//! the commit that wrote it named `tetheria_aero_hand_open` too. Both CAP their solver (30 and 5
+//! iterations), so neither shows that the stall happens without a cap.
 
 use ferromotion_core::{mujoco_constraint_update_blocks, solve_constraints_newton_blocks, Cone, ConeContact, EfcBlock};
 use nalgebra::{DMatrix, DVector};
@@ -195,11 +199,19 @@ fn main() {
                     ok += 1;
                     by_kind.entry(kind).or_default().0 += 1;
                 } else {
-                    // ⛔ the objective is convex but NOT strictly so: a row driven past its bound
-                    // contributes a LINEAR piece, so a set of saturated rows leaves flat directions and
-                    // the argmin is a SET, not a point. Two answers can both be optimal. So the test is
-                    // the cost, and how far apart the two costs are is reported below — a gap at machine
-                    // precision says the minimiser is not unique, a real deficit says MuJoCo stopped first.
+                    // The objective is STRICTLY convex, so its minimiser is unique: the Gauss term
+                    // ½(a−a₀)ᵀM(a−a₀) has Hessian M, which is positive definite, and adding the convex
+                    // row costs cannot make it less than strictly convex. Two different answers cannot
+                    // both be optimal, so when ours costs strictly less, MuJoCo stopped short of the one
+                    // optimum. The cost is the test because it is the one quantity both answers are
+                    // judged by; the deficit is reported so a gap at rounding level reads as rounding.
+                    //
+                    // ⛔ CORRECTED 2026-09-24: this comment used to claim the objective was "convex but
+                    // NOT strictly so" and that "the argmin is a SET". That was wrong. A row driven past
+                    // its bound does contribute a linear piece, but the Gauss term is strictly convex on
+                    // its own, and strict convexity survives the sum. It was written to explain why
+                    // MuJoCo's answer could differ from ours at an equal cost, and the explanation was
+                    // never needed: MuJoCo's cost is strictly HIGHER in every one of the 40 cases.
                     let cost_at = |a: &DVector<f64>| {
                         let jar: Vec<f64> = (&jac * a - DVector::from_row_slice(&c.aref)).iter().copied().collect();
                         let u = mujoco_constraint_update_blocks(&blocks, &c.d, &jar);
@@ -232,7 +244,7 @@ fn main() {
     }
     println!("constraint sets solved from MuJoCo's own rows: {seen}");
     println!("  reach MuJoCo's qacc within 1e-6 relative: {ok}");
-    println!("  differ, but at a cost no worse than MuJoCo's: {better}; worst cost DEFICIT (relative) {:.2e} on {} — at machine precision the minimiser is a flat set and both answers are optimal, above it MuJoCo's solver stopped first", worst_gap.0, worst_gap.1);
+    println!("  differ, but at a cost no worse than MuJoCo's: {better}; worst cost DEFICIT (relative) {:.2e} on {} — the minimiser is unique (the Gauss term is strictly convex), so a deficit above rounding means MuJoCo's solver stopped short of it", worst_gap.0, worst_gap.1);
     println!("  differ AND cost more — ours is wrong: {worse}");
     println!("  worst relative qacc {:.2e} on {}", worst.0, worst.1);
     for (k, (good, n)) in &by_kind {
