@@ -245,12 +245,22 @@ impl RobotFileLab {
         Self::tree().map_or(f64::NAN, |t| t.depth() as f64)
     }
 
-    /// **Fingertip separation at a given pose**, metres. The quantity a serial loader physically cannot compute,
-    /// because it can only see one finger at a time.
+    /// **Fingertip separation at a given pose**, metres, with both knuckles closed by `q0` radians. The quantity a
+    /// serial loader physically cannot compute, because it can only see one finger at a time.
+    ///
+    /// ⛔ The joints are set by NAME. `tree_from_urdf` orders them breadth-first (`[j1a, j2a, j1b, j2b]`), and this used
+    /// to write `[q0, 0.4, -q0, -0.4]` as if they were per finger: finger 2's knuckle stayed pinned at 0.4 rad, only
+    /// finger 1 moved, and it moved OUTWARD, so the separation grew from 0.045 m to 0.074 m under a label that said
+    /// "closed". That is the joint-order trap of the very lesson this lab serves. Finger 1 (at +y) now turns by
+    /// `-q0` and finger 2 (at -y) by `+q0`, toward each other.
     pub fn fingertip_separation(&self, q0: f64) -> f64 {
         let Some(t) = Self::tree() else { return f64::NAN };
         let base = nalgebra::Isometry3::identity();
-        let q = vec![q0, 0.4, -q0, -0.4];
+        let mut q = vec![0.0; t.dof()];
+        for (name, v) in [("j1a", -q0), ("j1b", -0.4), ("j2a", q0), ("j2b", 0.4)] {
+            let Some(&i) = t.joint_names.get(name) else { return f64::NAN };
+            q[i] = v;
+        }
         let (a, b) = (t.tip_pose("f1b", base, &q), t.tip_pose("f2b", base, &q));
         match (a, b) {
             (Some(a), Some(b)) => (a.translation.vector - b.translation.vector).norm(),
@@ -340,14 +350,20 @@ mod tests {
         assert_eq!(lab.joints_a_chain_loader_misses(), 2.0, "half this hand is invisible to a chain loader");
     }
 
-    /// The quantity that only exists on a tree: two fingertips at once, and a separation that responds to the pose.
+    /// The quantity that only exists on a tree: two fingertips at once. Pinned to the closed form, because the version
+    /// that asserted only `|a - b| > 1e-4` passed while ONE finger moved, outward, under the label "closed" (the joint
+    /// vector was written per finger and the tree orders joints breadth-first). Knuckles at y = +-0.03 turning toward
+    /// each other put the tip frames at y = +-(0.03 - 0.04 sin q0), so the separation is exactly |0.06 - 0.08 sin q0|.
     #[test]
-    fn fingertip_separation_responds_to_the_pose() {
+    fn closing_the_fingers_brings_the_tips_together_by_the_closed_form() {
         let lab = RobotFileLab::new();
-        let a = lab.fingertip_separation(0.0);
-        let b = lab.fingertip_separation(0.8);
-        eprintln!("fingertip separation: {a:.5} m at q0 = 0.0, {b:.5} m at q0 = 0.8");
-        assert!(a.is_finite() && b.is_finite(), "both poses must resolve");
-        assert!((a - b).abs() > 1e-4, "closing the fingers should change the separation: {a} vs {b}");
+        for q0 in [0.0, 0.2, 0.4, 0.6, 0.8] {
+            let s = lab.fingertip_separation(q0);
+            let exact = (0.06 - 0.08 * q0.sin()).abs();
+            assert!((s - exact).abs() < 1e-12, "q0 = {q0}: separation {s} against the closed form {exact}");
+        }
+        let (open, closed) = (lab.fingertip_separation(0.0), lab.fingertip_separation(0.8));
+        eprintln!("fingertip separation: {open:.5} m open (q0 = 0), {closed:.5} m closed (q0 = 0.8)");
+        assert!(closed < open, "closing must bring the tips together: {open} -> {closed}");
     }
 }
