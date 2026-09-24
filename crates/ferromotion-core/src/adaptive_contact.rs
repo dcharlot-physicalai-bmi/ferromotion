@@ -349,25 +349,34 @@ impl AdaptivePenalty {
 
     /// The restitution this continuous penalty model realises, measured by dropping the mass and reading the
     /// rebound. Needed so the rigid reference is the *same bounce*, not a nominal one.
+    ///
+    /// ⛔ ONE rollout from free flight, never a chain of short spans started on the plane. The earlier version began
+    /// at `h = 0`, the kink in the force, and stepped in spans; any span that started on or within a hair of the plane
+    /// made the controller return `StepTooSmall`, and which stiffnesses did so was last-bit arithmetic (see
+    /// `the_restitution_is_measured_at_every_stiffness_not_only_the_lucky_ones`). Here the mass falls from rest at the
+    /// height that meets the plane at `impact_speed`, crosses it mid-step as every other rollout in this module does,
+    /// and is read once it is airborne again. Free flight is an exact parabola, so the speed it left the plane with
+    /// follows from energy wherever it is read.
     pub fn effective_restitution(&self, impact_speed: f64, opts: AdaptiveOptions) -> Option<f64> {
         if impact_speed <= 0.0 {
             return None;
         }
-        // Integrate in short spans and inspect between them, so the airborne test sees the state near the plane.
-        let span = 1e-4 / (self.stiffness.sqrt().max(1.0)) * 100.0;
-        let mut x = [0.0, -impact_speed];
-        for _ in 0..2_000_000 {
-            let (next, _) = self.rollout(x, span, opts).ok()?;
-            x = next;
-            if x[0] > 0.0 && x[1] > 0.0 {
-                let v_at_plane = (x[1] * x[1] + 2.0 * self.gravity * x[0]).sqrt();
-                return Some(v_at_plane / impact_speed);
-            }
-            if x[0] > 0.0 && x[1] <= 0.0 {
-                return Some(0.0);
-            }
+        // A clamped spring-damper contact lasts about half a damped period (unit mass), so read at 1.5x that after
+        // impact: past lift-off, well before the apex. Overdamped (`zeta >= 1`) has no half-period to scale by, and is
+        // refused rather than guessed, as `AffineContact::solve` refuses it.
+        let w2 = self.stiffness - self.damping * self.damping / 4.0;
+        if !(w2 > 0.0) {
+            return None;
         }
-        None
+        let fall = impact_speed / self.gravity;
+        let drop = impact_speed * fall / 2.0;
+        let after = 1.5 * core::f64::consts::PI / w2.sqrt();
+        let (x, _) = self.rollout([drop, 0.0], fall + after, opts).ok()?;
+        // Still on the plane at the read time means the contact outlasted the scale it was read at: say so.
+        if !(x[0] > 0.0) {
+            return None;
+        }
+        Some((x[1] * x[1] + 2.0 * self.gravity * x[0]).sqrt() / impact_speed)
     }
 }
 
@@ -677,5 +686,64 @@ mod tests {
         .expect("decomposition");
         let f = d.reachable_fraction();
         assert!((0.0..=1.0).contains(&f), "fraction {f}");
+    }
+
+    /// ⛔ **The restitution measurement must not depend on where a span boundary lands.**
+    ///
+    /// It used to start ON the plane (`h = 0`, the kink in the force) and integrate in short spans. A span that starts
+    /// on or within a hair of the plane makes the controller demand a step below `dt_min`; the `StepTooSmall` was
+    /// discarded by `.ok()?`, and the decomposition returned `None`. Which stiffnesses failed was last-bit arithmetic:
+    /// 36 of 501 on this axis natively and 42 of 501 in WebAssembly, where one of them is `k = 1e6` itself, so the
+    /// contact-gradient lab printed `NaN` at the exact stiffness its lesson asks the learner to read. The test that
+    /// guarded the lab sampled `1e4, 1e5, 1e6`: three of the points where native happens to succeed.
+    ///
+    /// Both systems in use, on a 0.01 grid in `log10 k`, because a coarser grid is how this shipped.
+    ///
+    /// Existence is not enough, so the VALUE is pinned too, against [`crate::AffineContact`]: the same clamped
+    /// spring-damper solved in closed form, with no integrator in it. Measured worst disagreement `7.43e-9` over 988
+    /// points. The closed form covers one spring phase and one coast and refuses anything else by its own rules; it
+    /// refuses 14 points at the soft end of the 0.5 m sweep, which are checked for existence and range only, and the
+    /// pinned count is asserted so that a closed form refusing everything cannot turn the value check into a no-op.
+    #[test]
+    fn the_restitution_is_measured_at_every_stiffness_not_only_the_lucky_ones() {
+        let opts = AdaptiveOptions::with_tolerance(1e-11);
+        let (mut failed, mut worst, mut pinned) = (Vec::new(), 0.0f64, 0usize);
+        for (zeta, drop) in [(0.1606, 1.0), (0.1, 0.5)] {
+            for i in 300..=800 {
+                let k = 10f64.powf(i as f64 / 100.0);
+                let (c, v) = (2.0 * zeta * k.sqrt(), (2.0 * 9.81 * drop as f64).sqrt());
+                let p = AdaptivePenalty::new(9.81, k, c).unwrap();
+                let exact = crate::AffineContact::new(9.81, k, c).unwrap().solve(v).map(|x| x.exit_speed / x.impact_speed);
+                match p.effective_restitution(v, opts) {
+                    Some(e) if e > 0.0 && e <= 1.0 => {
+                        if let Some(x) = exact {
+                            worst = worst.max((e - x).abs());
+                            pinned += 1;
+                        }
+                    }
+                    other => failed.push(format!("zeta {zeta}, log10 k {:.2}: {other:?}", i as f64 / 100.0)),
+                }
+            }
+        }
+        eprintln!("restitution: worst |measured - closed form| {worst:.3e} over {pinned} of 1002 pinned points");
+        assert!(failed.is_empty(), "{} of 1002 measurements failed, first: {:?}", failed.len(), &failed[..failed.len().min(4)]);
+        assert!(pinned >= 980, "the closed form pinned only {pinned} of 1002 points, so the value check is mostly vacuous");
+        assert!(worst < 1e-7, "the measured restitution is off the closed form by {worst:.3e}");
+    }
+
+    /// Both refusals in `effective_restitution`, each made to fire, because no input in the sweep above reaches
+    /// either. Without the overdamped refusal the read time is `NaN`, `rollout` treats a `NaN` horizon as no time at
+    /// all and hands back the drop state, and an overdamped contact reports a perfectly elastic bounce, `1.0`. Without
+    /// the on-the-plane refusal a mass that sinks to rest in a soft spring (`h = -g/k`, it never leaves) is read
+    /// anyway, and the energy read at a negative height is `sqrt` of a negative number. The closed form refuses both.
+    #[test]
+    fn a_rebound_that_cannot_be_measured_is_refused_not_invented() {
+        let opts = AdaptiveOptions::with_tolerance(1e-11);
+        let v = (2.0f64 * 9.81).sqrt();
+        let overdamped = AdaptivePenalty::new(9.81, 1e6, 2.0 * 1.5 * 1e3).unwrap();
+        assert_eq!(overdamped.effective_restitution(v, opts), None, "an overdamped contact must be refused");
+        let resting = AdaptivePenalty::new(9.81, 1e1, 2.0 * 0.5 * 10f64.sqrt()).unwrap();
+        assert_eq!(resting.effective_restitution(v, opts), None, "a mass that never leaves the plane has no rebound");
+        assert!(crate::AffineContact::new(9.81, 1e1, 2.0 * 0.5 * 10f64.sqrt()).unwrap().solve(v).is_none());
     }
 }
