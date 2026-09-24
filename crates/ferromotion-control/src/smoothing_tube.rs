@@ -19,10 +19,12 @@
 //! wearing a certificate's clothes. So [`GapEvidence`] is carried through every function here, and the asymmetry is
 //! enforced by [`certify`] rather than left to the caller's discipline:
 //!
-//! - **Sampling can refute.** One sampled state whose tube violates a constraint is a real counterexample, and
-//!   [`TubeVerdict::Refuted`] is sound on sampled evidence.
 //! - **A bound still tagged [`GapEvidence::Sampled`] can never certify.** The best available verdict is
 //!   [`TubeVerdict::Undecided`], at any margin, and [`certify`] enforces it.
+//! - **An envelope can never refute.** The tube over-approximates, so its worst-case point need not be a state the
+//!   system reaches; a box built from sampled half-widths has corners no sample visited. Only a trajectory refutes,
+//!   and the one [`certify`] holds is the nominal: [`TubeVerdict::Refuted`] means the nominal itself violates, which is
+//!   sound on any evidence. ⛔ This bullet used to read "sampling can refute", and the module refuted on the envelope.
 //!
 //! **What this does NOT do, stated plainly because an adversarial audit of this module caught the overstatement.**
 //! Soundness is *relocated*, not eliminated. [`GapBound::assume_bound`] verifies nothing: it stamps
@@ -246,7 +248,8 @@ impl HalfSpace {
         HalfSpace { normal, bound }
     }
 
-    /// Worst-case violation over a set: positive means some reachable state violates the constraint.
+    /// Worst-case violation over a set: positive means the set reaches past the constraint. For a tube, which
+    /// over-approximates, that is not a violation by any state the system is known to reach.
     ///
     /// Uses the zonotope support function, which is exact, so no conservatism enters here. Any looseness in the
     /// verdict comes from the gap bound or the linearisation, not from this test.
@@ -261,8 +264,9 @@ impl HalfSpace {
 pub enum TubeVerdict {
     /// Every reachable state satisfies every constraint, on sound evidence. `margin` is the smallest slack.
     Certified { margin: f64 },
-    /// Some reachable state violates a constraint. Sound on sampled evidence too, since a sampled gap is a lower
-    /// bound and a violation of a lower-bound tube is a violation of the true one.
+    /// The NOMINAL trajectory itself violates a constraint: the plan fails before any uncertainty is added. Sound on
+    /// any evidence because it rests on no bound. An envelope reaching past a constraint is NOT this; see
+    /// [`UndecidedReason::EnvelopeReachesConstraint`].
     Refuted { step: usize, constraint: usize, violation: f64 },
     /// No constraint was shown to fail, but the evidence does not support a certificate.
     Undecided { reason: UndecidedReason },
@@ -282,6 +286,10 @@ pub enum UndecidedReason {
     /// A step's bounds were only valid in a region and the reachable set left it. The classic case is a free-flight
     /// step given a structurally-zero gap whose reachable set dips below the plane.
     PreconditionViolated { step: usize },
+    /// The tube reaches past a constraint while the nominal clears it. Not a counterexample: the tube over-approximates,
+    /// so the state at its worst-case point need not be one the system reaches. It only means the tube is too wide to
+    /// certify.
+    EnvelopeReachesConstraint { step: usize, constraint: usize },
     /// Dimensions did not agree across the inputs.
     DimensionMismatch,
 }
@@ -385,11 +393,17 @@ fn half_width(z: &Zonotope) -> f64 {
 
 /// Certify a nominal trajectory plus tube against half-space constraints.
 ///
-/// `nominal[t]` is the nominal state at step `t` and `tube.sets[t]` the deviation set around it, so the reachable set
-/// at step `t` is `nominal[t] (+) sets[t]`.
+/// `nominal[t]` is the nominal state at step `t` and `tube.sets[t]` the deviation set around it, so the tube claims the
+/// reachable set at step `t` lies inside `nominal[t] (+) sets[t]`.
 ///
-/// The order of checks is deliberate. Refutation is attempted **first**, because it is sound on any evidence; only
-/// once nothing can be refuted does the evidence quality decide between `Certified` and `Undecided`.
+/// ⛔ **Only a trajectory can refute; an envelope cannot.** The tube OVER-approximates, so its worst-case point is in
+/// general a state nothing reaches: a box built from sampled half-widths has corners no sample visited, and Minkowski
+/// sums add more. An envelope reaching past a constraint therefore means "cannot certify", which is
+/// [`UndecidedReason::EnvelopeReachesConstraint`]. The one trajectory held here is the nominal: if IT violates, the plan
+/// fails before any uncertainty is added, and that is [`TubeVerdict::Refuted`], sound on any evidence because it rests
+/// on no bound at all. This function used to refute on the envelope and document that as sound on sampled evidence.
+///
+/// Order: refute on the nominal, then the preconditions, then the envelope, then the evidence.
 pub fn certify(nominal: &[DVector<f64>], tube: &TubeReport, constraints: &[HalfSpace]) -> TubeVerdict {
     if nominal.len() != tube.sets.len() {
         return TubeVerdict::Undecided { reason: UndecidedReason::DimensionMismatch };
@@ -398,7 +412,20 @@ pub fn certify(nominal: &[DVector<f64>], tube: &TubeReport, constraints: &[HalfS
         return TubeVerdict::Undecided { reason: UndecidedReason::NonFinite };
     }
 
-    // Preconditions first: a step whose bounds are only valid in a region must have stayed in it, or every number
+    // Refutation first: it reads the nominal alone, so no bound, precondition or evidence can make it wrong.
+    for (t, x) in nominal.iter().enumerate() {
+        for (i, c) in constraints.iter().enumerate() {
+            if c.normal.len() != x.len() {
+                return TubeVerdict::Undecided { reason: UndecidedReason::DimensionMismatch };
+            }
+            let violation = c.normal.dot(x) - c.bound;
+            if violation > 0.0 {
+                return TubeVerdict::Refuted { step: t, constraint: i, violation };
+            }
+        }
+    }
+
+    // Then the preconditions: a step whose bounds are only valid in a region must have stayed in it, or every number
     // downstream is about a system the caller was not simulating.
     for (t, pre) in tube.preconditions.iter().enumerate() {
         if let Some(c) = pre {
@@ -423,13 +450,13 @@ pub fn certify(nominal: &[DVector<f64>], tube: &TubeReport, constraints: &[HalfS
             let shifted = Zonotope::new(&set.center + x, set.generators.clone());
             let v = c.worst_case(&shifted);
             if v > 0.0 {
-                return TubeVerdict::Refuted { step: t, constraint: i, violation: v };
+                return TubeVerdict::Undecided { reason: UndecidedReason::EnvelopeReachesConstraint { step: t, constraint: i } };
             }
             margin = margin.min(-v);
         }
     }
 
-    // Nothing refutable. Now the evidence decides, and a wide margin does not upgrade a sampled bound.
+    // The envelope clears every constraint. Now the evidence decides, and a wide margin does not upgrade a sampled bound.
     if tube.evidence.is_empty() {
         return TubeVerdict::Undecided { reason: UndecidedReason::EmptyTube };
     }
@@ -550,21 +577,41 @@ mod tests {
         }
     }
 
-    /// The other half of the asymmetry: sampling **can** refute, because a sampled gap under-states the true gap and
-    /// a violation of an under-stated tube is a real violation.
+    /// ⛔ **An envelope that reaches a constraint does not refute it.** One sampled deviation, `[+2, 0]`, becomes the box
+    /// `[-2, 2] x [0, 0]`, and the constraint `x >= -1` is crossed only by the corner `-2`, which no sample visited. This
+    /// module used to return `Refuted` here and call it sound on sampled evidence ("a violation of an under-stated tube
+    /// is a violation of the true one"), which holds only if the box is a SUBSET of the reachable set, and it is not.
     #[test]
-    fn a_sampled_gap_can_refute() {
+    fn an_envelope_that_reaches_a_constraint_does_not_refute_it() {
         let gap = GapBound::from_samples(&[DVector::from_vec(vec![2.0, 0.0])]).unwrap();
         let steps = vec![TubeStep::linear(m2(1.0, 0.0, 0.0, 1.0), gap).unwrap()];
         let tube = propagate_tube(&Zonotope::point(DVector::zeros(2)), &steps).unwrap();
         let nominal = vec![DVector::zeros(2), DVector::zeros(2)];
+        let c = vec![HalfSpace::new(DVector::from_vec(vec![-1.0, 0.0]), 1.0)];
+        assert!(c[0].worst_case(&tube.sets[1]) > 0.0, "the envelope must reach past the constraint or this tests nothing");
+        match certify(&nominal, &tube, &c) {
+            TubeVerdict::Undecided { reason } => {
+                assert_eq!(reason, UndecidedReason::EnvelopeReachesConstraint { step: 1, constraint: 0 })
+            }
+            other => panic!("an envelope refuted a constraint that no sampled state violates: {other:?}"),
+        }
+    }
+
+    /// Refutation needs a trajectory, and the nominal is one: if the plan itself violates, no bound can rescue it, so
+    /// this holds on sampled evidence and with an envelope far narrower than the violation.
+    #[test]
+    fn a_nominal_that_violates_is_refuted_on_any_evidence() {
+        let gap = GapBound::from_samples(&[DVector::from_vec(vec![1e-3, 0.0])]).unwrap();
+        let steps = vec![TubeStep::linear(m2(1.0, 0.0, 0.0, 1.0), gap).unwrap()];
+        let tube = propagate_tube(&Zonotope::point(DVector::zeros(2)), &steps).unwrap();
+        let nominal = vec![DVector::zeros(2), DVector::from_vec(vec![1.5, 0.0])];
         let c = vec![HalfSpace::new(DVector::from_vec(vec![1.0, 0.0]), 1.0)];
         match certify(&nominal, &tube, &c) {
             TubeVerdict::Refuted { step, violation, .. } => {
                 assert_eq!(step, 1);
-                assert!((violation - 1.0).abs() < 1e-12, "violation {violation}");
+                assert!((violation - 0.5).abs() < 1e-12, "the violation is the NOMINAL's, not the envelope's: {violation}");
             }
-            other => panic!("expected refutation, got {other:?}"),
+            other => panic!("a violating nominal must refute: {other:?}"),
         }
     }
 

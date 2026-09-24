@@ -141,16 +141,21 @@ disturbance, propagates it as a reachable tube, and checks constraints against t
 | measured on one mass, one impact, one ceiling | result |
 |---|---|
 | smoothing gap at `k = 1e4` vs `k = 1e6` | `3.2e-1` → `9.5e-3` |
-| the ceiling constraint at those two stiffnesses | **refuted** at step 208 → would **certify** at margin `2.6e-2` |
+| the ceiling constraint at those two stiffnesses | ⛔ **both verdicts withdrawn** (`97a7307`): the tube misses the trajectory its gap came from |
 | certifying with the fixed-step Jacobian instead | tube **2.38x** wider |
 
-So stiffness decides whether the certificate exists at all, and that is the same regime where a fixed-step gradient
-is unusable: at `k = 1e6` it reports `dv/dh = -209.76` against a true `+3.65`. The only contact stiff enough to
-certify is one you cannot differentiate with a fixed step.
+⛔ This table used to read "refuted at step 208 → would certify at margin `2.6e-2`". Both were withdrawn: the penalty
+trajectory the gap was measured from leaves the tube one control step after the bounce, because the gap is a TIME
+offset that no per-step box can hold, and the "refutation" reported a 0.46 m ceiling breached by a mass that peaks at
+0.396 m. `escaping_sample` is the check that shows it, and the shipped certificate lab now runs it beside the verdict.
+The tube does contain the real trajectory once the contact fits inside one control step (`k` above about `1e7.1` in
+that lab). The fixed-step gradient finding stands on its own: at `k = 1e6` it reports `dv/dh = -209.76` against a true
+`+3.65`.
 
 The blocking piece is the gap bound, not the tube algebra, and the API says so rather than papering over it. A gap
-measured by sampling is a **lower** bound on its own supremum, so it can refute a constraint and can never certify
-one:
+measured by sampling is a **lower** bound on its own supremum, so it can never certify a constraint. Nor can an
+envelope refute one: the tube over-approximates, so only a trajectory that actually violates refutes, which `certify`
+now checks on the nominal:
 
 ```rust
 // Sampled evidence, an enormous margin, and still not a certificate.
