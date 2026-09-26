@@ -365,7 +365,8 @@ impl AdaptivePenalty {
         // impact: past lift-off, well before the apex. Overdamped (`zeta >= 1`) has no half-period to scale by, and is
         // refused rather than guessed, as `AffineContact::solve` refuses it.
         let w2 = self.stiffness - self.damping * self.damping / 4.0;
-        if !(w2 > 0.0) {
+        // NaN included: a NaN stiffness or damping must refuse, as the negated `>` did
+        if w2.is_nan() || w2 <= 0.0 {
             return None;
         }
         let fall = impact_speed / self.gravity;
@@ -373,7 +374,7 @@ impl AdaptivePenalty {
         let after = 1.5 * core::f64::consts::PI / w2.sqrt();
         let (x, _) = self.rollout([drop, 0.0], fall + after, opts).ok()?;
         // Still on the plane at the read time means the contact outlasted the scale it was read at: say so.
-        if !(x[0] > 0.0) {
+        if x[0].is_nan() || x[0] <= 0.0 {
             return None;
         }
         Some((x[1] * x[1] + 2.0 * self.gravity * x[0]).sqrt() / impact_speed)
@@ -708,10 +709,10 @@ mod tests {
     fn the_restitution_is_measured_at_every_stiffness_not_only_the_lucky_ones() {
         let opts = AdaptiveOptions::with_tolerance(1e-11);
         let (mut failed, mut worst, mut pinned) = (Vec::new(), 0.0f64, 0usize);
-        for (zeta, drop) in [(0.1606, 1.0), (0.1, 0.5)] {
+        for (zeta, drop) in [(0.1606, 1.0_f64), (0.1, 0.5)] {
             for i in 300..=800 {
                 let k = 10f64.powf(i as f64 / 100.0);
-                let (c, v) = (2.0 * zeta * k.sqrt(), (2.0 * 9.81 * drop as f64).sqrt());
+                let (c, v) = (2.0 * zeta * k.sqrt(), (2.0 * 9.81 * drop).sqrt());
                 let p = AdaptivePenalty::new(9.81, k, c).unwrap();
                 let exact = crate::AffineContact::new(9.81, k, c).unwrap().solve(v).map(|x| x.exit_speed / x.impact_speed);
                 match p.effective_restitution(v, opts) {
