@@ -1046,6 +1046,107 @@ impl MjcfTree {
         crate::mujoco_contact::AssembledRows { blocks, jac, aref, d }
     }
 
+    /// **`mj_collision`**: every contact this state produces, geom pair by geom pair, in MuJoCo's order —
+    /// the same gates in the same sequence (`contype`/`conaffinity`, the weld-tree body filter,
+    /// `<contact><exclude>`), an explicit `<pair>` bypassing them with its own parameters, detection at
+    /// `margin + gap`, and `mj_setContact` completing each one.
+    ///
+    /// Contacts found in the gap band are KEPT, flagged by `record.exclude`: the solver skips them, but an
+    /// adhesion actuator counts them. A pair that needs a collider this port does not carry (a height
+    /// field) is listed in `refused` rather than silently dropped, and every pair that produced nothing
+    /// says why in `why`, so a missing contact names the rule that removed it.
+    ///
+    /// This is the pipeline `examples/menagerie_forward` verifies against MuJoCo 3.13.0 on Menagerie.
+    pub fn collide(&self, q: &[f64]) -> MjcfCollision {
+        use crate::mujoco_collision::{can_collide, collide_pair_with, contact_param, filter_body_pair, margin_and_gap, set_contact, CollideOptions, CollisionGeom, GeomPose, GeomType, PairParams};
+        let frames = crate::tree_frames(&self.tree, q);
+        let welds = self.body_welds();
+        let excludes: std::collections::HashSet<(&str, &str)> = self.contact_excludes.iter().flat_map(|(a, b)| [(a.as_str(), b.as_str()), (b.as_str(), a.as_str())]).collect();
+        let pairs: HashMap<(&str, &str), usize> = self.contact_pairs.iter().enumerate().flat_map(|(i, p)| [((p.geom1.as_str(), p.geom2.as_str()), i), ((p.geom2.as_str(), p.geom1.as_str()), i)]).collect();
+        let opts = CollideOptions::default();
+        let geoms: Vec<Option<CollisionGeom>> = self
+            .geoms
+            .iter()
+            .map(|g| {
+                let world = match g.joint {
+                    Some(j) => frames[j] * g.pose,
+                    None => g.pose,
+                };
+                let hull = match (&g.mesh, g.kind) {
+                    (Some(mn), GeomType::Mesh) => Some(self.mesh_hulls.get(mn)?),
+                    _ => None,
+                };
+                Some(CollisionGeom { kind: g.kind, pose: GeomPose { pos: world.translation.vector, mat: *world.rotation.to_rotation_matrix().matrix() }, size: g.size, hull })
+            })
+            .collect();
+        let mut out = MjcfCollision::default();
+        for i in 0..self.geoms.len() {
+            for j in i + 1..self.geoms.len() {
+                let (gi, gj) = (&self.geoms[i], &self.geoms[j]);
+                let (Some(ci), Some(cj)) = (&geoms[i], &geoms[j]) else { continue };
+                if ci.kind == GeomType::HField || cj.kind == GeomType::HField {
+                    out.refused.push([i, j]);
+                    continue;
+                }
+                let key = (i, j);
+                let pair = pairs.get(&(gi.name.as_str(), gj.name.as_str())).map(|&k| &self.contact_pairs[k]);
+                let (margin, gap, params) = if let Some(p) = pair {
+                    (p.margin, p.gap, PairParams { condim: p.condim, solref: p.solref, solimp: p.solimp, friction: p.friction, adhesion: p.adhesion })
+                } else {
+                    if !can_collide(gi.params.contype, gi.params.conaffinity, gj.params.contype, gj.params.conaffinity) {
+                        out.why.insert(key, "contype/conaffinity".into());
+                        continue;
+                    }
+                    let (w1, pw1, n1) = welds.get(&gi.body).copied().unwrap_or((0, 0, 0));
+                    let (w2, pw2, n2) = welds.get(&gj.body).copied().unwrap_or((0, 0, 0));
+                    if filter_body_pair(w1, pw1, n1, w2, pw2, n2, true) {
+                        out.why.insert(key, "the body filter (same weld, both static, or parent and child)".into());
+                        continue;
+                    }
+                    if excludes.contains(&(gi.body.as_str(), gj.body.as_str())) {
+                        out.why.insert(key, "<contact><exclude>".into());
+                        continue;
+                    }
+                    let (m, g) = margin_and_gap(&gi.params, &gj.params);
+                    (m, g, contact_param(&gi.params, &gj.params))
+                };
+                let Ok(pre) = collide_pair_with(&opts, margin + gap, ci, cj) else {
+                    out.refused.push([i, j]);
+                    out.why.insert(key, "a pair the collider refuses".into());
+                    continue;
+                };
+                if pre.is_empty() {
+                    out.why.insert(key, "no contact: the collider found them apart".into());
+                } else {
+                    out.why.insert(key, format!("the collider found {} witness(es) at dist {:?}, includemargin {margin}", pre.len(), pre.iter().map(|p| p.dist).collect::<Vec<_>>()));
+                }
+                out.contacts.extend(pre.iter().map(|p| MjcfContact { geom: [i, j], record: set_contact(p, &params, margin) }));
+            }
+        }
+        out
+    }
+
+    /// One contact as the constraint rows need it: its Jacobian at this state (`contact_jacobian` on the
+    /// two geoms' dofs) and its two bodies' inverse weights. ⛔ The weights are `body_invweight0`, taken at
+    /// `qpos0` when MuJoCo compiles the model and never recomputed, so pass the table computed ONCE.
+    pub fn contact_spec(&self, c: &MjcfContact, frames: &[Iso], invweight0: &BTreeMap<String, crate::mujoco_contact::InvWeight>) -> crate::mujoco_contact::ContactSpec {
+        use crate::mujoco_contact::{InvWeight, SolImp, SolRef};
+        let (gi, gj) = (&self.geoms[c.geom[0]], &self.geoms[c.geom[1]]);
+        let r = &c.record;
+        let jac = crate::contact_jacobian(&self.tree.joints, &self.tree.parent, frames, gi.joint, gj.joint, r.pos, &r.frame, r.dim);
+        let iw = |g: &MjcfGeom| invweight0.get(&g.body).copied().unwrap_or(InvWeight::STATIC);
+        crate::mujoco_contact::ContactSpec {
+            jac,
+            dist: r.dist,
+            margin: r.includemargin,
+            condim: r.dim,
+            friction: r.friction,
+            solref: SolRef(r.solref[0], r.solref[1]),
+            solimp: SolImp { d0: r.solimp[0], d_width: r.solimp[1], width: r.solimp[2], midpoint: r.solimp[3], power: r.solimp[4] },
+            invweight: [iw(gi), iw(gj)],
+        }
+    }
+
     /// One entry per degree of freedom: the joint's cap on the total actuator force through it, for
     /// [`crate::qfrc_actuator`]. `None` where the joint does not limit it.
     pub fn dof_actuator_force_range(&self) -> Vec<Option<[f64; 2]>> {
@@ -1271,6 +1372,25 @@ pub struct MjcfGeom {
     /// primitive geom fitted to a mesh, where the SHAPE is the primitive and this is only provenance.
     pub mesh: Option<String>,
     pub params: crate::mujoco_collision::GeomParams,
+}
+
+/// One contact [`MjcfTree::collide`] found: the two geoms (indices into [`MjcfTree::geoms`], lower first,
+/// as MuJoCo orders them) and the contact as `mj_setContact` completes it.
+#[derive(Clone, Debug)]
+pub struct MjcfContact {
+    pub geom: [usize; 2],
+    pub record: crate::mujoco_collision::ContactRecord,
+}
+
+/// What `mj_collision` decided at one state; see [`MjcfTree::collide`].
+#[derive(Clone, Debug, Default)]
+pub struct MjcfCollision {
+    /// every contact detected, INCLUDING those in the gap band (`record.exclude`), which the solver skips
+    pub contacts: Vec<MjcfContact>,
+    /// geom pairs this port cannot collide (a height field): a state with any is not the whole answer
+    pub refused: Vec<[usize; 2]>,
+    /// for each pair considered, what happened to it — the gate that dropped it, or what the collider found
+    pub why: BTreeMap<(usize, usize), String>,
 }
 
 /// An explicit `<contact><pair>`: the two geoms and the contact parameters MuJoCo uses for that pair

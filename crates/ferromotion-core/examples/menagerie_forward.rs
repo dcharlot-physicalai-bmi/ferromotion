@@ -16,10 +16,10 @@
 //! the remaining work and hiding it inside an average would be a lie about coverage.
 
 use ferromotion_core::{
-    can_collide, collide_pair_with, contact_jacobian, contact_param, filter_body_pair, margin_and_gap, set_contact, tree_frames, tree_from_mjcf, tree_inverse_dynamics, CollideOptions, CollisionGeom, ContactRecord, GeomPose, GeomType, InvWeight, MjcfJointKind, PairParams, SolImp, SolRef,
+    contact_jacobian, tree_frames, tree_from_mjcf, tree_inverse_dynamics, GeomType, MjcfJointKind,
 };
 use nalgebra::{DVector, Vector3};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 
 /// One of MuJoCo's own contacts: which geoms, where, and — the part a normal-only comparison never sees —
 /// the whole `frame`.
@@ -250,7 +250,6 @@ fn main() {
         // ⛔ the welds as MuJoCo computes them, from the BODY tree — not from the tree dof a geom rides on.
         // A body with two joints has a ride dof whose parent is its own previous dof, and that reads as
         // unrelated to the body it hangs off.
-        let welds = t.body_welds();
         // ⛔ these two are COMPILED quantities — they do not depend on the state, and comparing them
         // inside the state loop both recomputed them per state and skipped them entirely on a model
         // that some later gate refused. `hello_robot_stretch_3` is blocked on a passive force it has
@@ -373,8 +372,6 @@ fn main() {
                 }
             }
         }
-        let excludes: HashSet<(String, String)> = t.contact_excludes.iter().flat_map(|(a, b)| [(a.clone(), b.clone()), (b.clone(), a.clone())]).collect();
-        let pairs: HashMap<(String, String), usize> = t.contact_pairs.iter().enumerate().flat_map(|(i, p)| [((p.geom1.clone(), p.geom2.clone()), i), ((p.geom2.clone(), p.geom1.clone()), i)]).collect();
         for s in &o.states {
             states += 1;
             if !t.actuators_unsupported.is_empty() {
@@ -595,99 +592,26 @@ fn main() {
             // `menagerie_contacts` lives only there, so splitting the failures this way turns "the contacts
             // must be it" from an assertion into a count.
             let mut any_mesh = false;
-            let opts = CollideOptions::default();
-            let geoms: Vec<Option<CollisionGeom>> = t
-                .geoms
-                .iter()
-                .map(|g| {
-                    let world = match g.joint {
-                        Some(j) => frames[j] * g.pose,
-                        None => g.pose,
-                    };
-                    let hull = match (&g.mesh, g.kind) {
-                        (Some(mn), GeomType::Mesh) => Some(t.mesh_hulls.get(mn)?),
-                        _ => None,
-                    };
-                    Some(CollisionGeom {
-                        kind: g.kind,
-                        pose: GeomPose { pos: world.translation.vector, mat: *world.rotation.to_rotation_matrix().matrix() },
-                        size: g.size,
-                        hull,
-                    })
-                })
-                .collect();
-            let mut refused = false;
+            // ⭐ the library's own `mj_collision`, so what this sweep verifies is what a caller gets
+            let collision = t.collide(&q);
+            let refused = !collision.refused.is_empty();
             // ⭐ why a pair is NOT here: every gate records the pair it dropped, so a missing contact names
             // the rule that removed it instead of leaving a count to be stared at
-            let mut why: BTreeMap<(usize, usize), String> = BTreeMap::new();
-            for i in 0..t.geoms.len() {
-                for j in i + 1..t.geoms.len() {
-                    let (gi, gj) = (&t.geoms[i], &t.geoms[j]);
-                    let (Some(ci), Some(cj)) = (&geoms[i], &geoms[j]) else { continue };
-                    if ci.kind == GeomType::HField || cj.kind == GeomType::HField {
-                        refused = true;
-                        continue;
-                    }
-                    let key = (i.min(j), i.max(j));
-                    let pair = pairs.get(&(gi.name.clone(), gj.name.clone())).map(|&k| &t.contact_pairs[k]);
-                    let (margin, gap, params) = if let Some(p) = pair {
-                        (p.margin, p.gap, PairParams { condim: p.condim, solref: p.solref, solimp: p.solimp, friction: p.friction, adhesion: p.adhesion })
-                    } else {
-                        if !can_collide(gi.params.contype, gi.params.conaffinity, gj.params.contype, gj.params.conaffinity) {
-                            why.insert(key, "contype/conaffinity".into());
-                            continue;
-                        }
-                        let (w1, pw1, n1) = welds.get(&gi.body).copied().unwrap_or((0, 0, 0));
-                        let (w2, pw2, n2) = welds.get(&gj.body).copied().unwrap_or((0, 0, 0));
-                        if filter_body_pair(w1, pw1, n1, w2, pw2, n2, true) {
-                            why.insert(key, "the body filter (same weld, both static, or parent and child)".into());
-                            continue;
-                        }
-                        if excludes.contains(&(gi.body.clone(), gj.body.clone())) {
-                            why.insert(key, "<contact><exclude>".into());
-                            continue;
-                        }
-                        let (m, g) = margin_and_gap(&gi.params, &gj.params);
-                        (m, g, contact_param(&gi.params, &gj.params))
-                    };
-                    let Ok(pre) = collide_pair_with(&opts, margin + gap, ci, cj) else {
-                        refused = true;
-                        why.insert(key, "a pair the collider refuses".into());
-                        continue;
-                    };
-                    if pre.is_empty() {
-                        why.insert(key, "no contact: the collider found them apart".into());
-                    } else {
-                        why.insert(key, format!("the collider found {} witness(es) at dist {:?}, includemargin {margin}", pre.len(), pre.iter().map(|p| p.dist).collect::<Vec<_>>()));
-                    }
-                    for p in pre {
-                        let c: ContactRecord = set_contact(&p, &params, margin);
-                        // a contact inside the gap band is detected but not handed to the solver
-                        if c.exclude {
-                            continue;
-                        }
-                        let point = c.pos;
-                        let jac = contact_jacobian(joints, parent, &frames, gi.joint, gj.joint, point, &c.frame, c.dim);
-                        // ⛔ at `qpos0`, NOT here: MuJoCo computes `body_invweight0` when it compiles the
-                        // model and never recomputes it, so a contact's regularisation carries the reference
-                        // pose's inverse weights however far the model has moved since.
-                        let iw = |g: &ferromotion_core::MjcfGeom| biw.get(&g.body).copied().unwrap_or(InvWeight::STATIC);
-                        if ci.kind == GeomType::Mesh || cj.kind == GeomType::Mesh {
-                            any_mesh = true;
-                        }
-                        ourcon.push((i, j, c.pos, c.frame, c.dist));
-                        contacts.push(ferromotion_core::ContactSpec {
-                            jac,
-                            dist: c.dist,
-                            margin: c.includemargin,
-                            condim: c.dim,
-                            friction: c.friction,
-                            solref: SolRef(c.solref[0], c.solref[1]),
-                            solimp: SolImp { d0: c.solimp[0], d_width: c.solimp[1], width: c.solimp[2], midpoint: c.solimp[3], power: c.solimp[4] },
-                            invweight: [iw(gi), iw(gj)],
-                        });
-                    }
+            let why = &collision.why;
+            for c in &collision.contacts {
+                // a contact inside the gap band is detected but not handed to the solver
+                if c.record.exclude {
+                    continue;
                 }
+                let (i, j) = (c.geom[0], c.geom[1]);
+                // ⛔ `body_invweight0` at `qpos0`, NOT here: MuJoCo computes it when it compiles the model and
+                // never recomputes it, so a contact's regularisation carries the reference pose's inverse
+                // weights however far the model has moved since.
+                if t.geoms[i].kind == GeomType::Mesh || t.geoms[j].kind == GeomType::Mesh {
+                    any_mesh = true;
+                }
+                ourcon.push((i, j, c.record.pos, c.record.frame, c.record.dist));
+                contacts.push(t.contact_spec(c, &frames, &biw));
             }
             if refused {
                 *skip.entry("a geom pair this port refuses (height field)").or_default() += 1;
