@@ -1229,7 +1229,73 @@ impl MjcfTree {
         let specs: Vec<crate::mujoco_contact::ContactSpec> = collision.contacts.iter().filter(|c| !c.record.exclude).map(|c| self.contact_spec(c, &frames, &invweight0)).collect();
         let p = self.constraint_problem(q, v_mujoco, ctrl, &specs)?;
         let solve = crate::mujoco_contact::solve_constraints_newton_blocks(&p.m, &p.a0, &p.rows.jac, &p.rows.aref, &p.rows.d, &p.rows.blocks, 1e-13, 200)?;
-        Ok(MjcfForward { qacc: solve.qacc.iter().copied().collect(), qacc_smooth: p.a0.iter().copied().collect(), nefc: p.rows.aref.len(), collision, solve })
+        Ok(MjcfForward { qacc: solve.qacc.iter().copied().collect(), qacc_smooth: p.a0.iter().copied().collect(), nefc: p.rows.aref.len(), collision, solve, m: p.m })
+    }
+
+    /// MuJoCo's `qpos` address of each joint, in joint order.
+    pub fn qposadr(&self) -> Vec<usize> {
+        self.joints
+            .iter()
+            .scan(0usize, |adr, j| {
+                let here = *adr;
+                *adr += j.kind.qpos_width();
+                Some(here)
+            })
+            .collect()
+    }
+
+    /// **`mj_step` with MuJoCo's default integrator, `Euler`**, ported from `mj_EulerSkip`, `mj_advance`
+    /// and `mj_integratePos`: one `<option timestep>` from a state in MuJoCo's own layout (`qpos` with its
+    /// quaternions, `qvel` in its basis).
+    ///
+    /// * With any `damping` on a dof the velocity is integrated IMPLICITLY in it: the applied acceleration
+    ///   is `(M + h·diag(damping))⁻¹·(qfrc_smooth + qfrc_constraint)`, which is `(M + h·D)⁻¹·M·qacc`.
+    ///   Otherwise it is `qacc` itself.
+    /// * `qvel += h·qacc`, then positions move with the NEW velocity (semi-implicit): a hinge or slide by
+    ///   `h·qvel`, a free joint's position by `h·v` and every quaternion by `mju_quatIntegrate`, the rotation
+    ///   `h·ω` in the body's own frame, applied after normalising.
+    ///
+    /// ⛔ The constraint solve is run to convergence (see [`MjcfTree::forward_mujoco`]), so a model that caps
+    /// `<option iterations>` steps along the optimum MuJoCo only approaches. A model with an actuator that
+    /// carries an activation state is refused: this steps `qpos` and `qvel` and nothing else.
+    pub fn step_mujoco(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64]) -> Result<MjcfStep, String> {
+        if let Some(a) = self.actuators.iter().find(|a| a.dynamics != crate::mujoco_actuator::ActDyn::None) {
+            return Err(format!("actuator '{}' carries an activation state, which this step does not integrate", a.name));
+        }
+        let qposadr = self.qposadr();
+        let q = self.q_from_qpos(qpos, &qposadr)?;
+        let forward = self.forward_mujoco(&q, qvel, ctrl)?;
+        let h = self.timestep;
+        // dof damping in MuJoCo's dof order: a joint's own value on each of its dofs
+        let damping: Vec<f64> = self.joints.iter().flat_map(|j| std::iter::repeat_n(j.damping, j.kind.dofs())).collect();
+        let qacc = nalgebra::DVector::from_row_slice(&forward.qacc);
+        let applied = if damping.iter().any(|d| *d > 0.0) {
+            let mut mh = forward.m.clone();
+            for (i, d) in damping.iter().enumerate() {
+                mh[(i, i)] += h * d;
+            }
+            mh.cholesky().ok_or("M + h·D is not positive definite")?.solve(&(&forward.m * &qacc))
+        } else {
+            qacc
+        };
+        let qvel_next: Vec<f64> = qvel.iter().zip(applied.iter()).map(|(v, a)| v + h * a).collect();
+        // `mj_integratePos`, with the new velocity
+        let mut qpos_next = qpos.to_vec();
+        let mut vadr = 0usize;
+        for (j, &padr) in self.joints.iter().zip(&qposadr) {
+            match j.kind {
+                MjcfJointKind::Hinge | MjcfJointKind::Slide => qpos_next[padr] += h * qvel_next[vadr],
+                MjcfJointKind::Free => {
+                    for k in 0..3 {
+                        qpos_next[padr + k] += h * qvel_next[vadr + k];
+                    }
+                    quat_integrate(&mut qpos_next[padr + 3..padr + 7], &qvel_next[vadr + 3..vadr + 6], h);
+                }
+                MjcfJointKind::Ball => quat_integrate(&mut qpos_next[padr..padr + 4], &qvel_next[vadr..vadr + 3], h),
+            }
+            vadr += j.kind.dofs();
+        }
+        Ok(MjcfStep { qpos: qpos_next, qvel: qvel_next, qacc_integrated: applied.iter().copied().collect(), forward })
     }
 
     /// One entry per degree of freedom: the joint's cap on the total actuator force through it, for
@@ -1489,6 +1555,19 @@ pub struct MjcfForward {
     pub collision: MjcfCollision,
     /// the solve itself: `efc_force`, `efc_state`, the cost and the gradient at exit
     pub solve: crate::mujoco_contact::NewtonSolve,
+    /// the mass matrix in MuJoCo's coordinates, `T⁻ᵀ·M·T⁻¹` — what an integrator needs next
+    pub m: nalgebra::DMatrix<f64>,
+}
+
+/// One [`MjcfTree::step_mujoco`]: the next state, in MuJoCo's layout, and the forward pass it came from.
+#[derive(Clone, Debug)]
+pub struct MjcfStep {
+    pub qpos: Vec<f64>,
+    pub qvel: Vec<f64>,
+    /// the acceleration the integrator actually applied: `qacc` itself, or with damping the implicit
+    /// `(M + h·D)⁻¹·M·qacc`
+    pub qacc_integrated: Vec<f64>,
+    pub forward: MjcfForward,
 }
 
 /// One contact [`MjcfTree::collide`] found: the two geoms (indices into [`MjcfTree::geoms`], lower first,
@@ -2258,6 +2337,32 @@ fn wrap_obstacle(x0: Vector3<f64>, x1: Vector3<f64>, pose: &Iso, radius: f64, cy
         wlen = (wlen * wlen + height * height).sqrt();
     }
     Some(([xmat * res[0] + c, xmat * res[1] + c], wlen))
+}
+
+/// `mju_quatIntegrate`: rotate `quat` by `scale·vel`, an angular velocity in the body's own frame — the
+/// axis-angle quaternion multiplied on the RIGHT, after `quat` is normalised (`mju_normalize4`, which leaves a
+/// quaternion already within `mjMINVAL` of unit length untouched).
+fn quat_integrate(quat: &mut [f64], vel: &[f64], scale: f64) {
+    let v = Vector3::new(vel[0], vel[1], vel[2]);
+    let n = v.norm();
+    let axis = normalize3(v);
+    let angle = scale * n;
+    // `sin` and `cos` separately, as `mju_axisAngle2Quat` calls them: a fused `sin_cos` may differ in the last bit
+    let qrot = if angle == 0.0 { [1.0, 0.0, 0.0, 0.0] } else { let s = (angle * 0.5).sin(); [(angle * 0.5).cos(), axis[0] * s, axis[1] * s, axis[2] * s] };
+    let norm = (quat[0] * quat[0] + quat[1] * quat[1] + quat[2] * quat[2] + quat[3] * quat[3]).sqrt();
+    if norm < 1e-15 {
+        quat.copy_from_slice(&[1.0, 0.0, 0.0, 0.0]);
+    } else if (norm - 1.0).abs() > 1e-15 {
+        let k = 1.0 / norm;
+        for x in quat.iter_mut() {
+            *x *= k;
+        }
+    }
+    let (a, b) = ([quat[0], quat[1], quat[2], quat[3]], qrot);
+    quat[0] = a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3];
+    quat[1] = a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2];
+    quat[2] = a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1];
+    quat[3] = a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0];
 }
 
 /// `mju_normalize3`: a vector shorter than `mjMINVAL` becomes the x axis rather than NaN.
@@ -5202,6 +5307,77 @@ mod tests {
             }
         }
     }
+
+    /// **`step_mujoco`, the library's `mj_step` (Euler), against MuJoCo's own trajectory.** A free box on the
+    /// floor, an arm past its joint limit and a ball-jointed pendulum, moving: once with dof damping (MuJoCo
+    /// then integrates the velocity implicitly in it, `(M + h·D)⁻¹`) and once without. One step is held to
+    /// 1e-10 and twenty-five to 1e-7; MuJoCo runs `iterations="1000" tolerance="0"` so each of its steps is
+    /// the converged one this port takes.
+    #[test]
+    fn step_mujoco_follows_mujocos_euler_trajectory_with_and_without_damping() {
+        let qpos0 = [0.01, -0.02, 0.049, 0.9998249759398523, 0.010000249809360396, -0.015000374714040593, 0.005000124904680198, 0.31, 0.9822618062296308, 0.10023079655404396, -0.15034619483106593, 0.05011539827702198];
+        let qvel0 = [0.2, -0.1, -0.05, 0.3, -0.2, 0.1, 0.4, 0.5, -0.3, 0.2];
+        type Snap = ([f64; 12], [f64; 10]);
+        let want: [(&str, Snap, Snap); 2] = [
+            (
+                "0.2",
+                (
+                    [0.010380217142683779, -0.020185716542261742, 0.04889219879886996, 0.9998268823411698, 0.010262461713718413, -0.014710489975223043, 0.004948607096941901, 0.3105504420547829, 0.9821754855744429, 0.10067103163600079, -0.1505514440942976, 0.05030826579273555],
+                    [0.19010857134188877, -0.09285827113087017, -0.05390060056502018, 0.2628236267671603, 0.28803632298975357, -0.058350521262796405, 0.2752210273914292, 0.45978886481975273, -0.21731779597310744, 0.14815702303299097],
+                ),
+                (
+                    [0.013258487049700713, -0.020169147196851943, 0.04925187689690385, 0.9999919866484078, 0.0016613894442337517, -0.0008634559997705678, 0.0035384838307690497, 0.3044215407714665, 0.9835869936613889, 0.09924292950081777, -0.1411042732925926, 0.052887152530803255],
+                    [0.011299785223229634, 0.014808428339528975, 0.021940691234653982, -0.3054497078983967, 0.21471685401162136, -0.0016131745722577867, -0.1344479267160266, -0.33179869800999484, 0.7932692266127152, 0.025934366118544976],
+                ),
+            ),
+            (
+                "0",
+                (
+                    [0.010380217142683779, -0.02018571654226174, 0.04889219879886996, 0.9998268823411698, 0.010262461713718411, -0.014710489975223043, 0.004948607096941901, 0.3105447326523489, 0.9821693824625731, 0.1006702029158415, -0.15057551022428187, 0.050357026507414186],
+                    [0.19010857134188877, -0.09285827113086964, -0.05390060056502038, 0.2628236267671595, 0.28803632298975274, -0.058350521262796745, 0.2723663261744362, 0.465711471404695, -0.2369457611948599, 0.19889543632290546],
+                ),
+                (
+                    [0.013258487049700713, -0.02016914719685193, 0.04925187689690385, 0.9999919866484078, 0.0016613894442337532, -0.0008634559997705658, 0.0035384838307690545, 0.3043323205075922, 0.9837553010328234, 0.10009915764353215, -0.13802299888637334, 0.05617221828703629],
+                    [0.011299785223229625, 0.014808428339528988, 0.021940691234653975, -0.30544970789839737, 0.21471685401162147, -0.0016131745722573932, -0.13234429671280784, -0.36300009987506565, 1.2673169892733536, 0.16826335790464692],
+                ),
+            ),
+        ];
+        let near = |got: &[f64], want: &[f64], tol: f64, what: &str| {
+            for (k, (g, w)) in got.iter().zip(want).enumerate() {
+                assert!((g - w).abs() < tol * w.abs().max(1.0), "{what}[{k}] {g} vs MuJoCo {w}");
+            }
+        };
+        for (damp, one, twentyfive) in want {
+            let t = tree_from_mjcf_str(&STEP_MODEL.replace("DAMP", damp)).unwrap();
+            let (mut qpos, mut qvel) = (qpos0.to_vec(), qvel0.to_vec());
+            for k in 1..=25 {
+                let st = t.step_mujoco(&qpos, &qvel, &[]).unwrap();
+                (qpos, qvel) = (st.qpos, st.qvel);
+                if k == 1 {
+                    near(&qpos, &one.0, 1e-10, &format!("damping {damp}, step 1: qpos"));
+                    near(&qvel, &one.1, 1e-10, &format!("damping {damp}, step 1: qvel"));
+                }
+            }
+            near(&qpos, &twentyfive.0, 1e-7, &format!("damping {damp}, step 25: qpos"));
+            near(&qvel, &twentyfive.1, 1e-7, &format!("damping {damp}, step 25: qvel"));
+        }
+    }
+
+    const STEP_MODEL: &str = r#"<mujoco><compiler angle="radian"/><option impratio="3" cone="elliptic"/><worldbody>
+  <geom name="floor" type="plane" size="2 2 0.1"/>
+  <body name="box" pos="0 0 0.049">
+    <freejoint/>
+    <geom type="box" size="0.1 0.07 0.05" mass="1.3"/>
+  </body>
+  <body name="arm" pos="0.5 0 0.3">
+    <joint name="hinge" type="hinge" axis="0 1 0" range="-0.3 0.3" damping="DAMP"/>
+    <geom type="capsule" size="0.03 0.15" fromto="0 0 0 0.25 0 -0.2" mass="0.4"/>
+  </body>
+  <body name="bob" pos="-0.6 0 0.8">
+    <joint name="swivel" type="ball" damping="DAMP"/>
+    <geom type="capsule" size="0.02 0.1" fromto="0 0 0 0.1 0.05 -0.25" mass="0.3"/>
+  </body>
+</worldbody></mujoco>"#;
 
     const FORWARD_MODEL: &str = r#"<mujoco><compiler angle="radian"/><option impratio="3" cone="CONE"/><worldbody>
   <geom name="floor" type="plane" size="2 2 0.1"/>
