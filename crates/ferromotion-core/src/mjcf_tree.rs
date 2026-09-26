@@ -149,6 +149,10 @@ pub struct MjcfJoint {
     /// A SLIDE joint whose anchor is at the body frame's origin and whose axis is a coordinate axis — one of
     /// the conditions for MuJoCo's "simple body" shortcut in [`MjcfTree::dof_invweight0`].
     pub aligned_slide: bool,
+    /// `springdamper="timeconst dampratio"`: when given, `stiffness` and `damping` are NOT what the file
+    /// says but are COMPUTED at compile from the joint's inverse weight (`mjCModel::AutoSpringDamper`), and
+    /// the two fields above already hold the computed values.
+    pub springdamper: Option<[f64; 2]>,
 }
 
 impl MjcfTree {
@@ -2981,6 +2985,11 @@ impl Walk<'_> {
                 }
             }
             self.out.tree.joint_names.insert(jname.clone(), first);
+            let springdamper = match pair(get("springdamper"), [0.0, 0.0])? {
+                [0.0, 0.0] => None,
+                [tc, dr] if tc <= 0.0 || dr <= 0.0 => return Err(format!("joint '{jname}': when defined, springdamper values must be positive")),
+                v => Some(v),
+            };
             self.out.joints.push(MjcfJoint {
                 name: jname,
                 kind,
@@ -3002,6 +3011,7 @@ impl Walk<'_> {
                 aligned_slide: kind == MjcfJointKind::Slide
                     && anchor.norm() == 0.0
                     && axis.iter().filter(|x| x.abs() > f64::EPSILON).count() == 1,
+                springdamper,
             });
             // after the motion, the body frame sits at −anchor from the joint's frame
             pre = Iso::from_parts(Translation3::from(-anchor), UnitQuaternion::identity());
@@ -4149,6 +4159,20 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             }
         }
     }
+    // `mjCModel::AutoSpringDamper`, from MuJoCo's source: a joint that states `springdamper` gets its
+    // stiffness and damping from its average inverse weight at `qpos0`, the same way a `solref` time constant
+    // becomes a stiffness — `inertia = ndim / Σ dof_invweight0`, `stiffness = inertia / (τ²ζ²)`,
+    // `damping = 2·inertia / τ` — replacing whatever the file stated. flybody's halteres are sprung this way.
+    if out.joints.iter().any(|j| j.springdamper.is_some()) {
+        let invweight = out.dof_invweight0();
+        for j in out.joints.iter_mut() {
+            let Some([timeconst, dampratio]) = j.springdamper else { continue };
+            let ndim = j.kind.dofs();
+            let inertia = ndim as f64 / (0..ndim).map(|k| invweight[j.first + k]).sum::<f64>().max(1e-15);
+            j.stiffness = inertia / (timeconst * timeconst * dampratio * dampratio).max(1e-15);
+            j.damping = 2.0 * inertia / timeconst.max(1e-15);
+        }
+    }
     // <equality>: the `joint` coupling and `connect`; the rest are named rather than dropped
     {
         let by_name: HashMap<&str, &MjcfJoint> = out.joints.iter().map(|j| (j.name.as_str(), j)).collect();
@@ -5029,6 +5053,40 @@ mod tests {
             Ok(t) => format!("loaded {} actuators, refused {:?}", t.actuators.len(), t.actuators_unsupported),
         };
         assert!(why.contains("invalid control range"), "an adhesion actuator with no ctrlrange must be refused: {why}");
+    }
+
+    /// **`springdamper`, against MuJoCo's own numbers.** A joint that states a time constant and a damping
+    /// ratio gets its stiffness and damping COMPUTED from its average inverse weight at `qpos0`
+    /// (`mjCModel::AutoSpringDamper`), overriding the `stiffness="99" damping="99"` the hinge also states. A
+    /// ball joint averages over its three dofs (which `dof_invweight0` has already made one shared value, so
+    /// that average cannot be told from taking the first). flybody's two halteres are sprung this way.
+    #[test]
+    fn a_springdamper_joint_gets_the_stiffness_and_damping_mujoco_computes() {
+        let t = tree_from_mjcf_str(
+            r#"<mujoco><compiler angle="radian"/><option gravity="0 0 0"/><worldbody>
+  <body name="a" pos="0 0 0.3">
+    <joint name="hinge" type="hinge" axis="0.3 1 0.2" springdamper="0.05 0.7" stiffness="99" damping="99"/>
+    <geom type="capsule" size="0.03 0.2" pos="0.1 0 0" euler="0 1.2 0" mass="0.8"/>
+    <body name="b" pos="0.3 0 0">
+      <joint name="slide" type="slide" axis="1 0.2 0" springdamper="0.2 1.5"/>
+      <geom type="box" size="0.05 0.04 0.03" mass="0.4"/>
+      <body name="c" pos="0.1 0.05 0">
+        <joint name="ball" type="ball" springdamper="0.1 0.3"/>
+        <geom type="ellipsoid" size="0.06 0.03 0.02" pos="0.04 0 0" mass="0.2"/>
+      </body>
+    </body>
+  </body>
+</worldbody></mujoco>"#,
+        )
+        .unwrap();
+        let want = [("hinge", 50.45954575355362, 2.4725177419241273), ("slide", 6.6095777627584535, 5.948619986482609), ("ball", 0.1380264945560344, 0.0024844769020086195)];
+        for (name, k, c) in want {
+            let j = t.joints.iter().find(|j| j.name == name).unwrap();
+            assert!((j.stiffness - k).abs() < 1e-9 * k, "{name}: stiffness {} vs MuJoCo {k}", j.stiffness);
+            assert!((j.damping - c).abs() < 1e-9 * c, "{name}: damping {} vs MuJoCo {c}", j.damping);
+        }
+        let err = tree_from_mjcf_str(r#"<mujoco><worldbody><body><joint name="j" type="hinge" springdamper="0.1 0"/><geom type="sphere" size="0.1"/></body></worldbody></mujoco>"#).err().unwrap_or_default();
+        assert!(err.contains("springdamper values must be positive"), "{err}");
     }
 
     const ADHESION_MODEL: &str = r#"<mujoco><compiler angle="radian"/><option gravity="0 0 0" cone="elliptic"/><worldbody>
