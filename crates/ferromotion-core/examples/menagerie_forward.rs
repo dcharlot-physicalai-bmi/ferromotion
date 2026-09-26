@@ -185,6 +185,8 @@ fn main() {
     let (mut solved_nomesh, mut solved_ok_nomesh, mut worst_qacc_nomesh) = (0usize, 0usize, 0.0f64);
     let mut solved_no_worse = 0usize;
     let (mut framed, mut frame_unpaired, mut tangent_differs) = (0usize, 0usize, 0usize);
+    // the library's own `forward_mujoco` against the solve assembled here, and its `<option>` against MuJoCo's
+    let (mut lib_compared, mut lib_identical, mut options_differ) = (0usize, 0usize, 0usize);
     let (mut worst_con_normal, mut worst_con_normal_where) = (0.0f64, String::new());
     let (mut worst_con_tangent, mut worst_con_tangent_where) = (0.0f64, String::new());
     let (mut worst_con_d, mut worst_con_d_where, mut worst_con_aref, mut worst_con_aref_where) = (0.0f64, String::new(), 0.0f64, String::new());
@@ -729,11 +731,24 @@ fn main() {
                 }
             }
             solved += 1;
-            // the whole row set, in MuJoCo's order: equality, friction, limits, then contacts
-            let mut set = t.joint_constraint_rows(&q, &qvel, &t.dof_invweight0());
+            // ⭐ the cone and impratio the LIBRARY read from the file, checked against the ones MuJoCo compiled:
+            // `forward_mujoco` uses the tree's own, so a wrong one there would be invisible if this sweep
+            // passed the oracle's values in instead
             let cone = if o.cone_pyramidal { ferromotion_core::Cone::Pyramidal } else { ferromotion_core::Cone::Elliptic };
-            match ferromotion_core::contact_rows(&contacts, nv, &qvel, cone, o.impratio, t.timestep) {
-                Ok(cr) => {
+            if t.cone != cone || t.impratio != o.impratio {
+                options_differ += 1;
+            }
+            // the whole row set, in MuJoCo's order: equality, friction, limits, then contacts — posed by the
+            // library, in MuJoCo's coordinates
+            let problem = match t.constraint_problem(&q, &s.qvel, &vec![0.0; t.actuators.len()], &contacts) {
+                Ok(problem) => {
+                    let row0: usize = problem.rows.blocks[..problem.contact_blocks_from].iter().map(|b| b.rows()).sum();
+                    let cr = ferromotion_core::AssembledRows {
+                        blocks: problem.rows.blocks[problem.contact_blocks_from..].to_vec(),
+                        jac: nalgebra::DMatrix::zeros(0, 0),
+                        aref: problem.rows.aref[row0..].to_vec(),
+                        d: problem.rows.d[row0..].to_vec(),
+                    };
                     // ⭐ the contact rows themselves, against MuJoCo's own — `efc_D` is where the inverse
                     // weights, the impedance and the cone adjustment all land, and `efc_aref` is where the
                     // reference acceleration does. With the solver and the joint rows already pinned, a
@@ -785,7 +800,7 @@ fn main() {
                             }
                         }
                     }
-                    set.append(cr)
+                    problem
                 }
                 Err(e) => {
                     *skip.entry("a contact row this port cannot build").or_default() += 1;
@@ -794,23 +809,26 @@ fn main() {
                     }
                     continue;
                 }
-            }
-            if set.blocks.iter().map(|b| b.rows()).sum::<usize>() != s.nefc {
+            };
+            if problem.rows.blocks.iter().map(|b| b.rows()).sum::<usize>() != s.nefc {
                 *skip.entry("we and MuJoCo disagree on how many constraint ROWS there are").or_default() += 1;
                 continue;
             }
-            // ⛔ the solve happens in MUJOCO'S coordinates, because that is where its answer lives. A row's
-            // Jacobian maps by `J·T⁻¹`, the mass matrix by `T⁻ᵀ·M·T⁻¹`, and `aref` and `D` do not move at
-            // all — `J·q̇` is the same number in either basis. With no free or ball joint `T` is the identity
-            // and this is exactly the computation it was before.
-            let jac = &set.jac * &tinv;
-            let m_mj = tinv.transpose() * &m * &tinv;
-            let Some(a0_mj) = t.qacc_smooth_mujoco(&q, &s.qvel, &vec![0.0; t.actuators.len()]).map(DVector::from_vec) else {
-                *skip.entry("gimbal lock: the Euler base's basis map is singular").or_default() += 1;
-                continue;
-            };
-            match ferromotion_core::solve_constraints_newton_blocks(&m_mj, &a0_mj, &jac, &set.aref, &set.d, &set.blocks, 1e-13, 200) {
+            // ⛔ the solve happens in MUJOCO'S coordinates, because that is where its answer lives; the
+            // library has already mapped the rows (`J·T⁻¹`) and the mass matrix (`T⁻ᵀ·M·T⁻¹`)
+            let (jac, m_mj, a0_mj, set) = (&problem.rows.jac, &problem.m, &problem.a0, &problem.rows);
+            match ferromotion_core::solve_constraints_newton_blocks(m_mj, a0_mj, jac, &set.aref, &set.d, &set.blocks, 1e-13, 200) {
                 Ok(sol) => {
+                    // ⭐ and the ONE-CALL library forward must be this very answer: same contacts, same rows,
+                    // same solve. Only where the contacts were not swapped for MuJoCo's (`MJSUB`).
+                    if mjsub.is_none() {
+                        lib_compared += 1;
+                        match t.forward_mujoco(&q, &s.qvel, &vec![0.0; t.actuators.len()]) {
+                            Ok(f) if f.qacc.iter().zip(sol.qacc.iter()).all(|(x, y)| x.to_bits() == y.to_bits()) => lib_identical += 1,
+                            Ok(f) => notes.push(format!("{}: forward_mujoco differs from the assembled solve by {:.2e}", o.rel, f.qacc.iter().zip(sol.qacc.iter()).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max))),
+                            Err(e) => notes.push(format!("{}: forward_mujoco refused a state the sweep solved: {e}", o.rel)),
+                        }
+                    }
                     // ⛔⛔ compare against the OPTIMUM OF THE ROWS MUJOCO BUILT, not against the iterate it
                     // happened to stop on. On the 181 models that let the solver run these are the same
                     // number to the last bit, and the sweep is unchanged. On the 29 that cap `iterations`
@@ -846,10 +864,10 @@ fn main() {
                     // difference is MuJoCo's iteration limit and not this port.
                     if dq >= 1e-6 && contacts.is_empty() {
                         let cost_at = |a: &DVector<f64>| {
-                            let jar: Vec<f64> = (&jac * a - DVector::from_row_slice(&set.aref)).iter().copied().collect();
+                            let jar: Vec<f64> = (jac * a - DVector::from_row_slice(&set.aref)).iter().copied().collect();
                             let u = ferromotion_core::mujoco_constraint_update_blocks(&set.blocks, &set.d, &jar);
-                            let da = a - &a0_mj;
-                            0.5 * (da.transpose() * &m_mj * &da)[(0, 0)] + u.cost
+                            let da = a - a0_mj;
+                            0.5 * (da.transpose() * m_mj * &da)[(0, 0)] + u.cost
                         };
                         if cost_at(&sol.qacc) <= cost_at(&DVector::from_row_slice(target)) {
                             solved_no_worse += 1;
@@ -891,6 +909,7 @@ fn main() {
     println!("  CONSTRAINED (contacts found and solved by us): {solved_ok} of {solved} within 1e-6 ({solved_no_worse} more have NO contacts — rows this port checks separately — and reach a cost no worse than MuJoCo's own answer); worst qacc (relative) {worst_qacc:.2e} on {worst_qacc_where}");
     println!("    of those, with NO mesh geom in any contact: {solved_ok_nomesh} of {solved_nomesh}; worst qacc (relative) {worst_qacc_nomesh:.2e}");
     println!("    ⛔ MuJoCo stopped its own solver short of the optimum of the rows it built on {trunc_states} of them (worst {worst_trunc:.2e} on {worst_trunc_where}); those are compared against its CONVERGED answer");
+    println!("    the library's one-call MjcfTree::forward_mujoco equals this solve BIT FOR BIT on {lib_identical} of {lib_compared}; the tree's <option cone/impratio> differs from MuJoCo's on {options_differ} states");
     println!("  CONTACT FRAMES (the tangent pair, not only the normal): {framed} contacts paired with MuJoCo's ({frame_unpaired} states could not be paired by geom)");
     println!("    worst normal {worst_con_normal:.2e} on {worst_con_normal_where}; tangent pair rotated on {tangent_differs} of them, worst 1-|t·t'| {worst_con_tangent:.2e} on {worst_con_tangent_where}");
     println!("    worst efc_D (relative) {worst_con_d:.2e} on {worst_con_d_where} ({con_rows_compared} contacts compared row by row; {reversed_pair} left out because MuJoCo wrote the geom pair the other way round)");

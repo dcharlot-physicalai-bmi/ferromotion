@@ -1186,6 +1186,52 @@ impl MjcfTree {
         }
     }
 
+    /// **The constrained problem `mj_forward` solves at one state, in MUJOCO's coordinates**: the mass
+    /// matrix, the unconstrained acceleration, and every constraint row in MuJoCo's order (equality,
+    /// friction, limits, then `contacts`), each with its `efc_aref`, `efc_D` and law.
+    ///
+    /// `q` is this port's coordinates (from [`MjcfTree::q_from_qpos`]); `v_mujoco` and `ctrl` are MuJoCo's.
+    /// ⛔ The problem is posed where MuJoCo's answer lives. On a free or ball joint this port's velocity
+    /// basis is not MuJoCo's, so a row's Jacobian maps as `J·T⁻¹` and the mass matrix as `T⁻ᵀ·M·T⁻¹`, while
+    /// `efc_aref` and `efc_D` do not move (`J·q̇` is the same number in either basis). With no such joint `T`
+    /// is the identity.
+    pub fn constraint_problem(&self, q: &[f64], v_mujoco: &[f64], ctrl: &[f64], contacts: &[crate::mujoco_contact::ContactSpec]) -> Result<MjcfConstraintProblem, String> {
+        let nv = self.tree.joints.len();
+        let tinv = self.free_basis(q).try_inverse().ok_or("gimbal lock: the Euler base's basis map is singular")?;
+        let qvel: Vec<f64> = (&tinv * nalgebra::DVector::from_row_slice(v_mujoco)).iter().copied().collect();
+        let mut rows = self.joint_constraint_rows(q, &qvel, &self.dof_invweight0());
+        let contact_blocks_from = rows.blocks.len();
+        rows.append(crate::mujoco_contact::contact_rows(contacts, nv, &qvel, self.cone, self.impratio, self.timestep)?);
+        rows.jac = &rows.jac * &tinv;
+        let m = self.mass_matrix(q);
+        let a0 = self.qacc_smooth_mujoco(q, v_mujoco, ctrl).ok_or("gimbal lock: the Euler base's basis map is singular")?;
+        Ok(MjcfConstraintProblem { m: tinv.transpose() * m * &tinv, a0: nalgebra::DVector::from_vec(a0), rows, contact_blocks_from })
+    }
+
+    /// **`mj_forward`**: the constrained acceleration at one state, in MuJoCo's coordinates — contacts from
+    /// [`MjcfTree::collide`], rows from [`MjcfTree::constraint_problem`], and MuJoCo's Newton solver run to
+    /// convergence.
+    ///
+    /// ⛔ To CONVERGENCE, not to MuJoCo's iteration budget. The objective is strictly convex, so this is the
+    /// one optimum of the rows MuJoCo builds; a model whose `<option iterations>` caps the solve (every
+    /// `*_mjx.xml` in Menagerie) gets an answer MuJoCo itself only approaches. `Err` for a state this port
+    /// cannot pose: a height field, or a gimbal-locked Euler base.
+    ///
+    /// Verified against MuJoCo 3.13.0 on Menagerie by `examples/menagerie_forward`, which runs this and
+    /// checks it against the pipeline it assembles itself.
+    pub fn forward_mujoco(&self, q: &[f64], v_mujoco: &[f64], ctrl: &[f64]) -> Result<MjcfForward, String> {
+        let collision = self.collide(q);
+        if let Some([i, j]) = collision.refused.first() {
+            return Err(format!("geoms '{}' and '{}' need a collider this port does not carry", self.geoms[*i].name, self.geoms[*j].name));
+        }
+        let frames = crate::tree_frames(&self.tree, q);
+        let invweight0 = self.body_invweight0();
+        let specs: Vec<crate::mujoco_contact::ContactSpec> = collision.contacts.iter().filter(|c| !c.record.exclude).map(|c| self.contact_spec(c, &frames, &invweight0)).collect();
+        let p = self.constraint_problem(q, v_mujoco, ctrl, &specs)?;
+        let solve = crate::mujoco_contact::solve_constraints_newton_blocks(&p.m, &p.a0, &p.rows.jac, &p.rows.aref, &p.rows.d, &p.rows.blocks, 1e-13, 200)?;
+        Ok(MjcfForward { qacc: solve.qacc.iter().copied().collect(), qacc_smooth: p.a0.iter().copied().collect(), nefc: p.rows.aref.len(), collision, solve })
+    }
+
     /// One entry per degree of freedom: the joint's cap on the total actuator force through it, for
     /// [`crate::qfrc_actuator`]. `None` where the joint does not limit it.
     pub fn dof_actuator_force_range(&self) -> Vec<Option<[f64; 2]>> {
@@ -1294,6 +1340,10 @@ pub struct MjcfTree {
     pub density: f64,
     pub viscosity: f64,
     pub wind: Vector3<f64>,
+    /// `<option cone>`: which friction cone the contact rows model. MuJoCo's default is PYRAMIDAL.
+    pub cone: crate::mujoco_contact::Cone,
+    /// `<option impratio>`, default 1: how much stiffer the frictional rows are made than the normal one.
+    pub impratio: f64,
     /// Each body's PRINCIPAL inertia and the orientation of its inertial frame in its body frame —
     /// MuJoCo's `body_inertia` and `body_iquat`. The fluid model is written in that frame and nowhere else.
     pub body_iinertia: BTreeMap<String, [f64; 3]>,
@@ -1411,6 +1461,34 @@ pub struct MjcfGeom {
     /// primitive geom fitted to a mesh, where the SHAPE is the primitive and this is only provenance.
     pub mesh: Option<String>,
     pub params: crate::mujoco_collision::GeomParams,
+}
+
+/// The problem [`MjcfTree::constraint_problem`] poses, in MuJoCo's coordinates.
+#[derive(Clone, Debug)]
+pub struct MjcfConstraintProblem {
+    /// `T⁻ᵀ·M·T⁻¹`
+    pub m: nalgebra::DMatrix<f64>,
+    /// `qacc_smooth`, the acceleration with no constraint at all
+    pub a0: nalgebra::DVector<f64>,
+    /// every row (Jacobian already `J·T⁻¹`), with `efc_aref`, `efc_D` and its law, in MuJoCo's order
+    pub rows: crate::mujoco_contact::AssembledRows,
+    /// the index of the first CONTACT block in `rows.blocks`; the equality, friction and limit blocks
+    /// come before it
+    pub contact_blocks_from: usize,
+}
+
+/// What [`MjcfTree::forward_mujoco`] returns: the answer and the pieces that produced it.
+#[derive(Clone, Debug)]
+pub struct MjcfForward {
+    /// the constrained acceleration, in MuJoCo's coordinates
+    pub qacc: Vec<f64>,
+    /// the unconstrained one
+    pub qacc_smooth: Vec<f64>,
+    /// how many constraint rows (`d.nefc`)
+    pub nefc: usize,
+    pub collision: MjcfCollision,
+    /// the solve itself: `efc_force`, `efc_state`, the cost and the gradient at exit
+    pub solve: crate::mujoco_contact::NewtonSolve,
 }
 
 /// One contact [`MjcfTree::collide`] found: the two geoms (indices into [`MjcfTree::geoms`], lower first,
@@ -4004,6 +4082,8 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             density: 0.0,
             viscosity: 0.0,
             wind: Vector3::zeros(),
+            cone: crate::mujoco_contact::Cone::Pyramidal,
+            impratio: 1.0,
             body_iinertia: BTreeMap::new(),
             body_iquat: BTreeMap::new(),
             body_mass: BTreeMap::new(),
@@ -4072,6 +4152,16 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
         }
         if let Some(v) = el.attr("wind") {
             out.wind = vec3(v).map_err(|e| format!("<option wind>: {e}"))?;
+        }
+        if let Some(v) = el.attr("cone") {
+            out.cone = match v.trim() {
+                "pyramidal" => crate::mujoco_contact::Cone::Pyramidal,
+                "elliptic" => crate::mujoco_contact::Cone::Elliptic,
+                other => return Err(format!("<option cone>: '{other}' is neither pyramidal nor elliptic")),
+            };
+        }
+        if let Some(v) = el.attr("impratio") {
+            out.impratio = v.trim().parse::<f64>().map_err(|e| format!("<option impratio>: {e}"))?;
         }
         for (k, dst) in [("density", &mut out.density), ("viscosity", &mut out.viscosity)] {
             if let Some(v) = el.attr(k) {
@@ -5088,6 +5178,42 @@ mod tests {
         let err = tree_from_mjcf_str(r#"<mujoco><worldbody><body><joint name="j" type="hinge" springdamper="0.1 0"/><geom type="sphere" size="0.1"/></body></worldbody></mujoco>"#).err().unwrap_or_default();
         assert!(err.contains("springdamper values must be positive"), "{err}");
     }
+
+    /// **`forward_mujoco`, the library's one-call `mj_forward`, against MuJoCo's own converged answer.** A box
+    /// on a free joint resting tilted on the floor (two corner contacts) beside an arm pushed past its
+    /// joint limit, moving, under both cones and `impratio = 3`, all read from the file. MuJoCo is run with
+    /// `iterations="1000" tolerance="0"` so that its answer is the optimum and not an iterate.
+    #[test]
+    fn forward_mujoco_matches_mujocos_converged_qacc_under_both_cones() {
+        let qpos = [0.01, -0.02, 0.049, 0.9998249759398523, 0.010000249809360396, -0.015000374714040593, 0.005000124904680198, 0.31];
+        let qvel = [0.2, -0.1, -0.05, 0.3, -0.2, 0.1, 0.4];
+        let want: [(&str, usize, [f64; 7]); 2] = [
+            ("pyramidal", 9, [-4.5258058715528815, 3.620304256307129, -1.6638898721399942, -24.83205204979471, 245.69038295979536, -73.91773656072378, -64.08928673223734]),
+            ("elliptic", 7, [-4.94571432905561, 3.5708644345652583, -1.9503002825102176, -18.58818661642026, 244.0181614948763, -79.17526063139837, -64.08928673223734]),
+        ];
+        for (cone, nefc, qacc) in want {
+            let t = tree_from_mjcf_str(&FORWARD_MODEL.replace("CONE", cone)).unwrap();
+            let q = t.q_from_qpos(&qpos, &[0, 7]).unwrap();
+            let f = t.forward_mujoco(&q, &qvel, &[]).unwrap();
+            assert_eq!(f.nefc, nefc, "{cone}: rows");
+            assert_eq!(f.collision.contacts.len(), 2, "{cone}: contacts");
+            for k in 0..7 {
+                assert!((f.qacc[k] - qacc[k]).abs() < 1e-8 * qacc[k].abs().max(1.0), "{cone}: qacc[{k}] {} vs MuJoCo {}", f.qacc[k], qacc[k]);
+            }
+        }
+    }
+
+    const FORWARD_MODEL: &str = r#"<mujoco><compiler angle="radian"/><option impratio="3" cone="CONE"/><worldbody>
+  <geom name="floor" type="plane" size="2 2 0.1"/>
+  <body name="box" pos="0 0 0.049">
+    <freejoint/>
+    <geom type="box" size="0.1 0.07 0.05" mass="1.3"/>
+  </body>
+  <body name="arm" pos="0.5 0 0.3">
+    <joint name="hinge" type="hinge" axis="0 1 0" range="-0.3 0.3" damping="0.2"/>
+    <geom type="capsule" size="0.03 0.15" fromto="0 0 0 0.25 0 -0.2" mass="0.4"/>
+  </body>
+</worldbody></mujoco>"#;
 
     const ADHESION_MODEL: &str = r#"<mujoco><compiler angle="radian"/><option gravity="0 0 0" cone="elliptic"/><worldbody>
   <geom name="floor" type="plane" size="1 1 0.1"/>
