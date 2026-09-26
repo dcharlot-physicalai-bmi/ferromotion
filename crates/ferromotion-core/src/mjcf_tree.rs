@@ -1244,40 +1244,201 @@ impl MjcfTree {
             .collect()
     }
 
-    /// **`mj_step` with MuJoCo's default integrator, `Euler`**, ported from `mj_EulerSkip`, `mj_advance`
-    /// and `mj_integratePos`: one `<option timestep>` from a state in MuJoCo's own layout (`qpos` with its
-    /// quaternions, `qvel` in its basis).
+    /// **`mj_step`, for the two integrators Menagerie uses**, ported from `mj_EulerSkip`, `mj_implicitSkip`,
+    /// `mjd_smooth_vel`, `mj_advance` and `mj_integratePos`: one `<option timestep>` from a state in MuJoCo's
+    /// own layout (`qpos` with its quaternions, `qvel` in its basis).
     ///
-    /// * With any `damping` on a dof the velocity is integrated IMPLICITLY in it: the applied acceleration
-    ///   is `(M + h·diag(damping))⁻¹·(qfrc_smooth + qfrc_constraint)`, which is `(M + h·D)⁻¹·M·qacc`.
-    ///   Otherwise it is `qacc` itself.
-    /// * `qvel += h·qacc`, then positions move with the NEW velocity (semi-implicit): a hinge or slide by
-    ///   `h·qvel`, a free joint's position by `h·v` and every quaternion by `mju_quatIntegrate`, the rotation
-    ///   `h·ω` in the body's own frame, applied after normalising.
+    /// Both take the forward pass's force, `qfrc_smooth + qfrc_constraint = M·qacc`, and divide it by a
+    /// modified mass matrix before integrating:
+    /// * `Euler` (the default): `M + h·diag(damping)` when any dof is damped, so the velocity is implicit in
+    ///   the dof damping alone; otherwise `M`, and the applied acceleration is `qacc` itself.
+    /// * `implicitfast`: `M − h·∂qfrc/∂qvel` without the Coriolis term, where the derivative is every
+    ///   actuator's velocity gain `(biasprm[2] + gainprm[2]·ctrl)·m mᵀ`, minus the dof damping and each
+    ///   tendon's `damping·J Jᵀ`.
     ///
-    /// ⛔ The constraint solve is run to convergence (see [`MjcfTree::forward_mujoco`]), so a model that caps
-    /// `<option iterations>` steps along the optimum MuJoCo only approaches. A model with an actuator that
-    /// carries an activation state is refused: this steps `qpos` and `qvel` and nothing else.
+    /// Then `qvel += h·qacc`, and positions move with the NEW velocity: a hinge or slide by `h·qvel`, a free
+    /// joint's position by `h·v`, every quaternion by `mju_quatIntegrate` (the rotation `h·ω` in the body's
+    /// own frame, applied on the right after normalising).
+    ///
+    /// ⛔ The modified mass matrix is inverted in THIS port's coordinates, `T·(M − h·Q)⁻¹·M·T⁻¹`, where the
+    /// damping becomes `Tᵀ·D·T` — the same answer as MuJoCo's basis, without forming `T⁻ᵀ·M·T⁻¹`, which on a
+    /// tilted Euler base is badly conditioned. The constraint solve is converged (see
+    /// [`MjcfTree::forward_mujoco`]). Refused: `RK4` and `implicit` (not carried), `implicitfast` with a
+    /// fluid (its derivative is not carried), and any actuator with an activation state.
     pub fn step_mujoco(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64]) -> Result<MjcfStep, String> {
-        if let Some(a) = self.actuators.iter().find(|a| a.dynamics != crate::mujoco_actuator::ActDyn::None) {
+        use crate::mujoco_actuator::{ActBias, ActDyn, ActGain};
+        if let Some(a) = self.actuators.iter().find(|a| a.dynamics != ActDyn::None) {
             return Err(format!("actuator '{}' carries an activation state, which this step does not integrate", a.name));
+        }
+        match self.integrator {
+            MjcfIntegrator::Euler => {}
+            MjcfIntegrator::ImplicitFast if self.density > 0.0 || self.viscosity > 0.0 => {
+                return Err("implicitfast with a fluid: the fluid force's velocity derivative is not carried".into());
+            }
+            MjcfIntegrator::ImplicitFast => {}
+            other => return Err(format!("the {other:?} integrator is not carried")),
         }
         let qposadr = self.qposadr();
         let q = self.q_from_qpos(qpos, &qposadr)?;
         let forward = self.forward_mujoco(&q, qvel, ctrl)?;
         let h = self.timestep;
+        let nv = self.tree.joints.len();
         // dof damping in MuJoCo's dof order: a joint's own value on each of its dofs
         let damping: Vec<f64> = self.joints.iter().flat_map(|j| std::iter::repeat_n(j.damping, j.kind.dofs())).collect();
-        let qacc = nalgebra::DVector::from_row_slice(&forward.qacc);
-        let applied = if damping.iter().any(|d| *d > 0.0) {
-            let mut mh = forward.m.clone();
-            for (i, d) in damping.iter().enumerate() {
-                mh[(i, i)] += h * d;
+        let tb = self.free_basis(&q);
+        let tinv = tb.clone().try_inverse().ok_or("gimbal lock: the Euler base's basis map is singular")?;
+        let m = self.mass_matrix(&q);
+        let qacc_mj = nalgebra::DVector::from_row_slice(&forward.qacc);
+        // ⛔ `<flag eulerdamp="disable">` turns the Euler integrator's implicit damping off entirely
+        let damped = damping.iter().any(|d| *d > 0.0) && (self.eulerdamp || self.integrator != MjcfIntegrator::Euler);
+        // `∂qfrc/∂qvel` beyond the dof damping, as rank-one terms `c·v·vᵀ` in this port's coordinates:
+        // `mjd_actuator_vel` and the tendon half of `mjd_passive_vel` (MuJoCo 3.13.0's rules)
+        let mut rank_one: Vec<(f64, nalgebra::DVector<f64>)> = Vec::new();
+        if self.integrator == MjcfIntegrator::ImplicitFast {
+            let qd_ours: Vec<f64> = (&tinv * nalgebra::DVector::from_row_slice(qvel)).iter().copied().collect();
+            for (u, (a, st)) in self.actuators.iter().zip(self.actuator_state(&q, &qd_ours)).enumerate() {
+                let input = ctrl.get(u).copied().unwrap_or(0.0);
+                // `actuatorDerivSkip`: a force pinned at its `forcerange` has no velocity derivative
+                if let Some([lo, hi]) = a.forcerange {
+                    let f = a.force(st.length, st.velocity, input, 0.0);
+                    if f <= lo || f >= hi {
+                        continue;
+                    }
+                }
+                // `actuatorVelDeriv`: kv from an affine bias, plus an affine gain's kv times the CLAMPED control
+                let mut rate = if a.bias == ActBias::Affine { a.biasprm[2] } else { 0.0 };
+                if a.gain == ActGain::Affine {
+                    rate += a.gainprm[2] * a.ctrlrange.map_or(input, |[lo, hi]| input.clamp(lo, hi));
+                }
+                if rate != 0.0 {
+                    let mut mv = nalgebra::DVector::<f64>::zeros(nv);
+                    for (d, c) in &st.moment {
+                        mv[*d] += c;
+                    }
+                    rank_one.push((rate, mv));
+                }
             }
-            mh.cholesky().ok_or("M + h·D is not positive definite")?.solve(&(&forward.m * &qacc))
+            for (t, row) in self.tendons.iter().zip(self.ten_moment(&q)) {
+                if t.damping != 0.0 {
+                    let mut jv = nalgebra::DVector::<f64>::zeros(nv);
+                    for (d, c) in row {
+                        jv[d] += c;
+                    }
+                    rank_one.push((-t.damping, jv));
+                }
+            }
+        }
+        let mut applied = if self.integrator == MjcfIntegrator::Euler && !damped {
+            qacc_mj.clone()
         } else {
-            qacc
+            // the modified mass matrix `M − h·∂qfrc/∂qvel`, in this port's coordinates
+            let mut mh = m.clone();
+            if damped {
+                mh += (tb.transpose() * nalgebra::DMatrix::from_diagonal(&nalgebra::DVector::from_vec(damping.clone())) * &tb) * h;
+            }
+            if !rank_one.is_empty() {
+                // ⛔ MuJoCo keeps `qDeriv` in the mass matrix's SPARSITY: an entry survives only between a dof
+                // and one of its ancestors (or itself). Two sibling fingers pulled by one tendon actuator
+                // get their diagonal terms and NOT the cross term between them — `addJTBJSparse` has no slot
+                // for it. So the rank-one terms are masked in MuJoCo's basis before being mapped back here.
+                let ancestor = |a: usize, b: usize| {
+                    let mut p = self.tree.parent[b];
+                    while p >= 0 {
+                        if p as usize == a {
+                            return true;
+                        }
+                        p = self.tree.parent[p as usize];
+                    }
+                    false
+                };
+                let tinv_t = tinv.transpose();
+                let mut q_mj = nalgebra::DMatrix::<f64>::zeros(nv, nv);
+                for (c, v) in &rank_one {
+                    let vm = &tinv_t * v;
+                    for i in 0..nv {
+                        for j in 0..nv {
+                            if i == j || ancestor(i, j) || ancestor(j, i) {
+                                q_mj[(i, j)] += c * vm[i] * vm[j];
+                            }
+                        }
+                    }
+                }
+                mh -= (tb.transpose() * q_mj * &tb) * h;
+            }
+            let rhs = &m * (&tinv * &qacc_mj);
+            // LU, not Cholesky: MuJoCo factors this matrix without asking it to be positive definite, and a
+            // destabilising velocity gain or an Euler base near its singularity can leave it merely invertible
+            &tb * mh.lu().solve(&rhs).ok_or("the integrator's modified mass matrix is singular")?
         };
+        // ⭐ MuJoCo 3.13.0, `implicitfast`: a STANDALONE free body (one free joint, no other dof in its tree,
+        // no mass below it) is solved on its own, as an unsymmetric 6×6 `A = M − h·∂qfrc/∂qvel` that also
+        // carries the gyroscopic derivative the global symmetric solve drops (`mjd_freeMhat`). Its six rows are
+        // decoupled from every other dof, so overwriting them changes nothing else.
+        if self.integrator == MjcfIntegrator::ImplicitFast {
+            let frames = crate::tree_frames(&self.tree, &q);
+            let rhs_mj = &forward.m * &qacc_mj;
+            let tinv_t = tinv.transpose();
+            for j in self.joints.iter().filter(|j| j.kind == MjcfJointKind::Free) {
+                let (adr, block) = (j.first, j.first..j.first + 6);
+                let child_dof = self.tree.joints.iter().enumerate().any(|(k, _)| !block.contains(&k) && {
+                    let mut p = self.tree.parent[k];
+                    loop {
+                        if p < 0 {
+                            break false;
+                        }
+                        if block.contains(&(p as usize)) {
+                            break true;
+                        }
+                        p = self.tree.parent[p as usize];
+                    }
+                });
+                let heavy_child = self.body_frames.iter().any(|(b, (ride, _))| b != &j.body && block.contains(ride) && self.body_mass.get(b).copied().unwrap_or(0.0) != 0.0);
+                if child_dof || heavy_child {
+                    continue;
+                }
+                let (Some((ride, pre)), Some(inertia)) = (self.body_frames.get(&j.body), self.body_iinertia.get(&j.body)) else { continue };
+                let mass = self.body_mass.get(&j.body).copied().unwrap_or(0.0);
+                let mut a = nalgebra::Matrix6::<f64>::zeros();
+                for r in 0..6 {
+                    for c in 0..6 {
+                        a[(r, c)] = forward.m[(adr + r, adr + c)];
+                    }
+                    a[(r, r)] += h * damping[adr + r];
+                }
+                for (coef, v) in &rank_one {
+                    let vm = &tinv_t * v;
+                    for r in 0..6 {
+                        for c in 0..6 {
+                            a[(r, c)] -= h * coef * vm[adr + r] * vm[adr + c];
+                        }
+                    }
+                }
+                // `freeBias_vel_blocks`: the derivative of the free body's bias force in MuJoCo's basis
+                let body = frames[*ride] * pre;
+                let rm = body.rotation.to_rotation_matrix().into_inner();
+                let xi = rm * self.body_iquat[&j.body];
+                let s_off = rm * self.body_ipos.get(&j.body).copied().unwrap_or_else(Vector3::zeros);
+                let w = rm * Vector3::new(qvel[adr + 3], qvel[adr + 4], qvel[adr + 5]);
+                let iw = xi * Matrix3::from_diagonal(&Vector3::new(inertia[0], inertia[1], inertia[2])) * xi.transpose();
+                let (ws, iww) = (w.cross(&s_off), iw * w);
+                let k = s_off * w.transpose() - Matrix3::identity() * w.dot(&s_off) + ws.cross_matrix();
+                let lin = k * rm;
+                let cmat = -(s_off.cross_matrix() * k) * mass + w.cross_matrix() * iw - iww.cross_matrix();
+                let rot = rm.transpose() * cmat * rm;
+                for r in 0..3 {
+                    for c in 0..3 {
+                        a[(r, 3 + c)] += -h * mass * lin[(r, c)];
+                        a[(3 + r, 3 + c)] += h * rot[(r, c)];
+                    }
+                }
+                let b = nalgebra::Vector6::from_iterator((0..6).map(|r| rhs_mj[adr + r]));
+                if let Some(x) = a.lu().solve(&b) {
+                    for r in 0..6 {
+                        applied[adr + r] = x[r];
+                    }
+                }
+            }
+        }
         let qvel_next: Vec<f64> = qvel.iter().zip(applied.iter()).map(|(v, a)| v + h * a).collect();
         // `mj_integratePos`, with the new velocity
         let mut qpos_next = qpos.to_vec();
@@ -1410,6 +1571,11 @@ pub struct MjcfTree {
     pub cone: crate::mujoco_contact::Cone,
     /// `<option impratio>`, default 1: how much stiffer the frictional rows are made than the normal one.
     pub impratio: f64,
+    /// `<option integrator>`: which of MuJoCo's integrators [`MjcfTree::step_mujoco`] must reproduce.
+    pub integrator: MjcfIntegrator,
+    /// `<option><flag eulerdamp>`, default enabled: whether the `Euler` integrator treats dof damping
+    /// implicitly. Every Menagerie file written for MJX disables it.
+    pub eulerdamp: bool,
     /// Each body's PRINCIPAL inertia and the orientation of its inertial frame in its body frame —
     /// MuJoCo's `body_inertia` and `body_iquat`. The fluid model is written in that frame and nowhere else.
     pub body_iinertia: BTreeMap<String, [f64; 3]>,
@@ -1557,6 +1723,16 @@ pub struct MjcfForward {
     pub solve: crate::mujoco_contact::NewtonSolve,
     /// the mass matrix in MuJoCo's coordinates, `T⁻ᵀ·M·T⁻¹` — what an integrator needs next
     pub m: nalgebra::DMatrix<f64>,
+}
+
+/// `<option integrator>`. Menagerie uses `implicitfast` on 109 models, `Euler` (the default) on 99 and `RK4`
+/// on 2; `implicit` on none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MjcfIntegrator {
+    Euler,
+    Rk4,
+    Implicit,
+    ImplicitFast,
 }
 
 /// One [`MjcfTree::step_mujoco`]: the next state, in MuJoCo's layout, and the forward pass it came from.
@@ -4189,6 +4365,8 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             wind: Vector3::zeros(),
             cone: crate::mujoco_contact::Cone::Pyramidal,
             impratio: 1.0,
+            integrator: MjcfIntegrator::Euler,
+            eulerdamp: true,
             body_iinertia: BTreeMap::new(),
             body_iquat: BTreeMap::new(),
             body_mass: BTreeMap::new(),
@@ -4267,6 +4445,24 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
         }
         if let Some(v) = el.attr("impratio") {
             out.impratio = v.trim().parse::<f64>().map_err(|e| format!("<option impratio>: {e}"))?;
+        }
+        for flag in el.children_named("flag") {
+            if let Some(v) = flag.attr("eulerdamp") {
+                out.eulerdamp = match v.trim() {
+                    "enable" => true,
+                    "disable" => false,
+                    other => return Err(format!("<flag eulerdamp>: '{other}' is neither enable nor disable")),
+                };
+            }
+        }
+        if let Some(v) = el.attr("integrator") {
+            out.integrator = match v.trim() {
+                "Euler" => MjcfIntegrator::Euler,
+                "RK4" => MjcfIntegrator::Rk4,
+                "implicit" => MjcfIntegrator::Implicit,
+                "implicitfast" => MjcfIntegrator::ImplicitFast,
+                other => return Err(format!("<option integrator>: '{other}' is not one of Euler, RK4, implicit, implicitfast")),
+            };
         }
         for (k, dst) in [("density", &mut out.density), ("viscosity", &mut out.viscosity)] {
             if let Some(v) = el.attr(k) {
@@ -5361,7 +5557,73 @@ mod tests {
             near(&qpos, &twentyfive.0, 1e-7, &format!("damping {damp}, step 25: qpos"));
             near(&qvel, &twentyfive.1, 1e-7, &format!("damping {damp}, step 25: qvel"));
         }
+        // ⛔ `<flag eulerdamp="disable">`, which every Menagerie file written for MJX sets: the damping is still
+        // a force, but the velocity is integrated EXPLICITLY in it
+        let t = tree_from_mjcf_str(&STEP_MODEL.replace("DAMP", "0.2").replace("<worldbody>", r#"<option><flag eulerdamp="disable"/></option><worldbody>"#)).unwrap();
+        assert!(!t.eulerdamp);
+        let st = t.step_mujoco(&qpos0, &qvel0, &[]).unwrap();
+        near(&st.qvel, &[0.19010857134188877, -0.09285827113086964, -0.05390060056502038, 0.2628236267671595, 0.28803632298975274, -0.058350521262796745, 0.2718214265355253, 0.5751878886107167, -0.15442634068772546, -0.1480369835302928], 1e-10, "eulerdamp disabled: qvel");
     }
+
+    /// **`implicitfast`, MuJoCo 3.13.0's rules, against its own trajectory.** Three things the integrator
+    /// does that a plain `M − h·∂f/∂v` would get wrong, one in each part of the model:
+    /// * the wrist servo's force is PINNED at its `forcerange` (2 N·m), so its `kv` contributes no derivative
+    ///   at all (`actuatorDerivSkip`);
+    /// * the grip servo pulls two SIBLING slides through one tendon, and MuJoCo's derivative keeps only the
+    ///   entries the mass matrix's sparsity has a slot for, so there is no cross term between the fingers;
+    /// * the tumbling box is a standalone free body, solved on its own as an unsymmetric 6×6 that includes
+    ///   the gyroscopic derivative (`mjd_freeMhat`).
+    #[test]
+    fn step_mujoco_follows_mujocos_implicitfast_trajectory() {
+        let t = tree_from_mjcf_str(IMPLICITFAST_MODEL).unwrap();
+        assert_eq!(t.integrator, MjcfIntegrator::ImplicitFast);
+        let (mut qpos, mut qvel) = (
+            vec![0.01, -0.02, 0.3, 0.9713121577180394, 0.10013527399155045, -0.2002705479831009, 0.08010821919324036, 0.4, 0.01, -0.005],
+            vec![0.1, 0.2, -0.3, 3.0, -2.0, 5.0, 0.7, 0.3, -0.2],
+        );
+        let ctrl = [0.9, 0.03];
+        let near = |got: &[f64], want: &[f64], tol: f64, what: &str| {
+            for (k, (g, w)) in got.iter().zip(want).enumerate() {
+                assert!((g - w).abs() < tol * w.abs().max(1.0), "{what}[{k}] {g} vs MuJoCo {w}");
+            }
+        };
+        for k in 1..=25 {
+            let st = t.step_mujoco(&qpos, &qvel, &ctrl).unwrap();
+            (qpos, qvel) = (st.qpos, st.qvel);
+            if k == 1 {
+                near(&qpos, &[0.01020172181685666, -0.01959891925532773, 0.29936188978505046, 0.9701961287279255, 0.10220854248728502, -0.20244375230181513, 0.08537805805904039, 0.402194902373685, 0.010624545454545454, -0.005357272727272727], 1e-10, "step 1 qpos");
+                near(&qvel, &[0.10086090842833019, 0.20054037233613445, -0.3190551074747613, 3.00686581689145, -1.9727691084805241, 5.010493211551619, 1.09745118684248, 0.31227272727272726, -0.17863636363636365], 1e-10, "step 1 qvel");
+            }
+        }
+        near(&qpos, &[0.015504119794759796, -0.009611904021463651, 0.2726344269996223, 0.933660060990064, 0.15054890592708775, -0.24409313508770888, 0.21455176261042744, 0.6121286807547449, 0.02602953323854886, -0.008837776633251056], 1e-7, "step 25 qpos");
+        near(&qvel, &[0.11828805485946914, 0.21556122827087396, -0.7752658029575709, 3.1305892176094394, -1.2844060516761395, 5.23209093858203, 5.630739997332279, 0.28443201416748676, -0.031611412945476945], 1e-7, "step 25 qvel");
+    }
+
+    const IMPLICITFAST_MODEL: &str = r#"<mujoco><compiler angle="radian"/><option integrator="implicitfast"/><worldbody>
+  <geom name="floor" type="plane" size="2 2 0.1"/>
+  <body name="tumbler" pos="0 0 0.3">
+    <freejoint/>
+    <geom type="box" size="0.12 0.05 0.03" mass="0.9"/>
+    <geom type="sphere" size="0.02" pos="0.1 0.03 0.01" mass="0.2"/>
+  </body>
+  <body name="hand" pos="0.6 0 0.4">
+    <joint name="wrist" type="hinge" axis="0 1 0" damping="0.3"/>
+    <geom type="capsule" size="0.03 0.1" fromto="0 0 0 0.2 0 0" mass="0.5"/>
+    <body name="f1" pos="0.2 0.03 0">
+      <joint name="s1" type="slide" axis="0 1 0" damping="0.5"/>
+      <geom type="box" size="0.01 0.01 0.04" mass="0.05"/>
+    </body>
+    <body name="f2" pos="0.2 -0.03 0">
+      <joint name="s2" type="slide" axis="0 -1 0" damping="0.5"/>
+      <geom type="box" size="0.01 0.01 0.04" mass="0.05"/>
+    </body>
+  </body>
+</worldbody>
+<tendon><fixed name="grip"><joint joint="s1" coef="0.5"/><joint joint="s2" coef="0.5"/></fixed></tendon>
+<actuator>
+  <position name="wrist_servo" joint="wrist" kp="400" kv="20" forcerange="-2 2"/>
+  <position name="grip_servo" tendon="grip" kp="50" kv="8" ctrlrange="0 0.04"/>
+</actuator></mujoco>"#;
 
     const STEP_MODEL: &str = r#"<mujoco><compiler angle="radian"/><option impratio="3" cone="elliptic"/><worldbody>
   <geom name="floor" type="plane" size="2 2 0.1"/>
