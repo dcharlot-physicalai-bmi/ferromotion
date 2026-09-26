@@ -596,14 +596,23 @@ impl MjcfTree {
     /// its moment from the file; a SITE transmission's is a wrench in the site's frame and turns with the
     /// model, so it is rebuilt here: `mj_jacSite` at the site, and `gear` rotated into the world.
     pub fn actuator_state(&self, q: &[f64], qd: &[f64]) -> Vec<crate::mujoco_actuator::ActState> {
-        use crate::mujoco_actuator::ActState;
+        self.actuator_state_with(q, qd, true)
+    }
+
+    /// [`MjcfTree::actuator_state`], with the contact set optional. MuJoCo's `mj_setConst` runs
+    /// `mj_transmission` WITHOUT `mj_collision`, so an adhesion actuator's moment is zero there and so is its
+    /// `acc0`; the loader asks for exactly that.
+    fn actuator_state_with(&self, q: &[f64], qd: &[f64], collide: bool) -> Vec<crate::mujoco_actuator::ActState> {
+        use crate::mujoco_actuator::{ActState, DynTransmission};
         if self.actuators.iter().all(|a| a.dynamic.is_none()) {
             return self.actuators.iter().map(|a| ActState { moment: a.moment.clone(), length: a.length(q), velocity: a.velocity(qd) }).collect();
         }
         let frames = crate::tree_frames(&self.tree, q);
         // a spatial tendon's length is shared by every actuator that pulls on it, so build it once
         let ten = self.tendons.iter().any(|t| matches!(t.path, TendonPath::Spatial(_))).then(|| (self.ten_length(q), self.ten_moment(q)));
-        self.actuators.iter().map(|a| self.act_state_of(a, &frames, ten.as_ref(), q, qd)).collect()
+        // and so is the contact set, which only an adhesion actuator reads
+        let con = (collide && self.actuators.iter().any(|a| matches!(a.dynamic, Some(DynTransmission::Body { .. })))).then(|| self.collide(q));
+        self.actuators.iter().map(|a| self.act_state_of(a, &frames, ten.as_ref(), con.as_ref(), q, qd)).collect()
     }
 
     /// One actuator's transmission at a state — the per-actuator half of [`MjcfTree::actuator_state`], so a
@@ -615,11 +624,12 @@ impl MjcfTree {
         }
         let frames = crate::tree_frames(&self.tree, q);
         let ten = matches!(a.dynamic, Some(crate::mujoco_actuator::DynTransmission::SpatialTendon { .. })).then(|| (self.ten_length(q), self.ten_moment(q)));
-        self.act_state_of(a, &frames, ten.as_ref(), q, qd)
+        let con = matches!(a.dynamic, Some(crate::mujoco_actuator::DynTransmission::Body { .. })).then(|| self.collide(q));
+        self.act_state_of(a, &frames, ten.as_ref(), con.as_ref(), q, qd)
     }
 
     #[allow(clippy::type_complexity)]
-    fn act_state_of(&self, a: &crate::mujoco_actuator::Actuator, frames: &[Iso], ten: Option<&(Vec<f64>, Vec<Vec<(usize, f64)>>)>, q: &[f64], qd: &[f64]) -> crate::mujoco_actuator::ActState {
+    fn act_state_of(&self, a: &crate::mujoco_actuator::Actuator, frames: &[Iso], ten: Option<&(Vec<f64>, Vec<Vec<(usize, f64)>>)>, con: Option<&MjcfCollision>, q: &[f64], qd: &[f64]) -> crate::mujoco_actuator::ActState {
         use crate::mujoco_actuator::{ActState, DynTransmission};
         let nv = self.tree.joints.len();
         let vel = |m: &[(usize, f64)]| m.iter().map(|(d, c)| c * qd[*d]).sum::<f64>();
@@ -630,6 +640,31 @@ impl MjcfTree {
                 let m: Vec<(usize, f64)> = moments[*index].iter().map(|(d, c)| (*d, a.gear * c)).collect();
                 let v = vel(&m);
                 return ActState { moment: m, length: a.gear * lengths[*index], velocity: v };
+            }
+            // ⭐ `mj_transmission`'s `mjTRN_BODY`, from MuJoCo's source: every contact whose geom belongs to
+            // the body counts once, an ACTIVE one through its normal constraint row and one found in the GAP
+            // band through the same normal projection of `J₂ − J₁` at the contact point; the moment is minus
+            // their sum over the count. A pyramidal contact's rows are averaged there, `0.5/(dim−1)` on each
+            // of `2(dim−1)`, and the frictional halves cancel, leaving the same normal row.
+            Some(DynTransmission::Body { body }) => {
+                let Some(con) = con else { return ActState::default() };
+                let (mut sum, mut counter) = (vec![0.0; nv], 0usize);
+                for c in &con.contacts {
+                    let (gi, gj) = (&self.geoms[c.geom[0]], &self.geoms[c.geom[1]]);
+                    if &gi.body != body && &gj.body != body {
+                        continue;
+                    }
+                    counter += 1;
+                    let row = crate::contact_jacobian(&self.tree.joints, &self.tree.parent, frames, gi.joint, gj.joint, c.record.pos, &c.record.frame, 1);
+                    for (k, s) in sum.iter_mut().enumerate() {
+                        *s += row[(0, k)];
+                    }
+                }
+                if counter == 0 {
+                    return ActState::default();
+                }
+                let k = -1.0 / counter as f64;
+                sum.iter().enumerate().filter(|(_, v)| **v != 0.0).map(|(d, v)| (d, v * k)).collect()
             }
             Some(DynTransmission::Site { site, gear }) => {
                 // a site welded to the world moves nothing, whatever wrench is applied to it
@@ -3564,6 +3599,21 @@ impl ActRecord {
                 self.bias = ActBias::Muscle;
                 self.dynamics = crate::mujoco_actuator::ActDyn::Muscle;
             }
+            // `mjs_setToAdhesion`: a fixed gain (the element's `gain`, else what the record already holds),
+            // no bias, and a control range that is ALWAYS limited and may not go negative
+            "adhesion" => {
+                let gain = num("gain")?.unwrap_or(self.gainprm[0]);
+                self.gainprm[0] = gain;
+                self.ctrllimited = Some(true);
+                self.gain = ActGain::Fixed;
+                self.bias = ActBias::None;
+                if gain < 0.0 {
+                    return Err(Bad("adhesion gain cannot be negative".into()));
+                }
+                if self.ctrlrange[0] < 0.0 || self.ctrlrange[1] < 0.0 {
+                    return Err(Bad("adhesion control range cannot be negative".into()));
+                }
+            }
             other => self.unsupported = Some(format!("<{other}>")),
         }
         Ok(())
@@ -3800,6 +3850,11 @@ fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&s
             dynamic = Some(crate::mujoco_actuator::DynTransmission::Site { site: target.clone(), gear: rec.gear6 });
             (None, Vec::new())
         }
+        // an ADHESION actuator: its moment comes from the contacts on this body, at every state
+        "body" => {
+            dynamic = Some(crate::mujoco_actuator::DynTransmission::Body { body: target.clone() });
+            (None, Vec::new())
+        }
         _ => return Err(Unsupported(format!("a {kind} transmission"))),
     };
     // `limited="auto"`: under `autolimits` a stated range limits and an unstated one does not, and with
@@ -3830,6 +3885,14 @@ fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&s
         ctrlrange = Some([mean - radius, mean + radius]);
     }
     let forcerange = limit(rec.forcerange, rec.forcelimited, "force")?;
+    // `mjCActuator::Compile`: a limited range must be a range. This is what refuses an `<adhesion>` with no
+    // `ctrlrange`, since that shortcut always limits the control and the default range is [0, 0].
+    if forcerange.is_some_and(|r| r[0] >= r[1]) {
+        return Err(Bad("invalid force range for actuator".into()));
+    }
+    if ctrlrange.is_some_and(|r| r[0] >= r[1]) {
+        return Err(Bad("invalid control range for actuator".into()));
+    }
     Ok(Actuator {
         name: name.to_string(),
         moment,
@@ -4060,7 +4123,9 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
     if !out.actuators.is_empty() {
         let nv = out.tree.joints.len();
         if let Some(chol) = out.mass_matrix(&out.reference_q).cholesky() {
-            let state = out.actuator_state(&out.reference_q, &vec![0.0; nv]);
+            // ⛔ WITHOUT the contact set: `mj_setConst` never calls `mj_collision`, so an adhesion actuator's
+            // `acc0` is zero whatever touches it at the reference pose
+            let state = out.actuator_state_with(&out.reference_q, &vec![0.0; nv], false);
             // ⛔⛔ `acc0` is a NORM of an acceleration, so it is BASIS-DEPENDENT. MuJoCo takes it in its
             // own coordinates, and this port's free base is a different six. `M⁻¹·moment` maps across as
             // `T·(M_ours⁻¹·moment_ours)`, and only where `T` is orthogonal do the two norms agree — which
@@ -4921,6 +4986,69 @@ mod tests {
             }
         }
     }
+
+    /// **`<adhesion>`, against MuJoCo's own numbers.** The pad touches the floor twice: sphere `a` is an
+    /// ACTIVE contact and sphere `b` sits in its GAP band (MuJoCo's `exclude = 1`, no constraint rows). Both
+    /// count, so the moment is minus the mean of the two normal Jacobians. A third contact, on another body,
+    /// must not. Under both cones the answer is the same: a pyramidal contact's rows average back to the
+    /// normal. And `acc0` is ZERO, because `mj_setConst` never collides.
+    #[test]
+    fn an_adhesion_actuator_averages_every_contact_on_its_body_active_or_in_the_gap() {
+        for cone in ["elliptic", "pyramidal"] {
+            let t = tree_from_mjcf_str(&ADHESION_MODEL.replace(r#"cone="elliptic""#, &format!(r#"cone="{cone}""#))).unwrap();
+            assert!(t.actuators_unsupported.is_empty(), "{:?}", t.actuators_unsupported);
+            assert_eq!(t.actuators.len(), 2);
+            // mjs_setToAdhesion: fixed gain, no bias, ALWAYS limited
+            assert_eq!((t.actuators[0].gainprm[0], t.actuators[1].gainprm[0]), (5.0, 1.0));
+            assert_eq!((t.actuators[0].ctrlrange, t.actuators[1].ctrlrange), (Some([0.0, 1.0]), Some([0.0, 2.0])));
+            assert_eq!((t.actuators[0].acc0, t.actuators[1].acc0), (0.0, 0.0), "mj_setConst runs no collision");
+            let (q, qd, ctrl) = ([0.001, 0.05, -0.03, 0.0], [0.3, -0.2, 0.5, 0.1], [0.7, 1.5]);
+            let st = t.actuator_state(&q, &qd);
+            let want_moment = [[-1.0, -0.016649820522149587, -0.028975390251305563, 0.0], [0.0, 0.0, 0.0, -1.0]];
+            let want_vel = [-0.31115773102122285, -0.1];
+            for (u, (wm, wv)) in want_moment.iter().zip(want_vel).enumerate() {
+                let mut dense = [0.0; 4];
+                for (d, v) in &st[u].moment {
+                    dense[*d] += v;
+                }
+                for k in 0..4 {
+                    assert!((dense[k] - wm[k]).abs() < 1e-12, "{cone}: actuator {u} moment[{k}] {} vs MuJoCo {}", dense[k], wm[k]);
+                }
+                assert_eq!(st[u].length, 0.0);
+                assert!((st[u].velocity - wv).abs() < 1e-12, "{cone}: actuator {u} velocity {} vs MuJoCo {wv}", st[u].velocity);
+            }
+            let f = t.qfrc_actuator(&q, &qd, &ctrl);
+            for (k, w) in [-3.5, -0.058274371827523555, -0.10141386587956946, -1.5].iter().enumerate() {
+                assert!((f[k] - w).abs() < 1e-12, "{cone}: qfrc_actuator[{k}] {} vs MuJoCo {w}", f[k]);
+            }
+        }
+        // ⛔ the shortcut ALWAYS limits the control, and the default range is [0, 0], so an adhesion actuator
+        // with no ctrlrange is refused. MuJoCo 3.13.0: "invalid control range for actuator".
+        let why = match tree_from_mjcf_str(&ADHESION_MODEL.replace("</actuator>", r#"<adhesion name="unranged" body="other" gain="2"/></actuator>"#)) {
+            Err(e) => e,
+            Ok(t) => format!("loaded {} actuators, refused {:?}", t.actuators.len(), t.actuators_unsupported),
+        };
+        assert!(why.contains("invalid control range"), "an adhesion actuator with no ctrlrange must be refused: {why}");
+    }
+
+    const ADHESION_MODEL: &str = r#"<mujoco><compiler angle="radian"/><option gravity="0 0 0" cone="elliptic"/><worldbody>
+  <geom name="floor" type="plane" size="1 1 0.1"/>
+  <body name="pad" pos="0 0 0.1">
+    <joint name="z" type="slide" axis="0 0 1"/>
+    <joint name="tilt" type="hinge" axis="1 0 0"/>
+    <joint name="roll" type="hinge" axis="0 1 0" pos="0.03 0 0"/>
+    <inertial pos="0 0 0" mass="1" diaginertia="0.01 0.01 0.01"/>
+    <geom name="a" type="sphere" size="0.05" pos="0.1 0 -0.045" margin="0.02"/>
+    <geom name="b" type="sphere" size="0.05" pos="-0.1 0.03 -0.02" margin="0.02" gap="0.015"/>
+  </body>
+  <body name="other" pos="0.5 0 0.1">
+    <joint name="z2" type="slide" axis="0 0 1"/>
+    <inertial pos="0 0 0" mass="1" diaginertia="0.01 0.01 0.01"/>
+    <geom name="c" type="sphere" size="0.05" pos="0 0 -0.052"/>
+  </body>
+</worldbody>
+<actuator><adhesion name="stick" body="pad" ctrlrange="0 1" gain="5"/><adhesion name="idle" body="other" ctrlrange="0 2"/></actuator>
+</mujoco>"#;
 
     const WRAP_RULES_MODEL: &str = r#"<mujoco><compiler angle="radian"/><option gravity="0 0 0"/><worldbody>
   <geom name="drum" type="cylinder" size="0.1 0.3" euler="0.2 -0.1 0.3"/>

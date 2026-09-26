@@ -68,6 +68,11 @@ pub enum DynTransmission {
     Site { site: String, gear: [f64; 6] },
     /// A SPATIAL tendon, by index into [`crate::MjcfTree::tendons`]: `length = gear·L(q)` along the path.
     SpatialTendon { index: usize },
+    /// `<adhesion body="...">` (`mjTRN_BODY`): the moment is MINUS the AVERAGE of the normal Jacobians of
+    /// every contact touching the body — active ones and those found in the gap band alike — so a positive
+    /// control pulls the surfaces together. It is a function of the CONTACT SET, so it is rebuilt at every
+    /// state; the length is always zero and `gear` is not applied.
+    Body { body: String },
 }
 
 /// One actuator's transmission evaluated at a state: what MuJoCo calls `actuator_moment`,
