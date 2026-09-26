@@ -498,9 +498,6 @@ impl MjcfTree {
             .collect()
     }
 
-    /// **Where a spatial tendon actually touches the world at this state** — every point of the path, and
-    /// whether the next one is the far side of the same obstacle. This is what MuJoCo publishes as
-    /// `d.wrap_xpos`, and comparing against it is the only way to see WHICH wrap a disagreement is in.
     /// **Which obstacles a spatial tendon actually wraps at this state, and where it touches them** — the
     /// obstacle's name with its two tangent points, in path order. MuJoCo publishes the same thing in
     /// `d.wrap_obj`/`d.wrap_xpos`, so the two paths can be compared by WHAT they wrapped and not merely by
@@ -515,6 +512,9 @@ impl MjcfTree {
             .collect()
     }
 
+    /// **Where a spatial tendon actually touches the world at this state** — every point of the path, and
+    /// whether the next one is the far side of the same obstacle. This is what MuJoCo publishes as
+    /// `d.wrap_xpos`, and comparing against it is the only way to see WHICH wrap a disagreement is in.
     pub fn tendon_path_points(&self, i: usize, q: &[f64]) -> Vec<(Vector3<f64>, bool)> {
         let TendonPath::Spatial(pts) = &self.tendons[i].path else { return Vec::new() };
         let frames = crate::tree_frames(&self.tree, q);
@@ -1945,156 +1945,245 @@ struct PathPoint {
 
 /// **`mju_wrap`**: where a cable leaving `x0` for `x1` first touches an obstacle and where it leaves it.
 ///
-/// Returns the two tangent points in the world and the arc length between them, or `None` when the straight
-/// run misses the obstacle entirely — which is most of the time, and is why a wrapped tendon's length is not
-/// a smooth function of the state.
+/// Returns the two tangent points in the world and the length between them, or `None` when MuJoCo would
+/// not wrap. The construction is two-dimensional. A SPHERE works in the plane of the centre and both
+/// endpoints; a CYLINDER works in its own xy-plane with an infinite axis, and the two points get their
+/// heights by interpolating `z` along the 2-D path, so the arc is a helix.
 ///
-/// The construction is two-dimensional. For a SPHERE the plane is the one through `x0`, `x1` and the centre,
-/// and the answer lifts straight back. For a CYLINDER it is the geom's own xy-plane, the radius is `size[0]`
-/// and the axis is infinite, so the two tangent points get their heights by interpolating `z` along the
-/// 2-D path — which is what makes the arc a helix and not a circle.
-///
-/// ⛔ There are always TWO solutions, one each way round. `sidesite` picks between them; without one the
-/// shorter path wins. Measured against MuJoCo 3.13.0, which stores its own answer in `d.wrap_xpos`.
+/// ⭐⭐ **Ported line by line from MuJoCo's own source** (`mju_wrap`, `wrap_circle`, `wrap_inside`,
+/// `is_intersect` and `length_circle` in `engine_util_misc.c`, identical in 3.3.7 and 3.13.0), not
+/// fitted to its outputs. Four earlier rules here were measured against MuJoCo's answers and each was a
+/// partial view of the code below:
+///   * "the side site chooses by direction, and only when the infinite line cuts the circle" is
+///     `good = dot(unit(t0 + t1), side)` everywhere, plus a penalty on any candidate whose two straight
+///     runs CROSS each other. Where the line misses the circle, one candidate always crosses, which is
+///     what the gate was standing in for;
+///   * with no side site the candidate is the one whose tangent points lie CLOSER TOGETHER, not the
+///     shorter total path;
+///   * a side site INSIDE the obstacle (its 3-D distance from the centre, even for a cylinder) is a
+///     different wrap altogether, `wrap_inside`: the cable passes through ONE point of the circle, found by
+///     a Newton solve, and the arc between the two tangent points is zero. Treating it as an ordinary
+///     circle wrap gave the wrong arc, which is why forcing the wrap there once made lengths worse;
+///   * a chosen candidate whose straight runs cross is no wrap at all.
 fn wrap_obstacle(x0: Vector3<f64>, x1: Vector3<f64>, pose: &Iso, radius: f64, cylinder: bool, side: Option<Vector3<f64>>) -> Option<([Vector3<f64>; 2], f64)> {
+    const MINVAL: f64 = 1e-15; // mjMINVAL
     let c = pose.translation.vector;
-    let (e1, e2, axis) = if cylinder {
-        let m = pose.rotation.to_rotation_matrix().into_inner();
-        (m.column(0).into_owned(), m.column(1).into_owned(), Some(m.column(2).into_owned()))
+    let xmat = pose.rotation.to_rotation_matrix().into_inner();
+    // map sites to the wrap object's local frame
+    let p0 = xmat.transpose() * (x0 - c);
+    let p1 = xmat.transpose() * (x1 - c);
+    if p0.norm() < MINVAL || p1.norm() < MINVAL {
+        return None;
+    }
+    // the 2-D frame: a sphere's first axis is p0 and its plane is (p0, centre, p1); a cylinder's is xy
+    let (ax0, ax1) = if cylinder {
+        (Vector3::x(), Vector3::y())
     } else {
-        // the plane through the two endpoints and the centre; collinear means no plane, so no wrap
-        let n = (x1 - x0).cross(&(x0 - c));
-        if n.norm() < 1e-12 {
-            return None;
-        }
-        let n = n.normalize();
-        let e1 = (x1 - x0 - n * (x1 - x0).dot(&n)).normalize();
-        (e1, n.cross(&e1), None)
+        let ax0 = normalize3(p0);
+        let cr = p0.cross(&p1);
+        let normal = if cr.norm() < MINVAL {
+            // (p0, p1) parallel: a normal from p0 and a vector that is 0 at p0's largest component
+            let a = ax0.map(f64::abs);
+            let i = if a[1] > a[0] && a[1] > a[2] {
+                1
+            } else if a[2] > a[0] && a[2] > a[1] {
+                2
+            } else {
+                0
+            };
+            let mut t = Vector3::new(1.0, 1.0, 1.0);
+            t[i] = 0.0;
+            normalize3(ax0.cross(&t))
+        } else {
+            cr / cr.norm()
+        };
+        (ax0, normalize3(normal.cross(&ax0)))
     };
-    let to2 = |p: Vector3<f64>| [(p - c).dot(&e1), (p - c).dot(&e2)];
-    let (p0, p1) = (to2(x0), to2(x1));
-    let (d0, d1) = ((p0[0] * p0[0] + p0[1] * p0[1]).sqrt(), (p1[0] * p1[0] + p1[1] * p1[1]).sqrt());
-    if d0 <= radius || d1 <= radius {
+    let d = [p0.dot(&ax0), p0.dot(&ax1), p1.dot(&ax0), p1.dot(&ax1)];
+    // the side site: same projection, then rescaled onto the circle
+    let local_side = side.map(|s| xmat.transpose() * (s - c));
+    let sd = local_side.map(|s| {
+        let v = normalize2([s.dot(&ax0), s.dot(&ax1)]);
+        [v[0] * radius, v[1] * radius]
+    });
+    let (pnt, mut wlen) = match local_side {
+        Some(s) if s.norm() < radius => wrap_inside(&d, radius)?,
+        _ => wrap_circle(&d, sd, radius)?,
+    };
+    // back to 3-D in the local frame
+    let mut res = [ax0 * pnt[0] + ax1 * pnt[1], ax0 * pnt[2] + ax1 * pnt[3]];
+    if cylinder {
+        let l0 = ((p0[0] - res[0][0]).powi(2) + (p0[1] - res[0][1]).powi(2)).sqrt();
+        let l1 = ((p1[0] - res[1][0]).powi(2) + (p1[1] - res[1][1]).powi(2)).sqrt();
+        res[0][2] = p0[2] + (p1[2] - p0[2]) * l0 / (l0 + wlen + l1);
+        res[1][2] = p0[2] + (p1[2] - p0[2]) * (l0 + wlen) / (l0 + wlen + l1);
+        let height = (res[1][2] - res[0][2]).abs();
+        wlen = (wlen * wlen + height * height).sqrt();
+    }
+    Some(([xmat * res[0] + c, xmat * res[1] + c], wlen))
+}
+
+/// `mju_normalize3`: a vector shorter than `mjMINVAL` becomes the x axis rather than NaN.
+fn normalize3(v: Vector3<f64>) -> Vector3<f64> {
+    let n = v.norm();
+    if n < 1e-15 {
+        Vector3::x()
+    } else {
+        v * (1.0 / n)
+    }
+}
+
+/// `mju_normalize` in two dimensions, with the same fallback.
+fn normalize2(v: [f64; 2]) -> [f64; 2] {
+    let n = (v[0] * v[0] + v[1] * v[1]).sqrt();
+    if n < 1e-15 {
+        [1.0, 0.0]
+    } else {
+        let k = 1.0 / n;
+        [v[0] * k, v[1] * k]
+    }
+}
+
+/// `is_intersect`: do the 2-D segments p1→p2 and p3→p4 cross?
+fn segments_cross(p1: [f64; 2], p2: [f64; 2], p3: [f64; 2], p4: [f64; 2]) -> bool {
+    let det = (p4[1] - p3[1]) * (p2[0] - p1[0]) - (p4[0] - p3[0]) * (p2[1] - p1[1]);
+    if det.abs() < 1e-15 {
+        return false;
+    }
+    let a = ((p4[0] - p3[0]) * (p1[1] - p3[1]) - (p4[1] - p3[1]) * (p1[0] - p3[0])) / det;
+    let b = ((p2[0] - p1[0]) * (p1[1] - p3[1]) - (p2[1] - p1[1]) * (p1[0] - p3[0])) / det;
+    (0.0..=1.0).contains(&a) && (0.0..=1.0).contains(&b)
+}
+
+/// `length_circle`: the arc from `p0` to `p1`, going the way candidate `ind` goes round.
+fn arc_length(p0: [f64; 2], p1: [f64; 2], ind: usize, radius: f64) -> f64 {
+    let (n0, n1) = (normalize2(p0), normalize2(p1));
+    let mut angle = (n0[0] * n1[0] + n0[1] * n1[1]).acos();
+    let cross = p0[1] * p1[0] - p0[0] * p1[1];
+    if (cross > 0.0 && ind == 1) || (cross < 0.0 && ind == 0) {
+        angle = 2.0 * std::f64::consts::PI - angle;
+    }
+    radius * angle
+}
+
+/// `wrap_circle`: the two tangent points and the arc, for endpoints `end` = (x0, y0, x1, y1) outside the
+/// circle, or `None` for no wrap.
+fn wrap_circle(end: &[f64; 4], side: Option<[f64; 2]>, radius: f64) -> Option<([f64; 4], f64)> {
+    let sqlen0 = end[0] * end[0] + end[1] * end[1];
+    let sqlen1 = end[2] * end[2] + end[3] * end[3];
+    let sqrad = radius * radius;
+    // either point inside the circle, or the circle too small
+    if sqlen0 < sqrad || sqlen1 < sqrad || radius < 1e-15 {
         return None;
     }
-    let dif = [p1[0] - p0[0], p1[1] - p0[1]];
-    let a = dif[0] * dif[0] + dif[1] * dif[1];
-    if a < 1e-24 {
+    let dif = [end[2] - end[0], end[3] - end[1]];
+    let dd = dif[0] * dif[0] + dif[1] * dif[1];
+    if dd < 1e-15 {
         return None;
     }
-    let side2 = side.map(to2);
-    let b = p0[0] * dif[0] + p0[1] * dif[1];
-    let det = b * b - a * (d0 * d0 - radius * radius);
-    let crosses = det > 0.0 && (-b - det.max(0.0).sqrt()) / a <= 1.0 && (-b + det.max(0.0).sqrt()) / a >= 0.0;
-    match side2 {
-        // ⛔⛔ a `sidesite` does not merely choose between two wraps — it DEMANDS a side, and the cable is
-        // pulled all the way round when it is on the wrong one, however far off the obstacle sits. The test
-        // is the CLOSEST POINT OF THE RUN, clamped to its ends: if it lies on the opposite side of the
-        // obstacle's centre from the side site, the cable is on the wrong side and must come round.
-        //
-        // Measured on MuJoCo 3.13.0: an obstacle two-thirds of a segment length PAST the end still wraps
-        // when the side site is across from it, and one sitting right beside the run does not when the side
-        // site agrees with where the cable already is. Requiring an intersection loses `iit_softfoot`'s
-        // wraps entirely; requiring the obstacle to be alongside the run loses `ms_human_700`'s knee.
-        Some(sp) => {
-            // ⛔⛔ **TRIED AND REJECTED, 2026-09-21: forcing the wrap when the side site is INSIDE the
-            // obstacle.** MuJoCo does do that — mapped by sweeping the side site over a grid with the
-            // chord held clear of a sphere, the wrap region is the half-plane beyond the centre and the
-            // boundary dips to the circle's NEAR edge, so the whole disc wraps. Across every sidesite
-            // decision in Menagerie it takes the per-decision agreement from 3,615 of 3,807 to 3,719:
-            // 136 missed wraps down to 8, for 24 more wraps MuJoCo does not make.
-            //
-            // ⛔⛔ And it makes the ANSWER WORSE: tendon lengths matching fall 9,198 → 9,172 of 9,495,
-            // and the tendons whose path shape disagrees rise 297 → 323. The extra wraps are ones this
-            // port then computes a WRONG ARC for, so not wrapping was compensating. Do not re-apply the
-            // clause on its own — the arc for a side site inside the obstacle has to be right first.
-            let t = (-b / a).clamp(0.0, 1.0);
-            let near = [p0[0] + t * dif[0], p0[1] + t * dif[1]];
-            if !crosses && near[0] * sp[0] + near[1] * sp[1] >= 0.0 {
+    // the nearest point of the SEGMENT to the centre
+    let a = (-(dif[0] * end[0] + dif[1] * end[1]) / dd).clamp(0.0, 1.0);
+    let near = [a * dif[0] + end[0], a * dif[1] + end[1]];
+    // no wrap if the segment clears the circle, unless a side site sits across from where it passes
+    if near[0] * near[0] + near[1] * near[1] > sqrad && side.is_none_or(|s| s[0] * near[0] + s[1] * near[1] >= 0.0) {
+        return None;
+    }
+    let (sqrt0, sqrt1) = ((sqlen0 - sqrad).sqrt(), (sqlen1 - sqrad).sqrt());
+    let (e0, e1) = ([end[0], end[1]], [end[2], end[3]]);
+    let mut sol = [[[0.0; 2]; 2]; 2];
+    let mut good = [0.0; 2];
+    for (i, sgn) in [1.0, -1.0].into_iter().enumerate() {
+        sol[i][0] = [(end[0] * sqrad + sgn * radius * end[1] * sqrt0) / sqlen0, (end[1] * sqrad - sgn * radius * end[0] * sqrt0) / sqlen0];
+        sol[i][1] = [(end[2] * sqrad - sgn * radius * end[3] * sqrt1) / sqlen1, (end[3] * sqrad + sgn * radius * end[2] * sqrt1) / sqlen1];
+        good[i] = match side {
+            // close to the side site, by direction only
+            Some(s) => {
+                let m = normalize2([sol[i][0][0] + sol[i][1][0], sol[i][0][1] + sol[i][1][1]]);
+                m[0] * s[0] + m[1] * s[1]
+            }
+            // tangent points closer together
+            None => -((sol[i][0][0] - sol[i][1][0]).powi(2) + (sol[i][0][1] - sol[i][1][1]).powi(2)),
+        };
+        // a candidate whose two straight runs cross each other is penalised
+        if segments_cross(e0, sol[i][0], e1, sol[i][1]) {
+            good[i] = -10000.0;
+        }
+    }
+    let i = if good[0] > good[1] { 0 } else { 1 };
+    // and if the chosen one still crosses, there is no wrap
+    if segments_cross(e0, sol[i][0], e1, sol[i][1]) {
+        return None;
+    }
+    Some(([sol[i][0][0], sol[i][0][1], sol[i][1][0], sol[i][1][1]], arc_length(sol[i][0], sol[i][1], i, radius)))
+}
+
+/// `wrap_inside`: a side site INSIDE the obstacle. The cable passes through a single point of the circle,
+/// where `asin(A z) + asin(B z) − 2 asin(z) + G = 0` (Newton from just below 1), so both returned points are
+/// that point and the arc is zero. `None` for no wrap; MuJoCo's numerical-failure exits keep the default,
+/// the circle point in the direction of the endpoints' midpoint.
+fn wrap_inside(end: &[f64; 4], radius: f64) -> Option<([f64; 4], f64)> {
+    const MAXITER: usize = 20;
+    const ZINIT: f64 = 1.0 - 1e-7;
+    const TOLERANCE: f64 = 1e-6;
+    const MINVAL: f64 = 1e-15;
+    let len0 = (end[0] * end[0] + end[1] * end[1]).sqrt();
+    let len1 = (end[2] * end[2] + end[3] * end[3]).sqrt();
+    let dif = [end[2] - end[0], end[3] - end[1]];
+    let dd = dif[0] * dif[0] + dif[1] * dif[1];
+    if len0 <= radius || len1 <= radius || radius < MINVAL || len0 < MINVAL || len1 < MINVAL {
+        return None;
+    }
+    // the segment passing through the circle: no wrap
+    if dd > MINVAL {
+        let a = -(dif[0] * end[0] + dif[1] * end[1]) / dd;
+        if a > 0.0 && a < 1.0 {
+            let t = [end[0] + a * dif[0], end[1] + a * dif[1]];
+            if (t[0] * t[0] + t[1] * t[1]).sqrt() <= radius {
                 return None;
             }
         }
-        None if !crosses => return None,
-        None => {}
     }
-    // the tangent points from a point at distance `d`, one each way round
-    let tang = |p: [f64; 2], d: f64, sgn: f64| -> [f64; 2] {
-        let ca = radius / d;
-        let sa = sgn * (1.0 - ca * ca).max(0.0).sqrt();
-        let k = radius / d;
-        [(ca * p[0] - sa * p[1]) * k, (sa * p[0] + ca * p[1]) * k]
-    };
-    // ⛔⛔ the arc is NOT "the shorter way round". Which way the cable turns is fixed by how it arrives: it
-    // leaves `p0` on a tangent, so at the touch point it is already travelling one way around the circle and
-    // cannot reverse. A cable that comes in at one angle and leaves at another 147° away may well take the
-    // 213° arc, and on `ms_human_700`'s rectus femoris it does — taking the short arc instead lost 28 mm of
-    // a 690 mm tendon and put the wrap points 1.7 mm out along the cylinder's axis, because the heights
-    // interpolate along that same path.
-    let arc_of = |t0: [f64; 2], t1: [f64; 2]| -> f64 {
-        let din = [t0[0] - p0[0], t0[1] - p0[1]];
-        let ccw = t0[0] * din[1] - t0[1] * din[0] > 0.0;
-        let (a0, a1) = (t0[1].atan2(t0[0]), t1[1].atan2(t1[0]));
-        let mut da = if ccw { a1 - a0 } else { a0 - a1 };
-        while da < 0.0 {
-            da += std::f64::consts::TAU;
-        }
-        radius * da
-    };
-    let dist = |p: [f64; 2], q: [f64; 2]| ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2)).sqrt();
-    let cands = [(tang(p0, d0, 1.0), tang(p1, d1, -1.0)), (tang(p0, d0, -1.0), tang(p1, d1, 1.0))];
-    let total = |(t0, t1): ([f64; 2], [f64; 2])| dist(p0, t0) + arc_of(t0, t1) + dist(t1, p1);
-    // ⛔⛔ **the side site chooses by DIRECTION, and only when the infinite line cuts the circle.**
-    //
-    // Two things were wrong with comparing the raw chord midpoints. The side site's DISTANCE must not
-    // count — MuJoCo's decision region is a half-plane through the obstacle's CENTRE, so the score has to
-    // be a dot product of two UNIT vectors — and the midpoint must be pushed out onto the circle, because
-    // the two candidates' chord midpoints sit at different radii and that scale leaks into a distance
-    // comparison. `argmax_i dot(ŝ, unit(t0ᵢ + t1ᵢ))` has neither defect, and its boundary is exactly the
-    // angular bisector of the two candidates' surface-midpoint directions.
-    //
-    // ⛔ And it applies only where the INFINITE line through the two endpoints passes within `radius` of
-    // the centre (`det > 0` — the same discriminant `crosses` clamps to the segment). Outside that, the
-    // side site does NOT choose: MuJoCo takes the wrap it would take with no side site at all, the
-    // shorter total path, and the side site only gates WHETHER to wrap.
-    //
-    // Measured against MuJoCo 3.13.0 over every side-site decision in Menagerie, three states each:
-    //   the old rule, nearest RAW chord midpoint        1,767 of 1,965
-    //   `argmax dot(ŝ, unit(t0+t1))` everywhere         1,955 of 1,965
-    //   the same, gated on the line cutting the circle  1,965 of 1,965   <- this
-    //   shorter total path everywhere                   1,700 of 1,965
-    let line_cuts = det > 0.0;
-    let pick = match side2 {
-        Some(sp) if line_cuts => {
-            let spn = (sp[0] * sp[0] + sp[1] * sp[1]).sqrt();
-            let sd = if spn > 1e-15 { [sp[0] / spn, sp[1] / spn] } else { sp };
-            let score = |(t0, t1): ([f64; 2], [f64; 2])| {
-                let m = [t0[0] + t1[0], t0[1] + t1[1]];
-                let n = (m[0] * m[0] + m[1] * m[1]).sqrt();
-                if n > 1e-15 {
-                    (sd[0] * m[0] + sd[1] * m[1]) / n
-                } else {
-                    f64::NEG_INFINITY
-                }
-            };
-            usize::from(score(cands[1]) > score(cands[0]))
-        }
-        _ => usize::from(total(cands[1]) < total(cands[0])),
-    };
-    let (t0, t1) = cands[pick];
-    let arc2d = arc_of(t0, t1);
-    let lift = |t: [f64; 2], h: f64| c + e1 * t[0] + e2 * t[1] + axis.map(|ax| ax * h).unwrap_or_else(Vector3::zeros);
-    let Some(ax) = axis else {
-        return Some(([lift(t0, 0.0), lift(t1, 0.0)], arc2d));
-    };
-    // a cylinder is infinite along its axis: the heights follow the 2-D path, so the arc is a helix
-    let (h0, h1) = ((x0 - c).dot(&ax), (x1 - c).dot(&ax));
-    let (s0, s1) = (dist(p0, t0), dist(p0, t0) + arc2d);
-    let total = s1 + dist(t1, p1);
-    if total < 1e-15 {
+    let mid = normalize2([0.5 * (end[0] + end[2]), 0.5 * (end[1] + end[3])]);
+    let fallback = Some(([mid[0] * radius, mid[1] * radius, mid[0] * radius, mid[1] * radius], 0.0));
+    let (a, b) = (radius / len0, radius / len1);
+    let cos_g = (len0 * len0 + len1 * len1 - dd) / (2.0 * len0 * len1);
+    if cos_g < -1.0 + MINVAL {
         return None;
+    } else if cos_g > 1.0 - MINVAL {
+        return fallback;
     }
-    let (z0, z1) = (h0 + (h1 - h0) * s0 / total, h0 + (h1 - h0) * s1 / total);
-    Some(([lift(t0, z0), lift(t1, z1)], (arc2d * arc2d + (z1 - z0) * (z1 - z0)).sqrt()))
+    let g = cos_g.acos();
+    let fz = |z: f64| (a * z).asin() + (b * z).asin() - 2.0 * z.asin() + g;
+    let mut z = ZINIT;
+    let mut f = fz(z);
+    if f > 0.0 {
+        return fallback;
+    }
+    let mut iter = 0;
+    while iter < MAXITER && f.abs() > TOLERANCE {
+        let df = a / (1.0 - z * z * a * a).sqrt().max(MINVAL) + b / (1.0 - z * z * b * b).sqrt().max(MINVAL) - 2.0 / (1.0 - z * z).sqrt().max(MINVAL);
+        if df > -MINVAL {
+            return fallback;
+        }
+        let z1 = z - f / df;
+        if z1 > z {
+            return fallback;
+        }
+        z = z1;
+        f = fz(z);
+        if f > TOLERANCE {
+            return fallback;
+        }
+        iter += 1;
+    }
+    if iter >= MAXITER {
+        return fallback;
+    }
+    // rotate from whichever endpoint the turn is measured from
+    let (vec, ang) = if end[0] * end[3] - end[1] * end[2] > 0.0 { ([end[0], end[1]], z.asin() - (a * z).asin()) } else { ([end[2], end[3]], z.asin() - (b * z).asin()) };
+    let v = normalize2(vec);
+    let p = [radius * (ang.cos() * v[0] - ang.sin() * v[1]), radius * (ang.sin() * v[0] + ang.cos() * v[1])];
+    Some(([p[0], p[1], p[0], p[1]], 0.0))
 }
 
 /// One geom's contribution to its body: mass, centre in the body frame, inertia about that centre in the
@@ -4660,6 +4749,85 @@ mod tests {
             }
         }
     }
+
+    /// **MuJoCo's wrap rules, from its source, against its own numbers.** Each tendon here exercises one
+    /// branch of `mju_wrap` that the Menagerie sweep had only been able to approximate from outputs:
+    ///   * `inside`: a side site INSIDE the obstacle is `wrap_inside`, a cable through ONE point of the
+    ///     circle with no arc, not a circle wrap;
+    ///   * `across`: a side site across from the run, with the infinite line clear of the circle. MuJoCo
+    ///     still wraps, and picks the way round by direction with crossing runs penalised;
+    ///   * `tall`: a side site inside the cylinder's CIRCLE but far along its axis. "Inside" is the 3-D
+    ///     distance from the centre, so this is an ordinary circle test, and here it does not wrap at all;
+    ///   * `ball_inside`: the inside wrap on a sphere, in the plane of the centre and both endpoints;
+    ///   * `crossing`: the side site's DIRECTION prefers the candidate whose two straight runs cross each
+    ///     other, so the penalty hands the wrap to the other way round.
+    ///
+    /// ⛔ One line of `wrap_circle` is not exercised: "no wrap if the CHOSEN candidate's runs still cross".
+    /// In 2,000,000 random 2-D geometries, with and without a side site, both candidates never crossed
+    /// at once, so deleting that check changes nothing this test (or Menagerie) can see.
+    #[test]
+    fn mujocos_wrap_rules_inside_across_and_along_the_axis() {
+        let t = tree_from_mjcf_str(WRAP_RULES_MODEL).unwrap();
+        assert!(t.tendons_unsupported.is_empty(), "{:?}", t.tendons_unsupported);
+        let q = [0.07];
+        let (len, vel) = (t.ten_length(&q), t.ten_velocity(&q, &[1.0]));
+        // name, ten_length, ten_velocity at q̇ = 1, and MuJoCo's wrap_xpos pair (None: no wrap)
+        let want: [(&str, f64, f64, Option<[[f64; 3]; 2]>); 5] = [
+            ("inside", 0.9092707159093799, 0.9538181602238763, Some([[0.0028113626194876985, 0.10602107912979178, -0.019707759182168463]; 2])),
+            (
+                "across",
+                1.095556113756721,
+                0.7852796289662715,
+                Some([[-0.06146384977322341, -0.06761687651599636, -0.0501413698334621], [0.06719017030120919, -0.06735076384761232, -0.06229949760136277]]),
+            ),
+            ("tall", 0.8771544903835357, 0.991843523048708, None),
+            ("ball_inside", 0.9111720267678524, 0.947923827835781, Some([[-0.002799374752766072, 0.09993816332085413, 1.0021276778534032]; 2])),
+            ("crossing", 1.0619512100538142, 0.7786545888708268, Some([[-0.07309461601156907, 0.06824351331900542, 2.0], [0.06274528119551333, 0.07786545888708267, 2.0]])),
+        ];
+        for (i, (name, wl, wv, wp)) in want.iter().enumerate() {
+            assert_eq!(&t.tendons[i].name, name);
+            assert!((len[i] - wl).abs() < 1e-12, "{name}: length {} vs MuJoCo {wl}", len[i]);
+            assert!((vel[i] - wv).abs() < 1e-12, "{name}: velocity {} vs MuJoCo {wv}", vel[i]);
+            let wraps = t.tendon_wraps(i, &q);
+            match wp {
+                None => assert!(wraps.is_empty(), "{name}: MuJoCo does not wrap, this port wrapped {wraps:?}"),
+                Some(pts) => {
+                    assert_eq!(wraps.len(), 1, "{name}: {wraps:?}");
+                    for (k, w) in pts.iter().enumerate() {
+                        let d = (wraps[0].1[k] - Vector3::from(*w)).norm();
+                        assert!(d < 1e-12, "{name}: wrap point {k} is {:?}, MuJoCo {w:?} ({d:.2e} apart)", wraps[0].1[k]);
+                    }
+                }
+            }
+        }
+    }
+
+    const WRAP_RULES_MODEL: &str = r#"<mujoco><compiler angle="radian"/><option gravity="0 0 0"/><worldbody>
+  <geom name="drum" type="cylinder" size="0.1 0.3" euler="0.2 -0.1 0.3"/>
+  <geom name="ball" type="sphere" size="0.1" pos="0 0 1"/>
+  <geom name="post" type="cylinder" size="0.1 0.3" pos="0 0 2"/>
+  <site name="c0" pos="-0.4 -0.2819 2"/>
+  <site name="left" pos="-0.4973 -0.0521 2"/>
+  <site name="a0" pos="-0.4 0.2 0.05"/>
+  <site name="b0" pos="-0.4 0.2 1.05"/>
+  <site name="in" pos="0.03 0.02 0"/>
+  <site name="tall" pos="0.02 0.02 0.25"/>
+  <site name="below" pos="0 -0.3 0"/>
+  <site name="bin" pos="0.02 -0.03 1.01"/>
+  <body name="cart" pos="0 0 0"><joint name="x" type="slide" axis="1 0 0"/>
+    <inertial pos="0 0 0" mass="1" diaginertia="0.01 0.01 0.01"/>
+    <site name="a1" pos="0.4 0.25 -0.05"/>
+    <site name="b1" pos="0.4 0.25 0.95"/>
+    <site name="c1" pos="0.33 -0.1939 2"/>
+  </body>
+</worldbody>
+<tendon>
+  <spatial name="inside"><site site="a0"/><geom geom="drum" sidesite="in"/><site site="a1"/></spatial>
+  <spatial name="across"><site site="a0"/><geom geom="drum" sidesite="below"/><site site="a1"/></spatial>
+  <spatial name="tall"><site site="a0"/><geom geom="drum" sidesite="tall"/><site site="a1"/></spatial>
+  <spatial name="ball_inside"><site site="b0"/><geom geom="ball" sidesite="bin"/><site site="b1"/></spatial>
+  <spatial name="crossing"><site site="c0"/><geom geom="post" sidesite="left"/><site site="c1"/></spatial>
+</tendon></mujoco>"#;
 
     const WRAP_MODEL: &str = r#"<mujoco><compiler angle="radian"/><option gravity="0 0 0"/><worldbody>
   <site name="a0" pos="-0.4 0.05 0.3"/>

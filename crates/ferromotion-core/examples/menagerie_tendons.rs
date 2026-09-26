@@ -145,8 +145,14 @@ fn main() {
                     let ours_seq: Vec<String> = t.tendon_wraps(i, &q).into_iter().map(|(g, _)| g).collect();
                     let only_theirs = their_seq.iter().filter(|g| !ours_seq.contains(g)).count();
                     let only_ours = ours_seq.iter().filter(|g| !their_seq.contains(g)).count();
+                    // ⛔ A cable exactly TANGENT to its obstacle (tetheria's sites sit on the pulley's radius)
+                    // gets an arc of 0 or a full 2πr depending on the sign of a cross product that is pure
+                    // rounding. MuJoCo's own `ten_length` takes both values: perturbing qpos by 1e-12 rad
+                    // moves it by exactly 2πr on 1–4% of draws. Named, so it is not mistaken for an arc bug.
+                    let full_turn = their_seq.iter().any(|g| t.geoms.iter().find(|x| &x.name == g).is_some_and(|x| (dl - std::f64::consts::TAU * x.size[0]).abs() < 1e-9));
                     *wrap_shape
                         .entry(match (only_theirs, only_ours) {
+                            (0, 0) if full_turn => "the SAME obstacles, exactly one full turn (2πr) apart: a tangent cable, decided by rounding",
                             (0, 0) => "the SAME obstacles, a different arc on them",
                             (_, 0) => "MuJoCo wrapped an obstacle this port left alone",
                             (0, _) => "this port wrapped an obstacle MuJoCo left alone",
