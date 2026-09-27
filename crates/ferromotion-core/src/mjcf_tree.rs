@@ -156,6 +156,12 @@ pub struct MjcfJoint {
 }
 
 impl MjcfTree {
+    /// A body's inertial frame in its own frame as the kinematics use it
+    /// ([`MjcfTree::body_inertial_runtime`]); the body frame for a body with none recorded.
+    pub(crate) fn inertial_rt(&self, body: &str) -> (Vector3<f64>, Matrix3<f64>) {
+        self.body_inertial_runtime.get(body).copied().unwrap_or((Vector3::zeros(), Matrix3::identity()))
+    }
+
     /// **`qfrc_passive`**: the forces a MuJoCo model exerts without being asked — joint damping and joint
     /// springs.
     ///
@@ -406,7 +412,7 @@ impl MjcfTree {
             let mut xfrc = nalgebra::DVector::<f64>::zeros(nv);
             for (body, w) in &applied.xfrc {
                 let Some((ride, pre)) = self.body_frames.get(body) else { continue };
-                let com = (frames[*ride] * pre * Point3::from(self.body_ipos.get(body).copied().unwrap_or_else(Vector3::zeros))).coords;
+                let com = (frames[*ride] * pre * Point3::from(self.inertial_rt(body).0)).coords;
                 let jl = crate::tree_jacobian::tree_point_jacobian(&self.tree.joints, &self.tree.parent, &frames, Some(*ride), com);
                 let ja = crate::tree_jacobian::tree_angular_jacobian(&self.tree.joints, &self.tree.parent, &frames, Some(*ride));
                 xfrc += jl.transpose() * Vector3::new(w[0], w[1], w[2]) + ja.transpose() * Vector3::new(w[3], w[4], w[5]);
@@ -907,8 +913,8 @@ impl MjcfTree {
                 continue;
             }
             let body = frames[*ride] * pre;
-            let rot = body.rotation.to_rotation_matrix().into_inner() * self.body_iquat[name];
-            let ipos = self.body_ipos.get(name).copied().unwrap_or_else(Vector3::zeros);
+            let (ipos, irot) = self.inertial_rt(name);
+            let rot = body.rotation.to_rotation_matrix().into_inner() * irot;
             let com = (body * Point3::from(ipos)).coords;
             let jp = crate::tree_jacobian::tree_point_jacobian(&self.tree.joints, &self.tree.parent, &frames, Some(*ride), com);
             let ja = crate::tree_jacobian::tree_angular_jacobian(&self.tree.joints, &self.tree.parent, &frames, Some(*ride));
@@ -962,7 +968,7 @@ impl MjcfTree {
             if mass == 0.0 {
                 continue;
             }
-            let ipos = self.body_ipos.get(name).copied().unwrap_or_else(Vector3::zeros);
+            let ipos = self.inertial_rt(name).0;
             let com = (frames[*ride] * pre * Point3::from(ipos)).coords;
             let jac = crate::tree_jacobian::tree_point_jacobian(&self.tree.joints, &self.tree.parent, &frames, Some(*ride), com);
             let f = self.gravity * (-gc * mass);
@@ -1122,7 +1128,7 @@ impl MjcfTree {
         self.body_frames
             .iter()
             .map(|(name, (ride, pre))| {
-                let ipos = self.body_ipos.get(name).copied().unwrap_or_else(Vector3::zeros);
+                let ipos = self.inertial_rt(name).0;
                 let com = (frames[*ride] * pre * Point3::from(ipos)).coords;
                 let mut w = crate::tree_jacobian::body_invweight(&minv, &self.tree.joints, &self.tree.parent, &frames, Some(*ride), com);
                 if let Some(mass) = simple.get(name.as_str()) {
@@ -1911,8 +1917,9 @@ impl MjcfTree {
                 // `freeBias_vel_blocks`: the derivative of the free body's bias force in MuJoCo's basis
                 let body = frames[*ride] * pre;
                 let rm = body.rotation.to_rotation_matrix().into_inner();
-                let xi = rm * self.body_iquat[&j.body];
-                let s_off = rm * self.body_ipos.get(&j.body).copied().unwrap_or_else(Vector3::zeros);
+                let (ipos, irot) = self.inertial_rt(&j.body);
+                let xi = rm * irot;
+                let s_off = rm * ipos;
                 let w = rm * Vector3::new(qvel[adr + 3], qvel[adr + 4], qvel[adr + 5]);
                 let iw = xi * Matrix3::from_diagonal(&Vector3::new(inertia[0], inertia[1], inertia[2])) * xi.transpose();
                 let (ws, iww) = (w.cross(&s_off), iw * w);
@@ -2198,6 +2205,13 @@ pub struct MjcfTree {
     /// MuJoCo's `body_inertia` and `body_iquat`. The fluid model is written in that frame and nowhere else.
     pub body_iinertia: BTreeMap<String, [f64; 3]>,
     pub body_iquat: BTreeMap<String, Matrix3<f64>>,
+    /// The same frame as MuJoCo stores it: `body_iquat`, `(w x y z)`, bit for bit what its compiler computes.
+    pub body_iquat_wxyz: BTreeMap<String, [f64; 4]>,
+    /// ⛔ The inertial frame the KINEMATICS use (`xipos`, `ximat` in the body frame), which is not always the
+    /// stored one: where `body_ipos`/`body_iquat` are within 1e-6 of the body frame (`body_sameframe`),
+    /// MuJoCo copies the body frame instead. Everything that runs on `xipos` — the dynamics, gravity
+    /// compensation, the fluid model, the sensors — reads this.
+    pub body_inertial_runtime: BTreeMap<String, (Vector3<f64>, Matrix3<f64>)>,
     /// Each body's mass after MuJoCo's `boundmass` floor, and its `<body gravcomp>` where it is non-zero —
     /// together with [`MjcfTree::body_ipos`] these are what [`MjcfTree::qfrc_gravcomp`] needs.
     pub body_mass: BTreeMap<String, f64>,
@@ -2956,16 +2970,14 @@ pub struct MeshData {
     pub aamm: [f64; 6],
 }
 
-/// What [`Walk::geom_spec`] resolves: MuJoCo's own `geom_type`, `geom_size` and pose for one geom.
+/// What [`Walk::geom_spec`] resolves: MuJoCo's own `geom_type`, `geom_size` and the geom's frame in its body
+/// (`geom_pos`, `geom_quat`), with a mesh's own frame — the centre of mass and principal axes
+/// `mjCMesh::Process` left it in — already accumulated (`mjuu_frameaccum`), as `mjCGeom::Compile` does.
 struct GeomSpec {
     ty: String,
     size: Vec<f64>,
-    pose: Iso,
+    mj: MjPose,
     mesh: Option<String>,
-    /// For a `type="mesh"` geom, the mesh's OWN stored frame — the centre of mass and the principal rotation
-    /// `mjCMesh::Process` left it in — which MuJoCo folds into `geom_xmat`. Kept apart from `pose` because
-    /// [`Walk::geom_mass`] applies the same frame itself, through the inertia, and would double-count it.
-    mesh_frame: Option<Iso>,
 }
 
 struct MeshAsset {
@@ -3077,19 +3089,28 @@ fn uu_cross(b: &Vector3<f64>, c: &Vector3<f64>) -> Vector3<f64> {
     Vector3::new(b.y.mul_add(c.z, -(b.z * c.y)), b.z.mul_add(c.x, -(b.x * c.z)), b.x.mul_add(c.y, -(b.y * c.x)))
 }
 
-/// `mjuu_normvec(vec, 4)`: the squared norm below `mjEPS` (1e-14) leaves the vector alone, and so does a norm
-/// within `mjEPS` of 1; otherwise each component is DIVIDED by the norm.
-fn uu_normvec4(q: &mut [f64; 4]) {
-    let n2 = q[3].mul_add(q[3], q[2].mul_add(q[2], q[1].mul_add(q[1], q[0] * q[0])));
+/// `mjuu_normvec`: the squared norm below `mjEPS` (1e-14) leaves the vector alone and returns 0, and a norm
+/// within `mjEPS` of 1 leaves it alone too; otherwise each component is DIVIDED by the norm, which is
+/// returned. The sum of squares is one fused accumulation.
+fn uu_normvec(v: &mut [f64]) -> f64 {
+    let mut n2 = 0.0f64;
+    for x in v.iter() {
+        n2 = x.mul_add(*x, n2);
+    }
     if n2 < 1e-14 {
-        return;
+        return 0.0;
     }
     let n = n2.sqrt();
     if (n - 1.0).abs() > 1e-14 {
-        for x in q.iter_mut() {
+        for x in v.iter_mut() {
             *x /= n;
         }
     }
+    n
+}
+
+fn uu_normvec4(q: &mut [f64; 4]) {
+    uu_normvec(q);
 }
 
 /// `mjuu_quat2mat` (its products are separate statements, so nothing fuses).
@@ -3196,9 +3217,10 @@ pub(crate) fn eig3_mujoco(mat: &Matrix3<f64>) -> ([f64; 3], [f64; 4]) {
     (eigval, quat)
 }
 
-/// Rotation matrix of a MuJoCo `(w x y z)` quaternion, columns = axes.
+/// Rotation matrix of a MuJoCo `(w x y z)` quaternion, columns = axes: `mjuu_quat2mat`.
+#[cfg(test)]
 pub(crate) fn quat_to_rotation(q: &[f64; 4]) -> Matrix3<f64> {
-    *UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(q[0], q[1], q[2], q[3])).to_rotation_matrix().matrix()
+    uu_quat2mat(q)
 }
 
 /// A mesh as MuJoCo's OBJ reader (tinyobjloader with `real_t = float`) delivers it: coordinates rounded to
@@ -3670,12 +3692,12 @@ fn wrap_inside(end: &[f64; 4], radius: f64) -> Option<([f64; 4], f64)> {
     Some(([p[0], p[1], p[0], p[1]], 0.0))
 }
 
-/// One geom's contribution to its body: mass, centre in the body frame, inertia about that centre in the
-/// body frame.
+/// One geom's contribution to its body, as `mjCGeom` holds it: `mass_`, the geom's frame in the body (the
+/// mesh frame already folded in) and its principal inertia in that frame (`SetInertia`).
 struct GeomMass {
     mass: f64,
-    com: Vector3<f64>,
-    inertia: Matrix3<f64>,
+    pose: MjPose,
+    inertia: [f64; 3],
 }
 
 /// The default classes: for each class, its parent class and the attributes it sets per element kind.
@@ -3832,24 +3854,118 @@ impl Defaults {
 // Orientation, with every MJCF form
 // ---------------------------------------------------------------------------------------------
 
-fn axis_of(ch: char) -> Unit<Vector3<f64>> {
-    match ch.to_ascii_lowercase() {
-        'x' => Vector3::x_axis(),
-        'y' => Vector3::y_axis(),
-        _ => Vector3::z_axis(),
+/// A frame as MuJoCo's compiler holds it — `pos` and a `(w x y z)` quaternion — computed in MuJoCo's own
+/// arithmetic (`ResolveOrientation`, `mjuu_*`, contracted as clang contracts them), so its bits are MuJoCo's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MjPose {
+    pos: [f64; 3],
+    quat: [f64; 4],
+}
+
+impl MjPose {
+    /// The same frame for the rest of the loader. The quaternion is taken as is: renormalising it would
+    /// change its bits.
+    fn iso(&self) -> Iso {
+        Iso::from_parts(Translation3::new(self.pos[0], self.pos[1], self.pos[2]), UnitQuaternion::new_unchecked(nalgebra::Quaternion::new(self.quat[0], self.quat[1], self.quat[2], self.quat[3])))
+    }
+
+    /// `mjuu_frameaccum`: this frame followed by a child frame expressed in it.
+    fn accum(&mut self, childpos: &[f64; 3], childquat: &[f64; 4]) {
+        let v = uu_mulvecmat(&Vector3::from(*childpos), &uu_quat2mat(&self.quat));
+        self.pos = [self.pos[0] + v.x, self.pos[1] + v.y, self.pos[2] + v.z];
+        self.quat = uu_mulquat(&self.quat, childquat);
     }
 }
 
-/// Orientation from `quat` / `axisangle` / `euler` / `xyaxes` / `zaxis`, reading each through the defaults.
-fn orientation(get: &dyn Fn(&str) -> Option<String>, c: &Compiler) -> Result<UnitQuaternion<f64>, String> {
+/// `mjuu_rotVecQuat`, contracted.
+fn uu_rot_vec_quat(v: &[f64; 3], q: &[f64; 4]) -> [f64; 3] {
+    if v[0] == 0.0 && v[1] == 0.0 && v[2] == 0.0 {
+        return [0.0; 3];
+    }
+    if q[0] == 1.0 && q[1] == 0.0 && q[2] == 0.0 && q[3] == 0.0 {
+        return *v;
+    }
+    let t = [
+        (-q[3]).mul_add(v[1], q[0].mul_add(v[0], q[2] * v[2])),
+        (-q[1]).mul_add(v[2], q[0].mul_add(v[1], q[3] * v[0])),
+        (-q[2]).mul_add(v[0], q[0].mul_add(v[2], q[1] * v[1])),
+    ];
+    [
+        2.0f64.mul_add(q[2].mul_add(t[2], -(q[3] * t[1])), v[0]),
+        2.0f64.mul_add(q[3].mul_add(t[0], -(q[1] * t[2])), v[1]),
+        2.0f64.mul_add(q[1].mul_add(t[1], -(q[2] * t[0])), v[2]),
+    ]
+}
+
+/// `mjuu_z2quat`: the rotation taking +z to `vec` (which the caller has normalised).
+fn uu_z2quat(vec: &[f64; 3]) -> [f64; 4] {
+    let mut q = [0.0, 0.0f64.mul_add(vec[2], -vec[1]), 1.0f64.mul_add(vec[0], -(0.0 * vec[2])), 0.0f64.mul_add(vec[1], -(0.0 * vec[0]))];
+    let s = uu_normvec(&mut q[1..4]);
+    if s < 1e-10 {
+        q[1] = 1.0;
+        q[2] = 0.0;
+        q[3] = 0.0;
+    }
+    let ang = s.atan2(vec[2]);
+    q[0] = (ang / 2.0).cos();
+    for x in &mut q[1..4] {
+        *x *= (ang / 2.0).sin();
+    }
+    q
+}
+
+/// `mjuu_frame2quat`: the quaternion of the frame whose columns are `x`, `y`, `z`.
+fn uu_frame2quat(x: &[f64; 3], y: &[f64; 3], z: &[f64; 3]) -> [f64; 4] {
+    let m = [x, y, z]; // m[c][r]
+    let mut q = [0.0; 4];
+    if m[0][0] + m[1][1] + m[2][2] > 0.0 {
+        q[0] = 0.5 * (1.0 + m[0][0] + m[1][1] + m[2][2]).sqrt();
+        q[1] = 0.25 * (m[1][2] - m[2][1]) / q[0];
+        q[2] = 0.25 * (m[2][0] - m[0][2]) / q[0];
+        q[3] = 0.25 * (m[0][1] - m[1][0]) / q[0];
+    } else if m[0][0] > m[1][1] && m[0][0] > m[2][2] {
+        q[1] = 0.5 * (1.0 + m[0][0] - m[1][1] - m[2][2]).sqrt();
+        q[0] = 0.25 * (m[1][2] - m[2][1]) / q[1];
+        q[2] = 0.25 * (m[1][0] + m[0][1]) / q[1];
+        q[3] = 0.25 * (m[2][0] + m[0][2]) / q[1];
+    } else if m[1][1] > m[2][2] {
+        q[2] = 0.5 * (1.0 - m[0][0] + m[1][1] - m[2][2]).sqrt();
+        q[0] = 0.25 * (m[2][0] - m[0][2]) / q[2];
+        q[1] = 0.25 * (m[1][0] + m[0][1]) / q[2];
+        q[3] = 0.25 * (m[2][1] + m[1][2]) / q[2];
+    } else {
+        q[3] = 0.5 * (1.0 - m[0][0] - m[1][1] + m[2][2]).sqrt();
+        q[0] = 0.25 * (m[0][1] - m[1][0]) / q[3];
+        q[1] = 0.25 * (m[2][0] + m[0][2]) / q[3];
+        q[2] = 0.25 * (m[2][1] + m[1][2]) / q[3];
+    }
+    uu_normvec(&mut q);
+    q
+}
+
+/// Orientation from `quat` / `axisangle` / `euler` / `xyaxes` / `zaxis`, reading each through the defaults,
+/// as `mjuu_normvec` (a stated quaternion) and `ResolveOrientation` (the alternatives) compute it.
+fn orientation_mj(get: &dyn Fn(&str) -> Option<String>, c: &Compiler) -> Result<[f64; 4], String> {
+    orientation_mj_as(get, c, true)
+}
+
+/// [`orientation_mj`], leaving a stated `quat` unnormalised when `normalize` is false: sites and frames
+/// normalise only after accumulating their enclosing `<frame>`.
+fn orientation_mj_as(get: &dyn Fn(&str) -> Option<String>, c: &Compiler, normalize: bool) -> Result<[f64; 4], String> {
+    // `angle="degree"` converts as `x / 180.0 * mjPI`, which is not always the same double as `x * (π/180)`
+    let degree = c.deg != 1.0;
+    let rad = |x: f64| if degree { x / 180.0 * std::f64::consts::PI } else { x };
     let mut given = 0;
-    let mut out = UnitQuaternion::identity();
+    let mut quat = [1.0, 0.0, 0.0, 0.0];
     if let Some(q) = get("quat") {
         let v = floats(&q)?;
         if v.len() != 4 {
             return Err("quat needs 4 numbers (w x y z)".into());
         }
-        out = UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(v[0], v[1], v[2], v[3]));
+        quat = [v[0], v[1], v[2], v[3]];
+        if normalize {
+            uu_normvec(&mut quat);
+        }
         given += 1;
     }
     if let Some(aa) = get("axisangle") {
@@ -3857,8 +3973,12 @@ fn orientation(get: &dyn Fn(&str) -> Option<String>, c: &Compiler) -> Result<Uni
         if v.len() != 4 {
             return Err("axisangle needs 4 numbers".into());
         }
-        let axis = Unit::try_new(Vector3::new(v[0], v[1], v[2]), 1e-12).ok_or("axisangle axis is zero")?;
-        out = UnitQuaternion::from_axis_angle(&axis, v[3] * c.deg);
+        let mut a = [v[0], v[1], v[2], rad(v[3])];
+        if uu_normvec(&mut a[..3]) < 1e-14 {
+            return Err("axisangle too small".into());
+        }
+        let ang2 = a[3] / 2.0;
+        quat = [ang2.cos(), ang2.sin() * a[0], ang2.sin() * a[1], ang2.sin() * a[2]];
         given += 1;
     }
     if let Some(e) = get("euler") {
@@ -3866,14 +3986,22 @@ fn orientation(get: &dyn Fn(&str) -> Option<String>, c: &Compiler) -> Result<Uni
         if v.len() != 3 {
             return Err("euler needs 3 numbers".into());
         }
-        let mut r = UnitQuaternion::identity();
+        let mut q = [1.0, 0.0, 0.0, 0.0];
         for (ch, &ang) in c.eulerseq.chars().zip(&v) {
-            let step = UnitQuaternion::from_axis_angle(&axis_of(ch), ang * c.deg);
-            // lower-case: intrinsic, about the already-rotated axis (right-multiply); upper-case: extrinsic,
-            // about the fixed axis (left-multiply)
-            r = if ch.is_ascii_lowercase() { r * step } else { step * r };
+            let half = rad(ang) / 2.0;
+            let mut qrot = [half.cos(), 0.0, 0.0, 0.0];
+            let axis = match ch.to_ascii_lowercase() {
+                'x' => 1,
+                'y' => 2,
+                'z' => 3,
+                _ => return Err("euler sequence can only contain x, y, z, X, Y, Z".into()),
+            };
+            qrot[axis] = half.sin();
+            // lower-case: moving axes, post-multiply; upper-case: fixed axes, pre-multiply
+            q = if ch.is_ascii_lowercase() { uu_mulquat(&q, &qrot) } else { uu_mulquat(&qrot, &q) };
         }
-        out = r;
+        uu_normvec(&mut q);
+        quat = q;
         given += 1;
     }
     if let Some(xy) = get("xyaxes") {
@@ -3881,92 +4009,183 @@ fn orientation(get: &dyn Fn(&str) -> Option<String>, c: &Compiler) -> Result<Uni
         if v.len() != 6 {
             return Err("xyaxes needs 6 numbers".into());
         }
-        let x = Unit::try_new(Vector3::new(v[0], v[1], v[2]), 1e-12).ok_or("xyaxes x is zero")?;
-        let y0 = Vector3::new(v[3], v[4], v[5]);
-        let y = Unit::try_new(y0 - x.into_inner() * x.dot(&y0), 1e-12).ok_or("xyaxes y is parallel to x")?;
-        let z = x.cross(&y);
-        let m = Matrix3::from_columns(&[x.into_inner(), y.into_inner(), z]);
-        out = UnitQuaternion::from_rotation_matrix(&nalgebra::Rotation3::from_matrix_unchecked(m));
+        let (mut x, mut y) = ([v[0], v[1], v[2]], [v[3], v[4], v[5]]);
+        if uu_normvec(&mut x) < 1e-14 {
+            return Err("xaxis too small".into());
+        }
+        let d = x[2].mul_add(y[2], x[0].mul_add(y[0], x[1] * y[1]));
+        for k in 0..3 {
+            y[k] = (-x[k]).mul_add(d, y[k]);
+        }
+        if uu_normvec(&mut y) < 1e-14 {
+            return Err("yaxis too small".into());
+        }
+        let zv = uu_cross(&Vector3::from(x), &Vector3::from(y));
+        let mut z = [zv.x, zv.y, zv.z];
+        if uu_normvec(&mut z) < 1e-14 {
+            return Err("cross(xaxis, yaxis) too small".into());
+        }
+        quat = uu_frame2quat(&x, &y, &z);
         given += 1;
     }
     if let Some(za) = get("zaxis") {
         let v = vec3(&za)?;
-        let z = Unit::try_new(v, 1e-12).ok_or("zaxis is zero")?;
-        out = UnitQuaternion::rotation_between(&Vector3::z(), &z).unwrap_or_else(|| {
-            // exactly antiparallel: no unique minimal rotation; MuJoCo picks one, and so does this
-            UnitQuaternion::from_axis_angle(&Vector3::x_axis(), std::f64::consts::PI)
-        });
+        let mut z = [v.x, v.y, v.z];
+        if uu_normvec(&mut z) < 1e-14 {
+            return Err("zaxis too small".into());
+        }
+        quat = uu_z2quat(&z);
         given += 1;
     }
     if given > 1 {
         return Err("more than one of quat/axisangle/euler/xyaxes/zaxis given — MuJoCo refuses this too".into());
     }
-    Ok(out)
+    Ok(quat)
 }
 
-fn pose_of(el: &El, kind: &str, defaults: &Defaults, childclass: Option<&str>, c: &Compiler) -> Result<Iso, String> {
+/// `fromto` (geoms and sites): the frame at the segment's midpoint with +z along it, and the half-length.
+/// ⛔ MuJoCo's +z runs from the SECOND endpoint to the FIRST (`vec = fromto[0..3] − fromto[3..6]`, then
+/// `mjuu_z2quat`). Taking it the other way puts the frame 180° out — invisible on a symmetric capsule until
+/// something reads `geom_xmat`: 77 of Menagerie's 11,912 geoms, every one of them a `fromto` capsule.
+fn fromto_mj(v: &[f64], kind: &str) -> Result<(MjPose, f64), String> {
+    if v.len() != 6 {
+        return Err(format!("{kind} fromto needs 6 numbers"));
+    }
+    let mut vec = [v[0] - v[3], v[1] - v[4], v[2] - v[5]];
+    let half = uu_normvec(&mut vec) / 2.0;
+    if half < 1e-14 {
+        return Err(format!("{kind} fromto endpoints coincide"));
+    }
+    let pos = [(v[0] + v[3]) / 2.0, (v[1] + v[4]) / 2.0, (v[2] + v[5]) / 2.0];
+    Ok((MjPose { pos, quat: uu_z2quat(&vec) }, half))
+}
+
+/// An element's own frame in MuJoCo's arithmetic: `fromto` for geoms and sites (pos and the orientation
+/// attributes are then ignored), else `pos` and the orientation.
+fn pose_mj(el: &El, kind: &str, defaults: &Defaults, childclass: Option<&str>, c: &Compiler) -> Result<MjPose, String> {
+    pose_mj_as(el, kind, defaults, childclass, c, true)
+}
+
+fn pose_mj_as(el: &El, kind: &str, defaults: &Defaults, childclass: Option<&str>, c: &Compiler, normalize: bool) -> Result<MjPose, String> {
     let get = |k: &str| defaults.get(el, kind, k, childclass).map(|s| s.to_string());
-    // `fromto` (sites and geoms): the frame sits at the segment's midpoint with +z along it, and pos and the
-    // orientation attributes are ignored. flybody's claw sites use it; without this they sat 5.6 mm off.
-    if let Some(ft) = get("fromto") {
-        let v = floats(&ft)?;
-        if v.len() != 6 {
-            return Err(format!("{kind} fromto needs 6 numbers"));
-        }
-        let (p1, p2) = (Vector3::new(v[0], v[1], v[2]), Vector3::new(v[3], v[4], v[5]));
-        // ⛔ MuJoCo's +z runs from the SECOND endpoint to the FIRST (`mjCGeom::Compile` and `mjCSite::Compile`
-        // both take `vec = fromto[0..3] − fromto[3..6]`, then `mjuu_z2quat`). Taking it the other way puts the
-        // frame 180° out: the position, the size and the shape are all still right, because a capsule is
-        // symmetric about its axis, so nothing fails until something reads `geom_xmat` — 77 of Menagerie's
-        // 11,912 geoms, every one of them a `fromto` capsule.
-        let d = p1 - p2;
-        if !(d.norm().is_finite() && d.norm() > 0.0) {
-            return Err(format!("{kind} fromto endpoints coincide"));
-        }
-        let rot = UnitQuaternion::rotation_between(&Vector3::z(), &d)
-            .unwrap_or_else(|| UnitQuaternion::from_axis_angle(&Vector3::x_axis(), std::f64::consts::PI));
-        return Ok(Iso::from_parts(Translation3::from((p1 + p2) / 2.0), rot));
+    if let Some(ft) = get("fromto").filter(|_| kind == "geom" || kind == "site") {
+        return Ok(fromto_mj(&floats(&ft)?, kind)?.0);
     }
     let p = get("pos").map(|s| vec3(&s)).transpose()?.unwrap_or_else(Vector3::zeros);
     let orient = defaults.orientation_attrs(el, kind, childclass);
     let get_orient = |k: &str| orient.iter().find(|(kk, _)| kk == k).map(|(_, v)| v.clone());
-    Ok(Iso::from_parts(Translation3::from(p), orientation(&get_orient, c)?))
+    Ok(MjPose { pos: [p.x, p.y, p.z], quat: orientation_mj_as(&get_orient, c, normalize)? })
 }
 
-#[allow(clippy::type_complexity)]
-fn inertial_of(el: &El, c: &Compiler) -> Result<(LinkInertia, [f64; 3], Matrix3<f64>), String> {
+/// `kFrameEps`: MuJoCo's compiler treats two frames closer than this, component by component, as the SAME
+/// frame (`IsSamePose`), and its kinematics then copy one instead of computing the other.
+const FRAME_EPS: f64 = 1e-6;
+
+fn same_vec(a: &[f64; 3], b: &[f64; 3]) -> bool {
+    (0..3).all(|k| (a[k] - b[k]).abs() < FRAME_EPS)
+}
+
+/// `IsSameQuat`, double cover included.
+fn same_quat(a: &[f64; 4], b: &[f64; 4]) -> bool {
+    (0..4).all(|k| (a[k] - b[k]).abs() < FRAME_EPS) || (0..4).all(|k| (a[k] + b[k]).abs() < FRAME_EPS)
+}
+
+const UNIT_QUAT: [f64; 4] = [1.0, 0.0, 0.0, 0.0];
+
+/// ⛔⛔ **`mjtSameFrame`: a frame within 1e-6 of another IS that other one at run time.** The compiler tags
+/// every geom and site (`geom_sameframe`, `site_sameframe`) and `mj_local2Global` then COPIES the body's
+/// frame (`BODY`), its orientation (`BODYROT`), its inertial frame (`INERTIA`) or the inertial orientation
+/// (`INERTIAROT`) instead of composing the element's own pose — so an element 9e-8 m from its body's
+/// inertial frame sits exactly on it. This returns the local pose the kinematics effectively use; `inertial`
+/// is the body's stored inertial frame and `inertial_rt` the one its own `body_sameframe` leaves at run time.
+fn snap_to_body(p: MjPose, inertial: &MjPose, inertial_rt: &MjPose) -> MjPose {
+    if same_vec(&p.pos, &[0.0; 3]) && same_quat(&p.quat, &UNIT_QUAT) {
+        MjPose { pos: [0.0; 3], quat: UNIT_QUAT }
+    } else if same_quat(&p.quat, &UNIT_QUAT) {
+        MjPose { pos: p.pos, quat: UNIT_QUAT }
+    } else if same_vec(&p.pos, &inertial.pos) && same_quat(&p.quat, &inertial.quat) {
+        *inertial_rt
+    } else if same_quat(&p.quat, &inertial.quat) {
+        MjPose { pos: p.pos, quat: inertial_rt.quat }
+    } else {
+        p
+    }
+}
+
+/// `body_sameframe`: the body's inertial frame as its kinematics place it — the body frame itself when the
+/// stored `ipos`/`iquat` are within 1e-6 of null, its orientation when only `iquat` is.
+fn inertial_at_runtime(inertial: &MjPose) -> MjPose {
+    if same_vec(&inertial.pos, &[0.0; 3]) && same_quat(&inertial.quat, &UNIT_QUAT) {
+        MjPose { pos: [0.0; 3], quat: UNIT_QUAT }
+    } else if same_quat(&inertial.quat, &UNIT_QUAT) {
+        MjPose { pos: inertial.pos, quat: UNIT_QUAT }
+    } else {
+        *inertial
+    }
+}
+
+/// A body's inertia as `mjCBody` stores it: mass, the inertial frame (`body_ipos`, `body_iquat`) and the
+/// principal inertia in that frame (`body_inertia`).
+type BodyInertial = (f64, MjPose, [f64; 3]);
+
+/// `<inertial>` as `mjCBody::Compile` reads it: `pos` as written, the orientation normalised or resolved
+/// from an alternative, and a `fullinertia` diagonalised by `mjuu_eig3`, whose frame REPLACES the orientation.
+///
+/// ⛔ MuJoCo does not keep the tensor you wrote: it stores the eigenvalues beside the eigenframe, and
+/// `mjuu_eig3` stops on an ABSOLUTE 1e-12, which on an off-diagonal term of 8.3e-7 is 2.3e-7 RELATIVE.
+/// Keeping the exact input instead leaves the mass matrix out by 1.1e-7 relative at the root of
+/// `franka_emika_panda`.
+fn inertial_of(el: &El, c: &Compiler) -> Result<BodyInertial, String> {
     let mass = el.attr("mass").ok_or("inertial needs mass")?.trim().parse::<f64>().map_err(|e| e.to_string())?;
     let com = el.attr("pos").map(vec3).transpose()?.unwrap_or_else(Vector3::zeros);
     let get = |k: &str| el.attr(k).map(|s| s.to_string());
-    let rm = *orientation(&get, c)?.to_rotation_matrix().matrix();
-    let (ic, principal, iframe) = if let Some(d) = el.attr("diaginertia") {
+    let mut iquat = orientation_mj(&get, c)?;
+    let principal = if let Some(d) = el.attr("diaginertia") {
         let v = floats(d)?;
         if v.len() != 3 {
             return Err("diaginertia needs 3 numbers".into());
         }
-        // stated diagonal: this IS `body_inertia`, and `body_iquat` is the orientation as written
-        (Matrix3::from_diagonal(&Vector3::new(v[0], v[1], v[2])), [v[0], v[1], v[2]], rm)
+        [v[0], v[1], v[2]]
     } else if let Some(f) = el.attr("fullinertia") {
         let v = floats(f)?;
         if v.len() != 6 {
             return Err("fullinertia needs 6 numbers (xx yy zz xy xz yz)".into());
         }
-        // ⛔ MuJoCo does not keep the tensor you wrote. `mjCBody::Compile` diagonalises a `fullinertia` with
-        // `mjuu_eig3` and stores `body_inertia` (the eigenvalues) beside `body_iquat`, so the tensor the
-        // dynamics actually see is the ROUND TRIP — and `mjuu_eig3` stops on an ABSOLUTE 1e-12, which on an
-        // off-diagonal term of 8.3e-7 is 2.3e-7 RELATIVE. Keeping the exact input instead leaves the mass
-        // matrix out by 1.1e-7 relative at the root of `franka_emika_panda` — invisible in `qfrc_bias`,
-        // because at that pose joint 1's axis is vertical and gravity exerts no torque about it.
-        let (d, r) = mujoco_stored_inertia_parts(&Matrix3::new(v[0], v[3], v[4], v[3], v[1], v[5], v[4], v[5], v[2]));
-        (r * Matrix3::from_diagonal(&Vector3::new(d[0], d[1], d[2])) * r.transpose(), d, rm * r)
+        let (eig, q) = eig3_mujoco(&Matrix3::new(v[0], v[3], v[4], v[3], v[1], v[5], v[4], v[5], v[2]));
+        if eig[2] < 1e-14 {
+            return Err("error 'inertia must have positive eigenvalues' in fullinertia".into());
+        }
+        iquat = q;
+        eig
     } else if mass == 0.0 {
-        // MuJoCo accepts `<inertial pos="0 0 0" mass="0"/>` (Menagerie's rby1 uses it for its world body):
-        // a massless body has no tensor to state
-        (Matrix3::zeros(), [0.0; 3], rm)
+        // MuJoCo accepts `<inertial pos="0 0 0" mass="0"/>` (Menagerie's rby1 uses it for its world body)
+        [0.0; 3]
     } else {
         return Err("inertial needs diaginertia or fullinertia".into());
     };
-    Ok((LinkInertia { mass, com, inertia: rm * ic * rm.transpose() }, principal, iframe))
+    Ok((mass, MjPose { pos: [com.x, com.y, com.z], quat: iquat }, principal))
+}
+
+/// `mjuu_globalinertia`: a principal inertia in a frame, as the six entries of the tensor in the parent
+/// (`xx yy zz xy xz yz`), contracted.
+fn uu_globalinertia(local: &[f64; 3], quat: &[f64; 4]) -> [f64; 6] {
+    let m = uu_quat2mat(quat);
+    let mm = |k: usize| m[(k / 3, k % 3)];
+    let t = [mm(0) * local[0], mm(3) * local[0], mm(6) * local[0], mm(1) * local[1], mm(4) * local[1], mm(7) * local[1], mm(2) * local[2], mm(5) * local[2], mm(8) * local[2]];
+    let row = |a: usize, b: usize, c: usize, x: usize, y: usize, z: usize| mm(c).mul_add(t[z], mm(a).mul_add(t[x], mm(b) * t[y]));
+    [row(0, 1, 2, 0, 3, 6), row(3, 4, 5, 1, 4, 7), row(6, 7, 8, 2, 5, 8), row(0, 1, 2, 1, 4, 7), row(0, 1, 2, 2, 5, 8), row(3, 4, 5, 2, 5, 8)]
+}
+
+/// `mjuu_offcenter`: the parallel-axis term of a point mass at `v`, contracted.
+fn uu_offcenter(mass: f64, v: &[f64; 3]) -> [f64; 6] {
+    [
+        mass * v[1].mul_add(v[1], v[2] * v[2]),
+        mass * v[0].mul_add(v[0], v[2] * v[2]),
+        mass * v[0].mul_add(v[0], v[1] * v[1]),
+        -mass * v[0] * v[1],
+        -mass * v[0] * v[2],
+        -mass * v[1] * v[2],
+    ]
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3998,6 +4217,9 @@ struct Walk<'a> {
     /// geoms with the key MuJoCo sorts them by — `(body id, order within the file)` — and the name the MJCF
     /// gave them, if any; the auto-generated `geom{i}` needs the FINAL index, so it is assigned after sorting
     geom_records: Vec<(usize, usize, Option<String>, MjcfGeom)>,
+    /// per body: its stored inertial frame and the one its kinematics use (`body_sameframe`), which the
+    /// sameframe tags of its geoms and sites are taken against
+    inertial_mj: HashMap<String, (MjPose, MjPose)>,
     resolve: &'a dyn Fn(&str) -> Option<Vec<u8>>,
 }
 
@@ -4008,19 +4230,37 @@ impl Walk<'_> {
     ///
     /// `parent` is the tree joint the enclosing frame rides on (`-1` = world), `carry` the fixed transform from
     /// that joint's frame to the element's own frame.
-    fn children(&mut self, el: &El, parent: isize, carry: Iso, childclass: Option<&str>) -> Result<(), String> {
+    ///
+    /// `frame` is the accumulated `<frame>` the children sit in, relative to the body (`None` directly in it):
+    /// MuJoCo folds it into each child's own pose (`mjuu_frameaccumChild`), so it is carried apart from
+    /// `carry` and composed in MuJoCo's arithmetic.
+    fn children(&mut self, el: &El, parent: isize, carry: Iso, childclass: Option<&str>, frame: Option<MjPose>) -> Result<(), String> {
         for ch in &el.children {
             match ch.name.as_str() {
-                "body" => self.body(ch, parent, carry, childclass)?,
-                "geom" => self.record_geom(ch, parent, carry, childclass)?,
+                "body" => self.body(ch, parent, carry, childclass, frame)?,
+                "geom" => self.record_geom(ch, parent, carry, childclass, frame)?,
                 "frame" => {
-                    let f = pose_of(ch, "frame", self.defaults, childclass, self.c)?;
+                    // `mjCFrame::Compile`: its own orientation, the enclosing frame accumulated, THEN normalised
+                    let mut f = pose_mj_as(ch, "frame", self.defaults, childclass, self.c, false)?;
+                    if let Some(mut outer) = frame {
+                        outer.accum(&f.pos, &f.quat);
+                        f = outer;
+                    }
+                    uu_normvec(&mut f.quat);
                     let cc = ch.attr("childclass").or(childclass);
-                    self.children(ch, parent, carry * f, cc)?;
+                    self.children(ch, parent, carry, cc, Some(f))?;
                 }
                 "site" => {
                     let name = ch.attr("name").map(|s| s.to_string());
-                    let sp = pose_of(ch, "site", self.defaults, childclass, self.c)?;
+                    // `mjCSite::Compile`: its own frame, the enclosing `<frame>`, then normalised; placed where
+                    // `site_sameframe` puts it
+                    let mut sm = pose_mj_as(ch, "site", self.defaults, childclass, self.c, false)?;
+                    if let Some(mut outer) = frame {
+                        outer.accum(&sm.pos, &sm.quat);
+                        sm = outer;
+                    }
+                    uu_normvec(&mut sm.quat);
+                    let sp = self.snap_in_current_body(sm).iso();
                     if let Some(name) = name {
                         // which BODY the site sits on — a site-based `connect` needs it for the two
                         // `body_invweight0` values its rows regularise against
@@ -4065,10 +4305,14 @@ impl Walk<'_> {
     /// **Record one geom**, resolved the way MuJoCo resolves it, and note the mesh a collidable mesh geom
     /// needs a hull for. `parent` is the tree joint the enclosing frame rides on and `carry` the transform
     /// from that joint's frame to it, so the geom's own pose composes on the right.
-    fn record_geom(&mut self, g: &El, parent: isize, carry: Iso, childclass: Option<&str>) -> Result<(), String> {
+    fn record_geom(&mut self, g: &El, parent: isize, carry: Iso, childclass: Option<&str>, frame: Option<MjPose>) -> Result<(), String> {
         use crate::mujoco_collision::{GeomParams, GeomType};
         let body = self.body_stack.last().cloned().unwrap_or_else(|| "world".to_string());
-        let spec = self.geom_spec(g, childclass, &body)?;
+        let mut spec = self.geom_spec(g, childclass, &body)?;
+        if let Some(mut outer) = frame {
+            outer.accum(&spec.mj.pos, &spec.mj.quat);
+            spec.mj = outer;
+        }
         let index = self.geom_records.len();
         let get = |k: &str| self.defaults.get(g, "geom", k, childclass).map(|s| s.to_string());
         let num = |k: &str, dflt: f64| -> Result<f64, String> { get(k).map(|s| s.trim().parse::<f64>().map_err(|e| format!("geom {k}: {e}"))).transpose().map(|v| v.unwrap_or(dflt)) };
@@ -4121,7 +4365,7 @@ impl Walk<'_> {
             name: String::new(),
             body,
             joint: (parent >= 0).then_some(parent as usize),
-            pose: carry * spec.pose * spec.mesh_frame.unwrap_or_else(Iso::identity),
+            pose: carry * self.snap_in_current_body(spec.mj).iso(),
             kind,
             size: [spec.size.first().copied().unwrap_or(0.0), spec.size.get(1).copied().unwrap_or(0.0), spec.size.get(2).copied().unwrap_or(0.0)],
             mesh: spec.mesh,
@@ -4146,7 +4390,7 @@ impl Walk<'_> {
         Ok(())
     }
 
-    fn body(&mut self, b: &El, parent: isize, carry: Iso, childclass: Option<&str>) -> Result<(), String> {
+    fn body(&mut self, b: &El, parent: isize, carry: Iso, childclass: Option<&str>, frame: Option<MjPose>) -> Result<(), String> {
         let name = match b.attr("name") {
             Some(n) => n.to_string(),
             None => {
@@ -4169,7 +4413,17 @@ impl Walk<'_> {
             return Err(format!("body '{name}': a free joint must be the only joint of a child of the world"));
         }
         // the body frame relative to the enclosing frame — dropped entirely for a free body, whose pose IS qpos
-        let stated_pose = pose_of(b, "body", self.defaults, None, self.c)?;
+        let body_own = pose_mj(b, "body", self.defaults, None, self.c)?;
+        // an enclosing `<frame>` is folded into the body's pose last (`mjCBody::Compile`), after the
+        // inertial frame has been settled — so a body MuJoCo cannot weigh copies its OWN pose, not this one
+        let body_mj = match frame {
+            Some(mut outer) => {
+                outer.accum(&body_own.pos, &body_own.quat);
+                outer
+            }
+            None => body_own,
+        };
+        let stated_pose = body_mj.iso();
         if has_free {
             self.out.free_base_pose.insert(name.clone(), stated_pose);
         }
@@ -4371,52 +4625,46 @@ impl Walk<'_> {
         // inertia: a jointed body owns its last joint's link; a jointless one welds into the ancestor it rides on.
         // `inertiafromgeom`: auto = the <inertial> if stated, else the geoms; true = always the geoms; false = never
         let stated = b.child("inertial");
-        let (mut li, mut principal, mut iframe) = match (stated, self.c.inertiafromgeom) {
-            (Some(el), InertiaFromGeom::Auto | InertiaFromGeom::False) => inertial_of(el, self.c).map_err(|e| format!("body '{name}': {e}"))?,
-            (None, InertiaFromGeom::False) => {
-                self.out.no_inertial.push(name.clone());
-                (LinkInertia::zero(), [0.0; 3], Matrix3::identity())
-            }
-            (_, _) => {
-                if stated.is_none() {
-                    self.out.no_inertial.push(name.clone());
-                }
-                match self.inertia_from_geoms(b, childclass, &name)? {
-                    Some(li) => {
-                        self.out.inferred_from_geoms.push(name.clone());
-                        li
-                    }
-                    None => (LinkInertia::zero(), [0.0; 3], Matrix3::identity()),
-                }
-            }
+        // the stated `<inertial>`, if any; then `InertiaFromGeom` when `inertiafromgeom` is true, or is auto
+        // and nothing was stated — which replaces the stated values only if some geom has mass
+        let mut inertial: Option<BodyInertial> = stated.map(|el| inertial_of(el, self.c).map_err(|e| format!("body '{name}': {e}"))).transpose()?;
+        if stated.is_none() {
+            self.out.no_inertial.push(name.clone());
+        }
+        let from_geoms = match self.c.inertiafromgeom {
+            InertiaFromGeom::True => true,
+            InertiaFromGeom::Auto => stated.is_none(),
+            InertiaFromGeom::False => false,
         };
+        if let Some(x) = if from_geoms { self.inertia_from_geoms(b, childclass, &name)? } else { None } {
+            self.out.inferred_from_geoms.push(name.clone());
+            inertial = Some(x);
+        }
         // ⛔⛔ **a body MuJoCo could not weigh keeps its OWN placement as its inertial frame.** With no
         // `<inertial>` and nothing to infer from — a camera mount, a site holder, an attachment frame, or
         // geoms that all carry `mass="0"` — the compiler leaves `body_ipos` and `body_iquat` holding the
         // body's `pos` and `quat`, which describe where the body sits in its PARENT and are then read as an
         // offset inside the body itself. `xipos` lands somewhere with no physical meaning, and every value
         // taken there follows it: on `hello_robot_stretch` the camera's `body_invweight0` is 4.4x what the
-        // body frame gives, on `franka_emika_panda` the flange's is 1.56x.
-        //
-        // ⛔ The trigger is INFERRED AND WEIGHTLESS, not "zero mass": an explicit `<inertial mass="0">` is
-        // obeyed as written. And it fires BEFORE `boundmass`, so a floored mass still sits at `pos`.
-        if stated.is_none() && li.mass < 1e-15 {
-            li.com = stated_pose.translation.vector;
-            iframe = stated_pose.rotation.to_rotation_matrix().into_inner();
+        // body frame gives, on `franka_emika_panda` the flange's is 1.56x. It fires BEFORE `boundmass`, so a
+        // floored mass still sits at `pos`.
+        let (mut mass, ipose, mut principal) = inertial.unwrap_or((0.0, body_own, [0.0; 3]));
+        // mjCBody::Compile: floors on the mass and on each principal inertia, in the stored frame
+        mass = mass.max(self.c.boundmass);
+        for d in &mut principal {
+            *d = d.max(self.c.boundinertia);
         }
-        // mjCBody::Compile: floors on the mass and on each principal inertia
-        if self.c.boundmass > 0.0 {
-            li.mass = li.mass.max(self.c.boundmass);
-        }
-        if self.c.boundinertia > 0.0 {
-            let eig = li.inertia.symmetric_eigen();
-            let floored = eig.eigenvalues.map(|e| e.max(self.c.boundinertia));
-            li.inertia = eig.eigenvectors * Matrix3::from_diagonal(&floored) * eig.eigenvectors.transpose();
-            // the floor rewrites the principal values, so the stored pair has to follow it
-            let (d, r) = mujoco_stored_inertia_parts(&li.inertia);
-            principal = d;
-            iframe = r;
-        }
+        let iframe = uu_quat2mat(&ipose.quat);
+        // the dynamics see the inertial frame where the kinematics put it (`body_sameframe`)
+        let irt = inertial_at_runtime(&ipose);
+        let rrt = uu_quat2mat(&irt.quat);
+        let li = LinkInertia {
+            mass,
+            com: Vector3::from(irt.pos),
+            inertia: rrt * Matrix3::from_diagonal(&Vector3::from(principal)) * rrt.transpose(),
+        };
+        self.inertial_mj.insert(name.clone(), (ipose, irt));
+        self.out.body_inertial_runtime.insert(name.clone(), (Vector3::from(irt.pos), rrt));
         if ride >= 0 {
             let idx = ride as usize;
             let moved = crate::dynamics::transform_inertia(&li, &pre);
@@ -4425,13 +4673,14 @@ impl Walk<'_> {
                 self.out.tree.link_names.insert(name.clone(), idx);
             }
         }
-        self.out.body_ipos.insert(name.clone(), li.com);
+        self.out.body_ipos.insert(name.clone(), Vector3::from(ipose.pos));
         self.out.body_mass.insert(name.clone(), li.mass);
         // MuJoCo keeps a body's inertia as a DIAGONAL plus the frame it is diagonal in; the fluid model
         // reads both, and these are the two halves as the compiler computed them — not a second
         // diagonalisation of the tensor they were reassembled into
         self.out.body_iinertia.insert(name.clone(), principal);
         self.out.body_iquat.insert(name.clone(), iframe);
+        self.out.body_iquat_wxyz.insert(name.clone(), ipose.quat);
         // `<body gravcomp>` is a plain body attribute: no default class carries it, and it does not inherit
         if let Some(v) = b.attr("gravcomp") {
             let g = v.trim().parse::<f64>().map_err(|e| format!("body '{name}' gravcomp: {e}"))?;
@@ -4441,7 +4690,7 @@ impl Walk<'_> {
         }
         self.place("body", name.clone(), ride, pre)?;
         self.body_stack.push(name);
-        let r = self.children(b, ride, pre, childclass);
+        let r = self.children(b, ride, pre, childclass, None);
         self.body_stack.pop();
         r
     }
@@ -4463,65 +4712,16 @@ impl Walk<'_> {
             }
             size[..v.len()].copy_from_slice(&v);
         }
-        let mut pose = pose_of(g, "geom", self.defaults, childclass, self.c)?;
-        // **Mesh fitting.** A geom of a primitive type that names a `mesh` is sized from that mesh
-        // (`mjCMesh::FitGeom`): from its equivalent inertia box, or its bounding box under `fitaabb`, times
-        // `fitscale`, and placed at the mesh's centre of mass in its principal frame. Menagerie uses this for
-        // collision capsules fitted to visual meshes, and a geom with a mesh and no type is a fitted SPHERE.
+        // `mjCGeom::Compile`: the geom's own frame; `fromto` sets it and the half-length
+        let mut mj = pose_mj(g, "geom", self.defaults, childclass, self.c)?;
         let mesh_name = get("mesh");
-        if let (Some(mname), true) = (&mesh_name, ty != "mesh") {
-            if get("fromto").is_some() {
-                return Err(format!("body '{body}': fromto cannot be used with a fitted mesh geom"));
-            }
-            let md = self.mesh_data(mname)?;
-            let fitscale: f64 = get("fitscale").map(|s| s.trim().parse::<f64>().map_err(|e| e.to_string())).transpose()?.unwrap_or(1.0);
-            let mut center = Vector3::zeros();
-            let mut sz = [0.0f64; 3];
-            if !self.c.fitaabb {
-                let b = md.boxsz;
-                match ty.as_str() {
-                    "sphere" => sz[0] = (b[0] + b[1] + b[2]) / 3.0,
-                    "capsule" => {
-                        sz[0] = (b[0] + b[1]) / 2.0;
-                        sz[1] = (b[2] - sz[0] / 2.0).max(0.0);
-                    }
-                    "cylinder" => {
-                        sz[0] = (b[0] + b[1]) / 2.0;
-                        sz[1] = b[2];
-                    }
-                    "ellipsoid" | "box" => sz = b,
-                    other => return Err(format!("body '{body}': invalid geom type '{other}' in fitting mesh '{mname}'")),
-                }
-            } else {
-                let a = md.aamm;
-                center = Vector3::new((a[0] + a[3]) / 2.0, (a[1] + a[4]) / 2.0, (a[2] + a[5]) / 2.0);
-                let half = [a[3] - center.x, a[4] - center.y, a[5] - center.z];
-                match ty.as_str() {
-                    "sphere" => sz[0] = half[0].max(half[1]).max(half[2]),
-                    "capsule" | "cylinder" => {
-                        sz[0] = half[0].max(half[1]);
-                        sz[1] = half[2];
-                        if ty == "capsule" {
-                            sz[1] -= sz[0];
-                        }
-                    }
-                    "ellipsoid" | "box" => sz = half,
-                    other => return Err(format!("body '{body}': invalid fittype '{other}' in mesh '{mname}'")),
-                }
-            }
-            size = sz.iter().map(|v| v * fitscale).collect();
-            // accumulate the mesh frame into the geom frame: pos += R·(R_mesh·center + com), quat ∘= quat_mesh
-            let rm = quat_to_rotation(&md.quat);
-            let meshpos = rm * center + md.com;
-            let r = *pose.rotation.to_rotation_matrix().matrix();
-            let q = UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(md.quat[0], md.quat[1], md.quat[2], md.quat[3]));
-            pose = Iso::from_parts(Translation3::from(pose.translation.vector + r * meshpos), pose.rotation * q);
-        }
         if let Some(ft) = get("fromto") {
-            // pose_of already placed the frame at the midpoint with +z along the segment; MuJoCo puts the
-            // half-length into size[1] (capsule, cylinder) or size[2] with size[1] = size[0] (box, ellipsoid)
-            let v = floats(&ft)?;
-            let half = (Vector3::new(v[0], v[1], v[2]) - Vector3::new(v[3], v[4], v[5])).norm() / 2.0;
+            if mesh_name.is_some() {
+                return Err(format!("body '{body}': fromto cannot be used with a mesh geom"));
+            }
+            // MuJoCo puts the half-length into size[1] (capsule, cylinder) or size[2] with size[1] = size[0]
+            // (box, ellipsoid)
+            let (_, half) = fromto_mj(&floats(&ft)?, "geom")?;
             match ty.as_str() {
                 "capsule" | "cylinder" => {
                     size.resize(2, 0.0);
@@ -4535,15 +4735,64 @@ impl Walk<'_> {
                 other => return Err(format!("body '{body}': fromto requires capsule, cylinder, box or ellipsoid, not {other}")),
             }
         }
-        // a mesh geom takes MuJoCo's `geom_size` from the mesh's own bounds, and carries the mesh frame
-        let mut mesh_frame = None;
-        if ty == "mesh" {
-            let name = mesh_name.clone().ok_or_else(|| format!("body '{body}': a mesh geom needs a `mesh` attribute"))?;
-            let md = self.mesh_data(&name)?;
-            size = (0..3).map(|k| md.aamm[k].abs().max(md.aamm[k + 3].abs())).collect();
-            mesh_frame = Some(Iso::from_parts(Translation3::from(md.com), UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(md.quat[0], md.quat[1], md.quat[2], md.quat[3]))));
+        if let Some(mname) = &mesh_name {
+            if ty != "mesh" && ty != "sphere" && ty != "capsule" && ty != "cylinder" && ty != "ellipsoid" && ty != "box" {
+                return Err(format!("body '{body}': invalid geom type '{ty}' in fitting mesh '{mname}'"));
+            }
+            let md = self.mesh_data(mname)?;
+            // **Mesh fitting** (`mjCMesh::FitGeom`). A geom of a primitive type that names a `mesh` is sized
+            // from that mesh — from its equivalent inertia box, or its bounding box under `fitaabb`, times
+            // `fitscale` — and placed at the mesh's centre of mass in its principal frame. Menagerie uses this
+            // for collision capsules fitted to visual meshes, and a geom with a mesh and no type is a fitted
+            // SPHERE.
+            let mut center = [0.0f64; 3];
+            if ty != "mesh" {
+                let fitscale: f64 = get("fitscale").map(|s| s.trim().parse::<f64>().map_err(|e| e.to_string())).transpose()?.unwrap_or(1.0);
+                let mut sz = [0.0f64; 3];
+                if !self.c.fitaabb {
+                    let b = md.boxsz;
+                    match ty.as_str() {
+                        "sphere" => sz[0] = (b[0] + b[1] + b[2]) / 3.0,
+                        "capsule" => {
+                            sz[0] = (b[0] + b[1]) / 2.0;
+                            sz[1] = (b[2] - sz[0] / 2.0).max(0.0);
+                        }
+                        "cylinder" => {
+                            sz[0] = (b[0] + b[1]) / 2.0;
+                            sz[1] = b[2];
+                        }
+                        _ => sz = b,
+                    }
+                } else {
+                    let a = md.aamm;
+                    center = [(a[0] + a[3]) / 2.0, (a[1] + a[4]) / 2.0, (a[2] + a[5]) / 2.0];
+                    let half = [a[3] - center[0], a[4] - center[1], a[5] - center[2]];
+                    match ty.as_str() {
+                        "sphere" => sz[0] = half[0].max(half[1]).max(half[2]),
+                        "capsule" | "cylinder" => {
+                            sz[0] = half[0].max(half[1]);
+                            sz[1] = half[2];
+                            if ty == "capsule" {
+                                sz[1] -= sz[0];
+                            }
+                        }
+                        _ => sz = half,
+                    }
+                }
+                size = sz.iter().map(|v| v * fitscale).collect();
+            }
+            // rotate the centre into the geom frame, add the mesh's own position, and accumulate the mesh frame
+            // into the geom frame
+            let rc = uu_rot_vec_quat(&center, &md.quat);
+            mj.accum(&[rc[0] + md.com.x, rc[1] + md.com.y, rc[2] + md.com.z], &md.quat);
+            // a mesh geom takes MuJoCo's `geom_size` from the mesh's own bounds
+            if ty == "mesh" {
+                size = (0..3).map(|k| md.aamm[k].abs().max(md.aamm[k + 3].abs())).collect();
+            }
+        } else if ty == "mesh" {
+            return Err(format!("body '{body}': a mesh geom needs a `mesh` attribute"));
         }
-        Ok(GeomSpec { ty, size, pose, mesh: mesh_name, mesh_frame })
+        Ok(GeomSpec { ty, size, mj, mesh: mesh_name })
     }
 
     fn geom_mass(&mut self, g: &El, childclass: Option<&str>, body: &str) -> Result<Option<GeomMass>, String> {
@@ -4555,7 +4804,7 @@ impl Walk<'_> {
         if get("shellinertia").as_deref() == Some("true") {
             return Err(format!("body '{body}': geom shellinertia is outside this loader's subset"));
         }
-        let GeomSpec { ty, size, pose, mesh: mesh_name, mesh_frame: _ } = self.geom_spec(g, childclass, body)?;
+        let GeomSpec { ty, size, mj, mesh: mesh_name } = self.geom_spec(g, childclass, body)?;
         let need = |k: usize| -> Result<(), String> {
             if size.len() < k {
                 Err(format!("body '{body}': geom type '{ty}' needs {k} size value(s), got {}", size.len()))
@@ -4564,61 +4813,45 @@ impl Walk<'_> {
             }
         };
         let pi = std::f64::consts::PI;
-        // (volume, inertia per unit MASS about the centre in the geom frame, centre offset in the geom frame)
-        let (volume, unit_inertia, com_geom): (f64, Matrix3<f64>, Vector3<f64>) = match ty.as_str() {
+        // `mjCGeom::GetVolume` (volume inertia), contracted as clang contracts it
+        let mut boxsz = [0.0f64; 3];
+        let volume = match ty.as_str() {
             "sphere" => {
                 need(1)?;
-                let r = size[0];
-                (4.0 * pi * r * r * r / 3.0, Matrix3::identity() * (2.0 * r * r / 5.0), Vector3::zeros())
+                4.0 * pi * size[0] * size[0] * size[0] / 3.0
             }
             "capsule" => {
                 need(2)?;
                 let (r, h) = (size[0], 2.0 * size[1]);
-                let volume = pi * (r * r * h + 4.0 * r * r * r / 3.0);
-                let sphere = 4.0 * r / (4.0 * r + 3.0 * h); // the sphere's share of the mass
-                let cyl = 1.0 - sphere;
-                let si = 2.0 * sphere * r * r / 5.0;
-                let ixx = cyl * (3.0 * r * r + h * h) / 12.0 + si + sphere * h * (3.0 * r + 2.0 * h) / 8.0;
-                (volume, Matrix3::from_diagonal(&Vector3::new(ixx, ixx, cyl * r * r / 2.0 + si)), Vector3::zeros())
+                pi * (r * r).mul_add(h, 4.0 * r * r * r / 3.0)
             }
             "cylinder" => {
                 need(2)?;
                 let (r, h) = (size[0], 2.0 * size[1]);
-                (pi * r * r * h, Matrix3::from_diagonal(&Vector3::new((3.0 * r * r + h * h) / 12.0, (3.0 * r * r + h * h) / 12.0, r * r / 2.0)), Vector3::zeros())
+                pi * r * r * h
             }
             "ellipsoid" => {
                 need(3)?;
-                let (a, b, c) = (size[0], size[1], size[2]);
-                (4.0 * pi * a * b * c / 3.0, Matrix3::from_diagonal(&Vector3::new((b * b + c * c) / 5.0, (a * a + c * c) / 5.0, (a * a + b * b) / 5.0)), Vector3::zeros())
+                4.0 * pi * size[0] * size[1] * size[2] / 3.0
             }
             "box" => {
                 need(3)?;
-                let (a, b, c) = (size[0], size[1], size[2]);
-                (8.0 * a * b * c, Matrix3::from_diagonal(&Vector3::new((b * b + c * c) / 3.0, (a * a + c * c) / 3.0, (a * a + b * b) / 3.0)), Vector3::zeros())
+                size[0] * size[1] * size[2] * 8.0
             }
             "mesh" => {
                 let name = mesh_name.clone().ok_or_else(|| format!("body '{body}': a mesh geom needs a `mesh` attribute"))?;
-                if get("fromto").is_some() {
-                    return Err(format!("body '{body}': fromto cannot be used with a mesh geom"));
-                }
                 let md = self.mesh_data(&name)?;
-                if md.volume < 1e-15 {
-                    return Ok(None);
-                }
-                // mjCGeom::SetInertia for a mesh: the equivalent box's inertia per unit mass, in the mesh's
-                // principal frame — which is MuJoCo's own eigendecomposition, quirks included
-                let b = md.boxsz;
-                let diag = Vector3::new((b[1] * b[1] + b[2] * b[2]) / 3.0, (b[0] * b[0] + b[2] * b[2]) / 3.0, (b[0] * b[0] + b[1] * b[1]) / 3.0);
-                let rm = quat_to_rotation(&md.quat);
-                (md.volume, rm * Matrix3::from_diagonal(&diag) * rm.transpose(), md.com)
+                boxsz = md.boxsz;
+                md.volume
             }
             "plane" | "hfield" | "sdf" => return Ok(None),
             other => return Err(format!("body '{body}': geom type '{other}' is not one this loader can weigh")),
         };
-        // an explicit `mass` fixes it; otherwise density × volume, default density 1000
+        // an explicit `mass` is taken as is (on a geom with volume); otherwise density × volume, default 1000
         let mass = match get("mass").map(|s| s.trim().parse::<f64>().map_err(|e| e.to_string())).transpose()? {
             Some(0.0) => return Ok(None),
-            Some(m) => m,
+            Some(m) if volume > 1e-14 => m,
+            Some(_) => return Ok(None),
             None => {
                 let density = get("density").map(|s| s.trim().parse::<f64>().map_err(|e| e.to_string())).transpose()?.unwrap_or(1000.0);
                 if density == 0.0 {
@@ -4627,12 +4860,46 @@ impl Walk<'_> {
                 density * volume
             }
         };
-        if mass.is_nan() || mass <= 1e-15 {
+        // `InertiaFromGeom` weighs only geoms with `mass_ > mjEPS`
+        if mass.is_nan() || mass <= 1e-14 {
             return Ok(None);
         }
-        // a mesh's frame is accumulated into the geom's: centre = geom pos + R·CoM, tensor rotated by R
-        let r = *pose.rotation.to_rotation_matrix().matrix();
-        Ok(Some(GeomMass { mass, com: pose.translation.vector + r * com_geom, inertia: r * (unit_inertia * mass) * r.transpose() }))
+        // `mjCGeom::SetInertia` (volume inertia), contracted
+        let inertia = match ty.as_str() {
+            "sphere" => {
+                let i = 2.0 * mass * size[0] * size[0] / 5.0;
+                [i, i, i]
+            }
+            "capsule" => {
+                let (r, h) = (size[0], 2.0 * size[1]);
+                let sphere_mass = mass * 4.0 * r / 4.0f64.mul_add(r, 3.0 * h);
+                let cylinder_mass = mass - sphere_mass;
+                let side = cylinder_mass * (3.0 * r).mul_add(r, h * h) / 12.0;
+                let mut i = [side, side, cylinder_mass * r * r / 2.0];
+                let sphere_inertia = 2.0 * sphere_mass * r * r / 5.0;
+                let shift = sphere_mass * h * 3.0f64.mul_add(r, 2.0 * h) / 8.0;
+                i[0] += sphere_inertia + shift;
+                i[1] += sphere_inertia + shift;
+                i[2] += sphere_inertia;
+                i
+            }
+            "cylinder" => {
+                let (r, h) = (size[0], 2.0 * size[1]);
+                let side = mass * (3.0 * r).mul_add(r, h * h) / 12.0;
+                [side, side, mass * r * r / 2.0]
+            }
+            "ellipsoid" | "box" => {
+                let d = if ty == "box" { 3.0 } else { 5.0 };
+                let (s00, s11, s22) = (size[0] * size[0], size[1] * size[1], size[2] * size[2]);
+                [mass * (s11 + s22) / d, mass * (s00 + s22) / d, mass * (s00 + s11) / d]
+            }
+            // the mesh's equivalent inertia box, in the mesh's principal frame (already the geom's)
+            _ => {
+                let b = boxsz;
+                [mass * b[1].mul_add(b[1], b[2] * b[2]) / 3.0, mass * b[0].mul_add(b[0], b[2] * b[2]) / 3.0, mass * b[0].mul_add(b[0], b[1] * b[1]) / 3.0]
+            }
+        };
+        Ok(Some(GeomMass { mass, pose: mj, inertia }))
     }
 
     /// `mjCMesh::Process` for one mesh, loaded through the resolver once per mesh name.
@@ -4725,25 +4992,79 @@ impl Walk<'_> {
 
     /// `mjCBody::InertiaFromGeom`: the body's inertia from the geoms MuJoCo would weigh, in the body frame.
     #[allow(clippy::type_complexity)]
-    fn inertia_from_geoms(&mut self, b: &El, childclass: Option<&str>, body: &str) -> Result<Option<(LinkInertia, [f64; 3], Matrix3<f64>)>, String> {
-        let mut parts = Vec::new();
-        for g in b.children.iter().filter(|c| c.name == "geom") {
-            if let Some(gm) = self.geom_mass(g, childclass, body)? {
-                parts.push(gm);
+    fn inertia_from_geoms(&mut self, b: &El, childclass: Option<&str>, body: &str) -> Result<Option<BodyInertial>, String> {
+        // every geom of the body, including those inside `<frame>`s, in file order, each with its frame folded in
+        type Found<'e> = Vec<(&'e El, Option<MjPose>, Option<&'e str>)>;
+        fn collect<'e>(el: &'e El, frame: Option<MjPose>, w: &Walk, childclass: Option<&'e str>, out: &mut Found<'e>) -> Result<(), String> {
+            for ch in &el.children {
+                match ch.name.as_str() {
+                    "geom" => out.push((ch, frame, childclass)),
+                    "frame" => {
+                        let mut f = pose_mj_as(ch, "frame", w.defaults, childclass, w.c, false)?;
+                        if let Some(mut outer) = frame {
+                            outer.accum(&f.pos, &f.quat);
+                            f = outer;
+                        }
+                        uu_normvec(&mut f.quat);
+                        collect(ch, Some(f), w, ch.attr("childclass").or(childclass), out)?;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        }
+        let mut geoms = Vec::new();
+        collect(b, None, self, childclass, &mut geoms)?;
+        let mut sel = Vec::new();
+        for (g, frame, cc) in geoms {
+            if let Some(mut gm) = self.geom_mass(g, cc, body)? {
+                if let Some(mut outer) = frame {
+                    outer.accum(&gm.pose.pos, &gm.pose.quat);
+                    gm.pose = outer;
+                }
+                sel.push(gm);
             }
         }
-        if parts.is_empty() {
-            return Ok(None);
+        match sel.as_slice() {
+            [] => Ok(None),
+            // ⛔ one geom is COPIED — its frame and principal inertia become the body's, with no second
+            // diagonalisation (which, on a fly's 1e-12 tarsus, stops at iteration zero and keeps the diagonal
+            // of a rotated tensor: a stored inertia 27% off)
+            [one] => Ok(Some((one.mass, one.pose, one.inertia))),
+            _ => {
+                let (mut mass, mut com) = (0.0, [0.0f64; 3]);
+                for p in &sel {
+                    mass += p.mass;
+                    for (k, c) in com.iter_mut().enumerate() {
+                        *c = p.mass.mul_add(p.pose.pos[k], *c);
+                    }
+                }
+                if mass < 1e-14 {
+                    return Err(format!("body '{body}': body mass is too small, cannot compute center of mass"));
+                }
+                let ipos = [com[0] / mass, com[1] / mass, com[2] / mass];
+                let mut toti = [0.0f64; 6];
+                for p in &sel {
+                    let dpos = [p.pose.pos[0] - ipos[0], p.pose.pos[1] - ipos[1], p.pose.pos[2] - ipos[2]];
+                    let (i0, i1) = (uu_globalinertia(&p.inertia, &p.pose.quat), uu_offcenter(p.mass, &dpos));
+                    for j in 0..6 {
+                        toti[j] = toti[j] + i0[j] + i1[j];
+                    }
+                }
+                let (eig, quat) = eig3_mujoco(&Matrix3::new(toti[0], toti[3], toti[4], toti[3], toti[1], toti[5], toti[4], toti[5], toti[2]));
+                if eig[2] < 1e-14 {
+                    return Err(format!("body '{body}': error 'inertia must have positive eigenvalues' in alternative for principal axes"));
+                }
+                Ok(Some((mass, MjPose { pos: ipos, quat }, eig)))
+            }
         }
-        let mass: f64 = parts.iter().map(|p| p.mass).sum();
-        let com = parts.iter().map(|p| p.com * p.mass).sum::<Vector3<f64>>() / mass;
-        let mut inertia = Matrix3::zeros();
-        for p in &parts {
-            let d = p.com - com;
-            inertia += p.inertia + p.mass * (Matrix3::identity() * d.dot(&d) - d * d.transpose());
-        }
-        let (d, r) = mujoco_stored_inertia_parts(&inertia);
-        Ok(Some((LinkInertia { mass, com, inertia: r * Matrix3::from_diagonal(&Vector3::new(d[0], d[1], d[2])) * r.transpose() }, d, r)))
+    }
+
+    /// An element's pose in the body being walked, snapped as `mjtSameFrame` snaps it at run time.
+    fn snap_in_current_body(&self, p: MjPose) -> MjPose {
+        const NULL: MjPose = MjPose { pos: [0.0; 3], quat: UNIT_QUAT };
+        let (stored, rt) = self.body_stack.last().and_then(|b| self.inertial_mj.get(b)).copied().unwrap_or((NULL, NULL));
+        snap_to_body(p, &stored, &rt)
     }
 
     fn body_count(&self) -> usize {
@@ -5016,26 +5337,6 @@ impl ActRecord {
         }
         Ok(())
     }
-}
-
-/// ⛔ **The inertia MuJoCo actually stores for a body, which is not the one the file states.**
-/// `mjCBody::Compile` ends by diagonalising with `mjuu_eig3` and keeping `body_inertia` (the eigenvalues)
-/// beside `body_iquat`, so the tensor the dynamics see is the ROUND TRIP — and `mjuu_eig3` stops on an
-/// ABSOLUTE 1e-12, which on an off-diagonal of 8.3e-7 is 2.3e-7 RELATIVE.
-///
-/// ⚠ It applies wherever MuJoCo had to DIAGONALISE — a `fullinertia`, and an inertia inferred from geoms —
-/// and NOT to a `diaginertia`, which is already in the stored form and is kept verbatim. Applying it to all
-/// three is worse than applying it to one: it puts error into the case MuJoCo leaves exact.
-/// `google_robot` declares four `<inertial>` elements for twelve bodies, so eight go through the geom path;
-/// round-tripping only the stated ones left its root dof's inverse weight out by 2.1e-9, which lands
-/// straight in every constraint row's regularisation.
-/// The two halves MuJoCo actually stores: `body_inertia` (the eigenvalues) and `body_iquat` (the frame they
-/// are diagonal in). ⛔ Recovering them by diagonalising the reassembled tensor a second time is NOT the
-/// same number — `mjuu_eig3` stops on an absolute 1e-12, and a second pass moves the principal values by
-/// enough to shift a fluid force by 5e-10 relative. Take them where they are computed.
-fn mujoco_stored_inertia_parts(full: &Matrix3<f64>) -> ([f64; 3], Matrix3<f64>) {
-    let (eigval, quat) = eig3_mujoco(full);
-    (eigval, quat_to_rotation(&quat))
 }
 
 /// **`<tendon>`**: the `<fixed>` tendons, with their defaults class applied. A `<spatial>` tendon is
@@ -5485,6 +5786,8 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             meaninertia: 1.0,
             body_iinertia: BTreeMap::new(),
             body_iquat: BTreeMap::new(),
+            body_iquat_wxyz: BTreeMap::new(),
+            body_inertial_runtime: BTreeMap::new(),
             body_mass: BTreeMap::new(),
             body_gravcomp: BTreeMap::new(),
             tendons: Vec::new(),
@@ -5514,10 +5817,11 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
         body_stack: Vec::new(),
         body_ids: HashMap::new(),
         geom_records: Vec::new(),
+        inertial_mj: HashMap::new(),
         resolve,
     };
     for world in worlds {
-        walk.children(world, -1, Iso::identity(), world.attr("childclass"))?;
+        walk.children(world, -1, Iso::identity(), world.attr("childclass"), None)?;
     }
     let mut out = walk.out;
     // ⛔ MuJoCo orders geoms BODY-MAJOR — every geom of body 0 (the world), then of body 1, and so on —
@@ -7095,6 +7399,73 @@ mod tests {
             assert_eq!(d.quat, quat, "{attrs}: mesh_quat");
             let got: Vec<u32> = t.mesh_hulls["p"].verts.iter().flat_map(|v| [v.x as f32, v.y as f32, v.z as f32]).map(f32::to_bits).collect();
             assert_eq!(got, vert, "{attrs}: mesh_vert");
+        }
+    }
+
+    /// **Body inertia and element frames exactly as MuJoCo's compiler leaves them.** A capsule so small that
+    /// `mjuu_eig3`'s absolute 1e-12 would stop a second diagonalisation at once (a single geom is COPIED:
+    /// its frame and principal inertia become the body's); five geoms weighed together, oriented by `xyaxes`,
+    /// `axisangle`, `zaxis` and `euler` (under `angle="degree"`, `eulerseq="zyx"`), with a stated density and
+    /// a stated mass; a `fullinertia`; and two geoms within 1e-6 of their body's inertial frame and of
+    /// the body frame, which MuJoCo's kinematics place EXACTLY there (`geom_sameframe`). Mass, `body_inertia`,
+    /// `body_iquat` and `body_ipos` are compared bit for bit (the capsule's quaternion carries a `-0.0`).
+    ///
+    /// Undone, each of these fails here: the single-geom copy, `x / 180.0 * π`, the sameframe snap, the
+    /// fused parallel-axis term and centre-of-mass sum, the Euler composition order, and a `fullinertia`'s
+    /// eigenframe replacing the stated orientation. The fused `mjuu_globalinertia` is pinned by the corpus
+    /// instead (unfused, 58 of Menagerie's 4,626 bodies change). ⚠ The fused `xyaxes` dot product and
+    /// orthogonalisation and `axisangle`'s `mjuu_normvec` are ported but pinned by nothing: neither this
+    /// model nor any Menagerie body moves a bit when they are unfused.
+    #[test]
+    fn body_inertia_and_frames_match_mujocos_compiler_bit_for_bit() {
+        const MODEL: &str = r#"<mujoco>
+  <compiler angle="degree" eulerseq="zyx"/>
+  <worldbody>
+    <body name="tiny" pos="0.1 0 1">
+      <joint type="hinge" axis="0.3 1 0.2"/>
+      <geom type="capsule" size="0.0005" fromto="0.0003 -0.0011 0.0002 -0.0009 0.0021 0.0013"/>
+    </body>
+    <body name="pair" pos="-0.2 0.1 1" euler="10 -20 35">
+      <joint type="ball"/>
+      <geom type="box" size="0.03 0.05 0.07" pos="0.01 0.02 -0.03" xyaxes="0.31 0.97 0.13 -0.83 0.29 0.41"/>
+      <geom type="sphere" size="0.04" pos="-0.05 0.01 0.02" density="700"/>
+      <geom type="cylinder" size="0.02 0.06" pos="0.02 -0.04 0.05" axisangle="1.3 2.1 3.7 47" mass="0.3"/>
+      <geom type="ellipsoid" size="0.02 0.03 0.015" zaxis="0.2 -0.5 0.8"/>
+      <geom type="capsule" size="0.01 0.03" pos="0.03 0.03 0.03" euler="17 -41 73"/>
+    </body>
+    <body name="full" pos="0 0.4 1">
+      <joint type="slide" axis="0 0 1"/>
+      <inertial pos="0.01 0.02 0.03" mass="1.7" fullinertia="0.021 0.017 0.013 0.0013 -0.0021 0.0009"/>
+      <geom type="box" size="0.05 0.05 0.05" contype="0" conaffinity="0"/>
+    </body>
+    <body name="snap" pos="0 -0.4 1">
+      <joint type="hinge" axis="1 0 0"/>
+      <inertial pos="0.02 0.03 0.04" quat="0.9 0.1 0.2 0.3" mass="0.5" diaginertia="0.001 0.002 0.0025"/>
+      <geom name="near_inertial" type="box" size="0.01 0.02 0.03" pos="0.0200004 0.0299996 0.0400003" quat="0.9 0.1 0.2 0.3" contype="0" conaffinity="0"/>
+      <geom name="near_body" type="sphere" size="0.01" pos="0.0000006 -0.0000004 0.0000002" contype="0" conaffinity="0"/>
+    </body>
+  </worldbody>
+</mujoco>"#;
+        let want: [(&str, [f64; 11]); 4] = [
+            ("tiny", [3.343386009704378e-06, 5.297288492289184e-12, 5.297288492289184e-12, 4.0483328182308983e-13, 0.5889040235618007, 0.7567440281846111, 0.28377901056922916, -0.0, -0.00030000000000000003, 0.0004999999999999999, 0.00075]),
+            ("pair", [1.3883952591438333, 0.0054157787576827035, 0.004444959626535254, 0.002163181855674452, 0.7535891875991336, 0.23131982243392565, -0.0790689882846118, 0.610198796438066, 0.004111408683855843, 0.005306650499568431, -0.004145572778944047]),
+            ("full", [1.7, 0.02175572069593266, 0.017060856629607813, 0.012183422674459531, 0.9787378415042712, 0.13658524460465873, 0.1186397093384105, 0.09665054543013765, 0.01, 0.02, 0.03]),
+            ("snap", [0.5, 0.001, 0.002, 0.0025, 0.9233805168766387, 0.10259783520851541, 0.20519567041703082, 0.3077935056255462, 0.02, 0.03, 0.04]),
+        ];
+        let t = tree_from_mjcf_str(MODEL).unwrap();
+        for (body, w) in want {
+            let (i, q, p) = (t.body_iinertia[body], t.body_iquat_wxyz[body], t.body_ipos[body]);
+            let got = [t.body_mass[body], i[0], i[1], i[2], q[0], q[1], q[2], q[3], p[0], p[1], p[2]];
+            let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(&got), bits(&w), "{body}: {got:?}\n   MuJoCo {w:?}");
+        }
+        // geom_xpos at qpos0: the near-inertial box sits ON xipos, the near-body sphere ON xpos
+        let frames = crate::tree_frames(&t.tree, &vec![0.0; t.tree.joints.len()]);
+        for (name, xpos) in [("near_inertial", [0.02, -0.37, 1.04]), ("near_body", [0.0, -0.4, 1.0])] {
+            let g = t.geoms.iter().find(|g| g.name == name).unwrap();
+            let world = g.joint.map_or(g.pose, |j| frames[j] * g.pose);
+            let off = (world.translation.vector - Vector3::from(xpos)).norm();
+            assert!(off < 1e-12, "{name}: {:?} vs MuJoCo {xpos:?} ({off:.1e} off)", world.translation.vector);
         }
     }
 

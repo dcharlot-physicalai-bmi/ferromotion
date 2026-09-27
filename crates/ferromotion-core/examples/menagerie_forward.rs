@@ -169,6 +169,7 @@ fn main() {
     let (mut trunc_states, mut worst_trunc, mut worst_trunc_where) = (0usize, 0.0f64, String::new());
     let (mut iw0_ok, mut iw0_tried, mut worst_iw0, mut worst_iw0_where) = (0usize, 0usize, 0.0f64, String::new());
     let (mut inertia_ok, mut inertia_tried, mut worst_inertia, mut worst_inertia_where) = (0usize, 0usize, 0.0f64, String::new());
+    let (mut inertia_bits, mut inertia_bits_notes) = (0usize, Vec::<String>::new());
     let (mut inertia_permuted, mut inertia_at_eig3_floor, mut inertia_above_floor) = (0usize, 0usize, 0usize);
     // ⛔ how CLOSE the worst case comes to the bound. A bound nothing approaches is not a bound, it is a
     // number chosen to cover the data — this one is reached to within a factor of a few, or it is wrong.
@@ -315,6 +316,15 @@ fn main() {
                 let (Some(&mass), Some(&ipos), Some(&iq)) = (t.body_mass.get(name), t.body_ipos.get(name), t.body_iquat.get(name)) else { continue };
                 let Some(&pr) = t.body_iinertia.get(name) else { continue };
                 inertia_tried += 1;
+                // bit for bit: mass, principal values, the quaternion and ipos, exactly as MuJoCo stores them
+                if let Some(qw) = t.body_iquat_wxyz.get(name) {
+                    let ours = [mass, pr[0], pr[1], pr[2], qw[0], qw[1], qw[2], qw[3], ipos[0], ipos[1], ipos[2]];
+                    if ours.iter().zip(&inert[..11]).all(|(a, b)| a.to_bits() == b.to_bits()) {
+                        inertia_bits += 1;
+                    } else if inertia_bits_notes.len() < 6 {
+                        inertia_bits_notes.push(format!("{} body {name}: ours {ours:?}\n        MuJoCo {:?}", o.rel, &inert[..11]));
+                    }
+                }
                 let scale = inert[1].abs().max(inert[2].abs()).max(inert[3].abs()).max(1e-12);
                 let mut e = (mass - inert[0]).abs() / inert[0].abs().max(1e-9);
                 // ⭐ `ipos` tracked on its own as well as folded in: it is what `qfrc_gravcomp` and the
@@ -947,6 +957,12 @@ fn main() {
         bodies_in_corpus - refused_bodies - dofless
     );
     println!("  the inertia MuJoCo STORES (mass, the three principal values, their frame, ipos): {inertia_ok} of {inertia_tried} within 1e-9; worst {worst_inertia:.2e} on {worst_inertia_where}");
+    println!("    BIT FOR BIT (mass, body_inertia, body_iquat, body_ipos): {inertia_bits} of {inertia_tried}");
+    if std::env::var("MENAGERIE_INERTIA_BITS").is_ok() {
+        for n in &inertia_bits_notes {
+            println!("      {n}");
+        }
+    }
     println!("    the inertial POSITION alone, which is what gravcomp and the fluid model read: worst {worst_ipos:.2e} on {worst_ipos_where}");
     println!("    {inertia_permuted} of all {inertia_tried} have the same tensor with the principal axes in a DIFFERENT ORDER — equivalent, because the frame permutes with them, and counted here whether or not they pass");
     println!("    of the rest, {inertia_at_eig3_floor} are inside what mjuu_eig3's two stopping rules allow for their own principal values, and {inertia_above_floor} are not (worst case reaches {tightest:.2} of its own allowance):");

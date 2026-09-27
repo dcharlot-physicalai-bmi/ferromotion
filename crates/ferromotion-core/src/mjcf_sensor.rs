@@ -240,8 +240,7 @@ impl MjcfTree {
                         }
                     };
                     if matches!(o, SensorObject::Body(_)) {
-                        let ipos = self.body_ipos.get(n).copied().unwrap_or_else(Vector3::zeros);
-                        let irot = self.body_iquat.get(n).copied().unwrap_or_else(nalgebra::Matrix3::identity);
+                        let (ipos, irot) = self.inertial_rt(n);
                         let local = Iso::from_parts(ipos.into(), UnitQuaternion::from_matrix(&irot));
                         Some((x * local, ride))
                     } else {
@@ -526,12 +525,12 @@ impl MjcfTree {
                 },
             };
             let mass = self.body_mass.get(name).copied().unwrap_or(0.0);
-            let ipos = self.body_ipos.get(name).copied().unwrap_or_else(Vector3::zeros);
+            let (ipos, irot) = self.inertial_rt(name);
             let com = x * nalgebra::Point3::from(ipos);
             let at = Iso::from_parts(com.coords.into(), x.rotation);
             let (w, _) = velocity(&at, ride);
             let Some((al, a)) = acceleration(&at, ride) else { continue };
-            let r = x.rotation.to_rotation_matrix().into_inner() * self.body_iquat.get(name).copied().unwrap_or_else(nalgebra::Matrix3::identity);
+            let r = x.rotation.to_rotation_matrix().into_inner() * irot;
             let i = self.body_iinertia.get(name).copied().unwrap_or([0.0; 3]);
             let iw = r * nalgebra::Matrix3::from_diagonal(&Vector3::new(i[0], i[1], i[2])) * r.transpose();
             bodies.push((name.clone(), com.coords, a * mass, iw * al + w.cross(&(iw * w))));
