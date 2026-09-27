@@ -1898,8 +1898,8 @@ fn axis_angle_to_quat(axis: &V3, angle: f64) -> [f64; 4] {
     if angle == 0.0 {
         return [1.0, 0.0, 0.0, 0.0];
     }
-    let s = (angle * 0.5).sin();
-    [(angle * 0.5).cos(), axis.x * s, axis.y * s, axis.z * s]
+    let (s, c) = crate::mujoco_kinematics::sincos(angle * 0.5);
+    [c, axis.x * s, axis.y * s, axis.z * s]
 }
 
 /// `mju_quat2Mat`.

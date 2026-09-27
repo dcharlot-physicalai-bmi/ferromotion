@@ -615,8 +615,10 @@ fn main() {
             // `menagerie_contacts` lives only there, so splitting the failures this way turns "the contacts
             // must be it" from an assertion into a count.
             let mut any_mesh = false;
-            // ⭐ the library's own `mj_collision`, so what this sweep verifies is what a caller gets
-            let collision = t.collide_explained(&q);
+            // ⭐ the library's own `mj_collision`, so what this sweep verifies is what a caller gets — with the
+            // geoms placed by MuJoCo's own kinematics from MuJoCo's qpos (`MJ_KIN=tree` places them through
+            // this crate's tree instead, a few ulps away)
+            let collision = if std::env::var("MJ_KIN").as_deref() == Ok("tree") { t.collide_explained(&q) } else { t.collide_qpos_explained(&s.qpos) };
             let refused = !collision.refused.is_empty();
             // ⭐ why a pair is NOT here: every gate records the pair it dropped, so a missing contact names
             // the rule that removed it instead of leaving a count to be stared at
@@ -854,7 +856,15 @@ fn main() {
                     // same solve. Only where the contacts were not swapped for MuJoCo's (`MJSUB`).
                     if mjsub.is_none() {
                         lib_compared += 1;
-                        match t.forward_mujoco(&q, &s.qvel, &vec![0.0; t.actuators.len()], &[]) {
+                        let lib = if std::env::var("MJ_KIN").as_deref() == Ok("tree") {
+                            t.forward_mujoco(&q, &s.qvel, &vec![0.0; t.actuators.len()], &[])
+                        } else {
+                            let mut d = t.make_data();
+                            d.qpos.clone_from(&s.qpos);
+                            d.qvel.clone_from(&s.qvel);
+                            t.forward(&d)
+                        };
+                        match lib {
                             Ok(f) if f.qacc.iter().zip(sol.qacc.iter()).all(|(x, y)| x.to_bits() == y.to_bits()) => lib_identical += 1,
                             Ok(f) => notes.push(format!("{}: forward_mujoco differs from the assembled solve by {:.2e}", o.rel, f.qacc.iter().zip(sol.qacc.iter()).map(|(x, y)| (x - y).abs()).fold(0.0, nan_max))),
                             Err(e) => notes.push(format!("{}: forward_mujoco refused a state the sweep solved: {e}", o.rel)),
@@ -944,7 +954,7 @@ fn main() {
     println!("  CONSTRAINED (contacts found and solved by us): {solved_ok} of {solved} within 1e-6 ({solved_no_worse} more have NO contacts — rows this port checks separately — and reach a cost no worse than MuJoCo's own answer); worst qacc (relative) {worst_qacc:.2e} on {worst_qacc_where}");
     println!("    of those, with NO mesh geom in any contact: {solved_ok_nomesh} of {solved_nomesh}; worst qacc (relative) {worst_qacc_nomesh:.2e}");
     println!("    ⛔ MuJoCo stopped its own solver short of the optimum of the rows it built on {trunc_states} of them (worst {worst_trunc:.2e} on {worst_trunc_where}); those are compared against its CONVERGED answer");
-    println!("    the library's one-call MjcfTree::forward_mujoco equals this solve BIT FOR BIT on {lib_identical} of {lib_compared}; the tree's <option cone/impratio> differs from MuJoCo's on {options_differ} states");
+    println!("    the library's one-call MjcfTree::forward (MjcfData) equals this solve BIT FOR BIT on {lib_identical} of {lib_compared}; the tree's <option cone/impratio> differs from MuJoCo's on {options_differ} states");
     println!("  CONTACT FRAMES (the tangent pair, not only the normal): {framed} contacts paired with MuJoCo's ({frame_unpaired} states could not be paired by geom)");
     println!("    worst normal {worst_con_normal:.2e} on {worst_con_normal_where}; tangent pair rotated on {tangent_differs} of them, worst 1-|t·t'| {worst_con_tangent:.2e} on {worst_con_tangent_where}");
     println!("    worst efc_D (relative) {worst_con_d:.2e} on {worst_con_d_where} ({con_rows_compared} contacts compared row by row; {reversed_pair} left out because MuJoCo wrote the geom pair the other way round)");

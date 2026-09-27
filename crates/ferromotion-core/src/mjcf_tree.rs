@@ -1418,12 +1418,41 @@ impl MjcfTree {
         })
     }
 
+    /// **Every geom's world frame as MuJoCo's `mj_kinematics` computes it** (`geom_xpos`, `geom_xmat`), from
+    /// `qpos` in MuJoCo's layout, in MuJoCo's own arithmetic (the crate's `mujoco_kinematics`) — bit for bit.
+    /// [`MjcfTree::geoms`]' poses composed through this crate's tree agree to a few ulps; a collision between
+    /// two nearly parallel surfaces can read those ulps.
+    pub fn geom_frames_mujoco(&self, qpos: &[f64]) -> Vec<(Vector3<f64>, Matrix3<f64>)> {
+        self.mj_kin.geom_frames(qpos).into_iter().map(|(p, m)| (Vector3::from(p), Matrix3::new(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]))).collect()
+    }
+
+    /// Every body's compiled frame in its parent, `(body_pos, body_quat)`, in MuJoCo's body order (the world
+    /// first) and MuJoCo's own arithmetic.
+    pub fn body_frames_compiled(&self) -> Vec<([f64; 3], [f64; 4])> {
+        self.mj_kin.bodies.iter().map(|b| (b.pos, b.quat)).collect()
+    }
+
+    /// [`MjcfTree::collide`] from `qpos` in MuJoCo's layout, with the geoms where MuJoCo's own kinematics put
+    /// them ([`MjcfTree::geom_frames_mujoco`]).
+    pub fn collide_qpos(&self, qpos: &[f64]) -> MjcfCollision {
+        self.collide_qpos_impl(qpos, false)
+    }
+
+    /// [`MjcfTree::collide_qpos`] with [`MjcfCollision::why`] filled in.
+    pub fn collide_qpos_explained(&self, qpos: &[f64]) -> MjcfCollision {
+        self.collide_qpos_impl(qpos, true)
+    }
+
+    fn collide_qpos_impl(&self, qpos: &[f64], explain: bool) -> MjcfCollision {
+        use crate::mujoco_collision::GeomPose;
+        let poses: Vec<GeomPose> = self.geom_frames_mujoco(qpos).into_iter().map(|(pos, mat)| GeomPose { pos, mat }).collect();
+        self.collide_at(&poses, explain)
+    }
+
     fn collide_impl(&self, q: &[f64], explain: bool) -> MjcfCollision {
-        use crate::mujoco_collision::{can_collide, collide_pair_with, contact_param, filter_body_pair, margin_and_gap, set_contact, CollideOptions, CollisionGeom, GeomPose, GeomType, PairParams};
+        use crate::mujoco_collision::GeomPose;
         let frames = crate::tree_frames(&self.tree, q);
-        let st = self.collide_static();
-        let opts = CollideOptions::default();
-        let geoms: Vec<Option<CollisionGeom>> = self
+        let poses: Vec<GeomPose> = self
             .geoms
             .iter()
             .map(|g| {
@@ -1431,11 +1460,26 @@ impl MjcfTree {
                     Some(j) => frames[j] * g.pose,
                     None => g.pose,
                 };
+                GeomPose { pos: world.translation.vector, mat: *world.rotation.to_rotation_matrix().matrix() }
+            })
+            .collect();
+        self.collide_at(&poses, explain)
+    }
+
+    fn collide_at(&self, poses: &[crate::mujoco_collision::GeomPose], explain: bool) -> MjcfCollision {
+        use crate::mujoco_collision::{can_collide, collide_pair_with, contact_param, filter_body_pair, margin_and_gap, set_contact, CollideOptions, CollisionGeom, GeomType, PairParams};
+        let st = self.collide_static();
+        let opts = CollideOptions::default();
+        let geoms: Vec<Option<CollisionGeom>> = self
+            .geoms
+            .iter()
+            .zip(poses)
+            .map(|(g, pose)| {
                 let hull = match (&g.mesh, g.kind) {
                     (Some(mn), GeomType::Mesh) => Some(self.mesh_hulls.get(mn)?),
                     _ => None,
                 };
-                Some(CollisionGeom { kind: g.kind, pose: GeomPose { pos: world.translation.vector, mat: *world.rotation.to_rotation_matrix().matrix() }, size: g.size, hull })
+                Some(CollisionGeom { kind: g.kind, pose: *pose, size: g.size, hull })
             })
             .collect();
         let mut out = MjcfCollision::default();
@@ -1622,11 +1666,17 @@ impl MjcfTree {
     /// [`MjcfTree::forward_mujoco`] at `time` (`d.time`). Only a PID plugin's slew limiter reads it: at
     /// `time = 0` it has no previous setpoint to limit against, as a fresh `mjData` has none.
     pub fn forward_mujoco_at(&self, q: &[f64], v_mujoco: &[f64], ctrl: &[f64], act: &[f64], time: f64) -> Result<MjcfForward, String> {
-        self.forward_impl(q, v_mujoco, ctrl, act, time, &MjcfApplied::default())
+        self.forward_impl(q, None, v_mujoco, ctrl, act, time, &MjcfApplied::default())
     }
 
-    fn forward_impl(&self, q: &[f64], v_mujoco: &[f64], ctrl: &[f64], act: &[f64], time: f64, applied: &MjcfApplied) -> Result<MjcfForward, String> {
-        let collision = self.collide(q);
+    /// `qpos`, where the caller has it in MuJoCo's layout, places the geoms for the collision pass by MuJoCo's
+    /// own kinematics ([`MjcfTree::collide_qpos`]) rather than through this crate's tree.
+    #[allow(clippy::too_many_arguments)]
+    fn forward_impl(&self, q: &[f64], qpos: Option<&[f64]>, v_mujoco: &[f64], ctrl: &[f64], act: &[f64], time: f64, applied: &MjcfApplied) -> Result<MjcfForward, String> {
+        let collision = match qpos {
+            Some(qp) => self.collide_qpos(qp),
+            None => self.collide(q),
+        };
         if let Some([i, j]) = collision.refused.first() {
             return Err(format!("geoms '{}' and '{}' need a collider this port does not carry", self.geoms[*i].name, self.geoms[*j].name));
         }
@@ -1737,7 +1787,7 @@ impl MjcfTree {
         }
         let qposadr = self.qposadr();
         let q = self.q_from_qpos(qpos, &qposadr)?;
-        let forward = self.forward_impl(&q, qvel, ctrl, act, time, applied)?;
+        let forward = self.forward_impl(&q, Some(qpos), qvel, ctrl, act, time, applied)?;
         if let Some(i) = forward.qacc.iter().position(|x| check_acc && (x.is_nan() || x.abs() > MJ_MAXVAL)) {
             return self.step_after_reset(MjcfReset::BadQacc(i), false);
         }
@@ -1987,7 +2037,7 @@ impl MjcfTree {
         let qposadr = self.qposadr();
         let (nv, na) = (qvel.len(), self.na());
         let act0: Vec<f64> = (0..na).map(|k| act.get(k).copied().unwrap_or(0.0)).collect();
-        let forward0 = self.forward_impl(&self.q_from_qpos(qpos, &qposadr)?, qvel, ctrl, &act0, time, applied)?;
+        let forward0 = self.forward_impl(&self.q_from_qpos(qpos, &qposadr)?, Some(qpos), qvel, ctrl, &act0, time, applied)?;
         if let Some(i) = forward0.qacc.iter().position(|x| check_acc && (x.is_nan() || x.abs() > MJ_MAXVAL)) {
             return self.step_after_reset(MjcfReset::BadQacc(i), false);
         }
@@ -2009,7 +2059,7 @@ impl MjcfTree {
             let v: Vec<f64> = (0..nv).map(|k| da[k].mul_add(h, qvel[k])).collect();
             let x: Vec<f64> = (0..na).map(|k| dx[k].mul_add(h, act0[k])).collect();
             // the stage's time, `t + Cᵢ·h` with `Cᵢ` the row sum of A
-            let f = self.forward_impl(&self.q_from_qpos(&xq, &qposadr)?, &v, ctrl, &x, A[i - 1].iter().sum::<f64>().mul_add(h, time), applied)?;
+            let f = self.forward_impl(&self.q_from_qpos(&xq, &qposadr)?, Some(&xq), &v, ctrl, &x, A[i - 1].iter().sum::<f64>().mul_add(h, time), applied)?;
             xv.push(v);
             fa.push(f.qacc);
             fx.push(f.act_dot);
@@ -2212,6 +2262,8 @@ pub struct MjcfTree {
     /// MuJoCo copies the body frame instead. Everything that runs on `xipos` — the dynamics, gravity
     /// compensation, the fluid model, the sensors — reads this.
     pub body_inertial_runtime: BTreeMap<String, (Vector3<f64>, Matrix3<f64>)>,
+    /// MuJoCo's compiled kinematic data, for placing geoms in MuJoCo's own arithmetic
+    pub(crate) mj_kin: crate::mujoco_kinematics::MjKinematics,
     /// Each body's mass after MuJoCo's `boundmass` floor, and its `<body gravcomp>` where it is non-zero —
     /// together with [`MjcfTree::body_ipos`] these are what [`MjcfTree::qfrc_gravcomp`] needs.
     pub body_mass: BTreeMap<String, f64>,
@@ -2451,7 +2503,7 @@ impl MjcfTree {
     pub fn forward(&self, d: &MjcfData) -> Result<MjcfForward, String> {
         let t = self.chart_if_needed(&d.qpos)?;
         let t = t.as_ref().unwrap_or(self);
-        t.forward_impl(&t.q_from_qpos(&d.qpos, &t.qposadr())?, &d.qvel, &d.ctrl, &d.act, d.time, &d.applied)
+        t.forward_impl(&t.q_from_qpos(&d.qpos, &t.qposadr())?, Some(&d.qpos), &d.qvel, &d.ctrl, &d.act, d.time, &d.applied)
     }
 
     /// `mj_step` on `d`: advances `time`, `qpos`, `qvel` and `act` by one `<option timestep>`, and returns
@@ -3511,8 +3563,14 @@ fn quat_integrate(quat: &mut [f64], vel: &[f64], scale: f64) {
     let n = v.norm();
     let axis = normalize3(v);
     let angle = scale * n;
-    // `sin` and `cos` separately, as `mju_axisAngle2Quat` calls them: a fused `sin_cos` may differ in the last bit
-    let qrot = if angle == 0.0 { [1.0, 0.0, 0.0, 0.0] } else { let s = (angle * 0.5).sin(); [(angle * 0.5).cos(), axis[0] * s, axis[1] * s, axis[2] * s] };
+    // ⛔ ONE `sincos` call, as clang compiles `mju_axisAngle2Quat` (`__sincos_stret`); two separate calls
+    // differ in the last bit
+    let qrot = if angle == 0.0 {
+        [1.0, 0.0, 0.0, 0.0]
+    } else {
+        let (s, c) = crate::mujoco_kinematics::sincos(angle * 0.5);
+        [c, axis[0] * s, axis[1] * s, axis[2] * s]
+    };
     let norm = (quat[0] * quat[0] + quat[1] * quat[1] + quat[2] * quat[2] + quat[3] * quat[3]).sqrt();
     if norm < 1e-15 {
         quat.copy_from_slice(&[1.0, 0.0, 0.0, 0.0]);
@@ -3688,7 +3746,8 @@ fn wrap_inside(end: &[f64; 4], radius: f64) -> Option<([f64; 4], f64)> {
     // rotate from whichever endpoint the turn is measured from
     let (vec, ang) = if end[0] * end[3] - end[1] * end[2] > 0.0 { ([end[0], end[1]], z.asin() - (a * z).asin()) } else { ([end[2], end[3]], z.asin() - (b * z).asin()) };
     let v = normalize2(vec);
-    let p = [radius * (ang.cos() * v[0] - ang.sin() * v[1]), radius * (ang.sin() * v[0] + ang.cos() * v[1])];
+    let (sn, cs) = crate::mujoco_kinematics::sincos(ang);
+    let p = [radius * (cs * v[0] - sn * v[1]), radius * (sn * v[0] + cs * v[1])];
     Some(([p[0], p[1], p[0], p[1]], 0.0))
 }
 
@@ -3818,31 +3877,40 @@ impl Defaults {
     /// conflicts (a geom with `quat` inside a class with `euler` read as "more than one given", which is why
     /// `anybotics_anymal_b` was refused while MuJoCo compiles it) and, the other way round, silently
     /// COMPOSES two rotations that were never meant to meet. Returns the winning layer's attributes.
+    /// The orientation attribute that decides an element's frame, as MuJoCo's reader and compiler decide it.
+    ///
+    /// ⛔ MuJoCo keeps `quat` and ONE alternative (`axisangle`, `euler`, `xyaxes` or `zaxis`) in separate
+    /// slots, each inherited through the class chain on its own, and the alternative is resolved AFTER the
+    /// quaternion — so a class's `euler` beats an element's own `quat`. `anybotics_anymal_b`'s shank boxes
+    /// state `quat="1 0 1 0"` under a class with `euler="0 1.57079632679 0"`, and MuJoCo places them by the
+    /// Euler angles (6.9e-12 apart). Only on ONE element is more than one specifier refused
+    /// (`ReadAlternative`), which is why an element's own list is returned whole when it has several.
     fn orientation_attrs(&self, el: &El, kind: &str, childclass: Option<&str>) -> Vec<(String, String)> {
-        const ORIENT: [&str; 5] = ["quat", "axisangle", "euler", "xyaxes", "zaxis"];
-        let own: Vec<(String, String)> = ORIENT.iter().filter_map(|k| el.attr(k).map(|v| ((*k).to_string(), v.to_string()))).collect();
-        if !own.is_empty() {
+        const ALT: [&str; 4] = ["axisangle", "euler", "xyaxes", "zaxis"];
+        let own: Vec<(String, String)> = ["quat", "axisangle", "euler", "xyaxes", "zaxis"].iter().filter_map(|k| el.attr(k).map(|v| ((*k).to_string(), v.to_string()))).collect();
+        if own.len() > 1 {
             return own;
         }
-        let mut class: Option<&str> = el.attr("class").or(childclass).or(Some(MAIN));
-        let mut guard = 0;
-        while let Some(c) = class {
-            if let Some(list) = self.attrs.get(&(c.to_string(), kind.to_string())) {
-                let found: Vec<(String, String)> = ORIENT
-                    .iter()
-                    .filter_map(|k| list.iter().rev().find(|(kk, _)| kk == k).map(|(_, v)| ((*k).to_string(), v.clone())))
-                    .collect();
-                if !found.is_empty() {
-                    return found;
+        // the nearest source — the element, then its classes from the most specific up — of any of `keys`
+        let nearest = |keys: &[&str]| -> Option<(String, String)> {
+            if let Some((k, v)) = keys.iter().find_map(|k| el.attr(k).map(|v| (*k, v))) {
+                return Some((k.to_string(), v.to_string()));
+            }
+            let mut class: Option<&str> = el.attr("class").or(childclass).or(Some(MAIN));
+            let mut guard = 0;
+            while let Some(c) = class {
+                if let Some((k, v)) = self.attrs.get(&(c.to_string(), kind.to_string())).and_then(|list| list.iter().rev().find(|(kk, _)| keys.contains(&kk.as_str()))) {
+                    return Some((k.clone(), v.clone()));
+                }
+                class = self.parent.get(c).and_then(|p| p.as_deref());
+                guard += 1;
+                if guard > 64 {
+                    break;
                 }
             }
-            class = self.parent.get(c).and_then(|p| p.as_deref());
-            guard += 1;
-            if guard > 64 {
-                break;
-            }
-        }
-        Vec::new()
+            None
+        };
+        nearest(&ALT).or_else(|| nearest(&["quat"])).into_iter().collect()
     }
 
     fn known(&self, class: &str) -> bool {
@@ -3907,9 +3975,10 @@ fn uu_z2quat(vec: &[f64; 3]) -> [f64; 4] {
         q[3] = 0.0;
     }
     let ang = s.atan2(vec[2]);
-    q[0] = (ang / 2.0).cos();
+    let (sn, cs) = crate::mujoco_kinematics::sincos(ang / 2.0);
+    q[0] = cs;
     for x in &mut q[1..4] {
-        *x *= (ang / 2.0).sin();
+        *x *= sn;
     }
     q
 }
@@ -3977,8 +4046,8 @@ fn orientation_mj_as(get: &dyn Fn(&str) -> Option<String>, c: &Compiler, normali
         if uu_normvec(&mut a[..3]) < 1e-14 {
             return Err("axisangle too small".into());
         }
-        let ang2 = a[3] / 2.0;
-        quat = [ang2.cos(), ang2.sin() * a[0], ang2.sin() * a[1], ang2.sin() * a[2]];
+        let (sn, cs) = crate::mujoco_kinematics::sincos(a[3] / 2.0);
+        quat = [cs, sn * a[0], sn * a[1], sn * a[2]];
         given += 1;
     }
     if let Some(e) = get("euler") {
@@ -3988,15 +4057,15 @@ fn orientation_mj_as(get: &dyn Fn(&str) -> Option<String>, c: &Compiler, normali
         }
         let mut q = [1.0, 0.0, 0.0, 0.0];
         for (ch, &ang) in c.eulerseq.chars().zip(&v) {
-            let half = rad(ang) / 2.0;
-            let mut qrot = [half.cos(), 0.0, 0.0, 0.0];
+            let (sn, cs) = crate::mujoco_kinematics::sincos(rad(ang) / 2.0);
+            let mut qrot = [cs, 0.0, 0.0, 0.0];
             let axis = match ch.to_ascii_lowercase() {
                 'x' => 1,
                 'y' => 2,
                 'z' => 3,
                 _ => return Err("euler sequence can only contain x, y, z, X, Y, Z".into()),
             };
-            qrot[axis] = half.sin();
+            qrot[axis] = sn;
             // lower-case: moving axes, post-multiply; upper-case: fixed axes, pre-multiply
             q = if ch.is_ascii_lowercase() { uu_mulquat(&q, &qrot) } else { uu_mulquat(&qrot, &q) };
         }
@@ -4099,16 +4168,30 @@ const UNIT_QUAT: [f64; 4] = [1.0, 0.0, 0.0, 0.0];
 /// inertial frame sits exactly on it. This returns the local pose the kinematics effectively use; `inertial`
 /// is the body's stored inertial frame and `inertial_rt` the one its own `body_sameframe` leaves at run time.
 fn snap_to_body(p: MjPose, inertial: &MjPose, inertial_rt: &MjPose) -> MjPose {
+    use crate::mujoco_kinematics::SameFrame;
+    match sameframe_of(&p, inertial) {
+        SameFrame::Body => MjPose { pos: [0.0; 3], quat: UNIT_QUAT },
+        SameFrame::BodyRot => MjPose { pos: p.pos, quat: UNIT_QUAT },
+        SameFrame::Inertia => *inertial_rt,
+        SameFrame::InertiaRot => MjPose { pos: p.pos, quat: inertial_rt.quat },
+        SameFrame::None => p,
+    }
+}
+
+/// The `geom_sameframe` / `site_sameframe` tag `mjCModel` gives an element at pose `p` in a body whose
+/// stored inertial frame is `inertial`.
+fn sameframe_of(p: &MjPose, inertial: &MjPose) -> crate::mujoco_kinematics::SameFrame {
+    use crate::mujoco_kinematics::SameFrame;
     if same_vec(&p.pos, &[0.0; 3]) && same_quat(&p.quat, &UNIT_QUAT) {
-        MjPose { pos: [0.0; 3], quat: UNIT_QUAT }
+        SameFrame::Body
     } else if same_quat(&p.quat, &UNIT_QUAT) {
-        MjPose { pos: p.pos, quat: UNIT_QUAT }
+        SameFrame::BodyRot
     } else if same_vec(&p.pos, &inertial.pos) && same_quat(&p.quat, &inertial.quat) {
-        *inertial_rt
+        SameFrame::Inertia
     } else if same_quat(&p.quat, &inertial.quat) {
-        MjPose { pos: p.pos, quat: inertial_rt.quat }
+        SameFrame::InertiaRot
     } else {
-        p
+        SameFrame::None
     }
 }
 
@@ -4216,10 +4299,13 @@ struct Walk<'a> {
     body_ids: HashMap<String, usize>,
     /// geoms with the key MuJoCo sorts them by — `(body id, order within the file)` — and the name the MJCF
     /// gave them, if any; the auto-generated `geom{i}` needs the FINAL index, so it is assigned after sorting
-    geom_records: Vec<(usize, usize, Option<String>, MjcfGeom)>,
+    geom_records: Vec<(usize, usize, Option<String>, MjcfGeom, crate::mujoco_kinematics::KinGeom)>,
     /// per body: its stored inertial frame and the one its kinematics use (`body_sameframe`), which the
     /// sameframe tags of its geoms and sites are taken against
     inertial_mj: HashMap<String, (MjPose, MjPose)>,
+    /// MuJoCo's compiled kinematic data per body id (0 = world), for [`crate::mujoco_kinematics`]; a joint's
+    /// `qposadr` holds its index in `out.joints` until the walk is done
+    kin_bodies: Vec<crate::mujoco_kinematics::KinBody>,
     resolve: &'a dyn Fn(&str) -> Option<Vec<u8>>,
 }
 
@@ -4361,6 +4447,8 @@ impl Walk<'_> {
             self.collidable_meshes.insert(mname.clone());
         }
         let body_id = self.body_stack.last().and_then(|b| self.body_ids.get(b).copied()).unwrap_or(0);
+        let (stored, _) = self.body_stack.last().and_then(|b| self.inertial_mj.get(b)).copied().unwrap_or((MjPose { pos: [0.0; 3], quat: UNIT_QUAT }, MjPose { pos: [0.0; 3], quat: UNIT_QUAT }));
+        let kin = crate::mujoco_kinematics::KinGeom { body: body_id, pos: spec.mj.pos, quat: spec.mj.quat, sameframe: sameframe_of(&spec.mj, &stored) };
         self.geom_records.push((body_id, index, g.attr("name").map(|s| s.to_string()), MjcfGeom {
             name: String::new(),
             body,
@@ -4370,7 +4458,7 @@ impl Walk<'_> {
             size: [spec.size.first().copied().unwrap_or(0.0), spec.size.get(1).copied().unwrap_or(0.0), spec.size.get(2).copied().unwrap_or(0.0)],
             mesh: spec.mesh,
             params,
-        }));
+        }, kin));
         Ok(())
     }
 
@@ -4407,6 +4495,11 @@ impl Walk<'_> {
         // MuJoCo numbers bodies depth-first in file order, the world being 0
         let next_id = self.body_ids.len() + 1;
         self.body_ids.entry(name.clone()).or_insert(next_id);
+        let body_id = self.body_ids[&name];
+        let parent_id = self.body_stack.last().and_then(|p| self.body_ids.get(p)).copied().unwrap_or(0);
+        if self.kin_bodies.len() <= body_id {
+            self.kin_bodies.resize(body_id + 1, crate::mujoco_kinematics::KinBody::default());
+        }
         let joints: Vec<&El> = b.children.iter().filter(|c| c.name == "joint" || c.name == "freejoint").collect();
         let has_free = joints.iter().any(|j| j.name == "freejoint" || self.defaults.get(j, "joint", "type", childclass) == Some("free"));
         if has_free && (parent >= 0 || joints.len() > 1) {
@@ -4424,6 +4517,9 @@ impl Walk<'_> {
             None => body_own,
         };
         let stated_pose = body_mj.iso();
+        self.kin_bodies[body_id].parent = parent_id;
+        self.kin_bodies[body_id].pos = body_mj.pos;
+        self.kin_bodies[body_id].quat = body_mj.quat;
         if has_free {
             self.out.free_base_pose.insert(name.clone(), stated_pose);
         }
@@ -4595,6 +4691,23 @@ impl Walk<'_> {
                 [tc, dr] if tc <= 0.0 || dr <= 0.0 => return Err(format!("joint '{jname}': when defined, springdamper values must be positive")),
                 v => Some(v),
             };
+            {
+                // `mjCJoint::Compile`: a free or ball joint's axis is +z, every axis is `mjuu_normvec`ed, a
+                // free joint's position is the origin, and `qpos0` is the reference
+                use crate::mujoco_kinematics::{KinJoint, KinJointKind};
+                let kk = match kind {
+                    MjcfJointKind::Free => KinJointKind::Free,
+                    MjcfJointKind::Ball => KinJointKind::Ball,
+                    MjcfJointKind::Hinge => KinJointKind::Hinge,
+                    MjcfJointKind::Slide => KinJointKind::Slide,
+                };
+                let mut ax = if matches!(kk, KinJointKind::Free | KinJointKind::Ball) { [0.0, 0.0, 1.0] } else { [axis.x, axis.y, axis.z] };
+                uu_normvec(&mut ax);
+                let jpos = if kk == KinJointKind::Free { [0.0; 3] } else { [anchor.x, anchor.y, anchor.z] };
+                let qpos0 = if matches!(kk, KinJointKind::Hinge | KinJointKind::Slide) { reference } else { 0.0 };
+                let index = self.out.joints.len();
+                self.kin_bodies[body_id].joints.push(KinJoint { kind: kk, pos: jpos, axis: ax, qposadr: index, qpos0 });
+            }
             self.out.joints.push(MjcfJoint {
                 name: jname,
                 kind,
@@ -4664,6 +4777,19 @@ impl Walk<'_> {
             inertia: rrt * Matrix3::from_diagonal(&Vector3::from(principal)) * rrt.transpose(),
         };
         self.inertial_mj.insert(name.clone(), (ipose, irt));
+        {
+            use crate::mujoco_kinematics::SameFrame;
+            let kb = &mut self.kin_bodies[body_id];
+            kb.ipos = ipose.pos;
+            kb.iquat = ipose.quat;
+            kb.sameframe = if same_vec(&ipose.pos, &[0.0; 3]) && same_quat(&ipose.quat, &UNIT_QUAT) {
+                SameFrame::Body
+            } else if same_quat(&ipose.quat, &UNIT_QUAT) {
+                SameFrame::BodyRot
+            } else {
+                SameFrame::None
+            };
+        }
         self.out.body_inertial_runtime.insert(name.clone(), (Vector3::from(irt.pos), rrt));
         if ride >= 0 {
             let idx = ride as usize;
@@ -5788,6 +5914,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             body_iquat: BTreeMap::new(),
             body_iquat_wxyz: BTreeMap::new(),
             body_inertial_runtime: BTreeMap::new(),
+            mj_kin: Default::default(),
             body_mass: BTreeMap::new(),
             body_gravcomp: BTreeMap::new(),
             tendons: Vec::new(),
@@ -5818,6 +5945,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
         body_ids: HashMap::new(),
         geom_records: Vec::new(),
         inertial_mj: HashMap::new(),
+        kin_bodies: vec![crate::mujoco_kinematics::KinBody::default()],
         resolve,
     };
     for world in worlds {
@@ -5829,16 +5957,27 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
     // LAST in the file and FIRST in `geom_xpos`, because the floor belongs to the world body. Recording in
     // file order gives the right set with the wrong indices, which every by-index comparison then reads as a
     // pose error on almost every geom.
-    walk.geom_records.sort_by_key(|(body, seq, _, _)| (*body, *seq));
+    walk.geom_records.sort_by_key(|(body, seq, _, _, _)| (*body, *seq));
+    let mut kin_geoms = Vec::with_capacity(walk.geom_records.len());
     out.geoms = walk
         .geom_records
         .into_iter()
         .enumerate()
-        .map(|(i, (_, _, name, mut g))| {
+        .map(|(i, (_, _, name, mut g, k))| {
             g.name = name.unwrap_or_else(|| format!("geom{i}"));
+            kin_geoms.push(k);
             g
         })
         .collect();
+    // MuJoCo's own kinematic data; a joint's placeholder (its index among the joints) becomes its qposadr
+    let qposadr = out.qposadr();
+    let mut kin_bodies = walk.kin_bodies;
+    for b in &mut kin_bodies {
+        for j in &mut b.joints {
+            j.qposadr = qposadr[j.qposadr];
+        }
+    }
+    out.mj_kin = crate::mujoco_kinematics::MjKinematics { bodies: kin_bodies, geoms: kin_geoms };
     for name in &walk.collidable_meshes {
         let stored = &walk.mesh_stored[name];
         let cap = walk.meshes.get(name).and_then(|a| a.maxhullvert);
@@ -6573,11 +6712,13 @@ mod tests {
         assert!(e.contains("nope.xml"), "{e}");
     }
 
-    /// ⛔ The orientation attributes are one choice, not five. A geom with its own `quat` inside a class that
-    /// states `euler` must use the geom's `quat` and MUST NOT be read as "two orientations given" — that
-    /// refusal kept `anybotics_anymal_b` out while MuJoCo compiles it.
+    /// ⛔ A geom with its own `quat` inside a class that states `euler` is NOT "two orientations given" —
+    /// that refusal once kept `anybotics_anymal_b` out while MuJoCo compiles it. ⛔⛔ And the class's `euler`
+    /// WINS: MuJoCo keeps `quat` and the alternative in separate slots, inherits each on its own, and
+    /// resolves the alternative after the quaternion. (This test used to assert the element's `quat` won —
+    /// an assumption never run through MuJoCo; MuJoCo 3.13.0 turns BOTH geoms below to +x.)
     #[test]
-    fn an_elements_own_orientation_replaces_its_classs_whole() {
+    fn a_classs_alternative_orientation_beats_an_elements_own_quat() {
         let xml = r#"<mujoco>
             <default><default class="turned"><geom type="cylinder" size="0.05 0.05" euler="0 90 0"/></default></default>
             <worldbody><body name="b"><joint name="j" type="hinge" axis="0 0 1"/>
@@ -6586,7 +6727,7 @@ mod tests {
             </body></worldbody></mujoco>"#;
         let t = tree_from_mjcf_str(xml).expect("loads: the two are alternatives, not a conflict");
         let axis = |name: &str| t.geoms.iter().find(|g| g.name == name).unwrap().pose.rotation.to_rotation_matrix() * Vector3::z();
-        assert!((axis("own") - Vector3::z()).norm() < 1e-12, "the geom's own quat lost to its class: {:?}", axis("own"));
+        assert!((axis("own") - Vector3::x()).norm() < 1e-12, "the geom's own quat beat its class's euler: {:?}", axis("own"));
         assert!((axis("inherited") - Vector3::x()).norm() < 1e-12, "the class's euler was dropped: {:?}", axis("inherited"));
     }
 
@@ -7466,6 +7607,54 @@ mod tests {
             let world = g.joint.map_or(g.pose, |j| frames[j] * g.pose);
             let off = (world.translation.vector - Vector3::from(xpos)).norm();
             assert!(off < 1e-12, "{name}: {:?} vs MuJoCo {xpos:?} ({off:.1e} off)", world.translation.vector);
+        }
+    }
+
+    /// **`mj_kinematics`, bit for bit** ([`MjcfTree::geom_frames_mujoco`]): a free base whose `qpos`
+    /// quaternion is not unit length, a ball joint at an offset, a hinge with a `ref`, a slide with a `ref`,
+    /// and frames stated every way — `euler` (the pair of angles `sin`/`cos` must come from ONE
+    /// `__sincos_stret` call to match), an unnormalised `quat`, `fromto`, `axisangle`, `xyaxes`, `zaxis`, and
+    /// a class `euler` that beats the element's own `quat`. Expected: MuJoCo 3.13.0's `geom_xpos`,
+    /// `geom_xmat` after `mj_kinematics` at this `qpos`.
+    #[test]
+    fn geom_frames_match_mujocos_kinematics_bit_for_bit() {
+        const MODEL: &str = r#"<mujoco>
+  <default>
+    <default class="tilted">
+      <geom euler="0.3 1.57079632679 -0.2"/>
+    </default>
+  </default>
+  <worldbody>
+    <body name="base" pos="0.1 0.2 0.8">
+      <freejoint/>
+      <geom type="box" size="0.1 0.05 0.02" pos="0.01 -0.02 0.03" euler="-1.397059993 3.139694278 -0.001741181"/>
+      <body name="arm" pos="0.1234567 -0.0321987 0.0543219" euler="-1.397059993 3.139694278 -0.001741181">
+        <joint name="shoulder" type="ball" pos="0.01 0.02 -0.01"/>
+        <geom type="capsule" size="0.02" fromto="0 0 0 0.2 0.05 -0.03"/>
+        <body name="fore" pos="0.2 0.05 -0.03" axisangle="0.3 -1 0.2 0.7">
+          <joint name="elbow" type="hinge" axis="0.2 0.9 -0.1" pos="0.005 0 0" ref="0.4"/>
+          <geom class="tilted" type="box" size="0.02 0.03 0.08" quat="1 0 1 0"/>
+          <body name="tip" pos="0.0123457 -0.0234568 0.16789" xyaxes="0.31 0.97 0.13 -0.83 0.29 0.41">
+            <joint name="slide" type="slide" axis="1 1 0.3" ref="0.02"/>
+            <geom type="sphere" size="0.015" zaxis="0.2 -0.5 0.8"/>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>"#;
+        let t = tree_from_mjcf_str(MODEL).unwrap();
+        let qpos = [0.3, -0.2, 1.1, 0.9, 0.2, -0.3, 0.5, 0.7, 0.1, -0.4, 0.3, 1.3, 0.11];
+        let want: [[f64; 12]; 4] = [
+            [0.31285714285714283, -0.22033613445378153, 1.1286554621848741, 0.4447426323016755, -0.8499085837596758, -0.28259403791481397, 0.6841457508697124, 0.5259956262170982, -0.5052456756543302, 0.578055864584293, 0.031368781489010955, 0.8153940255898375],
+            [0.3085959510102222, -0.13392457947568095, 1.2925641574957125, 0.0666397393551405, -0.7477583884274337, 0.6606182995308918, -0.9487862447474189, -0.25240505636206584, -0.18999039265435044, 0.30881030895481915, -0.6141246453768733, -0.726283080502334],
+            [0.23830341655439918, -0.11875122357818646, 1.371547304660976, -0.16836836064385963, -0.9678677492365428, -0.1867728971823524, 0.9674924599959009, -0.1259869958231279, -0.21928432852017726, 0.18870727327048392, -0.21762191266334718, 0.9576169736087426],
+            [0.15693883366716896, -0.19463005451941134, 1.5655321866442131, -0.9742445822748731, -0.17989415059448038, -0.13596171700133045, 0.044693908937482305, -0.7450394066341359, 0.6655214024102788, -0.22102024434867382, 0.6423039600875481, 0.733890778279648],
+        ];
+        let got = t.geom_frames_mujoco(&qpos);
+        for (g, ((p, m), w)) in got.iter().zip(&want).enumerate() {
+            let ours = [p[0], p[1], p[2], m[(0, 0)], m[(0, 1)], m[(0, 2)], m[(1, 0)], m[(1, 1)], m[(1, 2)], m[(2, 0)], m[(2, 1)], m[(2, 2)]];
+            assert_eq!(ours.map(f64::to_bits), w.map(f64::to_bits), "geom {g}: {ours:?}\n  MuJoCo {w:?}");
         }
     }
 

@@ -96,6 +96,7 @@ fn main() {
     }
 
     let (mut seen, mut refused, mut ngeom, mut count_ok, mut params_ok, mut placed) = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+    let (mut exact_ok, mut exact_tried, mut exact_worst, mut exact_notes) = (0usize, 0usize, 0.0f64, Vec::<String>::new());
     let (mut order_ok, mut order_tried, mut order_bad, mut order_notes) = (0usize, 0usize, 0usize, Vec::<String>::new());
     let (mut worst_pos, mut worst_rot, mut worst_size) = (0.0f64, 0.0f64, 0.0f64);
     let mut refusals: Vec<String> = Vec::new();
@@ -146,6 +147,24 @@ fn main() {
             });
         let q = names_match.then(|| t.q_from_qpos(&o.qpos0, &o.joints.iter().map(|j| j.2).collect::<Vec<_>>()).ok()).flatten();
         let frames = q.as_ref().map(|q| ferromotion_core::tree_frames(&t.tree, q));
+        // ⭐ and MuJoCo's own kinematics, from MuJoCo's own qpos0: compared BIT FOR BIT
+        let exact = (t.geoms.len() == o.geoms.len()).then(|| t.geom_frames_mujoco(&o.qpos0));
+        if let Some(ex) = &exact {
+            for (i, (p, m)) in ex.iter().enumerate() {
+                let e = &o.geoms[i];
+                exact_tried += 1;
+                if (0..3).all(|k| p[k].to_bits() == e.xpos[k].to_bits()) && (0..9).all(|k| m[(k / 3, k % 3)].to_bits() == e.xmat[(k / 3, k % 3)].to_bits()) {
+                    exact_ok += 1;
+                } else {
+                    let dp = (p - e.xpos).norm();
+                    let dm = (m - e.xmat).norm();
+                    exact_worst = exact_worst.max(dp).max(dm);
+                    if exact_notes.len() < 8 {
+                        exact_notes.push(format!("{} geom {} ({}) on {}: position off {dp:.2e}, rotation off {dm:.2e}", o.rel, e.name, e.ty, e.body));
+                    }
+                }
+            }
+        }
 
         // ⛔⛔ this sweep, and the contact sweep's report of WHICH geom pairs disagree, both pair geoms
         // BY INDEX. That assumption is load-bearing and was never checked: if the two orders drift, every
@@ -232,6 +251,10 @@ fn main() {
         println!("      {n}");
     }
     println!("  geoms compared {ngeom}: contact parameters identical {params_ok}, placed at qpos0 {placed}");
+    println!("  ⭐ MuJoCo's own kinematics (geom_frames_mujoco) at MuJoCo's qpos0, BIT FOR BIT: {exact_ok} of {exact_tried} (worst {exact_worst:.2e})");
+    for n in &exact_notes {
+        println!("      {n}");
+    }
     println!("  worst size {worst_size:.2e}, worst world position {worst_pos:.2e} m, worst rotation {worst_rot:.2e}");
     for (kind, n) in &counts {
         let (mag, what) = &worst_of[kind];
