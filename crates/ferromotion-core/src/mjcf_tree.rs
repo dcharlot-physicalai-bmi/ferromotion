@@ -1477,7 +1477,42 @@ impl MjcfTree {
                 actuators: self.actuators.clone(),
                 unsupported,
             };
-            crate::mujoco_smooth::SmoothModel::new(&self.mj_kin, inp)
+            let mut sm = crate::mujoco_smooth::SmoothModel::new(&self.mj_kin, inp);
+            // the constraint rows: joints in MuJoCo's order, one dof entry per joint dof
+            let mut em = crate::mujoco_efc::EfcModel {
+                jnt_limited: self.joints.iter().map(|j| j.range.is_some()).collect(),
+                jnt_range: self.joints.iter().map(|j| j.range.map_or([0.0; 2], |(a, b)| [a, b])).collect(),
+                jnt_margin: self.joints.iter().map(|j| j.margin).collect(),
+                jnt_solref: self.joints.iter().map(|j| j.solref_limit).collect(),
+                jnt_solimp: self.joints.iter().map(|j| j.solimp_limit).collect(),
+                elliptic: self.cone == crate::mujoco_contact::Cone::Elliptic,
+                impratio: self.impratio,
+                ..Default::default()
+            };
+            for (j, joint) in self.joints.iter().enumerate() {
+                let n = sm.jnt_dofadr.get(j + 1).copied().unwrap_or(sm.dof_bodyid.len()) - sm.jnt_dofadr[j];
+                for _ in 0..n {
+                    em.dof_frictionloss.push(joint.frictionloss);
+                    em.dof_solref.push(joint.solref_friction);
+                    em.dof_solimp.push(joint.solimp_friction);
+                }
+            }
+            let (bw, dw) = sm.invweight0(&self.qpos0());
+            em.body_invweight0 = bw;
+            em.dof_invweight0 = dw;
+            if !self.equalities.is_empty() || !self.equalities_unsupported.is_empty() {
+                sm.unsupported.push("rows: an equality constraint".into());
+            }
+            if self.tendons.iter().any(|t| t.range.is_some() || t.frictionloss != 0.0) {
+                sm.unsupported.push("rows: a tendon limit or frictionloss".into());
+            }
+            if self.joints.iter().any(|j| j.range.is_some() && j.kind == MjcfJointKind::Ball) {
+                sm.unsupported.push("rows: a ball-joint limit".into());
+            }
+            sm.unsupported.sort();
+            sm.unsupported.dedup();
+            sm.efc = em;
+            sm
         })
     }
 
@@ -1486,7 +1521,11 @@ impl MjcfTree {
     /// `dof_simplenum`, `dof_M0`, the sparse layout of `M`… Integers are given as floats. For comparison
     /// with MuJoCo's own, array by array (`examples/menagerie_native.rs`).
     pub fn mujoco_native_model(&self) -> Vec<(&'static str, Vec<f64>)> {
-        self.smooth_model().arrays()
+        let sm = self.smooth_model();
+        let mut out = sm.arrays();
+        out.push(("body_invweight0", sm.efc.body_invweight0.iter().flatten().copied().collect()));
+        out.push(("dof_invweight0", sm.efc.dof_invweight0.clone()));
+        out
     }
 
     /// **MuJoCo's own smooth dynamics at `qpos`, `qvel`, by their `mjData` names** — `mj_kinematics`,
@@ -1497,12 +1536,55 @@ impl MjcfTree {
     /// `actuator_velocity`, `actuator_force`, `act_dot`, `qfrc_actuator`, `qfrc_smooth`, `qacc_smooth`),
     /// flattened as MuJoCo stores them.
     pub fn mujoco_native_forward(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64]) -> Vec<(&'static str, Vec<f64>)> {
-        self.smooth_model().forward(qpos, qvel, ctrl, act).arrays()
+        let sm = self.smooth_model();
+        let sd = sm.forward(qpos, qvel, ctrl, act);
+        let mut out = sd.arrays();
+        // the constraint rows, on the contacts MuJoCo's own collision pipeline finds here
+        let contacts: Vec<crate::mujoco_efc::NativeContact> = self
+            .collide_qpos(qpos)
+            .contacts
+            .iter()
+            .map(|c| {
+                let r = &c.record;
+                let f = &r.frame;
+                crate::mujoco_efc::NativeContact {
+                    geom: c.geom,
+                    dist: r.dist,
+                    pos: [r.pos.x, r.pos.y, r.pos.z],
+                    frame: [f[0].x, f[0].y, f[0].z, f[1].x, f[1].y, f[1].z, f[2].x, f[2].y, f[2].z],
+                    dim: r.dim,
+                    includemargin: r.includemargin,
+                    friction: r.friction,
+                    solref: r.solref,
+                    solreffriction: [0.0; 2],
+                    solimp: r.solimp,
+                    exclude: r.exclude,
+                }
+            })
+            .collect();
+        let e = sm.constraints(&sm.efc, &sd, qpos, qvel, &contacts);
+        let nv = sm.dof_bodyid.len();
+        out.extend([
+            ("efc_type", e.typ.iter().map(|&t| t as f64).collect()),
+            ("efc_id", e.id.iter().map(|&t| t as f64).collect()),
+            ("efc_J", e.dense_j(nv)),
+            ("efc_pos", e.pos.clone()),
+            ("efc_margin", e.margin.clone()),
+            ("efc_frictionloss", e.frictionloss.clone()),
+            ("efc_diagA", e.diag_a.clone()),
+            ("efc_R", e.r.clone()),
+            ("efc_D", e.d.clone()),
+            ("efc_KBIP", e.kbip.iter().flatten().copied().collect()),
+            ("efc_vel", e.vel.clone()),
+            ("efc_aref", e.aref.clone()),
+        ]);
+        out
     }
 
     /// What [`MjcfTree::mujoco_native_forward`] does not yet compute in MuJoCo's own arithmetic for this model
     /// (a fluid, a tendon's spring, an actuator that is not a hinge or slide joint transmission…); empty when
-    /// every array it returns is meant to be MuJoCo's to the bit.
+    /// every array it returns is meant to be MuJoCo's to the bit. A reason starting `rows:` leaves everything
+    /// but the constraint rows (`efc_*`) meant to be MuJoCo's.
     pub fn mujoco_native_unsupported(&self) -> Vec<String> {
         self.smooth_model().unsupported.clone()
     }

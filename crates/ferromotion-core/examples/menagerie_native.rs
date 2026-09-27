@@ -117,12 +117,14 @@ fn main() {
         };
         // a model with anything the native pipeline does not compute yet is counted by what, not compared
         let missing = t.mujoco_native_unsupported();
-        if !missing.is_empty() {
-            for why in missing {
-                *unsupported.entry(why).or_default() += 1;
-            }
+        for why in &missing {
+            *unsupported.entry(why.clone()).or_default() += 1;
+        }
+        // a `rows:` reason leaves everything but the constraint rows comparable
+        if missing.iter().any(|w| !w.starts_with("rows:")) {
             continue;
         }
+        let rows_ok = missing.is_empty();
         nmodels += 1;
         let ours: BTreeMap<&str, Vec<f64>> = t.mujoco_native_model().into_iter().collect();
         for (name, want) in &m.arrays {
@@ -133,6 +135,9 @@ fn main() {
         for (s, st) in m.states.iter().enumerate() {
             let ours: BTreeMap<&str, Vec<f64>> = t.mujoco_native_forward(&st.qpos, &st.qvel, &st.ctrl, &st.act).into_iter().collect();
             for (name, want) in &st.arrays {
+                if name.starts_with("efc_") && !rows_ok {
+                    continue;
+                }
                 if let Some(o) = ours.get(name.as_str()) {
                     compare("mjData ", name, &format!("{} state {s}", m.rel), o, want);
                 }

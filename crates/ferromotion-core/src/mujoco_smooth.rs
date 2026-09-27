@@ -42,7 +42,7 @@ fn dot_n6(a: &[f64; 6], b: &[f64; 6]) -> f64 {
 }
 
 /// `mju_dotSparse`: four running sums over the first `4⌊n/4⌋` entries, then the rest one by one.
-fn dot_sparse(v: &[f64], x: &[f64], ind: &[usize]) -> f64 {
+pub(crate) fn dot_sparse(v: &[f64], x: &[f64], ind: &[usize]) -> f64 {
     let n = v.len();
     let (mut r0, mut r1, mut r2, mut r3) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     let mut i = 0;
@@ -326,6 +326,8 @@ pub(crate) struct SmoothModel {
     pub(crate) actuators: Vec<NativeActuator>,
     pub(crate) na: usize,
     pub(crate) unsupported: Vec<String>,
+    /// what the constraint rows read ([`crate::mujoco_efc`]), filled in by the tree
+    pub(crate) efc: crate::mujoco_efc::EfcModel,
 }
 
 /// What the smooth stages leave in `mjData`.
@@ -842,6 +844,11 @@ impl SmoothModel {
             qfrc[i as usize] += 0.0;
             i = self.dof_parentid[i as usize];
         }
+    }
+
+    /// `mj_solveM` for one vector, on the factor in `sd`.
+    pub(crate) fn solve_m(&self, sd: &SmoothData, y: &[f64]) -> Vec<f64> {
+        self.solve_ld(&sd.qld, &sd.qld_diag_inv, y)
     }
 
     /// `mj_solveLD` for one vector.

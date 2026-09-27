@@ -25,11 +25,13 @@ MODEL = ["body_parentid", "body_rootid", "body_weldid", "body_jntnum", "body_jnt
          "body_mass", "body_subtreemass", "body_inertia", "body_ipos", "body_iquat", "body_pos", "body_quat",
          "jnt_type", "jnt_qposadr", "jnt_dofadr", "jnt_bodyid", "jnt_pos", "jnt_axis",
          "dof_bodyid", "dof_jntid", "dof_parentid", "dof_simplenum", "dof_M0", "dof_armature", "dof_damping",
-         "M_rownnz", "M_rowadr", "M_colind", "qpos0"]
+         "M_rownnz", "M_rowadr", "M_colind", "qpos0", "body_invweight0", "dof_invweight0"]
 DATA = ["xpos", "xquat", "xmat", "xipos", "ximat", "xanchor", "xaxis", "subtree_com", "cinert", "cdof", "crb",
         "M", "qLD", "qLDiagInv", "cvel", "cdof_dot", "qfrc_bias",
         "qfrc_spring", "qfrc_damper", "qfrc_gravcomp", "qfrc_passive", "actuator_length", "actuator_velocity",
-        "actuator_force", "act_dot", "qfrc_actuator", "qfrc_smooth", "qacc_smooth"]
+        "actuator_force", "act_dot", "qfrc_actuator", "qfrc_smooth", "qacc_smooth",
+        "efc_type", "efc_id", "efc_pos", "efc_margin", "efc_frictionloss", "efc_diagA", "efc_R", "efc_D", "efc_KBIP",
+        "efc_vel", "efc_aref"]
 
 
 def fmt(a):
@@ -89,5 +91,13 @@ for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
         lines.append("act\t" + fmt(a))
         for name in DATA:
             lines.append(f"d\t{name}\t{fmt(getattr(d, name))}")
+        # efc_J, dense whichever way MuJoCo stores it
+        J = np.zeros((d.nefc, m.nv))
+        if d.nefc:
+            if mujoco.mj_isSparse(m):
+                mujoco.mju_sparse2dense(J, d.efc_J, d.efc_J_rownnz, d.efc_J_rowadr, d.efc_J_colind)
+            else:
+                J[:] = d.efc_J[:d.nefc * m.nv].reshape(d.nefc, m.nv)
+        lines.append(f"d\tefc_J\t{fmt(J)}")
 open(out, "w").write("\n".join(lines) + "\n")
 print(models, "models,", k, "states each ->", out)
