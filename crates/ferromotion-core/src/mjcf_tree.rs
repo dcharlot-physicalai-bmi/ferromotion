@@ -367,6 +367,10 @@ impl MjcfTree {
 
     /// [`MjcfTree::qacc_smooth_mujoco`] at `time` (`d.time`, which a PID's slew limiter reads).
     pub fn qacc_smooth_mujoco_at(&self, q: &[f64], v_mujoco: &[f64], ctrl: &[f64], act: &[f64], time: f64) -> Option<Vec<f64>> {
+        self.qacc_smooth_impl(q, v_mujoco, ctrl, act, time, &MjcfApplied::default())
+    }
+
+    fn qacc_smooth_impl(&self, q: &[f64], v_mujoco: &[f64], ctrl: &[f64], act: &[f64], time: f64, applied: &MjcfApplied) -> Option<Vec<f64>> {
         let nv = self.tree.joints.len();
         let t = self.free_basis(q);
         let tinv = t.clone().try_inverse()?;
@@ -391,7 +395,24 @@ impl MjcfTree {
         let c_ours = nalgebra::DVector::from_iterator(nv, (0..nv).map(|i| bias[i])) - &m_rigid * (&tinv * tdot_v);
         let m_mj = tinv.transpose() * &m_full * &tinv;
         let passive = self.qfrc_passive_mujoco(q, v_mujoco)?;
-        let rhs = nalgebra::DVector::from_row_slice(&passive) + tinv.transpose() * (nalgebra::DVector::from_iterator(nv, (0..nv).map(|i| act[i])) - c_ours);
+        let mut rhs = nalgebra::DVector::from_row_slice(&passive) + tinv.transpose() * (nalgebra::DVector::from_iterator(nv, (0..nv).map(|i| act[i])) - c_ours);
+        // `qfrc_applied` (MuJoCo's basis already) and `xfrc_applied` (`mj_xfrcAccumulate`: each body's
+        // world force and torque at its centre of mass, through its Jacobians)
+        for (i, f) in applied.qfrc.iter().enumerate().take(nv) {
+            rhs[i] += f;
+        }
+        if !applied.xfrc.is_empty() {
+            let frames = crate::tree_frames(&self.tree, q);
+            let mut xfrc = nalgebra::DVector::<f64>::zeros(nv);
+            for (body, w) in &applied.xfrc {
+                let Some((ride, pre)) = self.body_frames.get(body) else { continue };
+                let com = (frames[*ride] * pre * Point3::from(self.body_ipos.get(body).copied().unwrap_or_else(Vector3::zeros))).coords;
+                let jl = crate::tree_jacobian::tree_point_jacobian(&self.tree.joints, &self.tree.parent, &frames, Some(*ride), com);
+                let ja = crate::tree_jacobian::tree_angular_jacobian(&self.tree.joints, &self.tree.parent, &frames, Some(*ride));
+                xfrc += jl.transpose() * Vector3::new(w[0], w[1], w[2]) + ja.transpose() * Vector3::new(w[3], w[4], w[5]);
+            }
+            rhs += tinv.transpose() * xfrc;
+        }
         Some((m_mj.try_inverse()? * rhs).iter().copied().collect())
     }
 
@@ -1557,6 +1578,11 @@ impl MjcfTree {
 
     /// [`MjcfTree::constraint_problem`] at `time` (`d.time`, which a PID's slew limiter reads).
     pub fn constraint_problem_at(&self, q: &[f64], v_mujoco: &[f64], ctrl: &[f64], act: &[f64], time: f64, contacts: &[crate::mujoco_contact::ContactSpec]) -> Result<MjcfConstraintProblem, String> {
+        self.constraint_problem_impl(q, v_mujoco, ctrl, act, time, &MjcfApplied::default(), contacts)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn constraint_problem_impl(&self, q: &[f64], v_mujoco: &[f64], ctrl: &[f64], act: &[f64], time: f64, applied: &MjcfApplied, contacts: &[crate::mujoco_contact::ContactSpec]) -> Result<MjcfConstraintProblem, String> {
         let nv = self.tree.joints.len();
         let tinv = self.free_basis(q).try_inverse().ok_or("gimbal lock: the Euler base's basis map is singular")?;
         let qvel: Vec<f64> = (&tinv * nalgebra::DVector::from_row_slice(v_mujoco)).iter().copied().collect();
@@ -1566,7 +1592,7 @@ impl MjcfTree {
         contact.jac = &contact.jac * &tinv;
         rows.append(contact);
         let m = self.mass_matrix(q);
-        let a0 = self.qacc_smooth_mujoco_at(q, v_mujoco, ctrl, act, time).ok_or("gimbal lock: the Euler base's basis map is singular")?;
+        let a0 = self.qacc_smooth_impl(q, v_mujoco, ctrl, act, time, applied).ok_or("gimbal lock: the Euler base's basis map is singular")?;
         Ok(MjcfConstraintProblem { m: tinv.transpose() * m * &tinv, a0: nalgebra::DVector::from_vec(a0), rows, contact_blocks_from })
     }
 
@@ -1590,6 +1616,10 @@ impl MjcfTree {
     /// [`MjcfTree::forward_mujoco`] at `time` (`d.time`). Only a PID plugin's slew limiter reads it: at
     /// `time = 0` it has no previous setpoint to limit against, as a fresh `mjData` has none.
     pub fn forward_mujoco_at(&self, q: &[f64], v_mujoco: &[f64], ctrl: &[f64], act: &[f64], time: f64) -> Result<MjcfForward, String> {
+        self.forward_impl(q, v_mujoco, ctrl, act, time, &MjcfApplied::default())
+    }
+
+    fn forward_impl(&self, q: &[f64], v_mujoco: &[f64], ctrl: &[f64], act: &[f64], time: f64, applied: &MjcfApplied) -> Result<MjcfForward, String> {
         let collision = self.collide(q);
         if let Some([i, j]) = collision.refused.first() {
             return Err(format!("geoms '{}' and '{}' need a collider this port does not carry", self.geoms[*i].name, self.geoms[*j].name));
@@ -1597,7 +1627,7 @@ impl MjcfTree {
         let frames = crate::tree_frames(&self.tree, q);
         let invweight0 = self.body_invweight0();
         let specs: Vec<crate::mujoco_contact::ContactSpec> = collision.contacts.iter().filter(|c| !c.record.exclude).map(|c| self.contact_spec(c, &frames, &invweight0)).collect();
-        let p = self.constraint_problem_at(q, v_mujoco, ctrl, act, time, &specs)?;
+        let p = self.constraint_problem_impl(q, v_mujoco, ctrl, act, time, applied, &specs)?;
         let mut solve = crate::mujoco_contact::solve_constraints_newton_blocks(&p.m, &p.a0, &p.rows.jac, &p.rows.aref, &p.rows.d, &p.rows.blocks, 1e-13, 200)?;
         // ⭐ `<option noslip_iterations>`: MuJoCo re-solves the friction forces after the main solve, so the
         // acceleration it reports is NOT the optimum of the main problem. Part of the problem statement.
@@ -1660,6 +1690,10 @@ impl MjcfTree {
     /// model without one steps the same from any time. Chain `step.time` into the next call to follow
     /// MuJoCo's trajectory.
     pub fn step_mujoco_at(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64], time: f64) -> Result<MjcfStep, String> {
+        self.step_impl(qpos, qvel, ctrl, act, time, &MjcfApplied::default())
+    }
+
+    fn step_impl(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64], time: f64, applied: &MjcfApplied) -> Result<MjcfStep, String> {
         let bad = |x: &f64| x.is_nan() || *x > MJ_MAXVAL || *x < -MJ_MAXVAL;
         if let Some(i) = qpos.iter().position(bad) {
             return self.step_after_reset(MjcfReset::BadQpos(i), true);
@@ -1667,24 +1701,25 @@ impl MjcfTree {
         if let Some(i) = qvel.iter().position(bad) {
             return self.step_after_reset(MjcfReset::BadQvel(i), true);
         }
-        self.step_checked(qpos, qvel, ctrl, act, time, true)
+        self.step_checked(qpos, qvel, ctrl, act, time, applied, true)
     }
 
     /// One step from `mj_resetData`'s state — `qpos0`, time zero, everything else zero, the control included.
     fn step_after_reset(&self, why: MjcfReset, check_acc: bool) -> Result<MjcfStep, String> {
         let nv = self.tree.joints.len();
-        let mut s = self.step_checked(&self.qpos0(), &vec![0.0; nv], &vec![0.0; self.actuators.len()], &vec![0.0; self.na()], 0.0, check_acc)?;
+        let mut s = self.step_checked(&self.qpos0(), &vec![0.0; nv], &vec![0.0; self.actuators.len()], &vec![0.0; self.na()], 0.0, &MjcfApplied::default(), check_acc)?;
         s.reset = Some(why);
         Ok(s)
     }
 
     /// [`MjcfTree::step_mujoco`] once `qpos` and `qvel` have passed `mj_checkPos`/`mj_checkVel`; `check_acc`
     /// is `mj_checkAcc`, which MuJoCo does not repeat after the reset it triggers.
-    fn step_checked(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64], time: f64, check_acc: bool) -> Result<MjcfStep, String> {
+    #[allow(clippy::too_many_arguments)]
+    fn step_checked(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64], time: f64, applied: &MjcfApplied, check_acc: bool) -> Result<MjcfStep, String> {
         use crate::mujoco_actuator::{ActBias, ActDyn, ActGain};
         // ⭐ near gimbal lock, the same step in a chart where the angles are zero
         if let Some(t) = self.chart_if_needed(qpos)? {
-            return t.step_checked(qpos, qvel, ctrl, act, time, check_acc);
+            return t.step_checked(qpos, qvel, ctrl, act, time, applied, check_acc);
         }
         match self.integrator {
             MjcfIntegrator::Euler => {}
@@ -1692,11 +1727,11 @@ impl MjcfTree {
                 return Err("an implicit integrator with a fluid: the fluid force's velocity derivative is not carried".into());
             }
             MjcfIntegrator::ImplicitFast | MjcfIntegrator::Implicit => {}
-            MjcfIntegrator::Rk4 => return self.step_rk4(qpos, qvel, ctrl, act, time, check_acc),
+            MjcfIntegrator::Rk4 => return self.step_rk4(qpos, qvel, ctrl, act, time, applied, check_acc),
         }
         let qposadr = self.qposadr();
         let q = self.q_from_qpos(qpos, &qposadr)?;
-        let forward = self.forward_mujoco_at(&q, qvel, ctrl, act, time)?;
+        let forward = self.forward_impl(&q, qvel, ctrl, act, time, applied)?;
         if let Some(i) = forward.qacc.iter().position(|x| check_acc && (x.is_nan() || x.abs() > MJ_MAXVAL)) {
             return self.step_after_reset(MjcfReset::BadQacc(i), false);
         }
@@ -1937,14 +1972,15 @@ impl MjcfTree {
     /// fused multiply-adds, as `mju_addToScl` compiles. The activations ride along as the last block of the
     /// state: each stage sets `act₀ + h·Σⱼ Aᵢⱼ·act'ⱼ` (no clamp), and the final step is `mj_nextActivation` on
     /// the B-weighted rate, which does clamp.
-    fn step_rk4(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64], time: f64, check_acc: bool) -> Result<MjcfStep, String> {
+    #[allow(clippy::too_many_arguments)]
+    fn step_rk4(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64], time: f64, applied: &MjcfApplied, check_acc: bool) -> Result<MjcfStep, String> {
         const A: [[f64; 3]; 3] = [[0.5, 0.0, 0.0], [0.0, 0.5, 0.0], [0.0, 0.0, 1.0]];
         const B: [f64; 4] = [1.0 / 6.0, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 6.0];
         let h = self.timestep;
         let qposadr = self.qposadr();
         let (nv, na) = (qvel.len(), self.na());
         let act0: Vec<f64> = (0..na).map(|k| act.get(k).copied().unwrap_or(0.0)).collect();
-        let forward0 = self.forward_mujoco_at(&self.q_from_qpos(qpos, &qposadr)?, qvel, ctrl, &act0, time)?;
+        let forward0 = self.forward_impl(&self.q_from_qpos(qpos, &qposadr)?, qvel, ctrl, &act0, time, applied)?;
         if let Some(i) = forward0.qacc.iter().position(|x| check_acc && (x.is_nan() || x.abs() > MJ_MAXVAL)) {
             return self.step_after_reset(MjcfReset::BadQacc(i), false);
         }
@@ -1966,7 +2002,7 @@ impl MjcfTree {
             let v: Vec<f64> = (0..nv).map(|k| da[k].mul_add(h, qvel[k])).collect();
             let x: Vec<f64> = (0..na).map(|k| dx[k].mul_add(h, act0[k])).collect();
             // the stage's time, `t + Cᵢ·h` with `Cᵢ` the row sum of A
-            let f = self.forward_mujoco_at(&self.q_from_qpos(&xq, &qposadr)?, &v, ctrl, &x, A[i - 1].iter().sum::<f64>().mul_add(h, time))?;
+            let f = self.forward_impl(&self.q_from_qpos(&xq, &qposadr)?, &v, ctrl, &x, A[i - 1].iter().sum::<f64>().mul_add(h, time), applied)?;
             xv.push(v);
             fa.push(f.qacc);
             fx.push(f.act_dot);
@@ -2348,6 +2384,84 @@ pub enum MjcfReset {
     BadQpos(usize),
     BadQvel(usize),
     BadQacc(usize),
+}
+
+/// **The forces a caller applies**, MuJoCo's `qfrc_applied` (generalised, in MuJoCo's `qvel` basis) and
+/// `xfrc_applied` (per body: a world force and torque, `[fx, fy, fz, τx, τy, τz]`, acting at the body's centre
+/// of mass).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MjcfApplied {
+    pub qfrc: Vec<f64>,
+    pub xfrc: BTreeMap<String, [f64; 6]>,
+}
+
+/// **The state and inputs of one simulation — MuJoCo's `mjData`, the part a loop sets and reads.** Make it
+/// with [`MjcfTree::make_data`], advance it with [`MjcfTree::step`], evaluate it with [`MjcfTree::forward`]
+/// and [`MjcfTree::sensors_of`]. `qpos` and `qvel` are in MuJoCo's layout and basis; `act` is `d.act`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MjcfData {
+    pub time: f64,
+    pub qpos: Vec<f64>,
+    pub qvel: Vec<f64>,
+    pub act: Vec<f64>,
+    pub ctrl: Vec<f64>,
+    pub applied: MjcfApplied,
+}
+
+impl MjcfTree {
+    /// `mj_makeData`: the reset state — `qpos0`, everything else zero.
+    pub fn make_data(&self) -> MjcfData {
+        MjcfData { time: 0.0, qpos: self.qpos0(), qvel: vec![0.0; self.tree.joints.len()], act: vec![0.0; self.na()], ctrl: vec![0.0; self.actuators.len()], applied: MjcfApplied::default() }
+    }
+
+    /// `mj_resetData`.
+    pub fn reset_data(&self, d: &mut MjcfData) {
+        *d = self.make_data();
+    }
+
+    /// `mj_resetDataKeyframe`: the reset state, then the key's time, `qpos`, `qvel`, `act` and `ctrl`.
+    pub fn reset_data_keyframe(&self, d: &mut MjcfData, key: usize) -> Result<(), String> {
+        let k = self.keyframes.get(key).ok_or_else(|| format!("no keyframe {key}"))?;
+        *d = self.make_data();
+        d.time = k.time;
+        d.qpos = k.qpos.clone();
+        d.qvel = k.qvel.clone();
+        d.act = k.act.clone();
+        d.ctrl = k.ctrl.clone();
+        Ok(())
+    }
+
+    /// `mj_forward` on `d`: its constrained acceleration and everything the solve found.
+    pub fn forward(&self, d: &MjcfData) -> Result<MjcfForward, String> {
+        let t = self.chart_if_needed(&d.qpos)?;
+        let t = t.as_ref().unwrap_or(self);
+        t.forward_impl(&t.q_from_qpos(&d.qpos, &t.qposadr())?, &d.qvel, &d.ctrl, &d.act, d.time, &d.applied)
+    }
+
+    /// `mj_step` on `d`: advances `time`, `qpos`, `qvel` and `act` by one `<option timestep>`, and returns
+    /// the step's details. ⛔ After an auto-reset ([`MjcfStep::reset`]) `d` is what MuJoCo's is: the control
+    /// and the applied forces zeroed too.
+    pub fn step(&self, d: &mut MjcfData) -> Result<MjcfStep, String> {
+        let s = self.step_impl(&d.qpos, &d.qvel, &d.ctrl, &d.act, d.time, &d.applied)?;
+        d.qpos.clone_from(&s.qpos);
+        d.qvel.clone_from(&s.qvel);
+        d.act.clone_from(&s.act);
+        d.time = s.time;
+        if s.reset.is_some() {
+            d.ctrl.iter_mut().for_each(|u| *u = 0.0);
+            d.applied = MjcfApplied::default();
+        }
+        Ok(s)
+    }
+
+    /// `d.sensordata` after `mj_forward`: one entry per sensor ([`MjcfTree::sensordata`]), with the applied
+    /// forces in the force sensors' books.
+    pub fn sensors_of(&self, d: &MjcfData) -> Result<Vec<Option<Vec<f64>>>, String> {
+        use crate::mjcf_sensor::SensorKind::*;
+        let acc_stage = self.sensors.iter().any(|s| matches!(s.kind, Accelerometer | Force | Torque | Touch | FrameLinAcc | FrameAngAcc));
+        let forward = if acc_stage { Some(self.forward(d)?) } else { None };
+        self.sensordata_applied(&d.qpos, &d.qvel, &d.ctrl, &d.act, d.time, forward.as_ref(), &d.applied)
+    }
 }
 
 /// One `<keyframe><key>`: a named state to reset to (`mj_resetDataKeyframe`). What the file leaves out is
@@ -7079,6 +7193,101 @@ mod tests {
         }
     }
 
+    /// **Applied forces through [`MjcfData`], against MuJoCo.** `qfrc_applied` on every dof (a hinge chain, a
+    /// ball, a free cart and its pole) and `xfrc_applied` on four bodies — a forearm whose centre of mass is
+    /// off its joint, a ball-jointed wrist, the cart (in contact with the floor) and its pole, whose force is
+    /// inside the pole's force/torque sensor's subtree and has to be booked as external there. At a nonzero
+    /// `time`, with control. MuJoCo's `qacc` and `sensordata` after `mj_forward`, then ten `mj_step`s — with
+    /// Euler and with RK4 — and a step that trips `mj_checkAcc`'s reset.
+    #[test]
+    fn applied_forces_match_mujoco() {
+        let t = tree_from_mjcf_str(APPLIED_MODEL).unwrap();
+        let mut d = t.make_data();
+        assert_eq!((d.qpos.len(), d.qvel.len(), d.ctrl.len()), (14, 12, 2));
+        d.qpos = vec![0.3, -0.4, 0.9535826651341416, 0.10037712264569912, -0.20075424529139824, 0.20075424529139824, 0.5, 0.3, 0.048, 0.9846387287763668, 0.02009466793421157, -0.030142001901317352, 0.17080467744079836, 0.25];
+        d.qvel = (0..12).map(|i| -0.5 + 1.1 * i as f64 / 11.0).collect();
+        d.ctrl = vec![0.7, -0.3];
+        d.time = 0.4;
+        d.applied.qfrc = vec![0.3, -0.33, 0.0036, -0.0039000000000000003, 0.0042, -0.44999999999999996, 0.48, -0.51, 0.54, -0.57, 0.6, -0.63];
+        for (b, w) in [("forearm", [0.5, -1.2, 2.0, 0.1, -0.3, 0.05]), ("pole", [-0.8, 0.4, 1.5, 0.02, 0.07, -0.04]), ("cart", [2.0, 1.0, 3.0, -0.2, 0.1, 0.3]), ("wrist", [0.1, 0.2, -0.3, 0.001, 0.002, 0.003])] {
+            d.applied.xfrc.insert(b.into(), w);
+        }
+        let start = d.clone();
+        let close = |g: f64, w: f64| (g - w).abs() < 1e-9 * w.abs().max(1.0);
+        let f = t.forward(&d).unwrap();
+        assert_eq!(f.nefc, 8, "the cart's two floor contacts, four pyramid rows each");
+        let want_qacc = [34.61785414447881, -58.180860886726585, 147.72327329326586, 13.620987249747657, 277.8590548108485, -4.8285227520966085, -5.166179969997382, 3.9577985038036396, 139.0575069196684, 73.07430349407136, 88.70336443197453, -254.85636972066575];
+        for (k, (g, w)) in f.qacc.iter().zip(want_qacc).enumerate() {
+            assert!(close(*g, w), "qacc[{k}] {g} vs MuJoCo {w}");
+        }
+        let want_sd = [3.91058863544872, 2.6782742110655082, 1.527506089513932, -0.7960862894467228, 0.8268481433609536, 0.060056668908081694, 2.9616140360354546, 1.2141548091008696, 14.298893079021887];
+        let sd: Vec<f64> = t.sensors_of(&d).unwrap().into_iter().flat_map(Option::unwrap).collect();
+        for (k, (g, w)) in sd.iter().zip(want_sd).enumerate() {
+            assert!(close(*g, w), "sensordata[{k}] {g} vs MuJoCo {w}");
+        }
+        for _ in 0..10 {
+            t.step(&mut d).unwrap();
+        }
+        assert!(close(d.time, 0.42000000000000004), "time {}", d.time);
+        let want_qpos = [0.2975782145810774, -0.42073104093243013, 0.9457973005163347, 0.10750620517908743, -0.20098973631975023, 0.23132878782832683, 0.4991394675828127, 0.30106582543953003, 0.05272961681775667, 0.9815655986301296, 0.03980880238877929, -0.015625728266028784, 0.18627955189553497, 0.1967821756686385];
+        let want_qvel = [0.18716491140324654, -1.5497901169886688, 2.7956726492082216, 0.18734933037690799, 5.361859000949678, -0.07107857783953643, 0.02022177255762923, 0.2626206661210189, 4.089138211485138, 1.6543906130245478, 2.3225081046119898, -5.614102286188027];
+        for (k, (g, w)) in d.qpos.iter().zip(want_qpos).chain(d.qvel.iter().zip(want_qvel)).enumerate() {
+            assert!(close(*g, w), "after 10 steps [{k}] {g} vs MuJoCo {w}");
+        }
+        // RK4 evaluates the applied forces at every stage
+        let rk4 = tree_from_mjcf_str(&APPLIED_MODEL.replace(r#"<option timestep="0.002"/>"#, r#"<option timestep="0.002" integrator="RK4"/>"#)).unwrap();
+        let mut r = rk4.make_data();
+        (r.qpos, r.qvel, r.ctrl, r.time) = (start.qpos.clone(), start.qvel.clone(), start.ctrl.clone(), start.time);
+        r.applied = start.applied.clone();
+        for _ in 0..10 {
+            rk4.step(&mut r).unwrap();
+        }
+        let want_qpos = [0.2968954302796029, -0.41958008346219877, 0.9465541060335043, 0.10664808644757628, -0.2012173283738647, 0.22841430946914915, 0.4992263435105761, 0.3011600536235026, 0.05265921763560146, 0.9817872351811727, 0.038341486236605334, -0.016553927448475756, 0.18533678197947512, 0.2024472724924038];
+        let want_qvel = [0.1875143558510835, -1.5491549568263236, 2.8008445085791993, 0.19610932672892872, 5.357547700222157, -0.07002357393198831, 0.02077607459101893, 0.2623904515304731, 4.115106407089137, 1.6555435459934438, 2.3239965047591666, -5.639620847689321];
+        for (k, (g, w)) in r.qpos.iter().zip(want_qpos).chain(r.qvel.iter().zip(want_qvel)).enumerate() {
+            assert!(close(*g, w), "after 10 RK4 steps [{k}] {g} vs MuJoCo {w}");
+        }
+        // a torque that sends `qacc` past `mjMAXVAL`: `mj_checkAcc` resets the data, which zeroes the control
+        // and the applied forces too, and the step then runs from the reset state
+        let mut d = start;
+        d.applied.xfrc.insert("wrist".into(), [0.0, 0.0, 0.0, 1e9, 0.0, 0.0]);
+        assert!(t.step(&mut d).unwrap().reset.is_some());
+        assert_eq!((d.ctrl.as_slice(), &d.applied), (&[0.0, 0.0][..], &MjcfApplied::default()));
+        let want_qpos = [0.00012147139779340167, 5.159596715055786e-21, 0.9999999767253738, 2.4154066618325593e-19, -0.00021575275657405364, 2.451964668848554e-20, 0.5, 0.3, 0.04996076, 0.984807753012208, 1.5294600818987096e-21, 2.69685078355321e-22, 0.17364817766693033, 3.858664933547006e-21];
+        let want_qvel = [0.060735698896700836, 2.579798357527893e-18, 2.4154066805717887e-16, -0.21575275824790857, 2.4519646878714075e-17, 6.1044065919280735e-21, 6.170573241758271e-21, -0.019620000000000002, -1.488190197243287e-18, 4.440892098500626e-19, 7.272835269408394e-21, 1.9293324667735027e-18];
+        assert!(close(d.time, 0.002), "time after the reset step {}", d.time);
+        for (k, (g, w)) in d.qpos.iter().zip(want_qpos).chain(d.qvel.iter().zip(want_qvel)).enumerate() {
+            assert!(close(*g, w), "after the reset step [{k}] {g} vs MuJoCo {w}");
+        }
+    }
+
+    const APPLIED_MODEL: &str = r#"<mujoco><option timestep="0.002"/><worldbody>
+  <geom name="floor" type="plane" size="2 2 0.1"/>
+  <body name="arm" pos="0 0 1.2">
+    <joint name="j1" type="hinge" axis="0 1 0" damping="0.05"/>
+    <geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.03" mass="0.8" contype="0" conaffinity="0"/>
+    <body name="forearm" pos="0.3 0 0">
+      <joint name="j2" type="hinge" axis="0 0 1"/>
+      <geom type="box" pos="0.1 0.02 0" size="0.1 0.03 0.02" mass="0.3" contype="0" conaffinity="0"/>
+      <body name="wrist" pos="0.2 0 0">
+        <joint name="j3" type="ball"/>
+        <geom type="box" pos="0.05 0 0.01" size="0.05 0.02 0.01" mass="0.1" contype="0" conaffinity="0"/>
+      </body>
+    </body>
+  </body>
+  <body name="cart" pos="0.5 0.3 0.05" euler="0 0 20">
+    <freejoint/>
+    <geom type="box" size="0.1 0.06 0.05" mass="1.2"/>
+    <body name="pole" pos="0.02 0 0.05">
+      <joint name="p" type="hinge" axis="1 0 0"/>
+      <geom type="capsule" fromto="0 0 0 0 0 0.4" size="0.02" mass="0.2" contype="0" conaffinity="0"/>
+      <site name="pole_ft" pos="0 0 0.05"/>
+    </body>
+  </body>
+</worldbody>
+<actuator><motor joint="j1" gear="2"/><motor joint="p"/></actuator>
+<sensor><force name="f" site="pole_ft"/><torque name="t" site="pole_ft"/><accelerometer name="acc" site="pole_ft"/></sensor></mujoco>"#;
+
     const WELD_MODEL: &str = r#"<mujoco><option timestep="0.002"/><worldbody>
   <body name="arm" pos="0 0 1">
     <joint name="j1" type="hinge" axis="0 1 0" damping="0.05"/>
@@ -7136,6 +7345,13 @@ mod tests {
             }
             assert_eq!((&k.qvel, &k.ctrl), (&qvel, &ctrl), "'{name}'");
         }
+        // `mj_resetDataKeyframe`: the key's state, and the applied forces cleared
+        let mut d = t.make_data();
+        d.applied.qfrc = vec![1.0; 10];
+        t.reset_data_keyframe(&mut d, 0).unwrap();
+        let k = &t.keyframes[0];
+        assert_eq!((d.time, &d.qpos, &d.qvel, &d.act, &d.ctrl, &d.applied), (1.5, &k.qpos, &k.qvel, &k.act, &k.ctrl, &MjcfApplied::default()));
+        assert!(t.reset_data_keyframe(&mut d, 3).is_err());
         // and a key whose qpos has the wrong length is refused, as MuJoCo refuses it
         assert!(tree_from_mjcf_str(r#"<mujoco><worldbody><body><joint type="hinge"/><geom size="0.1"/></body></worldbody><keyframe><key qpos="0 0"/></keyframe></mujoco>"#).is_err());
     }

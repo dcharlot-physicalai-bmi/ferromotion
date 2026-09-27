@@ -207,6 +207,11 @@ impl MjcfTree {
     /// [`MjcfTree::sensordata`] with the forward pass at this state already run; acceleration-stage sensors
     /// read `None` without one.
     pub fn sensordata_with(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64], time: f64, forward: Option<&crate::MjcfForward>) -> Result<Vec<Option<Vec<f64>>>, String> {
+        self.sensordata_applied(qpos, qvel, ctrl, act, time, forward, &crate::MjcfApplied::default())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn sensordata_applied(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64], time: f64, forward: Option<&crate::MjcfForward>, applied: &crate::MjcfApplied) -> Result<Vec<Option<Vec<f64>>>, String> {
         let q = self.q_from_qpos(qpos, &self.qposadr())?;
         let tinv = self.free_basis(&q).try_inverse().ok_or("gimbal lock: the Euler base's basis map is singular")?;
         let qd: Vec<f64> = (&tinv * nalgebra::DVector::from_row_slice(qvel)).iter().copied().collect();
@@ -287,7 +292,7 @@ impl MjcfTree {
                 None => qdd.as_ref().map(|_| (Vector3::zeros(), Vector3::zeros())),
             }
         };
-        let wrench = self.sensors.iter().any(|s| matches!(s.kind, SensorKind::Force | SensorKind::Torque)).then(|| forward.map(|f| self.body_wrenches(&frames, &qd, &velocity, &acceleration, f))).flatten();
+        let wrench = self.sensors.iter().any(|s| matches!(s.kind, SensorKind::Force | SensorKind::Torque)).then(|| forward.map(|f| self.body_wrenches(&frames, &qd, &velocity, &acceleration, f, applied))).flatten();
         let contact_forces = forward.map(|f| self.contact_forces(f));
         let mut out = Vec::with_capacity(self.sensors.len());
         for s in &self.sensors {
@@ -509,6 +514,7 @@ impl MjcfTree {
         velocity: &dyn Fn(&Iso, Option<usize>) -> (Vector3<f64>, Vector3<f64>),
         acceleration: &dyn Fn(&Iso, Option<usize>) -> Option<(Vector3<f64>, Vector3<f64>)>,
         forward: &crate::MjcfForward,
+        applied: &crate::MjcfApplied,
     ) -> BodyWrenches {
         let mut bodies = Vec::new();
         for name in self.body_parent.keys() {
@@ -531,6 +537,12 @@ impl MjcfTree {
             bodies.push((name.clone(), com.coords, a * mass, iw * al + w.cross(&(iw * w))));
         }
         let mut external = Vec::new();
+        // `xfrc_applied`: a world force and torque at the body's centre of mass
+        for (b, w) in &applied.xfrc {
+            if let Some((_, com, _, _)) = bodies.iter().find(|(n, ..)| n == b) {
+                external.push((b.clone(), *com, Vector3::new(w[0], w[1], w[2]), Vector3::new(w[3], w[4], w[5])));
+            }
+        }
         for c in self.contact_forces(forward) {
             let f = c.frame[0] * c.local[0] + c.frame[1] * c.local[1] + c.frame[2] * c.local[2];
             let tau = c.frame[0] * c.local[3] + c.frame[1] * c.local[4] + c.frame[2] * c.local[5];

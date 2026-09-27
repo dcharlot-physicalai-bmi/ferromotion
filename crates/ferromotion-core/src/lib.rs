@@ -476,7 +476,7 @@ pub use manipulability::{condition_number, force_ellipsoid_axes, isotropy, manip
 pub use modal::{modal_analysis, ModalModel};
 pub use mjcf::{from_mjcf_constrained, from_mjcf_full, from_mjcf_str, geometry_from_mjcf, to_mjcf};
 pub use tree_jacobian::{body_com, body_invweight, contact_jacobian, frame_matrix, tree_angular_jacobian, tree_frames, tree_point_jacobian};
-pub use mjcf_tree::{tree_from_mjcf, tree_from_mjcf_str, EqualityKind, MjcfCollision, MjcfConstraintProblem, MjcfContact, MjcfContactPair, MjcfEquality, MjcfForward, MjcfIntegrator, MjcfKeyframe, MjcfReset, MjcfStep, MjcfGeom, MjcfJoint, MjcfJointKind, MjcfTendon, MeshData, MjcfTree, TendonPath, WrapPoint};
+pub use mjcf_tree::{tree_from_mjcf, tree_from_mjcf_str, EqualityKind, MjcfCollision, MjcfConstraintProblem, MjcfContact, MjcfContactPair, MjcfEquality, MjcfForward, MjcfApplied, MjcfData, MjcfIntegrator, MjcfKeyframe, MjcfReset, MjcfStep, MjcfGeom, MjcfJoint, MjcfJointKind, MjcfTendon, MeshData, MjcfTree, TendonPath, WrapPoint};
 pub use mujoco_collision::{box_box, can_collide, capsule_box, capsule_capsule, collide_pair, collide_pair_with, contact_param, filter_body_pair, make_frame, margin_and_gap, plane_box, plane_capsule, plane_cylinder, plane_sphere, set_contact, sphere_box, sphere_capsule, sphere_cylinder, sphere_sphere, CollideOptions, CollisionGeom, ContactRecord, GeomParams, GeomPose, GeomType, PairParams, PreContact};
 pub use mujoco_ccd::{ccd, convex_pair, max_contacts, plane_convex, CcdConfig, CcdObj, CcdStatus};
 pub use mujoco_hull::{HullPolygon, MeshHull};
