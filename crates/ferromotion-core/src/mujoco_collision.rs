@@ -832,14 +832,18 @@ pub fn capsule_box(margin: f64, p1: &GeomPose, size1: [f64; 2], p2: &GeomPose, s
 /// `mju_makeFrame`: complete `[normal, tangent]` into an orthonormal frame; a zero tangent is replaced by
 /// `y` unless the normal is mostly `y`, in which case `z`.
 pub fn make_frame(normal: Vector3<f64>, tangent: Vector3<f64>) -> [Vector3<f64>; 3] {
-    let n = normal * (1.0 / normal.norm());
+    // as clang contracts `mju_makeFrame` (`mju_normalize3`, `mju_dot3`, `mji_cross` each fuse their products)
+    let dot = |a: &Vector3<f64>, b: &Vector3<f64>| a.z.mul_add(b.z, a.x.mul_add(b.x, a.y * b.y));
+    let norm = |v: &Vector3<f64>| dot(v, v).sqrt();
+    let n = normal * (1.0 / norm(&normal));
     let mut t = tangent;
-    if t.dot(&t) < 0.25 {
+    if dot(&t, &t) < 0.25 {
         t = if n[1] < 0.5 && n[1] > -0.5 { Vector3::y() } else { Vector3::z() };
     }
-    t -= n * n.dot(&t);
-    t *= 1.0 / t.norm();
-    [n, t, n.cross(&t)]
+    t -= n * dot(&n, &t);
+    t *= 1.0 / norm(&t);
+    let z = Vector3::new(n.y.mul_add(t.z, -(n.z * t.y)), n.z.mul_add(t.x, -(n.x * t.z)), n.x.mul_add(t.y, -(n.y * t.x)));
+    [n, t, z]
 }
 
 /// A geom's contact parameters as MJCF states them (defaults: condim 3, priority 0, solmix 1,

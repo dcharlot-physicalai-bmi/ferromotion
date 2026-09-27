@@ -21,10 +21,18 @@
 //!    instead perturbs the pair by ±1e-3 rad about the contact frame's tangents and keeps distinct extra
 //!    contacts.
 //!
-//! Every number in the tests is MuJoCo 3.13.0's (`scripts/mujoco_ccd_probe.py`). Where MuJoCo's answer is
-//! itself only tolerance-exact (a curved surface, an iterative distance) the tests say so with the tolerance
-//! MuJoCo's own `ccd_tolerance` implies; where the answer is combinatorial (which face, which corners) it is
-//! exact to floating-point.
+//! Every number in the tests is MuJoCo 3.13.0's (`scripts/mujoco_ccd_probe.py`, and
+//! `scripts/mujoco_ccd_harness.c` for the probes pinned bit for bit). Where MuJoCo's answer is itself only
+//! tolerance-exact (a curved surface, an iterative distance) the tests say so with the tolerance MuJoCo's own
+//! `ccd_tolerance` implies; where the answer is combinatorial (which face, which corners) it is exact to
+//! floating-point.
+//!
+//! ⭐ The arithmetic is contracted exactly as clang contracts MuJoCo's C on Apple silicon (see below), and
+//! the port is **bit-identical to MuJoCo's own `engine_collision_gjk.c` built that way on all 3,614 geom
+//! pairs** that reach this code across Menagerie (`MENAGERIE_CCD_DUMP` in `examples/menagerie_contacts`,
+//! rerun by `scripts/mujoco_ccd_pairs.c`, compared by `scripts/mujoco_ccd_pairs_compare.py`). The same
+//! source built without contraction — the arithmetic of MuJoCo's x86-64 wheels — differs from it on 939 of
+//! those pairs, 40 of them beyond 1e-9 (reversed normals at equal depth, other corners of a tied face).
 
 use crate::mujoco_collision::{GeomPose, GeomType, PreContact};
 use crate::mujoco_hull::MeshHull;
@@ -44,6 +52,79 @@ const EDGE_TOL: f64 = 0.0888;
 const MAXCONPAIR: usize = 50;
 
 type V3 = Vector3<f64>;
+
+// ⛔ MuJoCo's Apple-silicon build contracts `a*b + c` into one fused multiply–add wherever clang can, and the
+// CCD's ties (which face, which corner) follow the last bit. Every expression below is written the way clang
+// contracts MuJoCo's C: in `a*b + c*d` the LEFT product is fused and the right one rounded; a chain
+// `x + y + z` of products fuses each later product into the running sum; `s += a*b` is one fma.
+
+/// `dot3` / `mju_dot3`.
+#[inline]
+fn dot3(a: &V3, b: &V3) -> f64 {
+    a.z.mul_add(b.z, a.x.mul_add(b.x, a.y * b.y))
+}
+
+/// `norm3` / `mju_norm3`.
+#[inline]
+fn norm3(v: &V3) -> f64 {
+    dot3(v, v).sqrt()
+}
+
+/// `cross3` / `mji_cross` / `mju_cross`.
+#[inline]
+fn cross3(a: &V3, b: &V3) -> V3 {
+    V3::new(a.y.mul_add(b.z, -(a.z * b.y)), a.z.mul_add(b.x, -(a.x * b.z)), a.x.mul_add(b.y, -(a.y * b.x)))
+}
+
+/// `addScl3` / `mji_addToScl3`: `v1 + s·v2`, fused.
+#[inline]
+fn add_scl3(v1: &V3, v2: &V3, s: f64) -> V3 {
+    V3::new(s.mul_add(v2.x, v1.x), s.mul_add(v2.y, v1.y), s.mul_add(v2.z, v1.z))
+}
+
+/// One row of a 3×3 product, `a·x + b·y + c·z`, as clang contracts it.
+#[inline]
+fn row3(a: f64, b: f64, c: f64, v: &V3) -> f64 {
+    c.mul_add(v.z, a.mul_add(v.x, b * v.y))
+}
+
+/// `mulMatTVec3` / `mju_mulMatTVec3`: `matᵀ · v`.
+#[inline]
+fn mat_t_vec(m: &nalgebra::Matrix3<f64>, v: &V3) -> V3 {
+    V3::new(row3(m[(0, 0)], m[(1, 0)], m[(2, 0)], v), row3(m[(0, 1)], m[(1, 1)], m[(2, 1)], v), row3(m[(0, 2)], m[(1, 2)], m[(2, 2)], v))
+}
+
+/// `mju_mulMatVec3` / `localToGlobal` / `globalcoord` without the translation: `mat · v`.
+#[inline]
+fn mat_vec(m: &nalgebra::Matrix3<f64>, v: &V3) -> V3 {
+    V3::new(row3(m[(0, 0)], m[(0, 1)], m[(0, 2)], v), row3(m[(1, 0)], m[(1, 1)], m[(1, 2)], v), row3(m[(2, 0)], m[(2, 1)], m[(2, 2)], v))
+}
+
+/// `localToGlobal`: `mat · v`, then `+ pos` as a separate statement.
+#[inline]
+fn local_to_global(m: &nalgebra::Matrix3<f64>, v: &V3, pos: &V3) -> V3 {
+    mat_vec(m, v) + pos
+}
+
+/// The minors `M_i4` of `S2D` / `triAffineCoord`: `a₀a₁ − b₀b₁ − c₀c₁ + d₀d₁ + e₀e₁ − f₀f₁`, left to right.
+#[inline]
+fn minor6(a: (f64, f64), b: (f64, f64), c: (f64, f64), d: (f64, f64), e: (f64, f64), f: (f64, f64)) -> f64 {
+    let t = a.0.mul_add(a.1, -(b.0 * b.1));
+    let t = (-c.0).mul_add(c.1, t);
+    let t = d.0.mul_add(d.1, t);
+    let t = e.0.mul_add(e.1, t);
+    (-f.0).mul_add(f.1, t)
+}
+
+/// The cofactors `C3i`: `a₀a₁ + b₀b₁ + c₀c₁ − d₀d₁ − e₀e₁ − f₀f₁`, left to right.
+#[inline]
+fn cofactor6(a: (f64, f64), b: (f64, f64), c: (f64, f64), d: (f64, f64), e: (f64, f64), f: (f64, f64)) -> f64 {
+    let t = a.0.mul_add(a.1, b.0 * b.1);
+    let t = c.0.mul_add(c.1, t);
+    let t = (-d.0).mul_add(d.1, t);
+    let t = (-e.0).mul_add(e.1, t);
+    (-f.0).mul_add(f.1, t)
+}
 
 /// One convex geom as the CCD sees it (`mjCCDObj`): type, pose, MuJoCo size, hull data for a mesh.
 #[derive(Clone)]
@@ -98,40 +179,45 @@ impl<'a> CcdObj<'a> {
         let mat = self.pose.mat;
         let pos = self.pose.pos;
         match self.reduced {
+            // `mjc_pointSupport`
             Some(Reduced::Point) => return pos,
+            // `mjc_lineSupport`
             Some(Reduced::Line) => {
-                let axis = self.pose.axis();
-                let scl = if axis.dot(dir) >= 0.0 { self.size[1] } else { -self.size[1] };
-                return axis * scl + pos;
+                let dot = row3(mat[(0, 2)], mat[(1, 2)], mat[(2, 2)], dir);
+                let scl = if dot >= 0.0 { self.size[1] } else { -self.size[1] };
+                return V3::new(mat[(0, 2)].mul_add(scl, pos.x), mat[(1, 2)].mul_add(scl, pos.y), mat[(2, 2)].mul_add(scl, pos.z));
             }
             None => {}
         }
-        let local_dir = mat.transpose() * dir;
+        if self.kind == GeomType::Sphere {
+            let r = self.size[0];
+            return V3::new(r.mul_add(dir.x, pos.x), r.mul_add(dir.y, pos.y), r.mul_add(dir.z, pos.z));
+        }
+        let local_dir = mat_t_vec(&mat, dir);
         match self.kind {
-            GeomType::Sphere => pos + dir * self.size[0],
             GeomType::Capsule => {
-                let mut ls = local_dir * self.size[0];
+                let mut ls = V3::new(local_dir.x * self.size[0], local_dir.y * self.size[0], local_dir.z * self.size[0]);
                 ls.z += if local_dir.z >= 0.0 { self.size[1] } else { -self.size[1] };
-                mat * ls + pos
+                local_to_global(&mat, &ls, &pos)
             }
             GeomType::Ellipsoid => {
                 let mut ls = Vector3::new(local_dir.x * self.size[0], local_dir.y * self.size[1], local_dir.z * self.size[2]);
-                let n2 = ls.dot(&ls);
+                let n2 = dot3(&ls, &ls);
                 if n2 < MINVAL2 {
-                    return mat.column(0) * self.size[0] + pos;
+                    return V3::new(mat[(0, 0)].mul_add(self.size[0], pos.x), mat[(1, 0)].mul_add(self.size[0], pos.y), mat[(2, 0)].mul_add(self.size[0], pos.z));
                 }
                 let inv = 1.0 / n2.sqrt();
                 ls.x *= inv * self.size[0];
                 ls.y *= inv * self.size[1];
                 ls.z *= inv * self.size[2];
-                mat * ls + pos
+                local_to_global(&mat, &ls, &pos)
             }
             GeomType::Cylinder => {
-                let n2 = local_dir.x * local_dir.x + local_dir.y * local_dir.y;
+                let n2 = local_dir.x.mul_add(local_dir.x, local_dir.y * local_dir.y);
                 let scl = if n2 >= MINVAL2 { self.size[0] / n2.sqrt() } else { 0.0 };
                 let ls = Vector3::new(scl * local_dir.x, scl * local_dir.y, if local_dir.z >= 0.0 { self.size[1] } else { -self.size[1] });
                 self.vertindex = if local_dir.z >= 0.0 { 0 } else { 1 };
-                mat * ls + pos
+                local_to_global(&mat, &ls, &pos)
             }
             GeomType::Box => {
                 let ls = Vector3::new(
@@ -140,18 +226,14 @@ impl<'a> CcdObj<'a> {
                     if local_dir.z >= 0.0 { self.size[2] } else { -self.size[2] },
                 );
                 self.vertindex = (ls.x > 0.0) as i64 | ((ls.y > 0.0) as i64) << 1 | ((ls.z > 0.0) as i64) << 2;
-                mat * ls + pos
+                local_to_global(&mat, &ls, &pos)
             }
             GeomType::Mesh => {
                 let hull = self.hull.expect("mesh geom without hull data");
-                // `mulMatTVec3` and `localToGlobal` as clang contracts them: each row's first product fused
-                let m = &mat;
-                let row = |a: f64, b: f64, c: f64, x: &V3| c.mul_add(x.z, a.mul_add(x.x, b * x.y));
-                let ld = V3::new(row(m[(0, 0)], m[(1, 0)], m[(2, 0)], dir), row(m[(0, 1)], m[(1, 1)], m[(2, 1)], dir), row(m[(0, 2)], m[(1, 2)], m[(2, 2)], dir));
-                let v = hull.support_mujoco(&ld, &mut self.vertindex, &mut self.meshindex);
-                V3::new(row(m[(0, 0)], m[(0, 1)], m[(0, 2)], &v) + pos.x, row(m[(1, 0)], m[(1, 1)], m[(1, 2)], &v) + pos.y, row(m[(2, 0)], m[(2, 1)], m[(2, 2)], &v) + pos.z)
+                let v = hull.support_mujoco(&local_dir, &mut self.vertindex, &mut self.meshindex);
+                local_to_global(&mat, &v, &pos)
             }
-            GeomType::Plane | GeomType::HField => pos,
+            GeomType::Sphere | GeomType::Plane | GeomType::HField => pos,
         }
     }
 }
@@ -170,11 +252,13 @@ struct Vertex {
 fn mink_support(obj1: &mut CcdObj, obj2: &mut CcdObj, dir: &V3, dir_neg: &V3) -> Vertex {
     let mut v1 = obj1.support(dir);
     if obj1.margin > 0.0 {
-        v1 += dir * (0.5 * obj1.margin);
+        let m = 0.5 * obj1.margin;
+        v1 = V3::new(dir.x.mul_add(m, v1.x), dir.y.mul_add(m, v1.y), dir.z.mul_add(m, v1.z));
     }
     let mut v2 = obj2.support(dir_neg);
     if obj2.margin > 0.0 {
-        v2 += dir_neg * (0.5 * obj2.margin);
+        let m = 0.5 * obj2.margin;
+        v2 = V3::new(dir_neg.x.mul_add(m, v2.x), dir_neg.y.mul_add(m, v2.y), dir_neg.z.mul_add(m, v2.z));
     }
     Vertex { vert: v1 - v2, vert1: v1, vert2: v2, index1: obj1.vertindex, index2: obj2.vertindex }
 }
@@ -182,7 +266,7 @@ fn mink_support(obj1: &mut CcdObj, obj2: &mut CcdObj, dir: &V3, dir_neg: &V3) ->
 /// `mju_normalize3`: multiply by the reciprocal norm (not divide — the last bit decides exact ties in the
 /// polygon pruning below), `(1, 0, 0)` for a vector shorter than `mjMINVAL`.
 fn normalize3(v: &V3) -> V3 {
-    let norm = (v.x * v.x + v.y * v.y + v.z * v.z).sqrt();
+    let norm = norm3(v);
     if norm < MINVAL {
         Vector3::x()
     } else {
@@ -191,8 +275,12 @@ fn normalize3(v: &V3) -> V3 {
     }
 }
 
-fn det3(a: &V3, b: &V3, c: &V3) -> f64 {
-    a.x * (b.y * c.z - b.z * c.y) + a.y * (b.z * c.x - b.x * c.z) + a.z * (b.x * c.y - b.y * c.x)
+/// `det3`: `v1 · (v2 × v3)` as MuJoCo writes it out, contracted.
+fn det3(v1: &V3, v2: &V3, v3: &V3) -> f64 {
+    let a = v2.y.mul_add(v3.z, -(v2.z * v3.y));
+    let b = v2.z.mul_add(v3.x, -(v2.x * v3.z));
+    let c = v2.x.mul_add(v3.y, -(v2.y * v3.x));
+    v1.z.mul_add(c, v1.x.mul_add(a, v1.y * b))
 }
 
 fn same_sign2(a: f64, b: f64) -> i32 {
@@ -205,12 +293,18 @@ fn same_sign2(a: f64, b: f64) -> i32 {
     }
 }
 
+/// `lincomb`: `Σ coefᵢ·vᵢ` for up to four vectors, contracted as MuJoCo's unrolled sums are.
 fn lincomb(coef: &[f64], vs: &[V3]) -> V3 {
-    let mut r = V3::zeros();
-    for (c, v) in coef.iter().zip(vs) {
-        r += v * *c;
-    }
-    r
+    let comp = |k: usize| -> f64 {
+        match coef.len() {
+            0 => 0.0,
+            1 => coef[0] * vs[0][k],
+            2 => coef[0].mul_add(vs[0][k], coef[1] * vs[1][k]),
+            3 => coef[2].mul_add(vs[2][k], coef[0].mul_add(vs[0][k], coef[1] * vs[1][k])),
+            _ => coef[3].mul_add(vs[3][k], coef[2].mul_add(vs[2][k], coef[0].mul_add(vs[0][k], coef[1] * vs[1][k]))),
+        }
+    };
+    V3::new(comp(0), comp(1), comp(2))
 }
 
 /// `projectOriginPlane`: the origin's projection on the plane of three points; `None` if degenerate.
@@ -218,31 +312,31 @@ fn project_origin_plane(v1: &V3, v2: &V3, v3: &V3) -> Option<V3> {
     let diff21 = v2 - v1;
     let diff31 = v3 - v1;
     let diff32 = v3 - v2;
-    let n = diff32.cross(&diff21);
-    let (nv, nn) = (n.dot(v2), n.dot(&n));
+    let n = cross3(&diff32, &diff21);
+    let (nv, nn) = (dot3(&n, v2), dot3(&n, &n));
     if nn == 0.0 {
         return None;
     }
     if nv != 0.0 && nn > MINVAL {
         return Some(n * (nv / nn));
     }
-    let n = diff21.cross(&diff31);
-    let (nv, nn) = (n.dot(v1), n.dot(&n));
+    let n = cross3(&diff21, &diff31);
+    let (nv, nn) = (dot3(&n, v1), dot3(&n, &n));
     if nn == 0.0 {
         return None;
     }
     if nv != 0.0 && nn > MINVAL {
         return Some(n * (nv / nn));
     }
-    let n = diff31.cross(&diff32);
-    let (nv, nn) = (n.dot(v3), n.dot(&n));
+    let n = cross3(&diff31, &diff32);
+    let (nv, nn) = (dot3(&n, v3), dot3(&n, &n));
     Some(n * (nv / nn))
 }
 
 fn project_origin_line(v1: &V3, v2: &V3) -> V3 {
     let diff = v2 - v1;
-    let scl = -(v2.dot(&diff) / diff.dot(&diff));
-    v2 + diff * scl
+    let scl = -(dot3(v2, &diff) / dot3(&diff, &diff));
+    add_scl3(v2, &diff, scl)
 }
 
 fn s1d(s1: &V3, s2: &V3) -> [f64; 2] {
@@ -274,9 +368,9 @@ fn s2d(s1: &V3, s2: &V3, s3: &V3) -> [f64; 3] {
         let l = s1d(s1, s2);
         return [l[0], l[1], 0.0];
     };
-    let m14 = s2.y * s3.z - s2.z * s3.y - s1.y * s3.z + s1.z * s3.y + s1.y * s2.z - s1.z * s2.y;
-    let m24 = s2.x * s3.z - s2.z * s3.x - s1.x * s3.z + s1.z * s3.x + s1.x * s2.z - s1.z * s2.x;
-    let m34 = s2.x * s3.y - s2.y * s3.x - s1.x * s3.y + s1.y * s3.x + s1.x * s2.y - s1.y * s2.x;
+    let m14 = minor6((s2.y, s3.z), (s2.z, s3.y), (s1.y, s3.z), (s1.z, s3.y), (s1.y, s2.z), (s1.z, s2.y));
+    let m24 = minor6((s2.x, s3.z), (s2.z, s3.x), (s1.x, s3.z), (s1.z, s3.x), (s1.x, s2.z), (s1.z, s2.x));
+    let m34 = minor6((s2.x, s3.y), (s2.y, s3.x), (s1.x, s3.y), (s1.y, s3.x), (s1.x, s2.y), (s1.y, s2.x));
     let (mu1, mu2, mu3) = (m14.abs(), m24.abs(), m34.abs());
     let (m_max, x, y) = if mu1 >= mu2 && mu1 >= mu3 {
         (m14, 1, 2)
@@ -286,9 +380,9 @@ fn s2d(s1: &V3, s2: &V3, s3: &V3) -> [f64; 3] {
         (m34, 0, 1)
     };
     let (s1_2, s2_2, s3_2, p_2) = ([s1[x], s1[y]], [s2[x], s2[y]], [s3[x], s3[y]], [p_o[x], p_o[y]]);
-    let c31 = p_2[0] * s2_2[1] + p_2[1] * s3_2[0] + s2_2[0] * s3_2[1] - p_2[0] * s3_2[1] - p_2[1] * s2_2[0] - s3_2[0] * s2_2[1];
-    let c32 = p_2[0] * s3_2[1] + p_2[1] * s1_2[0] + s3_2[0] * s1_2[1] - p_2[0] * s1_2[1] - p_2[1] * s3_2[0] - s1_2[0] * s3_2[1];
-    let c33 = p_2[0] * s1_2[1] + p_2[1] * s2_2[0] + s1_2[0] * s2_2[1] - p_2[0] * s2_2[1] - p_2[1] * s1_2[0] - s2_2[0] * s1_2[1];
+    let c31 = cofactor6((p_2[0], s2_2[1]), (p_2[1], s3_2[0]), (s2_2[0], s3_2[1]), (p_2[0], s3_2[1]), (p_2[1], s2_2[0]), (s3_2[0], s2_2[1]));
+    let c32 = cofactor6((p_2[0], s3_2[1]), (p_2[1], s1_2[0]), (s3_2[0], s1_2[1]), (p_2[0], s1_2[1]), (p_2[1], s3_2[0]), (s1_2[0], s3_2[1]));
+    let c33 = cofactor6((p_2[0], s1_2[1]), (p_2[1], s2_2[0]), (s1_2[0], s2_2[1]), (p_2[0], s2_2[1]), (p_2[1], s1_2[0]), (s2_2[0], s1_2[1]));
     let (comp1, comp2, comp3) = (same_sign2(m_max, c31) != 0, same_sign2(m_max, c32) != 0, same_sign2(m_max, c33) != 0);
     if comp1 && comp2 && comp3 {
         return [c31 / m_max, c32 / m_max, c33 / m_max];
@@ -299,12 +393,12 @@ fn s2d(s1: &V3, s2: &V3, s3: &V3) -> [f64; 3] {
         let l = s1d(s2, s3);
         let x = lincomb(&l, &[*s2, *s3]);
         lambda = [0.0, l[0], l[1]];
-        dmin = x.dot(&x);
+        dmin = dot3(&x, &x);
     }
     if !comp2 {
         let l = s1d(s1, s3);
         let x = lincomb(&l, &[*s1, *s3]);
-        let d = x.dot(&x);
+        let d = dot3(&x, &x);
         if d < dmin {
             lambda = [l[0], 0.0, l[1]];
             dmin = d;
@@ -313,7 +407,7 @@ fn s2d(s1: &V3, s2: &V3, s3: &V3) -> [f64; 3] {
     if !comp3 {
         let l = s1d(s1, s2);
         let x = lincomb(&l, &[*s1, *s2]);
-        let d = x.dot(&x);
+        let d = dot3(&x, &x);
         if d < dmin {
             lambda = [l[0], l[1], 0.0];
         }
@@ -337,12 +431,12 @@ fn s3d(s1: &V3, s2: &V3, s3: &V3, s4: &V3) -> [f64; 4] {
         let l = s2d(s2, s3, s4);
         let x = lincomb(&l, &[*s2, *s3, *s4]);
         lambda = [0.0, l[0], l[1], l[2]];
-        dmin = x.dot(&x);
+        dmin = dot3(&x, &x);
     }
     if !comp2 {
         let l = s2d(s1, s3, s4);
         let x = lincomb(&l, &[*s1, *s3, *s4]);
-        let d = x.dot(&x);
+        let d = dot3(&x, &x);
         if d < dmin {
             lambda = [l[0], 0.0, l[1], l[2]];
             dmin = d;
@@ -351,7 +445,7 @@ fn s3d(s1: &V3, s2: &V3, s3: &V3, s4: &V3) -> [f64; 4] {
     if !comp3 {
         let l = s2d(s1, s2, s4);
         let x = lincomb(&l, &[*s1, *s2, *s4]);
-        let d = x.dot(&x);
+        let d = dot3(&x, &x);
         if d < dmin {
             lambda = [l[0], l[1], 0.0, l[2]];
             dmin = d;
@@ -360,7 +454,7 @@ fn s3d(s1: &V3, s2: &V3, s3: &V3, s4: &V3) -> [f64; 4] {
     if !comp4 {
         let l = s2d(s1, s2, s3);
         let x = lincomb(&l, &[*s1, *s2, *s3]);
-        let d = x.dot(&x);
+        let d = dot3(&x, &x);
         if d < dmin {
             lambda = [l[0], l[1], l[2], 0.0];
         }
@@ -421,11 +515,11 @@ fn discrete_geoms(o1: &CcdObj, o2: &CcdObj) -> bool {
 }
 
 fn signed_distance(v1: &Vertex, v2: &Vertex, v3: &Vertex) -> (V3, f64) {
-    let normal = (v3.vert - v1.vert).cross(&(v2.vert - v1.vert));
-    let norm2 = normal.dot(&normal);
+    let normal = cross3(&(v3.vert - v1.vert), &(v2.vert - v1.vert));
+    let norm2 = dot3(&normal, &normal);
     if norm2 > MINVAL2 && norm2 < MAXVAL2 {
         let n = normal * (1.0 / norm2.sqrt());
-        return (n, n.dot(&v1.vert));
+        return (n, dot3(&n, &v1.vert));
     }
     (normal, MAX_LIMIT)
 }
@@ -458,7 +552,7 @@ fn gjk_intersect(st: &mut CcdStatus, o1: &mut CcdObj, o2: &mut CcdObj) -> i32 {
         }
         let dir = normals[index];
         simplex[s[index]] = mink_support(o1, o2, &dir, &(-dir));
-        if dir.dot(&simplex[s[index]].vert) < 0.0 {
+        if dot3(&dir, &simplex[s[index]].vert) < 0.0 {
             st.nsimplex = 0;
             st.gjk_iterations = k;
             return 0;
@@ -489,7 +583,7 @@ fn gjk(st: &mut CcdStatus, o1: &mut CcdObj, o2: &mut CcdObj) {
     let epsilon = if discrete { 0.0 } else { 0.5 * tol2 };
     let min_norm = if discrete { MINVAL } else { st.tolerance };
     let mut x_k = x1_k - x2_k;
-    let mut x_norm = x_k.norm();
+    let mut x_norm = norm3(&x_k);
     let mut x_norm_prev = 0.0;
     while k < kmax {
         if x_norm < min_norm || (x_norm_prev - x_norm).abs() < MINVAL {
@@ -499,10 +593,10 @@ fn gjk(st: &mut CcdStatus, o1: &mut CcdObj, o2: &mut CcdObj) {
         simplex[n] = mink_support(o1, o2, &(-dir_neg), &dir_neg);
         let s_k = simplex[n].vert;
         let diff = x_k - s_k;
-        if x_k.dot(&diff) < epsilon {
+        if dot3(&x_k, &diff) < epsilon {
             break;
         }
-        let lower = x_k.dot(&s_k);
+        let lower = dot3(&x_k, &s_k);
         if !get_dist {
             if lower > 0.0 {
                 st.separated = true;
@@ -556,7 +650,7 @@ fn gjk(st: &mut CcdStatus, o1: &mut CcdObj, o2: &mut CcdObj) {
         }
         x_k = lincomb(&lambda[..n], &[simplex[0].vert, simplex[1].vert, simplex[2].vert, simplex[3].vert][..n]);
         x_norm_prev = x_norm;
-        x_norm = x_k.norm();
+        x_norm = norm3(&x_k);
         k += 1;
         if n == 4 {
             break;
@@ -566,10 +660,10 @@ fn gjk(st: &mut CcdStatus, o1: &mut CcdObj, o2: &mut CcdObj) {
         x1_k = lincomb(&lambda[..n], &[simplex[0].vert1, simplex[1].vert1, simplex[2].vert1, simplex[3].vert1][..n]);
         x2_k = lincomb(&lambda[..n], &[simplex[0].vert2, simplex[1].vert2, simplex[2].vert2, simplex[3].vert2][..n]);
     }
-    // mark separation
-    let dir_neg = if x_norm > 0.0 { x_k * (1.0 / x_norm) } else { V3::zeros() };
+    // mark separation (`gjkSupport` divides by `x_norm` even when it is zero, as MuJoCo does)
+    let dir_neg = x_k * (1.0 / x_norm);
     let tmp = mink_support(o1, o2, &(-dir_neg), &dir_neg);
-    if x_k.dot(&tmp.vert) > 0.0 {
+    if dot3(&x_k, &tmp.vert) > 0.0 {
         st.separated = true;
     }
     st.x1 = vec![x1_k];
@@ -616,7 +710,12 @@ impl Polytope {
     }
 
     fn epa_support(&mut self, o1: &mut CcdObj, o2: &mut CcdObj, d: &V3, dnorm: f64) -> usize {
-        let (dir, dir_neg) = if dnorm > MINVAL { (d / dnorm, -(d / dnorm)) } else { (Vector3::x(), -Vector3::x()) };
+        let (dir, dir_neg) = if dnorm > MINVAL {
+            let dir = V3::new(d.x / dnorm, d.y / dnorm, d.z / dnorm);
+            (dir, dir * -1.0)
+        } else {
+            (Vector3::x(), -Vector3::x())
+        };
         let v = mink_support(o1, o2, &dir, &dir_neg);
         self.insert_vertex(v)
     }
@@ -643,11 +742,11 @@ impl Polytope {
             return 0.0;
         };
         let outward = self.verts[v1].vert - self.center;
-        if v.dot(&outward) < 0.0 {
-            v = -v;
+        if dot3(&v, &outward) < 0.0 {
+            v *= -1.0;
         }
         face.v = v;
-        face.dist2 = v.dot(&v);
+        face.dist2 = dot3(&v, &v);
         self.faces.push(face);
         face.dist2
     }
@@ -670,7 +769,7 @@ impl Polytope {
 
     fn horizon_rec(&mut self, fi: usize, e: usize) -> bool {
         let face = self.faces[fi];
-        if face.v.dot(&self.horizon_w) - face.dist2 > MINVAL {
+        if dot3(&face.v, &self.horizon_w) - face.dist2 > MINVAL {
             self.delete_face(fi);
             for k in 1..3 {
                 let i = (e + k) % 3;
@@ -723,9 +822,9 @@ impl Polytope {
 }
 
 fn tri_affine_coord(v1: &V3, v2: &V3, v3: &V3, p: &V3) -> [f64; 3] {
-    let m14 = v2.y * v3.z - v2.z * v3.y - v1.y * v3.z + v1.z * v3.y + v1.y * v2.z - v1.z * v2.y;
-    let m24 = v2.x * v3.z - v2.z * v3.x - v1.x * v3.z + v1.z * v3.x + v1.x * v2.z - v1.z * v2.x;
-    let m34 = v2.x * v3.y - v2.y * v3.x - v1.x * v3.y + v1.y * v3.x + v1.x * v2.y - v1.y * v2.x;
+    let m14 = minor6((v2.y, v3.z), (v2.z, v3.y), (v1.y, v3.z), (v1.z, v3.y), (v1.y, v2.z), (v1.z, v2.y));
+    let m24 = minor6((v2.x, v3.z), (v2.z, v3.x), (v1.x, v3.z), (v1.z, v3.x), (v1.x, v2.z), (v1.z, v2.x));
+    let m34 = minor6((v2.x, v3.y), (v2.y, v3.x), (v1.x, v3.y), (v1.y, v3.x), (v1.x, v2.y), (v1.y, v2.x));
     let (mu1, mu2, mu3) = (m14.abs(), m24.abs(), m34.abs());
     let (m_max, x, y) = if mu1 >= mu2 && mu1 >= mu3 {
         (m14, 1, 2)
@@ -734,9 +833,9 @@ fn tri_affine_coord(v1: &V3, v2: &V3, v3: &V3, p: &V3) -> [f64; 3] {
     } else {
         (m34, 0, 1)
     };
-    let c31 = p[x] * v2[y] + p[y] * v3[x] + v2[x] * v3[y] - p[x] * v3[y] - p[y] * v2[x] - v3[x] * v2[y];
-    let c32 = p[x] * v3[y] + p[y] * v1[x] + v3[x] * v1[y] - p[x] * v1[y] - p[y] * v3[x] - v1[x] * v3[y];
-    let c33 = p[x] * v1[y] + p[y] * v2[x] + v1[x] * v2[y] - p[x] * v2[y] - p[y] * v1[x] - v2[x] * v1[y];
+    let c31 = cofactor6((p[x], v2[y]), (p[y], v3[x]), (v2[x], v3[y]), (p[x], v3[y]), (p[y], v2[x]), (v3[x], v2[y]));
+    let c32 = cofactor6((p[x], v3[y]), (p[y], v1[x]), (v3[x], v1[y]), (p[x], v1[y]), (p[y], v3[x]), (v1[x], v3[y]));
+    let c33 = cofactor6((p[x], v1[y]), (p[y], v2[x]), (v1[x], v2[y]), (p[x], v2[y]), (p[y], v1[x]), (v2[x], v1[y]));
     [c31 / m_max, c32 / m_max, c33 / m_max]
 }
 
@@ -745,14 +844,18 @@ fn tri_point_intersect(v1: &V3, v2: &V3, v3: &V3, p: &V3) -> bool {
     if l[0] < 0.0 || l[1] < 0.0 || l[2] < 0.0 {
         return false;
     }
-    let pr = v1 * l[0] + v2 * l[1] + v3 * l[2];
-    (pr - p).norm() < MINVAL
+    let pr = V3::new(
+        v3.x.mul_add(l[2], v1.x.mul_add(l[0], v2.x * l[1])),
+        v3.y.mul_add(l[2], v1.y.mul_add(l[0], v2.y * l[1])),
+        v3.z.mul_add(l[2], v1.z.mul_add(l[0], v2.z * l[1])),
+    );
+    norm3(&(pr - p)) < MINVAL
 }
 
 fn same_side(p0: &V3, p1: &V3, p2: &V3, p3: &V3) -> bool {
-    let n = (p1 - p0).cross(&(p2 - p0));
-    let dot1 = n.dot(&(p3 - p0));
-    let dot2 = n.dot(&(-p0));
+    let n = cross3(&(p1 - p0), &(p2 - p0));
+    let dot1 = dot3(&n, &(p3 - p0));
+    let dot2 = dot3(&n, &(p0 * -1.0));
     (dot1 > 0.0 && dot2 > 0.0) || (dot1 < 0.0 && dot2 < 0.0)
 }
 
@@ -760,15 +863,17 @@ fn test_tetra(p0: &V3, p1: &V3, p2: &V3, p3: &V3) -> bool {
     same_side(p0, p1, p2, p3) && same_side(p1, p2, p3, p0) && same_side(p2, p3, p0, p1) && same_side(p3, p0, p1, p2)
 }
 
+/// `rotmat`: 120° about `axis`. `u·u·(1 − cos)` rounds `u·u` and fuses the second product into the sum.
 fn rotmat120(axis: &V3) -> nalgebra::Matrix3<f64> {
-    let n = axis.norm();
+    let n = norm3(axis);
     let (u1, u2, u3) = (axis.x / n, axis.y / n, axis.z / n);
     let s = 0.86602540378;
     let c = -0.5;
+    let k = 1.0 - c;
     nalgebra::Matrix3::new(
-        c + u1 * u1 * (1.0 - c), u1 * u2 * (1.0 - c) - u3 * s, u1 * u3 * (1.0 - c) + u2 * s,
-        u2 * u1 * (1.0 - c) + u3 * s, c + u2 * u2 * (1.0 - c), u2 * u3 * (1.0 - c) - u1 * s,
-        u1 * u3 * (1.0 - c) - u2 * s, u2 * u3 * (1.0 - c) + u1 * s, c + u3 * u3 * (1.0 - c),
+        (u1 * u1).mul_add(k, c), (u1 * u2).mul_add(k, -(u3 * s)), (u1 * u3).mul_add(k, u2 * s),
+        (u2 * u1).mul_add(k, u3 * s), (u2 * u2).mul_add(k, c), (u2 * u3).mul_add(k, -(u1 * s)),
+        (u1 * u3).mul_add(k, -(u2 * s)), (u2 * u3).mul_add(k, u1 * s), (u3 * u3).mul_add(k, c),
     )
 }
 
@@ -813,15 +918,15 @@ fn polytope2(pt: &mut Polytope, st: &mut CcdStatus, o1: &mut CcdObj, o2: &mut Cc
     }
     let mut e = V3::zeros();
     e[index] = 1.0;
-    let d1 = e.cross(&diff);
+    let d1 = cross3(&e, &diff);
     let r = rotmat120(&diff);
-    let d2 = r * d1;
-    let d3 = r * d2;
+    let d2 = mat_vec(&r, &d1);
+    let d3 = mat_vec(&r, &d2);
     let v1i = pt.insert_vertex(st.simplex[0]);
     let v2i = pt.insert_vertex(st.simplex[1]);
-    let v3i = pt.epa_support(o1, o2, &d1, d1.norm());
-    let v4i = pt.epa_support(o1, o2, &d2, d2.norm());
-    let v5i = pt.epa_support(o1, o2, &d3, d3.norm());
+    let v3i = pt.epa_support(o1, o2, &d1, norm3(&d1));
+    let v4i = pt.epa_support(o1, o2, &d2, norm3(&d2));
+    let v5i = pt.epa_support(o1, o2, &d3, norm3(&d3));
     let (v3, v4, v5) = (pt.verts[v3i].vert, pt.verts[v4i].vert, pt.verts[v5i].vert);
     let tri = [(v1i, v3i, v4i, 1, 3, 2), (v1i, v5i, v3i, 2, 4, 0), (v1i, v4i, v5i, 0, 5, 1), (v2i, v4i, v3i, 5, 0, 4), (v2i, v3i, v5i, 3, 1, 5), (v2i, v5i, v4i, 4, 2, 3)];
     for (a, b, c, x, y, z) in tri {
@@ -841,16 +946,17 @@ fn polytope2(pt: &mut Polytope, st: &mut CcdStatus, o1: &mut CcdObj, o2: &mut Cc
 
 fn polytope3(pt: &mut Polytope, st: &mut CcdStatus, o1: &mut CcdObj, o2: &mut CcdObj) -> i32 {
     let (v1, v2, v3) = (st.simplex[0].vert, st.simplex[1].vert, st.simplex[2].vert);
-    pt.center = (v1 + v2 + v3) / 3.0;
-    let n = (v2 - v1).cross(&(v3 - v1));
-    let n_norm = n.norm();
+    // `scl3(center, center, 1.0/3.0)`: a multiply by the rounded third, not a division by three
+    pt.center = (v1 + v2 + v3) * (1.0 / 3.0);
+    let n = cross3(&(v2 - v1), &(v3 - v1));
+    let n_norm = norm3(&n);
     if n_norm < MINVAL {
         return EPA_P3_BAD_NORMAL;
     }
     let v1i = pt.insert_vertex(st.simplex[0]);
     let v2i = pt.insert_vertex(st.simplex[1]);
     let v3i = pt.insert_vertex(st.simplex[2]);
-    let v5i = pt.epa_support(o1, o2, &(-n), n_norm);
+    let v5i = pt.epa_support(o1, o2, &(n * -1.0), n_norm);
     let v4i = pt.epa_support(o1, o2, &n, n_norm);
     let (v4, v5) = (pt.verts[v4i].vert, pt.verts[v5i].vert);
     if tri_point_intersect(&v1, &v2, &v3, &v4) {
@@ -935,7 +1041,7 @@ fn epa(st: &mut CcdStatus, pt: &mut Polytope, o1: &mut CcdObj, o2: &mut CcdObj) 
         let fv = pt.faces[fi].v;
         let wi = pt.epa_support(o1, o2, &fv, lower);
         let w = pt.verts[wi];
-        let upper_k = fv.dot(&w.vert) / lower;
+        let upper_k = dot3(&fv, &w.vert) / lower;
         if upper_k < upper {
             upper = upper_k;
             upper2 = upper * upper;
@@ -1017,7 +1123,7 @@ fn epa(st: &mut CcdStatus, pt: &mut Polytope, o1: &mut CcdObj, o2: &mut CcdObj) 
 // ------------------------------------------------------------------------------------------------
 
 fn area4(hull: &[V3], a: usize, b: usize, c: usize, d: usize) -> f64 {
-    0.5 * (hull[a] - hull[c]).cross(&(hull[b] - hull[d])).norm()
+    0.5 * norm3(&cross3(&(hull[a] - hull[c]), &(hull[b] - hull[d])))
 }
 
 fn hull4(hull: &[V3]) -> [usize; 4] {
@@ -1072,17 +1178,17 @@ fn hull4(hull: &[V3]) -> [usize; 4] {
 
 fn plane_normal(v1: &V3, v2: &V3, n: &V3) -> (V3, f64) {
     let v3 = v1 + n;
-    let res = normalize3(&(v2 - v1).cross(&(v3 - v1)));
-    (res, res.dot(v1))
+    let res = normalize3(&cross3(&(v2 - v1), &(v3 - v1)));
+    (res, dot3(&res, v1))
 }
 
 fn halfspace(a: &V3, n: &V3, p: &V3) -> bool {
-    (p - a).dot(n) > -MINVAL
+    dot3(&(p - a), n) > -MINVAL
 }
 
 fn witness_on_face(v: &V3, p: &V3, n: &V3, dir: &V3) -> (V3, V3, f64) {
-    let dist = (v - p).dot(n);
-    (v - dir * dist.abs(), *v, dist)
+    let dist = dot3(&(v - p), n);
+    (add_scl3(v, dir, -dist.abs()), *v, dist)
 }
 
 /// `polygonClip`: clip `face2` against the prism of `face1`, keep points below `face1`'s plane, reduce to
@@ -1118,11 +1224,11 @@ fn polygon_clip(st: &mut CcdStatus, face1: &[V3], face2: &[V3], n: &V3, dir: &V3
                 clipped.push(q);
                 continue;
             }
-            let tmp = pn[e].dot(&pq);
+            let tmp = dot3(&pn[e], &pq);
             if tmp != 0.0 {
-                let t = (pd[e] - pn[e].dot(&p)) / tmp;
+                let t = (pd[e] - dot3(&pn[e], &p)) / tmp;
                 if (0.0..=1.0).contains(&t) {
-                    clipped.push(p + pq * t);
+                    clipped.push(add_scl3(&p, &pq, t));
                 }
             }
             if inside2 {
@@ -1131,7 +1237,7 @@ fn polygon_clip(st: &mut CcdStatus, face1: &[V3], face2: &[V3], n: &V3, dir: &V3
         }
         polygon = clipped;
     }
-    let polygon: Vec<V3> = polygon.into_iter().filter(|p| (p - face1[0]).dot(n) <= 0.0).collect();
+    let polygon: Vec<V3> = polygon.into_iter().filter(|p| dot3(&(p - face1[0]), n) <= 0.0).collect();
     if polygon.is_empty() {
         return false;
     }
@@ -1152,7 +1258,8 @@ fn polygon_clip(st: &mut CcdStatus, face1: &[V3], face2: &[V3], n: &V3, dir: &V3
         let (mut best1, mut best2, mut dd) = (0, 1, 0.0);
         for i in 0..polygon.len() {
             for j in i + 1..polygon.len() {
-                let d2 = (polygon[j] - polygon[i]).norm_squared();
+                let diff = polygon[j] - polygon[i];
+                let d2 = dot3(&diff, &diff);
                 if d2 > dd {
                     dd = d2;
                     best1 = i;
@@ -1178,7 +1285,7 @@ fn polygon_clip(st: &mut CcdStatus, face1: &[V3], face2: &[V3], n: &V3, dir: &V3
 }
 
 fn globalcoord(pose: &GeomPose, l: V3, with_pos: bool) -> V3 {
-    let r = pose.mat * l;
+    let r = mat_vec(&pose.mat, &l);
     if with_pos {
         r + pose.pos
     } else {
@@ -1205,10 +1312,10 @@ fn feature_normals(obj: &CcdObj, dim: usize, vi: [i64; 3], dir: &V3) -> Vec<(V3,
 
 fn box_normals2(pose: &GeomPose, n: &V3) -> Option<(V3, usize)> {
     let normals = [Vector3::x(), -Vector3::x(), Vector3::y(), -Vector3::y(), Vector3::z(), -Vector3::z()];
-    let mut local = pose.mat.transpose() * n;
-    local *= 1.0 / local.dot(&local).sqrt();
+    let mut local = mat_t_vec(&pose.mat, n);
+    local *= 1.0 / dot3(&local, &local).sqrt();
     for (i, nn) in normals.iter().enumerate() {
-        if local.dot(nn) > FACE_TOL {
+        if dot3(&local, nn) > FACE_TOL {
             return Some((globalcoord(pose, *nn, false), i));
         }
     }
@@ -1359,8 +1466,9 @@ fn edge_normals(obj: &CcdObj, dim: usize, v: &[V3; 3], v1i: i64) -> Vec<(V3, V3)
         GeomType::Cylinder => {
             if dim == 1 || dim == 2 {
                 let sgn = if v1i != 0 { 1.0 } else { -1.0 };
-                let d = obj.pose.axis() * sgn;
-                return vec![(d, v[0] + d * (2.0 * obj.size[1]))];
+                let m = &obj.pose.mat;
+                let d = V3::new(sgn * m[(0, 2)], sgn * m[(1, 2)], sgn * m[(2, 2)]);
+                return vec![(d, add_scl3(&v[0], &d, 2.0 * obj.size[1]))];
             }
             Vec::new()
         }
@@ -1404,7 +1512,7 @@ fn face_vertices(obj: &CcdObj, idx: usize) -> Vec<V3> {
 fn aligned_faces(n1: &[(V3, usize)], n2: &[(V3, usize)]) -> Option<(usize, usize)> {
     for (i, a) in n1.iter().enumerate() {
         for (j, b) in n2.iter().enumerate() {
-            if a.0.dot(&b.0) < -FACE_TOL {
+            if dot3(&a.0, &b.0) < -FACE_TOL {
                 return Some((i, j));
             }
         }
@@ -1414,11 +1522,11 @@ fn aligned_faces(n1: &[(V3, usize)], n2: &[(V3, usize)]) -> Option<(usize, usize
 
 fn aligned_face_edge(edges: &[(V3, V3)], faces: &[(V3, usize)], dir: &V3) -> Option<(usize, usize)> {
     for (i, f) in faces.iter().enumerate() {
-        if f.0.dot(dir) <= MINVAL {
+        if dot3(&f.0, dir) <= MINVAL {
             continue;
         }
         for (j, e) in edges.iter().enumerate() {
-            if e.0.dot(&f.0).abs() < EDGE_TOL {
+            if dot3(&e.0, &f.0).abs() < EDGE_TOL {
                 return Some((j, i));
             }
         }
@@ -1458,7 +1566,7 @@ fn multicontact(pt: &Polytope, fi: usize, st: &mut CcdStatus, o1: &CcdObj, o2: &
     let nface1 = simplex_dim(&mut v1i, &mut v1);
     let nface2 = simplex_dim(&mut v2i, &mut v2);
     let dir = st.x2[0] - st.x1[0];
-    let dir_neg = -dir;
+    let dir_neg = st.x1[0] - st.x2[0];
     let mut n1 = feature_normals(o1, nface1, v1i, &dir_neg);
     let mut n2 = feature_normals(o2, nface2, v2i, &dir);
     let mut edgecon1 = false;
@@ -1488,24 +1596,20 @@ fn multicontact(pt: &Polytope, fi: usize, st: &mut CcdStatus, o1: &CcdObj, o2: &
     let face1: Vec<V3> = if edgecon1 { vec![v1[0], e1[i].1] } else { face_vertices(o1, if edgecon2 { n1[j].1 } else { n1[i].1 }) };
     let face2: Vec<V3> = if edgecon2 { vec![v2[0], e2[i].1] } else { face_vertices(o2, n2[j].1) };
     if edgecon1 {
-        // the faces go in reversed, so the witness points come out belonging to the other geom — but ONLY
-        // if the clip produced any.
+        // the faces go in reversed, so the witness points come out belonging to the other geom.
         //
-        // ⛔ MuJoCo swaps `status->nx` pairs unconditionally here, and when the clip produces nothing that
-        // count is still the 1 left by EPA: it swaps EPA's witness pair, which inverts the contact normal.
-        // Measured on Menagerie, that is one pair of 2,805 (a cylinder against a hand-link mesh in
-        // `unitree_g1/g1_with_hands.xml`) whose depth is right to 9e-6 m and whose normal points exactly
-        // backwards — a contact that would pull the two bodies together. This port swaps only what the clip
-        // actually wrote, and otherwise leaves EPA's pair alone, which is where the correct normal already is.
-        let wit_dir = -n2[j].0;
+        // ⛔ MuJoCo swaps `status->nx` pairs unconditionally, and when the clip produced nothing that count is
+        // still the 1 left by EPA: it swaps EPA's own witness pair, which inverts the contact normal (on
+        // Menagerie, one cylinder–mesh pair in `unitree_g1/g1_with_hands.xml`, depth right, normal exactly
+        // backwards). This is a port of MuJoCo, so it does the same.
+        let wit_dir = n2[j].0 * -1.0;
         let nrm = n2[j].0;
-        if polygon_clip(st, &face2, &face1, &nrm, &wit_dir) {
-            std::mem::swap(&mut st.x1, &mut st.x2);
-        }
+        polygon_clip(st, &face2, &face1, &nrm, &wit_dir);
+        std::mem::swap(&mut st.x1, &mut st.x2);
         return;
     }
     if edgecon2 {
-        let wit_dir = -n1[j].0;
+        let wit_dir = n1[j].0 * -1.0;
         let nrm = n1[j].0;
         polygon_clip(st, &face1, &face2, &nrm, &wit_dir);
         return;
@@ -1518,10 +1622,10 @@ fn multicontact(pt: &Polytope, fi: usize, st: &mut CcdStatus, o1: &CcdObj, o2: &
 fn inflate(st: &mut CcdStatus, margin1: f64, margin2: f64) {
     let n = normalize3(&(st.x2[0] - st.x1[0]));
     if margin1 != 0.0 {
-        st.x1[0] += n * margin1;
+        st.x1[0] = add_scl3(&st.x1[0], &n, margin1);
     }
     if margin2 != 0.0 {
-        st.x2[0] -= n * margin2;
+        st.x2[0] = add_scl3(&st.x2[0], &n, -margin2);
     }
     st.dist[0] -= margin1 + margin2;
 }
@@ -1623,21 +1727,21 @@ pub fn plane_convex(margin: f64, plane: &GeomPose, obj: &mut CcdObj) -> Vec<PreC
     obj.vertindex = -1;
     obj.meshindex = -1;
     let v = obj.support(&dir);
-    let dist = normal.dot(&(v - plane.pos));
+    let dist = dot3(&normal, &(v - plane.pos));
     if dist > margin {
         return Vec::new();
     }
-    let mut out = vec![PreContact { dist, pos: v - normal * (0.5 * dist), normal, tangent: V3::zeros() }];
+    let mut out = vec![PreContact { dist, pos: add_scl3(&v, &normal, -0.5 * dist), normal, tangent: V3::zeros() }];
     let Some(hull) = obj.hull.filter(|_| obj.kind == GeomType::Mesh) else { return out };
     if hull.polygons.is_empty() || obj.vertindex < 0 {
         return out;
     }
     let vi = obj.vertindex as usize;
-    let local_normal = obj.pose.mat.transpose() * normal;
+    let local_normal = mat_t_vec(&obj.pose.mat, &normal);
     let mut best_poly: Option<usize> = None;
     let mut best_dot = 1.0;
     for &pi in &hull.polymap[vi] {
-        let nd = hull.polygons[pi].normal.dot(&local_normal);
+        let nd = dot3(&hull.polygons[pi].normal, &local_normal);
         if nd < best_dot {
             best_dot = nd;
             best_poly = Some(pi);
@@ -1648,12 +1752,12 @@ pub fn plane_convex(margin: f64, plane: &GeomPose, obj: &mut CcdObj) -> Vec<PreC
     let a = face.iter().position(|&x| x == vi).unwrap_or(0);
     let idx = hull4f(&hull.verts, face, a);
     for &i in idx.iter().skip(1) {
-        let pnt = obj.pose.mat * hull.verts[face[i]] + obj.pose.pos;
-        let vdist = normal.dot(&(pnt - plane.pos));
-        if vdist > margin || normal.dot(&(pnt - obj.pose.pos)) > 0.0 {
+        let pnt = local_to_global(&obj.pose.mat, &hull.verts[face[i]], &obj.pose.pos);
+        let vdist = dot3(&normal, &(pnt - plane.pos));
+        if vdist > margin || dot3(&normal, &(pnt - obj.pose.pos)) > 0.0 {
             continue;
         }
-        out.push(PreContact { dist: vdist, pos: pnt - normal * (0.5 * vdist), normal, tangent: V3::zeros() });
+        out.push(PreContact { dist: vdist, pos: add_scl3(&pnt, &normal, -0.5 * vdist), normal, tangent: V3::zeros() });
     }
     out
 }
@@ -1662,7 +1766,7 @@ pub fn plane_convex(margin: f64, plane: &GeomPose, obj: &mut CcdObj) -> Vec<PreC
 /// `a`; a polygon of at most four vertices is returned whole, starting at `a`.
 fn hull4f(verts: &[V3], idx: &[usize], a: usize) -> Vec<usize> {
     let n = idx.len();
-    let area = |a: usize, b: usize, c: usize, d: usize| 0.5 * (verts[idx[a]] - verts[idx[c]]).cross(&(verts[idx[b]] - verts[idx[d]])).norm();
+    let area = |a: usize, b: usize, c: usize, d: usize| 0.5 * norm3(&cross3(&(verts[idx[a]] - verts[idx[c]]), &(verts[idx[b]] - verts[idx[d]])));
     let (mut b, mut c, mut d) = ((a + 1) % n, (a + 2) % n, (a + 3) % n);
     let mut res = vec![a, b, c, d];
     if n <= 4 {
@@ -1763,7 +1867,7 @@ pub fn convex_pair(o1: &mut CcdObj, o2: &mut CcdObj, margin: f64, ccd_tolerance:
                 o2.pose = rotate_frame(&pose2, &origin, &rot.transpose());
                 let cfg1 = CcdConfig { max_contacts: 1, ..config };
                 let extra = penetration(&cfg1, o1, o2, margin);
-                if let Some(mut c) = extra.into_iter().next().filter(|c| con.iter().all(|k| (k.pos - c.pos).norm() > tolerance)) {
+                if let Some(mut c) = extra.into_iter().next().filter(|c| con.iter().all(|k| norm3(&(k.pos - c.pos)) > tolerance)) {
                     c.dist = con[0].dist;
                     con.push(c);
                 }
@@ -1777,9 +1881,16 @@ pub fn convex_pair(o1: &mut CcdObj, o2: &mut CcdObj, margin: f64, ccd_tolerance:
 
 /// `mju_rotateFrame`: rotate a pose about `origin`, with MuJoCo's own operation order.
 fn rotate_frame(pose: &GeomPose, origin: &V3, rot: &nalgebra::Matrix3<f64>) -> GeomPose {
+    // `mju_mulMatMat3(mat, rot, xmat)`: each entry a contracted row·column
+    let mut mat = nalgebra::Matrix3::zeros();
+    for i in 0..3 {
+        for j in 0..3 {
+            mat[(i, j)] = rot[(i, 2)].mul_add(pose.mat[(2, j)], rot[(i, 0)].mul_add(pose.mat[(0, j)], rot[(i, 1)] * pose.mat[(1, j)]));
+        }
+    }
     let rel = origin - pose.pos;
-    let vec = rot * rel - rel;
-    GeomPose { pos: pose.pos - vec, mat: rot * pose.mat }
+    let vec = mat_vec(rot, &rel) - rel;
+    GeomPose { pos: pose.pos - vec, mat }
 }
 
 /// `mju_axisAngle2Quat`.
@@ -1807,7 +1918,7 @@ fn quat_to_mat(q: &[f64; 4]) -> nalgebra::Matrix3<f64> {
 }
 
 #[cfg(test)]
-// the 7-digit quaternions are the probe's verbatim inputs (MuJoCo normalises them, as nalgebra does here); the
+// the 7-digit quaternions are the probe's verbatim inputs (MuJoCo normalises them, as `rot` does here); the
 // 17-significant-digit expectations are `%.17g` prints of MuJoCo's doubles, kept verbatim
 #[allow(clippy::approx_constant, clippy::excessive_precision)]
 mod tests {
@@ -1819,7 +1930,7 @@ mod tests {
     use super::*;
     use crate::mjcf_tree::{eig3_mujoco, mesh_inertia_mujoco, obj_as_mujoco_reads_it, quat_to_rotation, MeshInertia};
     use crate::mujoco_collision::{collide_pair, collide_pair_with, CollideOptions, CollisionGeom};
-    use nalgebra::{Matrix3, Quaternion, UnitQuaternion};
+    use nalgebra::Matrix3;
 
     const BOXMESH: &str = "v -0.1 -0.15 -0.075\nv -0.1 -0.15 0.075\nv -0.1 0.15 -0.075\nv -0.1 0.15 0.075\nv 0.1 -0.15 -0.075\nv 0.1 -0.15 0.075\nv 0.1 0.15 -0.075\nv 0.1 0.15 0.075\nf 1 2 4\nf 1 4 3\nf 5 7 8\nf 5 8 6\nf 1 5 6\nf 1 6 2\nf 3 4 8\nf 3 8 7\nf 1 3 7\nf 1 7 5\nf 2 6 8\nf 2 8 4\n";
     const OCTA: &str = "v 0.12 0 0\nv -0.12 0 0\nv 0 0.12 0\nv 0 -0.12 0\nv 0 0 0.12\nv 0 0 -0.12\nf 1 3 5\nf 3 2 5\nf 2 4 5\nf 4 1 5\nf 3 1 6\nf 2 3 6\nf 4 2 6\nf 1 4 6\n";
@@ -1838,8 +1949,19 @@ mod tests {
         (MeshHull::from_frames(&mesh.verts, &stored, &stored.verts, None).unwrap(), com, r)
     }
 
+    /// `mju_normalize4` (its sum of squares contracted, as the arm64 build computes it) then `mju_quat2Mat`:
+    /// how the harness poses every probe, so the collider sees MuJoCo's own rotation to the bit.
     fn rot(q: [f64; 4]) -> Matrix3<f64> {
-        *UnitQuaternion::from_quaternion(Quaternion::new(q[0], q[1], q[2], q[3])).to_rotation_matrix().matrix()
+        let n = q[3].mul_add(q[3], q[2].mul_add(q[2], q[0].mul_add(q[0], q[1] * q[1]))).sqrt();
+        let q = if n < MINVAL {
+            [1.0, 0.0, 0.0, 0.0]
+        } else if (n - 1.0).abs() > MINVAL {
+            let inv = 1.0 / n;
+            q.map(|x| x * inv)
+        } else {
+            q
+        };
+        quat_to_mat(&q)
     }
 
     fn pose(p: [f64; 3], q: [f64; 4]) -> GeomPose {
@@ -1870,12 +1992,12 @@ mod tests {
         for p in positions {
             let p = Vector3::new(p[0], p[1], p[2]);
             let (i, d) = got.iter().enumerate().filter(|(i, _)| !used[*i]).map(|(i, c)| (i, (c.pos - p).norm())).fold((usize::MAX, f64::INFINITY), |a, b| if b.1 < a.1 { b } else { a });
-            assert!(d < tol, "no contact within {tol:.1e} of MuJoCo's {p:?}; nearest {d:.2e}: {got:?}");
+            assert!(d <= tol, "no contact within {tol:.1e} of MuJoCo's {p:?}; nearest {d:.2e}: {got:?}");
             used[i] = true;
         }
         for c in got {
-            assert!((c.dist - dist).abs() < tol, "dist {} vs MuJoCo {dist}", c.dist);
-            assert!((c.normal - n).norm() < tol, "normal {:?} vs MuJoCo {normal:?}", c.normal);
+            assert!((c.dist - dist).abs() <= tol, "dist {} vs MuJoCo {dist}", c.dist);
+            assert!((c.normal - n).norm() <= tol, "normal {:?} vs MuJoCo {normal:?}", c.normal);
         }
     }
 
@@ -1935,12 +2057,13 @@ mod tests {
     }
 
     /// ⚠ A regular 16-gon makes `hull4`'s greedy area comparisons EXACT TIES, so the chosen quadrilateral is
-    /// decided by the last bit. MuJoCo's own answer is therefore build-dependent: its C source compiled
-    /// without floating-point contraction (`-ffp-contract=off`, which is what the x86-64 wheels compute)
-    /// gives the four corners below, bit-for-bit what this port gives; the arm64 macOS wheel (clang
-    /// contracts `a*b + c` into fused multiply-adds — 13,528 `fmadd` instructions in its arm64 slice, none
-    /// in its x86-64 slice) returns the square at 67.5°, −22.5°, 157.5°, 247.5° instead. Established with
-    /// `scripts/mujoco_ccd_harness.c` built around MuJoCo's own `engine_collision_gjk.c` both ways.
+    /// decided by the last bit, and MuJoCo's own answer is build-dependent. The arm64 macOS wheel (clang
+    /// contracts `a*b + c` into fused multiply-adds — 13,528 `fmadd` instructions in its arm64 slice, none in
+    /// its x86-64 slice) returns the square at 112.5°, 22.5°, −67.5°, 202.5° below, and so does this port,
+    /// which fuses at the same sites; the same C source built with `-ffp-contract=off` (what the x86-64
+    /// wheels compute) returns the square at 90°, 0°, −90°, 180° instead. Both are
+    /// `scripts/mujoco_ccd_harness.c` built around MuJoCo's own `engine_collision_gjk.c`
+    /// (`scripts/mujoco_ccd_harness_build.sh`); these are `ccd_on`'s numbers, compared bit for bit.
     #[test]
     fn a_cylinder_standing_on_a_box_yields_mujocos_four_sixteen_gon_contacts() {
         let cy = prim(GeomType::Cylinder, [0.05, 0.1, 0.0], [0.04, 0.02, 1.24], ID);
@@ -1950,12 +2073,12 @@ mod tests {
             -0.010000000000000009,
             [0.0, 0.0, -1.0],
             &[
-                [-0.006193976625564368, 0.039134171618254443, 1.145],
-                [0.03999999999999998, 0.070000000000000007, 1.145],
-                [0.089999999999999997, 0.020000000000000052, 1.145],
-                [0.040000000000000015, -0.029999999999999999, 1.145],
+                [-0.0061939766255643203, 0.039134171618254485, 1.145],
+                [0.059134171618254461, 0.066193976625564352, 1.145],
+                [0.086193976625564342, 0.00086582838174548171, 1.145],
+                [0.020865828381745527, -0.026193976625564355, 1.145],
             ],
-            1e-15,
+            0.0,
         );
         // every contact sits on the cylinder's rim, whichever quadrilateral a build picks
         for k in &c {
@@ -1970,9 +2093,9 @@ mod tests {
     /// driven directly by `scripts/mujoco_ccd_harness.c`.
     ///
     /// A segment parallel to a face is a degenerate closest-feature pair, so GJK's witness point is decided
-    /// by the last bit: MuJoCo's source without floating-point contraction lands mid-segment and the two
-    /// perturbations then add both capsule ends (three contacts, the numbers below, bit-for-bit this port);
-    /// the arm64 wheel, whose clang contracts multiply-adds, lands on one end and reports two.
+    /// by the last bit. Here both builds of MuJoCo's source land mid-segment and the two perturbations then
+    /// add both capsule ends — three contacts — and differ only in the last digits; the numbers below are
+    /// the contracted build's (`ccd_on`), bit for bit.
     #[test]
     fn a_capsule_lying_on_a_box_yields_mujocos_perturbation_contacts() {
         let mut cp = CcdObj::new(GeomType::Capsule, pose([0.04, 0.02, 1.18], [0.7071068, 0.0, 0.7071068, 0.0]), [0.04, 0.1, 0.0], None, 0.0);
@@ -1980,14 +2103,14 @@ mod tests {
         let c = convex_pair(&mut cp, &mut bx, 0.0, 1e-6, 35, true);
         assert_eq!(c.len(), 3, "{c:?}");
         let expected = [
-            ([0.026666666666666679, 0.020000000000000049, 1.145], [3.4694469519535343e-16, 1.3877787807814137e-15, -1.0]),
-            ([-0.060069869953409231, 0.020000000000000021, 1.1450000349133043], [-0.00099999983333385191, 6.8206221216096748e-16, -0.99999950000004167]),
-            ([0.14006982995343259, 0.020000000000000052, 1.1450000348866376], [0.00099999983333323196, 1.3570103998217788e-15, -0.99999950000004167]),
+            ([0.026666666666666668, 0.020000000000000021, 1.1449999999999998], [0.0, 6.9388939039070686e-16, -1.0]),
+            ([-0.060069869953409211, 0.020000000000000039, 1.1450000349133043], [-0.00099999983333316994, 1.0230933182414512e-15, -0.99999950000004167]),
+            ([0.14006982995343253, 0.020000000000000039, 1.1450000348866374], [0.00099999983333323196, 1.017757799866334e-15, -0.99999950000004167]),
         ];
         for (k, (p, n)) in c.iter().zip(expected) {
-            assert!((k.dist - -0.0099999999999999707).abs() < 1e-15, "{}", k.dist);
-            assert!((k.pos - Vector3::new(p[0], p[1], p[2])).norm() < 1e-15, "{:?} vs {p:?}", k.pos);
-            assert!((k.normal - Vector3::new(n[0], n[1], n[2])).norm() < 1e-15, "{:?} vs {n:?}", k.normal);
+            assert_eq!(k.dist, -0.0099999999999999777);
+            assert_eq!(k.pos, Vector3::new(p[0], p[1], p[2]));
+            assert_eq!(k.normal, Vector3::new(n[0], n[1], n[2]));
         }
     }
 
@@ -1996,16 +2119,42 @@ mod tests {
         let c1 = prim(GeomType::Cylinder, [0.05, 0.2, 0.0], [0.0, 0.0, 1.0], ID);
         let c2 = prim(GeomType::Cylinder, [0.05, 0.2, 0.0], [0.02, 0.01, 1.095], [0.7071068, 0.0, 0.7071068, 0.0]);
         let c = collide_pair(0.0, &c1, &c2).unwrap();
-        // the arm64 wheel differs from MuJoCo's uncontracted source only in the last digits (pos x
-        // −1.4796140527733129e-05, normal x −2.8248827006248473e-07); the source's numbers, bit-for-bit:
-        check_set(&c, -0.089999910950677928, [-2.824882700680563e-07, 0.99999999999995637, -8.7192995954490671e-08], &[[-1.4796140527732876e-05, 0.0050000005607276354, 1.0949930830747925]], 1e-15);
+        // MuJoCo's source built without contraction differs only in the last digits (pos x
+        // −1.4796140527732876e-05, normal x −2.824882700680563e-07); the contracted build's, bit for bit:
+        check_set(&c, -0.089999910950677928, [-2.8248827006248473e-07, 0.99999999999995637, -8.719299348732596e-08], &[[-1.4796140527733129e-05, 0.0050000005607276354, 1.0949930830747925]], 0.0);
+    }
+
+    /// `fourier_n1/n1.xml` geoms 1 and 16 at MuJoCo's own `geom_xpos`/`geom_xmat`: two cylinders overlapping
+    /// by 31 µm at a generic orientation, where every product in GJK and EPA reaches the answer. MuJoCo's
+    /// source built without contraction reports this contact with the normal REVERSED at the same depth;
+    /// the arm64 wheel, `ccd_on`, and this port report the numbers below, bit for bit.
+    #[test]
+    fn fourier_n1s_overlapping_cylinders_match_the_contracted_build_bit_for_bit() {
+        let cyl = |size: [f64; 3], p: [f64; 3], m: [f64; 9]| CollisionGeom {
+            kind: GeomType::Cylinder,
+            pose: GeomPose { pos: Vector3::new(p[0], p[1], p[2]), mat: Matrix3::new(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]) },
+            size,
+            hull: None,
+        };
+        let a = cyl(
+            [0.065, 0.0675, 0.0],
+            [0.08539340246023025, 0.032896559837938814, 0.6641187211978501],
+            [-0.49418139395483024, -0.8109762031412986, 0.31321294323093446, 0.6602653884717504, -0.11574723429074663, 0.7420594279033802, -0.5655390054232421, 0.5735156281153694, 0.592659647396652],
+        );
+        let b = cyl(
+            [0.06, 0.095, 0.0],
+            [0.04788949966356997, 0.23417202888574384, 0.6552473273724194],
+            [-0.6018919636550226, -0.46927452071099596, 0.6461481937597335, -0.1511126975750603, -0.7275770566496756, -0.6691760450498682, 0.7841498687872679, -0.5004128803782532, 0.3670094446093328],
+        );
+        let c = collide_pair(0.0, &a, &b).unwrap();
+        check_set(&c, -3.1287806572612574e-05, [0.052617795152431056, -0.99686384009728823, -0.059108814400097937], &[[0.077371193662543206, 0.12623679201342905, 0.66536192686712903]], 0.0);
     }
 
     #[test]
     fn an_ellipsoid_on_a_box_yields_mujocos_iterated_epa_answer() {
         let el = prim(GeomType::Ellipsoid, [0.06, 0.04, 0.03], [0.03, 0.02, 1.175], [0.9238795, 0.0, 0.3826834, 0.0]);
         let c = collide_pair(0.0, &el, &big_box()).unwrap();
-        check_set(&c, -0.022434120907788884, [-6.8874448817191456e-08, -3.4741961578929045e-08, -0.999999999999997], &[[0.058423792189869414, 0.020006847523118546, 1.1387829395461053]], 1e-15);
+        check_set(&c, -0.022434120907788884, [-6.8874450054395757e-08, -3.4741962506832099e-08, -0.999999999999997], &[[0.058423792189869435, 0.020006847523118557, 1.1387829395461053]], 0.0);
     }
 
     #[test]
@@ -2017,8 +2166,8 @@ mod tests {
         check_set(&c, -0.005000002980232357, [0.0, 0.0, -1.0], &[[0.030000000000000002, 0.040000000000000015, 1.0725000014901163]], 1e-9);
     }
 
-    /// The guard on the inversion fix: a clip that writes nothing must SAY so, because the caller's
-    /// edge-on-face branch swaps the witness points and swapping EPA's pair inverts the contact normal.
+    /// A clip that writes nothing must SAY so and leave EPA's witness pair alone. (MuJoCo's edge-on-face
+    /// branch swaps the pair whether or not the clip wrote anything, and this port does the same.)
     #[test]
     fn a_clip_that_produces_nothing_reports_it() {
         let mut st = CcdStatus {

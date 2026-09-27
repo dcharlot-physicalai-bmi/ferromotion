@@ -244,6 +244,54 @@ struct Tally {
     param_mismatch: usize,
 }
 
+/// One CCD pair for `scripts/mujoco_ccd_pairs.c`: the two objects in the order the CCD sees them (lower
+/// geom type first, as `mj_collision` orders them), and our contacts with normals in that order.
+#[allow(clippy::too_many_arguments)]
+fn dump_ccd_pair(w: &mut impl std::io::Write, rel: &str, sample: usize, i: usize, j: usize, margin: f64, opts: &CollideOptions, ci: &CollisionGeom, cj: &CollisionGeom, cs: &[ferromotion_core::PreContact]) {
+    use GeomType::*;
+    let (a, b, swapped) = if ci.kind <= cj.kind { (ci, cj, false) } else { (cj, ci, true) };
+    let analytic = matches!(
+        (a.kind, b.kind),
+        (Plane, _) | (HField, _) | (_, HField) | (Sphere, Sphere) | (Sphere, Capsule) | (Sphere, Cylinder) | (Sphere, Box) | (Capsule, Capsule) | (Capsule, Box) | (Box, Box)
+    );
+    if analytic {
+        return;
+    }
+    let f = |x: f64| format!("{x:e}");
+    let _ = writeln!(w, "pair\t{rel}\t{sample}\t{i}\t{j}\t{}\t{}\t{}\t{}", f(margin), f(opts.ccd_tolerance), opts.ccd_iterations, opts.multiccd as i32);
+    for g in [a, b] {
+        let m = &g.pose.mat;
+        let mat: Vec<String> = (0..3).flat_map(|r| (0..3).map(move |c| (r, c))).map(|(r, c)| f(m[(r, c)])).collect();
+        let _ = writeln!(w, "obj\t{}\t{} {} {}\t{} {} {}\t{}", g.kind as i32, f(g.size[0]), f(g.size[1]), f(g.size[2]), f(g.pose.pos.x), f(g.pose.pos.y), f(g.pose.pos.z), mat.join(" "));
+        if let Some(h) = g.hull {
+            let verts: Vec<String> = h.verts.iter().flat_map(|v| [f(v.x), f(v.y), f(v.z)]).collect();
+            let (graph, extrema) = match &h.graph {
+                Some(gr) => {
+                    let nv = gr.vert_globalid.len();
+                    let nf = h.hull_faces.len();
+                    let mut ints: Vec<i64> = vec![nv as i64, nf as i64];
+                    ints.extend(gr.vert_edgeadr.iter().map(|&x| x as i64));
+                    ints.extend(gr.vert_globalid.iter().map(|&x| x as i64));
+                    ints.extend(gr.edge_localid.iter().map(|&x| x as i64));
+                    ints.extend(h.hull_faces.iter().flat_map(|t| t.iter().map(|&x| x as i64)));
+                    (ints.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(" "), gr.extrema.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(" "))
+                }
+                None => ("-".to_string(), "-".to_string()),
+            };
+            let polys: Vec<String> = h.polygons.iter().map(|p| format!("{} {} {} {} {}", p.verts.len(), p.verts.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(" "), f(p.normal.x), f(p.normal.y), f(p.normal.z))).collect();
+            let _ = writeln!(w, "mesh\t{}\t{}\t{graph}\t{extrema}\t{}\t{}", h.verts.len(), verts.join(" "), h.polygons.len(), polys.join(" "));
+        }
+    }
+    let ours: Vec<String> = cs
+        .iter()
+        .map(|c| {
+            let n = if swapped { -c.normal } else { c.normal };
+            format!("{} {} {} {} {} {} {}", f(c.dist), f(c.pos.x), f(c.pos.y), f(c.pos.z), f(n.x), f(n.y), f(n.z))
+        })
+        .collect();
+    let _ = writeln!(w, "ours\t{}\t{}", cs.len(), ours.join("\t"));
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
@@ -263,6 +311,9 @@ fn main() {
     let mut models = 0;
     // MENAGERIE_NOTES=<n> lists up to n discrepancies per model (default 3)
     let max_notes: usize = std::env::var("MENAGERIE_NOTES").ok().and_then(|s| s.parse().ok()).unwrap_or(3);
+    // MENAGERIE_CCD_DUMP=<file>: every pair that goes through the native CCD, with its inputs and our
+    // contacts, for `scripts/mujoco_ccd_pairs.c` to rerun through MuJoCo's own engine_collision_gjk.c
+    let mut ccd_dump: Option<std::io::BufWriter<std::fs::File>> = std::env::var("MENAGERIE_CCD_DUMP").ok().map(|p| std::io::BufWriter::new(std::fs::File::create(p).unwrap()));
     for file in &files {
         let o = parse_oracle(&std::fs::read_to_string(file).unwrap());
         if filter.as_ref().is_some_and(|f| !o.rel.contains(f.as_str())) {
@@ -317,7 +368,7 @@ fn main() {
         let opts = CollideOptions { ccd_tolerance: o.ccdtol, ccd_iterations: o.ccditer, multiccd: o.multiccd };
         let mut tally = Tally::default();
         let mut model_notes: Vec<String> = Vec::new();
-        for s in &o.samples {
+        for (si, s) in o.samples.iter().enumerate() {
             // every geom at MuJoCo's pose
             let geoms: Vec<Option<CollisionGeom>> = o
                 .geoms
@@ -379,6 +430,9 @@ fn main() {
                     let dbg = std::env::var("MENAGERIE_PAIR").ok().map(|v| v == format!("{i},{j}")).unwrap_or(false);
                     match collide_pair_with(&opts, detect, ci, cj) {
                         Ok(cs) => {
+                            if let Some(w) = ccd_dump.as_mut() {
+                                dump_ccd_pair(w, &o.rel, si, i, j, detect, &opts, ci, cj, &cs);
+                            }
                             if dbg {
                                 eprintln!("pair {i},{j} ({}–{}): {} contacts {cs:?}", gi.name, gj.name, cs.len());
                             }
