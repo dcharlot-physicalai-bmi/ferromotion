@@ -214,6 +214,8 @@ fn weld_root<'a>(t: &'a MjcfTree, body: &'a str) -> &'a str {
 struct Tally {
     oracle: usize,
     matched: usize,
+    /// matched AND bit for bit: `dist`, `pos` and the normal are the same doubles as MuJoCo's
+    bits: usize,
     /// same geom pair, same normal and depth within the CCD tolerance, witness elsewhere on the face
     near: usize,
     missing: usize,
@@ -600,7 +602,11 @@ fn main() {
                         let n_mine = if oc.g1 == a { c.frame[0] } else { -c.frame[0] };
                         let dd = (c.dist - oc.dist).abs();
                         let dn = (n_mine - oc.normal).norm();
+                        let same_bits = exact && c.dist.to_bits() == oc.dist.to_bits() && (0..3).all(|k| c.pos[k].to_bits() == oc.pos[k].to_bits() && n_mine[k].to_bits() == oc.normal[k].to_bits());
                         for t in [&mut tally, bt] {
+                            if same_bits {
+                                t.bits += 1;
+                            }
                             if exact {
                                 t.matched += 1;
                                 t.worst_dist = t.worst_dist.max(dd);
@@ -689,6 +695,7 @@ fn main() {
         }
         grand.oracle += tally.oracle;
         grand.matched += tally.matched;
+        grand.bits += tally.bits;
         grand.pair_both += tally.pair_both;
         grand.pair_count_same += tally.pair_count_same;
         grand.pair_manifold_tight += tally.pair_manifold_tight;
@@ -744,11 +751,12 @@ fn main() {
         let line: Vec<String> = order.iter().filter_map(|k| grand.miss_dist.get(k).map(|v| format!("{k}: {v}"))).collect();
         println!("  how far our nearest contact was, for the misses: {}", line.join(", "));
     }
+    println!("  BIT FOR BIT (dist, pos, normal): {} of {} matched contacts", grand.bits, grand.matched);
     println!("by pair type:");
     for (k, t) in &by_type {
         println!(
-            "  {:<22} contacts {:>5}/{:<5} near {:>4} | PAIRS both {:>5} onlyMJ {:>4} onlyOurs {:>4} depth {:.1e} normal {:.1e}",
-            k, t.matched, t.oracle, t.near, t.pair_both, t.pair_only_mujoco, t.pair_only_ours, t.pair_worst_depth, t.pair_worst_normal
+            "  {:<22} contacts {:>5}/{:<5} bits {:>5} near {:>4} | PAIRS both {:>5} onlyMJ {:>4} onlyOurs {:>4} depth {:.1e} normal {:.1e}",
+            k, t.matched, t.oracle, t.bits, t.near, t.pair_both, t.pair_only_mujoco, t.pair_only_ours, t.pair_worst_depth, t.pair_worst_normal
         );
         if !t.miss_dist.is_empty() {
             let order = ["<10um", "<0.1mm", "<1mm", "<1cm", ">=1cm", "no contact of ours on that pair"];

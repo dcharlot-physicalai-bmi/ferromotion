@@ -77,7 +77,7 @@ fn pre(dist: f64, pos: Vector3<f64>, normal: Vector3<f64>, tangent: Vector3<f64>
 /// `mjraw_PlaneSphere`: `r2` is the sphere's radius.
 pub fn plane_sphere(margin: f64, p1: &GeomPose, p2: &GeomPose, r2: f64) -> Option<PreContact> {
     let n = p1.axis();
-    let cdist = (p2.pos - p1.pos).dot(&n);
+    let cdist = dot3(&(p2.pos - p1.pos), &n);
     if cdist > margin + r2 {
         return None;
     }
@@ -88,24 +88,22 @@ pub fn plane_sphere(margin: f64, p1: &GeomPose, p2: &GeomPose, r2: f64) -> Optio
 /// `mjraw_SphereSphere`.
 pub fn sphere_sphere(margin: f64, p1: &GeomPose, r1: f64, p2: &GeomPose, r2: f64) -> Option<PreContact> {
     let dif = p1.pos - p2.pos;
-    let cdist_sqr = dif.dot(&dif);
+    let cdist_sqr = dot3(&dif, &dif);
     let min_dist = margin + r1 + r2;
     if cdist_sqr > min_dist * min_dist {
         return None;
     }
     let dist = cdist_sqr.sqrt() - r1 - r2;
     let mut normal = p2.pos - p1.pos;
-    let len = normal.norm();
+    let len = dot3(&normal, &normal).sqrt();
+    normalize3_mj(&mut normal);
     if len < MINVAL {
-        normal = p1.axis().cross(&p2.axis());
-        let l = normal.norm();
-        if l >= MINVAL {
-            normal /= l;
-        }
-    } else {
-        normal /= len;
+        // coincident centres: the cross product of the two z axes, or +x when they are parallel too
+        let (a1, a2) = (p1.axis(), p2.axis());
+        normal = Vector3::new(a1.y.mul_add(a2.z, -(a1.z * a2.y)), a1.z.mul_add(a2.x, -(a1.x * a2.z)), a1.x.mul_add(a2.y, -(a1.y * a2.x)));
+        normalize3_mj(&mut normal);
     }
-    Some(pre(dist, p1.pos + normal * (r1 + dist / 2.0), normal, Vector3::zeros()))
+    Some(pre(dist, normal * (r1 + dist / 2.0) + p1.pos, normal, Vector3::zeros()))
 }
 
 /// `mjc_PlaneCapsule`: `size2 = (radius, half-length)`; each end cap is a plane–sphere test and the
@@ -127,8 +125,8 @@ pub fn plane_capsule(margin: f64, p1: &GeomPose, p2: &GeomPose, size2: [f64; 2])
 /// `mjraw_SphereCapsule`: the sphere against the nearest point of the capsule's segment.
 pub fn sphere_capsule(margin: f64, p1: &GeomPose, r1: f64, p2: &GeomPose, size2: [f64; 2]) -> Option<PreContact> {
     let axis = p2.axis();
-    let x = axis.dot(&(p1.pos - p2.pos)).clamp(-size2[1], size2[1]);
-    let near = GeomPose { pos: p2.pos + axis * x, mat: p2.mat };
+    let x = dot3(&axis, &(p1.pos - p2.pos)).clamp(-size2[1], size2[1]);
+    let near = GeomPose { pos: axis * x + p2.pos, mat: p2.mat };
     sphere_sphere(margin, p1, r1, &near, size2[0])
 }
 
@@ -137,16 +135,16 @@ pub fn capsule_capsule(margin: f64, p1: &GeomPose, size1: [f64; 2], p2: &GeomPos
     let axis1 = p1.axis() * size1[1];
     let axis2 = p2.axis() * size2[1];
     let dif = p1.pos - p2.pos;
-    let ma = axis1.dot(&axis1);
-    let mb = -axis1.dot(&axis2);
-    let mc = axis2.dot(&axis2);
-    let u = -axis1.dot(&dif);
-    let v = axis2.dot(&dif);
-    let det = ma * mc - mb * mb;
+    let ma = dot3(&axis1, &axis1);
+    let mb = -dot3(&axis1, &axis2);
+    let mc = dot3(&axis2, &axis2);
+    let u = -dot3(&axis1, &dif);
+    let v = dot3(&axis2, &dif);
+    let det = ma.mul_add(mc, -(mb * mb));
     let ss = |p: Vector3<f64>, q: Vector3<f64>| sphere_sphere(margin, &GeomPose { pos: p, mat: p1.mat }, size1[0], &GeomPose { pos: q, mat: p2.mat }, size2[0]);
     if det.abs() >= MINVAL {
-        let mut x1 = (mc * u - mb * v) / det;
-        let mut x2 = (ma * v - mb * u) / det;
+        let mut x1 = mc.mul_add(u, -(mb * v)) / det;
+        let mut x2 = ma.mul_add(v, -(mb * u)) / det;
         if x1 > 1.0 {
             x1 = 1.0;
             x2 = (v - mb) / mc;
@@ -161,24 +159,24 @@ pub fn capsule_capsule(margin: f64, p1: &GeomPose, size1: [f64; 2], p2: &GeomPos
             x2 = -1.0;
             x1 = ((u + mb) / ma).clamp(-1.0, 1.0);
         }
-        return ss(p1.pos + axis1 * x1, p2.pos + axis2 * x2).into_iter().collect();
+        return ss(axis1 * x1 + p1.pos, axis2 * x2 + p2.pos).into_iter().collect();
     }
     // parallel: both ends of segment 1 against segment 2, then segment 2's ends against segment 1
     let mut out = Vec::with_capacity(2);
     let x2 = ((v - mb) / mc).clamp(-1.0, 1.0);
-    out.extend(ss(p1.pos + axis1, p2.pos + axis2 * x2));
+    out.extend(ss(p1.pos + axis1, axis2 * x2 + p2.pos));
     let x2 = ((v + mb) / mc).clamp(-1.0, 1.0);
-    out.extend(ss(p1.pos - axis1, p2.pos + axis2 * x2));
+    out.extend(ss(p1.pos - axis1, axis2 * x2 + p2.pos));
     if out.len() >= 2 {
         return out;
     }
     let x1 = ((u - mb) / ma).clamp(-1.0, 1.0);
-    out.extend(ss(p1.pos + axis1 * x1, p2.pos + axis2));
+    out.extend(ss(axis1 * x1 + p1.pos, p2.pos + axis2));
     if out.len() >= 2 {
         return out;
     }
     let x1 = ((u + mb) / ma).clamp(-1.0, 1.0);
-    out.extend(ss(p1.pos + axis1 * x1, p2.pos - axis2));
+    out.extend(ss(axis1 * x1 + p1.pos, p2.pos - axis2));
     out
 }
 
@@ -186,45 +184,44 @@ pub fn capsule_capsule(margin: f64, p1: &GeomPose, size1: [f64; 2], p2: &GeomPos
 pub fn plane_cylinder(margin: f64, p1: &GeomPose, p2: &GeomPose, size2: [f64; 2]) -> Vec<PreContact> {
     let normal = p1.axis();
     let mut axis = p2.axis();
-    let mut prjaxis = normal.dot(&axis);
+    let mut prjaxis = dot3(&normal, &axis);
     if prjaxis > 0.0 {
         axis = -axis;
         prjaxis = -prjaxis;
     }
-    let dist0 = (p2.pos - p1.pos).dot(&normal);
+    let dist0 = dot3(&(p2.pos - p1.pos), &normal);
     // vec = the rim direction most aligned with −normal
     let mut vec = axis * prjaxis - normal;
-    let len_sqr = vec.dot(&vec);
+    let len_sqr = dot3(&vec, &vec);
     if len_sqr >= MINVAL * MINVAL {
         vec *= size2[0] / len_sqr.sqrt();
     } else {
         vec = p2.mat.column(0) * size2[0];
     }
-    let prjvec = vec.dot(&normal);
+    let prjvec = dot3(&vec, &normal);
     let axis = axis * size2[1];
     prjaxis *= size2[1];
+    // `mji_addToScl3(pos, v, s)`: `pos += v·s`, one fused step per component
+    let add_scl = |pos: Vector3<f64>, v: &Vector3<f64>, s: f64| Vector3::from_fn(|k, _| v[k].mul_add(s, pos[k]));
     let mut out = Vec::with_capacity(4);
     let d = dist0 + prjaxis + prjvec;
     if d <= margin {
-        out.push(pre(d, p2.pos + vec + axis - normal * (d * 0.5), normal, Vector3::zeros()));
+        out.push(pre(d, add_scl(p2.pos + vec + axis, &normal, -d * 0.5), normal, Vector3::zeros()));
     } else {
         return out;
     }
     let d = dist0 - prjaxis + prjvec;
     if d <= margin {
-        out.push(pre(d, p2.pos + vec - axis - normal * (d * 0.5), normal, Vector3::zeros()));
+        out.push(pre(d, add_scl(p2.pos + vec - axis, &normal, -d * 0.5), normal, Vector3::zeros()));
     }
     let prjvec1 = -prjvec * 0.5;
     let d = dist0 + prjaxis + prjvec1;
     if d <= margin {
-        let mut vec1 = vec.cross(&axis);
-        let l = vec1.norm();
-        if l >= MINVAL {
-            vec1 /= l;
-        }
+        let mut vec1 = Vector3::new(vec.y.mul_add(axis.z, -(vec.z * axis.y)), vec.z.mul_add(axis.x, -(vec.x * axis.z)), vec.x.mul_add(axis.y, -(vec.y * axis.x)));
+        normalize3_mj(&mut vec1);
         vec1 *= size2[0] * 3.0f64.sqrt() / 2.0;
-        out.push(pre(d, p2.pos + vec1 + axis - vec * 0.5 - normal * (d * 0.5), normal, Vector3::zeros()));
-        out.push(pre(d, p2.pos - vec1 + axis - vec * 0.5 - normal * (d * 0.5), normal, Vector3::zeros()));
+        out.push(pre(d, add_scl(add_scl(p2.pos + vec1 + axis, &vec, -0.5), &normal, -d * 0.5), normal, Vector3::zeros()));
+        out.push(pre(d, add_scl(add_scl(p2.pos - vec1 + axis, &vec, -0.5), &normal, -d * 0.5), normal, Vector3::zeros()));
     }
     out
 }
@@ -234,10 +231,10 @@ pub fn sphere_cylinder(margin: f64, p1: &GeomPose, r1: f64, p2: &GeomPose, size2
     let (radius, height) = (size2[0], size2[1]);
     let axis = p2.axis();
     let vec = p1.pos - p2.pos;
-    let x = axis.dot(&vec);
+    let x = dot3(&axis, &vec);
     let a_proj = axis * x;
     let p_proj = vec - a_proj;
-    let p_proj_sqr = p_proj.dot(&p_proj);
+    let p_proj_sqr = dot3(&p_proj, &p_proj);
     let mut side = x.abs() < height;
     let mut cap = p_proj_sqr < radius * radius;
     if side && cap {
@@ -249,34 +246,36 @@ pub fn sphere_cylinder(margin: f64, p1: &GeomPose, r1: f64, p2: &GeomPose, size2
         }
     }
     if side {
-        return sphere_sphere(margin, p1, r1, &GeomPose { pos: p2.pos + a_proj, mat: p2.mat }, radius);
+        return sphere_sphere(margin, p1, r1, &GeomPose { pos: a_proj + p2.pos, mat: p2.mat }, radius);
     }
     if cap {
         // the cap as a plane facing the sphere, then flip the normal back to geom1 → geom2
+        // `mju_addScl3(pos_cap, pos2, axis, ±height)`: fused
+        let cap_at = |h: f64| Vector3::from_fn(|k, _| axis[k].mul_add(h, p2.pos[k]));
         let (pos_cap, mat_cap) = if x > 0.0 {
-            (p2.pos + axis * height, p2.mat)
+            (cap_at(height), p2.mat)
         } else {
             let m = p2.mat;
-            (p2.pos - axis * height, Matrix3::new(-m[(0, 0)], m[(0, 1)], -m[(0, 2)], -m[(1, 0)], m[(1, 1)], -m[(1, 2)], -m[(2, 0)], m[(2, 1)], -m[(2, 2)]))
+            (cap_at(-height), Matrix3::new(-m[(0, 0)], m[(0, 1)], -m[(0, 2)], -m[(1, 0)], m[(1, 1)], -m[(1, 2)], -m[(2, 0)], m[(2, 1)], -m[(2, 2)]))
         };
         let mut c = plane_sphere(margin, &GeomPose { pos: pos_cap, mat: mat_cap }, p1, r1)?;
         c.normal = -c.normal;
         return Some(c);
     }
     // rim: the nearest point of the circular edge, as a zero-radius sphere
-    let rim = p2.pos + p_proj * (radius / p_proj_sqr.sqrt()) + axis * if x > 0.0 { height } else { -height };
+    let rim = axis * if x > 0.0 { height } else { -height } + p_proj * (radius / p_proj_sqr.sqrt()) + p2.pos;
     sphere_sphere(margin, p1, r1, &GeomPose { pos: rim, mat: p2.mat }, 0.0)
 }
 
 /// `mjc_PlaneBox`: every corner below the plane (at most four), `size2` the half-extents.
 pub fn plane_box(margin: f64, p1: &GeomPose, p2: &GeomPose, size2: [f64; 3]) -> Vec<PreContact> {
     let norm = p1.axis();
-    let dist = (p2.pos - p1.pos).dot(&norm);
+    let dist = dot3(&(p2.pos - p1.pos), &norm);
     let mut out = Vec::with_capacity(4);
     for i in 0..8 {
         let v = Vector3::new(if i & 1 != 0 { size2[0] } else { -size2[0] }, if i & 2 != 0 { size2[1] } else { -size2[1] }, if i & 4 != 0 { size2[2] } else { -size2[2] });
-        let corner = p2.mat * v;
-        let ldist = norm.dot(&corner);
+        let corner = mat_vec(&p2.mat, &v);
+        let ldist = dot3(&norm, &corner);
         if dist + ldist > margin || ldist > 0.0 {
             continue;
         }
@@ -292,7 +291,7 @@ pub fn plane_box(margin: f64, p1: &GeomPose, p2: &GeomPose, size2: [f64; 3]) -> 
 /// `mjraw_SphereBox`: the sphere against the nearest point of the box, with MuJoCo's nearest-face rule when
 /// the centre is inside.
 pub fn sphere_box(margin: f64, p1: &GeomPose, r1: f64, p2: &GeomPose, size2: [f64; 3]) -> Option<PreContact> {
-    let center = p2.mat.transpose() * (p1.pos - p2.pos);
+    let center = mat_t_vec(&p2.mat, &(p1.pos - p2.pos));
     let mut clamped = center;
     for i in 0..3 {
         if size2[i] > 0.0 {
@@ -300,7 +299,8 @@ pub fn sphere_box(margin: f64, p1: &GeomPose, r1: f64, p2: &GeomPose, size2: [f6
         }
     }
     let mut tmp = clamped - center;
-    let mut dist = tmp.norm();
+    let mut dist = dot3(&tmp, &tmp).sqrt();
+    normalize3_mj(&mut tmp);
     if dist - r1 > margin {
         return None;
     }
@@ -317,18 +317,18 @@ pub fn sphere_box(margin: f64, p1: &GeomPose, r1: f64, p2: &GeomPose, size2: [f6
                 k = i;
             }
         }
-        let mut nearest = Vector3::zeros();
+        let mut nearest: Vector3<f64> = Vector3::zeros();
         nearest[k / 2] = if k % 2 == 1 { -1.0 } else { 1.0 };
-        pos = center + nearest * ((r1 - closest) / 2.0);
+        let f = (r1 - closest) / 2.0;
+        pos = Vector3::from_fn(|i, _| nearest[i].mul_add(f, center[i]));
         normal_local = nearest;
         dist = -closest;
     } else {
-        tmp /= dist;
-        let deepest = center + tmp * r1;
-        pos = clamped * 0.5 + deepest * 0.5;
+        let deepest = Vector3::from_fn(|i, _| tmp[i].mul_add(r1, center[i]));
+        pos = Vector3::from_fn(|i, _| deepest[i].mul_add(0.5, clamped[i] * 0.5));
         normal_local = tmp;
     }
-    Some(pre(dist - r1, p2.mat * pos + p2.pos, p2.mat * normal_local, Vector3::zeros()))
+    Some(pre(dist - r1, mat_vec(&p2.mat, &pos) + p2.pos, mat_vec(&p2.mat, &normal_local), Vector3::zeros()))
 }
 
 // --- box–box (engine_collision_box.c), MuJoCo's double-precision tolerances
@@ -340,7 +340,7 @@ const BOXBOX_EDGEBIAS: f64 = 1e-6;
 const BOXBOX_MAXVERT: usize = 12;
 
 fn clip_half_plane(poly: &mut Vec<[f64; 3]>, coord: usize, sign: f64, limit: f64) {
-    let d: Vec<f64> = poly.iter().map(|p| sign * p[coord] - limit).collect();
+    let d: Vec<f64> = poly.iter().map(|p| sign.mul_add(p[coord], -limit)).collect();
     if d.iter().all(|&x| x <= 0.0) {
         return;
     }
@@ -355,25 +355,58 @@ fn clip_half_plane(poly: &mut Vec<[f64; 3]>, coord: usize, sign: f64, limit: f64
         if ((dp < 0.0 && dq > 0.0) || (dp > 0.0 && dq < 0.0)) && out.len() < BOXBOX_MAXVERT {
             let t = dp / (dp - dq);
             let (p, q) = (poly[k], poly[k1]);
-            out.push([p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1]), p[2] + t * (q[2] - p[2])]);
+            out.push([t.mul_add(q[0] - p[0], p[0]), t.mul_add(q[1] - p[1], p[1]), t.mul_add(q[2] - p[2], p[2])]);
         }
     }
     *poly = out;
 }
 
+// The primitive colliders' arithmetic, contracted as clang contracts MuJoCo's C on arm64 (see
+// `mujoco_ccd`): the LEFT product of `a*b + c*d` fused, each later product of a chain fused into the sum.
+
+/// `mju_dot3` / `mji_dot3`.
+fn dot3(a: &Vector3<f64>, b: &Vector3<f64>) -> f64 {
+    a.z.mul_add(b.z, a.x.mul_add(b.x, a.y * b.y))
+}
+
+/// `mji_mulMatVec3`: `mat · v`.
+fn mat_vec(m: &Matrix3<f64>, v: &Vector3<f64>) -> Vector3<f64> {
+    Vector3::from_fn(|r, _| m[(r, 2)].mul_add(v.z, m[(r, 0)].mul_add(v.x, m[(r, 1)] * v.y)))
+}
+
+/// `mji_mulMatTVec3`: `matᵀ · v`.
+fn mat_t_vec(m: &Matrix3<f64>, v: &Vector3<f64>) -> Vector3<f64> {
+    Vector3::from_fn(|c, _| m[(2, c)].mul_add(v.z, m[(0, c)].mul_add(v.x, m[(1, c)] * v.y)))
+}
+
+/// `mju_mulMatTMat3`: `aᵀ · b`.
+fn mat_t_mat(a: &Matrix3<f64>, b: &Matrix3<f64>) -> Matrix3<f64> {
+    Matrix3::from_fn(|i, j| a[(2, i)].mul_add(b[(2, j)], a[(0, i)].mul_add(b[(0, j)], a[(1, i)] * b[(1, j)])))
+}
+
+/// `mju_normalize3`: below `mjMINVAL` the x axis; otherwise multiplied by the reciprocal of the norm.
+fn normalize3_mj(v: &mut Vector3<f64>) {
+    let norm = dot3(v, v).sqrt();
+    if norm < MINVAL {
+        *v = Vector3::x();
+    } else {
+        *v *= 1.0 / norm;
+    }
+}
+
 /// `mjc_BoxBox`: separating-axis test over 15 axes, then either one edge–edge contact or the incident
 /// face clipped to the reference face (up to 8 contacts).
 pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2: [f64; 3]) -> Vec<PreContact> {
-    let pos21 = p1.mat.transpose() * (p2.pos - p1.pos);
-    let pos12 = p2.mat.transpose() * (p1.pos - p2.pos);
-    let rot = p1.mat.transpose() * p2.mat;
+    let pos21 = mat_t_vec(&p1.mat, &(p2.pos - p1.pos));
+    let pos12 = mat_t_vec(&p2.mat, &(p1.pos - p2.pos));
+    let rot = mat_t_mat(&p1.mat, &p2.mat);
     let r = |i: usize, j: usize| rot[(i, j)];
     let rotabs = rot.abs();
-    let septol = margin + BOXBOX_SEPEPS * (size1[0] + size1[1] + size1[2] + size2[0] + size2[1] + size2[2]);
+    let septol = BOXBOX_SEPEPS.mul_add(size1[0] + size1[1] + size1[2] + size2[0] + size2[1] + size2[2], margin);
     let mut sep_best = -MAXVAL;
     let mut code: i32 = -1;
     for i in 0..3 {
-        let radius2 = rotabs[(i, 0)] * size2[0] + rotabs[(i, 1)] * size2[1] + rotabs[(i, 2)] * size2[2];
+        let radius2 = rotabs[(i, 2)].mul_add(size2[2], rotabs[(i, 0)].mul_add(size2[0], rotabs[(i, 1)] * size2[1]));
         let sep = pos21[i].abs() - size1[i] - radius2;
         if sep > septol {
             return Vec::new();
@@ -384,7 +417,7 @@ pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2
         }
     }
     for j in 0..3 {
-        let radius1 = rotabs[(0, j)] * size1[0] + rotabs[(1, j)] * size1[1] + rotabs[(2, j)] * size1[2];
+        let radius1 = rotabs[(2, j)].mul_add(size1[2], rotabs[(0, j)].mul_add(size1[0], rotabs[(1, j)] * size1[1]));
         let sep = pos12[j].abs() - size2[j] - radius1;
         if sep > septol {
             return Vec::new();
@@ -401,23 +434,23 @@ pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2
             let (i1, i2) = ((i + 1) % 3, (i + 2) % 3);
             let mut ax1 = -r(i2, j);
             let mut ax2 = r(i1, j);
-            let norm2 = ax1 * ax1 + ax2 * ax2;
+            let norm2 = ax1.mul_add(ax1, ax2 * ax2);
             if norm2 < BOXBOX_PAREPS {
                 continue;
             }
             let inv = 1.0 / norm2.sqrt();
             ax1 *= inv;
             ax2 *= inv;
-            let radius1 = size1[i1] * ax1.abs() + size1[i2] * ax2.abs();
+            let radius1 = size1[i1].mul_add(ax1.abs(), size1[i2] * ax2.abs());
             let (j1, j2) = ((j + 1) % 3, (j + 2) % 3);
-            let a2_1 = ax1 * r(i1, j1) + ax2 * r(i2, j1);
-            let a2_2 = ax1 * r(i1, j2) + ax2 * r(i2, j2);
-            let radius2 = size2[j1] * a2_1.abs() + size2[j2] * a2_2.abs();
-            let sep = (ax1 * pos21[i1] + ax2 * pos21[i2]).abs() - radius1 - radius2;
+            let a2_1 = ax1.mul_add(r(i1, j1), ax2 * r(i2, j1));
+            let a2_2 = ax1.mul_add(r(i1, j2), ax2 * r(i2, j2));
+            let radius2 = size2[j1].mul_add(a2_1.abs(), size2[j2] * a2_2.abs());
+            let sep = ax1.mul_add(pos21[i1], ax2 * pos21[i2]).abs() - radius1 - radius2;
             if sep > septol {
                 return Vec::new();
             }
-            if sep - BOXBOX_EDGEBIAS * sep.abs() > sep_best && sep > sep_face {
+            if (-BOXBOX_EDGEBIAS).mul_add(sep.abs(), sep) > sep_best && sep > sep_face {
                 sep_best = sep;
                 code = 6 + 3 * i as i32 + j as i32;
             }
@@ -426,22 +459,25 @@ pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2
     if code < 0 {
         return Vec::new();
     }
-    if code >= 6 {
-        // an edge axis nearly parallel to the best face normal, and barely better: prefer the face
-        let i = ((code - 6) / 3) as usize;
-        let j = ((code - 6) % 3) as usize;
+    // the separating axis of an edge pair (i, j), in box1's frame
+    let edge_axis = |i: usize, j: usize| -> Vector3<f64> {
         let (i1, i2) = ((i + 1) % 3, (i + 2) % 3);
         let mut axis = Vector3::zeros();
         axis[i1] = -r(i2, j);
         axis[i2] = r(i1, j);
-        axis /= axis.norm();
+        normalize3_mj(&mut axis);
+        axis
+    };
+    if code >= 6 {
+        // an edge axis nearly parallel to the best face normal, and barely better: prefer the face
+        let axis = edge_axis(((code - 6) / 3) as usize, ((code - 6) % 3) as usize);
         let face_dot = if code_face < 3 {
             axis[code_face as usize].abs()
         } else {
             let f = (code_face - 3) as usize;
-            (axis[0] * r(0, f) + axis[1] * r(1, f) + axis[2] * r(2, f)).abs()
+            axis[2].mul_add(r(2, f), axis[0].mul_add(r(0, f), axis[1] * r(1, f))).abs()
         };
-        if face_dot > 0.99 && sep_best < sep_face + 0.05 * sep_face.abs() + MINVAL {
+        if face_dot > 0.99 && sep_best < 0.05f64.mul_add(sep_face.abs(), sep_face) + MINVAL {
             code = code_face;
         }
     }
@@ -450,24 +486,17 @@ pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2
         let j = ((code - 6) % 3) as usize;
         let (i1, i2) = ((i + 1) % 3, (i + 2) % 3);
         let (j1, j2) = ((j + 1) % 3, (j + 2) % 3);
-        let mut axis = Vector3::zeros();
-        axis[i1] = -r(i2, j);
-        axis[i2] = r(i1, j);
-        axis /= axis.norm();
-        if axis.dot(&pos21) < 0.0 {
+        let mut axis = edge_axis(i, j);
+        if dot3(&axis, &pos21) < 0.0 {
             axis = -axis;
         }
-        let a2 = Vector3::new(
-            axis[0] * r(0, 0) + axis[1] * r(1, 0) + axis[2] * r(2, 0),
-            axis[0] * r(0, 1) + axis[1] * r(1, 1) + axis[2] * r(2, 1),
-            axis[0] * r(0, 2) + axis[1] * r(1, 2) + axis[2] * r(2, 2),
-        );
+        let a2 = Vector3::from_fn(|c, _| axis[2].mul_add(r(2, c), axis[0].mul_add(r(0, c), axis[1] * r(1, c))));
         let ambig = BOXBOX_SGNEPS;
         let amb1: Option<usize> = if axis[i1].abs() < ambig { Some(i1) } else if axis[i2].abs() < ambig { Some(i2) } else { None };
         let amb2: Option<usize> = if a2[j1].abs() < ambig { Some(j1) } else if a2[j2].abs() < ambig { Some(j2) } else { None };
         let d2 = Vector3::new(r(0, j), r(1, j), r(2, j));
         let b = d2[i];
-        let denom = 1.0 - b * b;
+        let denom = (-b).mul_add(b, 1.0);
         let (mut w1, mut w2) = (Vector3::zeros(), Vector3::zeros());
         let mut best_d2 = MAXVAL;
         for v1 in 0..if amb1.is_some() { 2 } else { 1 } {
@@ -484,19 +513,19 @@ pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2
                 if let (Some(a), 1) = (amb2, v2) {
                     cc[a] = -cc[a];
                 }
-                let c2 = rot * cc + pos21;
+                let c2 = mat_vec(&rot, &cc) + pos21;
                 let e = c2 - c1;
                 let d1e = e[i];
-                let d2e = d2.dot(&e);
-                let mut s = if denom < MINVAL { 0.0 } else { (d1e - b * d2e) / denom };
+                let d2e = dot3(&d2, &e);
+                let mut s = if denom < MINVAL { 0.0 } else { (-b).mul_add(d2e, d1e) / denom };
                 s = s.clamp(-size1[i], size1[i]);
-                let t = (b * s - d2e).clamp(-size2[j], size2[j]);
-                s = (d1e + b * t).clamp(-size1[i], size1[i]);
+                let t = b.mul_add(s, -d2e).clamp(-size2[j], size2[j]);
+                s = b.mul_add(t, d1e).clamp(-size1[i], size1[i]);
                 let mut p1c = c1;
                 p1c[i] += s;
-                let p2c = c2 + d2 * t;
+                let p2c = Vector3::from_fn(|k, _| d2[k].mul_add(t, c2[k]));
                 let gap = p2c - p1c;
-                let gap2 = gap.dot(&gap);
+                let gap2 = dot3(&gap, &gap);
                 if gap2 < best_d2 {
                     best_d2 = gap2;
                     w1 = p1c;
@@ -504,12 +533,12 @@ pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2
                 }
             }
         }
-        let dist = (w2 - w1).dot(&axis);
+        let dist = dot3(&(w2 - w1), &axis);
         if dist > septol {
             return Vec::new();
         }
-        let mid = (w1 + w2) * 0.5;
-        return vec![pre(dist, p1.mat * mid + p1.pos, p1.mat * axis, Vector3::zeros())];
+        let mid = Vector3::new(0.5 * (w1[0] + w2[0]), 0.5 * (w1[1] + w2[1]), 0.5 * (w1[2] + w2[2]));
+        return vec![pre(dist, mat_vec(&p1.mat, &mid) + p1.pos, mat_vec(&p1.mat, &axis), Vector3::zeros())];
     }
     // face contact: clip the incident face of the other box against the reference face
     let ref1 = code < 3;
@@ -532,40 +561,43 @@ pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2
     let (mut cx, mut du, mut dv) = ([0.0; 3], [0.0; 3], [0.0; 3]);
     for rr in 0..3 {
         let c = if rr == 0 { ax } else if rr == 1 { ay } else { a };
-        cx[rr] = posoi[c] + tinc * sizeinc[binc] * rinc[(c, binc)];
+        cx[rr] = (tinc * sizeinc[binc]).mul_add(rinc[(c, binc)], posoi[c]);
         du[rr] = sizeinc[bu] * rinc[(c, bu)];
         dv[rr] = sizeinc[bv] * rinc[(c, bv)];
     }
-    cx[2] = sgn * cx[2] - sizeref[a];
+    cx[2] = sgn.mul_add(cx[2], -sizeref[a]);
     du[2] *= sgn;
     dv[2] *= sgn;
-    let corner_sign = [[1.0, 1.0], [-1.0, 1.0], [-1.0, -1.0], [1.0, -1.0]];
-    let mut poly: Vec<[f64; 3]> = corner_sign.iter().map(|[su, sv]| [cx[0] + su * du[0] + sv * dv[0], cx[1] + su * du[1] + sv * dv[1], cx[2] + su * du[2] + sv * dv[2]]).collect();
+    let corner_sign = [[1.0f64, 1.0], [-1.0, 1.0], [-1.0, -1.0], [1.0, -1.0]];
+    let mut poly: Vec<[f64; 3]> = corner_sign.iter().map(|[su, sv]| [sv.mul_add(dv[0], su.mul_add(du[0], cx[0])), sv.mul_add(dv[1], su.mul_add(du[1], cx[1])), sv.mul_add(dv[2], su.mul_add(du[2], cx[2]))]).collect();
     clip_half_plane(&mut poly, 0, 1.0, sizeref[ax]);
     clip_half_plane(&mut poly, 0, -1.0, sizeref[ax]);
     clip_half_plane(&mut poly, 1, 1.0, sizeref[ay]);
     clip_half_plane(&mut poly, 1, -1.0, sizeref[ay]);
-    let dupe2 = BOXBOX_DUPEPS * (sizeref[ax] * sizeref[ax] + sizeref[ay] * sizeref[ay]);
+    let dupe2 = BOXBOX_DUPEPS * sizeref[ax].mul_add(sizeref[ax], sizeref[ay] * sizeref[ay]);
     let mut accepted: Vec<[f64; 3]> = Vec::new();
     for v in &poly {
         if v[2] > margin {
             continue;
         }
-        if accepted.iter().any(|q| (q[0] - v[0]).powi(2) + (q[1] - v[1]).powi(2) < dupe2) {
+        if accepted.iter().any(|q| {
+            let (dx, dy) = (q[0] - v[0], q[1] - v[1]);
+            dx.mul_add(dx, dy * dy) < dupe2
+        }) {
             continue;
         }
         accepted.push(*v);
     }
     let nsign = if ref1 { sgn } else { -sgn };
-    let normal = matref.column(a) * nsign;
+    let normal = Vector3::new(nsign * matref[(0, a)], nsign * matref[(1, a)], nsign * matref[(2, a)]);
     accepted
         .iter()
         .map(|v| {
             let mut posc = Vector3::zeros();
             posc[ax] = v[0];
             posc[ay] = v[1];
-            posc[a] = sgn * (sizeref[a] + 0.5 * v[2]);
-            pre(v[2], matref * posc + posref, normal, Vector3::zeros())
+            posc[a] = sgn * 0.5f64.mul_add(v[2], sizeref[a]);
+            pre(v[2], mat_vec(&matref, &posc) + posref, normal, Vector3::zeros())
         })
         .collect()
 }
@@ -579,9 +611,11 @@ pub fn capsule_box(margin: f64, p1: &GeomPose, size1: [f64; 2], p2: &GeomPose, s
     let halflength = size1[1];
     let mut secondpos = -4.0; // no second contact until set (valid values lie in [−1, 1])
     // the capsule in the box frame
-    let pos = p2.mat.transpose() * (p1.pos - p2.pos);
-    let axis = p2.mat.transpose() * p1.axis();
+    let pos = mat_t_vec(&p2.mat, &(p1.pos - p2.pos));
+    let axis = mat_t_vec(&p2.mat, &p1.axis());
     let halfaxis = axis * halflength;
+    // `mji_addToScl3(v, halfaxis, s)` on a copy of `pos`: fused per component
+    let along = |s: f64| Vector3::from_fn(|k, _| halfaxis[k].mul_add(s, pos[k]));
     let mut axisdir = 0;
     if halfaxis[0] > 0.0 {
         axisdir += 1;
@@ -603,7 +637,7 @@ pub fn capsule_box(margin: f64, p1: &GeomPose, size1: [f64; 2], p2: &GeomPose, s
 
     // a face of the box closest to one of the capsule's ends
     for i in [-1.0f64, 1.0] {
-        let mut tmp1 = pos + halfaxis * i;
+        let mut tmp1 = along(i);
         let tmp2 = tmp1;
         let (mut c1, mut c2) = (0, -1i32);
         for j in 0..3 {
@@ -621,7 +655,7 @@ pub fn capsule_box(margin: f64, p1: &GeomPose, size1: [f64; 2], p2: &GeomPose, s
             continue;
         }
         let diff = tmp1 - tmp2;
-        let dist = diff.dot(&diff);
+        let dist = dot3(&diff, &diff);
         if dist < bestdist {
             bestdist = dist;
             bestsegmentpos = i;
@@ -643,14 +677,14 @@ pub fn capsule_box(margin: f64, p1: &GeomPose, size1: [f64; 2], p2: &GeomPose, s
             let mb = -size2[j] * halfaxis[j];
             let mc = size1[1] * size1[1];
             let u = -size2[j] * dif[j];
-            let v = halfaxis.dot(&dif);
-            let det = ma * mc - mb * mb;
+            let v = dot3(&halfaxis, &dif);
+            let det = ma.mul_add(mc, -(mb * mb));
             if det.abs() < MINVAL {
                 continue;
             }
             let idet = 1.0 / det;
-            let mut x1 = (mc * u - mb * v) * idet;
-            let mut x2 = (ma * v - mb * u) * idet;
+            let mut x1 = mc.mul_add(u, -(mb * v)) * idet;
+            let mut x2 = ma.mul_add(v, -(mb * u)) * idet;
             let (mut s1, mut s2) = (1, 1);
             if x1 > 1.0 {
                 x1 = 1.0;
@@ -684,10 +718,10 @@ pub fn capsule_box(margin: f64, p1: &GeomPose, size1: [f64; 2], p2: &GeomPose, s
                     s1 = 0;
                 }
             }
-            let mut dif = tmp3 - pos;
-            dif -= halfaxis * x2;
-            dif[j] += size2[j] * x1;
-            let d2 = dif.dot(&dif);
+            let dif0 = tmp3 - pos;
+            let mut dif = Vector3::from_fn(|k, _| halfaxis[k].mul_add(-x2, dif0[k]));
+            dif[j] = size2[j].mul_add(x1, dif[j]);
+            let d2 = dot3(&dif, &dif);
             let c1 = s1 * 3 + s2;
             // the −MINVAL fixes an axis numerically parallel to the box (MuJoCo's comment)
             if d2 < bestdist - MINVAL {
@@ -796,7 +830,7 @@ pub fn capsule_box(margin: f64, p1: &GeomPose, size1: [f64; 2], p2: &GeomPose, s
         } else {
             let mul = if cltype == -3 { 1.0 } else { -1.0 };
             secondpos = 2.0;
-            let tmp1 = pos - halfaxis * mul;
+            let tmp1 = along(-mul);
             for i in 0..3 {
                 if i as i32 != clface {
                     let e1 = (size2[i] - tmp1[i]) / halfaxis[i] * mul;
@@ -816,10 +850,10 @@ pub fn capsule_box(margin: f64, p1: &GeomPose, size1: [f64; 2], p2: &GeomPose, s
 
     // a sphere at the first contact point, in the world
     let mut out = Vec::new();
-    let c1 = p2.mat * (pos + halfaxis * bestsegmentpos) + p2.pos;
+    let c1 = mat_vec(&p2.mat, &along(bestsegmentpos)) + p2.pos;
     out.extend(sphere_box(margin, &GeomPose { pos: c1, mat: p1.mat }, size1[0], p2, size2));
     if secondpos > -3.0 {
-        let c2 = p2.mat * (pos + halfaxis * (secondpos + bestsegmentpos)) + p2.pos;
+        let c2 = mat_vec(&p2.mat, &along(secondpos + bestsegmentpos)) + p2.pos;
         out.extend(sphere_box(margin, &GeomPose { pos: c2, mat: p1.mat }, size1[0], p2, size2));
     }
     out

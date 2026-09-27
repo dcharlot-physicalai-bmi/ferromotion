@@ -1392,6 +1392,7 @@ impl MjcfTree {
                     pairs.insert((b, a), k);
                 }
             }
+            // `mjCGeom::GetRBound`, contracted; a mesh's is the corner of its box of half-sizes (`geom_size`)
             let rbound = self
                 .geoms
                 .iter()
@@ -1400,20 +1401,25 @@ impl MjcfTree {
                     match g.kind {
                         GeomType::Sphere => s[0],
                         GeomType::Capsule => s[0] + s[1],
-                        GeomType::Cylinder => (s[0] * s[0] + s[1] * s[1]).sqrt(),
+                        GeomType::Cylinder => s[0].mul_add(s[0], s[1] * s[1]).sqrt(),
                         GeomType::Ellipsoid => s[0].max(s[1]).max(s[2]),
-                        GeomType::Box => (s[0] * s[0] + s[1] * s[1] + s[2] * s[2]).sqrt(),
-                        GeomType::Mesh => g.mesh.as_ref().and_then(|m| self.mesh_hulls.get(m)).map_or(0.0, |h| h.rbound()),
+                        GeomType::Box | GeomType::Mesh => s[2].mul_add(s[2], s[0].mul_add(s[0], s[1] * s[1])).sqrt(),
                         _ => 0.0,
                     }
                 })
                 .collect();
+            let mut per_body: HashMap<&str, usize> = HashMap::new();
+            for g in &self.geoms {
+                *per_body.entry(g.body.as_str()).or_default() += 1;
+            }
+            let multi = self.geoms.iter().map(|g| per_body[g.body.as_str()] > 1).collect();
             CollideStatic {
                 weld: self.geoms.iter().map(|g| welds.get(&g.body).copied().unwrap_or((0, 0, 0))).collect(),
                 excludes: self.contact_excludes.iter().flat_map(|(a, b)| [(body_id[a.as_str()], body_id[b.as_str()]), (body_id[b.as_str()], body_id[a.as_str()])]).collect(),
                 body: self.geoms.iter().map(|g| body_id[g.body.as_str()]).collect(),
                 pairs,
                 rbound,
+                multi,
             }
         })
     }
@@ -1521,19 +1527,34 @@ impl MjcfTree {
                 // from a geom's centre than its bound, cannot touch — the pair is never handed to a collider.
                 // A pure saving: the test is conservative, so no contact is lost to it.
                 let rb = &st.rbound;
-                let far = if rb[i] > 0.0 && rb[j] > 0.0 {
-                    let b = rb[i] + rb[j] + margin + gap;
-                    (ci.pose.pos - cj.pose.pos).norm_squared() > b * b
-                } else if ci.kind == GeomType::Plane && rb[j] > 0.0 {
-                    (cj.pose.pos - ci.pose.pos).dot(&ci.pose.mat.column(2)) > margin + gap + rb[j]
-                } else if cj.kind == GeomType::Plane && rb[i] > 0.0 {
-                    (ci.pose.pos - cj.pose.pos).dot(&cj.pose.mat.column(2)) > margin + gap + rb[i]
-                } else {
-                    false
+                // `filterSphere` / `planeGeomDist`, contracted, bounds associated as MuJoCo adds them
+                let dot3 = |a: &Vector3<f64>, b: &Vector3<f64>| a.z.mul_add(b.z, a.x.mul_add(b.x, a.y * b.y));
+                let sphere_far = |mg: f64| {
+                    if rb[i] > 0.0 && rb[j] > 0.0 {
+                        let d = ci.pose.pos - cj.pose.pos;
+                        let b = rb[i] + rb[j] + mg;
+                        dot3(&d, &d) > b * b
+                    } else if ci.kind == GeomType::Plane && rb[j] > 0.0 && dot3(&(cj.pose.pos - ci.pose.pos), &ci.pose.mat.column(2).into()) > mg + rb[j] {
+                        true
+                    } else {
+                        cj.kind == GeomType::Plane && rb[i] > 0.0 && dot3(&(ci.pose.pos - cj.pose.pos), &cj.pose.mat.column(2).into()) > mg + rb[i]
+                    }
                 };
-                if far {
+                if sphere_far(margin + gap) {
                     why(&mut out, key, &|| "the bounding-sphere filter".into());
                     continue;
+                }
+                // ⛔ the BVH midphase: a pair not between two single-geom bodies reaches its collider only past
+                // `mj_collideOBB` on the two `geom_aabb`s, with the SUMMED margins and gaps. ⚠ Only this LEAF
+                // test is carried: `mj_collideTree` also tests the bodies' BVH nodes (boxes over their geoms,
+                // in the inertial frames) on the way down, and that is where franka's finger pads, touching
+                // at rest 7.8e-18 apart, are called separated — so this port still collides them.
+                if pair.is_none() && (st.multi[i] || st.multi[j]) {
+                    let mg = (gi.params.margin + gj.params.margin) + (gi.params.gap + gj.params.gap);
+                    if sphere_far(mg) || !collide_obb(&gi.aabb, &ci.pose, &gj.aabb, &cj.pose, mg) {
+                        why(&mut out, key, &|| "the midphase's bounding-box test (mj_collideOBB)".into());
+                        continue;
+                    }
                 }
                 let Ok(pre) = collide_pair_with(&opts, margin + gap, ci, cj) else {
                     out.refused.push([i, j]);
@@ -2383,6 +2404,8 @@ pub struct MjcfGeom {
     /// primitive geom fitted to a mesh, where the SHAPE is the primitive and this is only provenance.
     pub mesh: Option<String>,
     pub params: crate::mujoco_collision::GeomParams,
+    /// `geom_aabb`: the bounding box in the geom's own frame, centre then half-sizes (`mjCGeom::ComputeAABB`)
+    pub aabb: [f64; 6],
 }
 
 /// The problem [`MjcfTree::constraint_problem`] poses, in MuJoCo's coordinates.
@@ -2626,6 +2649,9 @@ struct CollideStatic {
     pairs: HashMap<(usize, usize), usize>,
     /// `geom_rbound`
     rbound: Vec<f64>,
+    /// whether the geom's body holds more than one geom — `mj_collision` sends a pair through the BVH
+    /// midphase, and its leaf test `mj_collideOBB`, unless both bodies hold exactly one
+    multi: Vec<bool>,
 }
 
 /// The three `*_invweight0`, as [`MjcfTree`] keeps them.
@@ -3124,6 +3150,45 @@ pub(crate) fn mesh_inertia_mujoco(mesh: &crate::TriMesh3, method: MeshInertia) -
     }
     let inertia = Matrix3::new(p[1] + p[2], -p[3], -p[4], -p[3], p[0] + p[2], -p[5], -p[4], -p[5], p[0] + p[1]);
     Ok((total, com, inertia))
+}
+
+/// `mj_collideOBB` without its precomputed products (the leaf test of `mj_collideTree`): do two geoms'
+/// bounding boxes (`geom_aabb`, centre and half-sizes in the geom frame) overlap, within `margin`, along
+/// any of their six face normals? A box at least one of whose half-sizes is `mjMAXVAL` (a plane) is
+/// never tested against.
+fn collide_obb(aabb1: &[f64; 6], p1: &crate::mujoco_collision::GeomPose, aabb2: &[f64; 6], p2: &crate::mujoco_collision::GeomPose, margin: f64) -> bool {
+    const MAXVAL: f64 = 1e10;
+    let dot3 = |a: &Vector3<f64>, b: &Vector3<f64>| a.z.mul_add(b.z, a.x.mul_add(b.x, a.y * b.y));
+    let inf = |a: &[f64; 6]| [a[3] >= MAXVAL, a[4] >= MAXVAL, a[5] >= MAXVAL];
+    let (inf1, inf2) = (inf(aabb1), inf(aabb2));
+    if inf1.iter().all(|&x| x) || inf2.iter().all(|&x| x) {
+        return true;
+    }
+    let aabb = [aabb1, aabb2];
+    let pose = [p1, p2];
+    let infinite = [inf1.iter().any(|&x| x), inf2.iter().any(|&x| x)];
+    let xcenter: [Vector3<f64>; 2] = std::array::from_fn(|i| {
+        let (m, c) = (&pose[i].mat, Vector3::new(aabb[i][0], aabb[i][1], aabb[i][2]));
+        Vector3::from_fn(|r, _| m[(r, 2)].mul_add(c.z, m[(r, 0)].mul_add(c.x, m[(r, 1)] * c.y))) + pose[i].pos
+    });
+    let normal = |i: usize, j: usize| -> Vector3<f64> { pose[i].mat.column(j).into() };
+    for j in 0..2 {
+        if infinite[1 - j] {
+            continue;
+        }
+        for k in 0..3 {
+            let njk = normal(j, k);
+            let (mut proj, mut radius) = ([0.0; 2], [0.0; 2]);
+            for i in 0..2 {
+                proj[i] = dot3(&xcenter[i], &njk);
+                radius[i] = (aabb[i][3] * dot3(&normal(i, 0), &njk)).abs() + (aabb[i][4] * dot3(&normal(i, 1), &njk)).abs() + (aabb[i][5] * dot3(&normal(i, 2), &njk)).abs();
+            }
+            if radius[0] + radius[1] + margin < (proj[1] - proj[0]).abs() {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 // ⛔ MuJoCo's compiler is C++ that clang builds with `-ffp-contract=on` on the arm64 wheel, so the helpers
@@ -4448,6 +4513,17 @@ impl Walk<'_> {
         }
         let body_id = self.body_stack.last().and_then(|b| self.body_ids.get(b).copied()).unwrap_or(0);
         let (stored, _) = self.body_stack.last().and_then(|b| self.inertial_mj.get(b)).copied().unwrap_or((MjPose { pos: [0.0; 3], quat: UNIT_QUAT }, MjPose { pos: [0.0; 3], quat: UNIT_QUAT }));
+        // `mjCGeom::ComputeAABB`, in (min, max) form first
+        let sz = |k: usize| spec.size.get(k).copied().unwrap_or(0.0);
+        let aamm: [f64; 6] = match kind {
+            GeomType::Sphere => [-sz(0), -sz(0), -sz(0), sz(0), sz(0), sz(0)],
+            GeomType::Capsule => [-sz(0), -sz(0), -(sz(0) + sz(1)), sz(0), sz(0), sz(0) + sz(1)],
+            GeomType::Cylinder => [-sz(0), -sz(0), -sz(1), sz(0), sz(0), sz(1)],
+            GeomType::Mesh => spec.mesh.as_ref().map(|m| self.mesh_data(m)).transpose()?.map_or([0.0; 6], |md| md.aamm),
+            GeomType::Plane => [-1e10, -1e10, -1e10, 1e10, 1e10, 0.0],
+            _ => [-sz(0), -sz(1), -sz(2), sz(0), sz(1), sz(2)],
+        };
+        let aabb = [(aamm[3] + aamm[0]) / 2.0, (aamm[4] + aamm[1]) / 2.0, (aamm[5] + aamm[2]) / 2.0, (aamm[3] - aamm[0]) / 2.0, (aamm[4] - aamm[1]) / 2.0, (aamm[5] - aamm[2]) / 2.0];
         let kin = crate::mujoco_kinematics::KinGeom { body: body_id, pos: spec.mj.pos, quat: spec.mj.quat, sameframe: sameframe_of(&spec.mj, &stored) };
         self.geom_records.push((body_id, index, g.attr("name").map(|s| s.to_string()), MjcfGeom {
             name: String::new(),
@@ -4458,6 +4534,7 @@ impl Walk<'_> {
             size: [spec.size.first().copied().unwrap_or(0.0), spec.size.get(1).copied().unwrap_or(0.0), spec.size.get(2).copied().unwrap_or(0.0)],
             mesh: spec.mesh,
             params,
+            aabb,
         }, kin));
         Ok(())
     }
