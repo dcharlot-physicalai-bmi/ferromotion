@@ -173,6 +173,10 @@ fn main() {
                     entry.3 = e;
                     entry.4 = format!("{}{}", c.rel, if c.capped { " (its file caps the solver)" } else { "" });
                 }
+                // MENAGERIE_STEP_ALL=1: every model's error at every compared step, for diffing two builds
+                if std::env::var("MENAGERIE_STEP_ALL").is_ok() {
+                    println!("step\t{}\t{k}\t{e:.3e}", c.rel);
+                }
                 if k == 1 && e >= 1e-8 && notes.len() < 40 {
                     notes.push(format!("{}: step 1 off {e:.2e}{}", c.rel, if mesh_in_contact { " (mesh in contact)" } else { "" }));
                 }

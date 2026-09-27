@@ -305,6 +305,7 @@ fn main() {
     let mut grand = Tally::default();
     let mut by_type: BTreeMap<String, Tally> = BTreeMap::new();
     let mut refused: Vec<(String, String)> = Vec::new();
+    let mut frames_differ = 0usize;
     let mut imperfect: Vec<(String, String)> = Vec::new();
     let mut dumped = false;
     let mut not_carried: BTreeMap<String, usize> = BTreeMap::new();
@@ -331,25 +332,17 @@ fn main() {
             }
         };
         models += 1;
-        // hulls in MuJoCo's own mesh frame (its CoM and principal axes), so a mesh geom's recorded
-        // `geom_xmat` places OUR vertices exactly where it places MuJoCo's; without the frame in the oracle,
-        // the loader's own frame is used
-        let mut hulls: BTreeMap<String, MeshHull> = BTreeMap::new();
-        for (name, raw) in &t.mesh_raw {
-            let hull = match o.meshes.get(name) {
-                Some((pos, q)) => {
-                    let r = *nalgebra::UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(q[0], q[1], q[2], q[3])).to_rotation_matrix().matrix();
-                    // the hull and its polygons from the FILE's frame, the normals from the final one, as
-                    // `mjCMesh::Process` builds them
-                    let final_f64: Vec<nalgebra::Vector3<f64>> = raw.verts.iter().map(|v| r.transpose() * (v - pos)).collect();
-                    let stored = ferromotion_core::TriMesh3 { verts: final_f64.clone(), tris: raw.tris.clone() };
-                    let cap = t.mesh_hulls.get(name).and_then(|h| h.max_verts);
-                    MeshHull::from_frames(&t.mesh_file[name].verts, &stored, &final_f64, cap)
+        // the loader's own hulls: its mesh frames (CoM and principal axes) are MuJoCo's bit for bit
+        // (`examples/menagerie_mesh_store`), so a mesh geom's recorded `geom_xmat` places OUR stored vertices
+        // exactly where it places MuJoCo's. A frame that is not bit-identical is counted, not papered over.
+        let hulls: BTreeMap<String, MeshHull> = t.mesh_hulls.clone();
+        for (name, (pos, q)) in &o.meshes {
+            if let Some(d) = t.mesh_props.get(name) {
+                let ours = [d.com.x, d.com.y, d.com.z, d.quat[0], d.quat[1], d.quat[2], d.quat[3]];
+                let theirs = [pos.x, pos.y, pos.z, q[0], q[1], q[2], q[3]];
+                if ours.iter().zip(&theirs).any(|(a, b)| a.to_bits() != b.to_bits()) {
+                    frames_differ += 1;
                 }
-                None => t.mesh_hulls.get(name).cloned(),
-            };
-            if let Some(h) = hull {
-                hulls.insert(name.clone(), h);
             }
         }
         // welds
@@ -723,7 +716,7 @@ fn main() {
         }
     }
     println!();
-    println!("models {models} (loader refused {})", refused.len());
+    println!("models {models} (loader refused {}); mesh frames not bit-identical to MuJoCo's: {frames_differ}", refused.len());
     for (r, e) in &refused {
         println!("  refused {r}: {e}");
     }

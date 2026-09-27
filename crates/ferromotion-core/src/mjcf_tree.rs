@@ -2210,8 +2210,8 @@ pub struct MjcfTree {
     /// `geom_xmat` already includes that frame, so these vertices go straight under the geom's world pose.
     pub mesh_hulls: BTreeMap<String, crate::mujoco_hull::MeshHull>,
     /// The same meshes before centring and rotation: after `scale`/`refpos`/`refquat`, in `f64` as the
-    /// compiler holds them — for placing them under a frame chosen elsewhere (MuJoCo's `mesh_pos`,
-    /// `mesh_quat` when comparing against it).
+    /// compiler holds them, with a mirrored mesh's faces rewound as MuJoCo rewinds them — for placing them
+    /// under a frame chosen elsewhere.
     pub mesh_raw: BTreeMap<String, crate::TriMesh3>,
     /// ⭐ And as the FILE states them: `f32` vertices before `refpos`, `refquat` and `scale`. This is the frame
     /// MuJoCo builds the convex hull and merges its polygons in (`MakeGraph` and `MakePolygons` run before
@@ -2219,7 +2219,9 @@ pub struct MjcfTree {
     pub mesh_file: BTreeMap<String, crate::TriMesh3>,
     /// **What MuJoCo's mesh compiler produced for every mesh** — volume, centre of mass and principal
     /// frame, which it publishes as `mesh_pos` and `mesh_quat`. Every body's `ipos` and inertia is built
-    /// from these, so this is the level at which a mesh-integral residual can be seen at all.
+    /// from these, so this is the level at which a mesh-integral residual can be seen at all. ⭐ Bit for bit
+    /// MuJoCo's on all 2,339 Menagerie meshes, and so are the 788 collision meshes' stored `f32` vertices
+    /// (`examples/menagerie_mesh_store`).
     pub mesh_props: BTreeMap<String, MeshData>,
     /// Every geom, in file order — the order MuJoCo numbers them in.
     pub geoms: Vec<MjcfGeom>,
@@ -2976,7 +2978,8 @@ struct MeshAsset {
     include_dir: String,
     scale: Vector3<f64>,
     refpos: Vector3<f64>,
-    refquat: UnitQuaternion<f64>,
+    /// as written: `ApplyTransformations` normalises it itself (`mjuu_normvec`)
+    refquat: [f64; 4],
     inertia: MeshInertia,
 }
 
@@ -2985,46 +2988,50 @@ struct MeshAsset {
 /// about it. Both passes take pyramids from the apex to each face; `legacy` takes their volumes absolute.
 pub(crate) fn mesh_inertia_mujoco(mesh: &crate::TriMesh3, method: MeshInertia) -> Result<(f64, Vector3<f64>, Matrix3<f64>), String> {
     const MINVAL: f64 = 1e-15;
-    // triangle(): unit normal, centre, area — faces below MINVAL in |cross| are ignored (area 0)
+    // `triangle()`: unit normal, centre, area — faces below MINVAL in |cross| are ignored (area 0)
     let tri = |a: Vector3<f64>, b: Vector3<f64>, c: Vector3<f64>| -> (Vector3<f64>, Vector3<f64>, f64) {
-        let n = (b - a).cross(&(c - a));
-        let len = n.norm();
+        let center = Vector3::new((a.x + b.x + c.x) / 3.0, (a.y + b.y + c.y) / 3.0, (a.z + b.z + c.z) / 3.0);
+        let n = uu_cross(&(b - a), &(c - a));
+        let len = uu_dot3(&n, &n).sqrt();
         if len < MINVAL {
-            return (Vector3::zeros(), (a + b + c) / 3.0, 0.0);
+            return (Vector3::zeros(), center, 0.0);
         }
-        (n / len, (a + b + c) / 3.0, 0.5 * len)
+        (Vector3::new(n.x / len, n.y / len, n.z / len), center, 0.5 * len)
     };
     let v = |i: usize| mesh.verts[i];
-    // area-weighted centroid of face centres
+    // `ComputeFaceCentroid`: area-weighted centroid of face centres
     let (mut facecen, mut total_area) = (Vector3::zeros(), 0.0);
     for t in &mesh.tris {
         let (_, c, area) = tri(v(t[0]), v(t[1]), v(t[2]));
-        facecen += area * c;
+        facecen = Vector3::new(area.mul_add(c.x, facecen.x), area.mul_add(c.y, facecen.y), area.mul_add(c.z, facecen.z));
         total_area += area;
     }
     if total_area < MINVAL {
         return Err("mesh surface area is too small".into());
     }
-    facecen /= total_area;
-    // pass 1: volume (or area) and CoM from pyramids at the face centroid
+    facecen = Vector3::new(facecen.x / total_area, facecen.y / total_area, facecen.z / total_area);
+    // `ComputeVolume` / `ComputeSurfaceArea`: volume (or area) and CoM from pyramids at the face centroid
     let (mut vol, mut com) = (0.0, Vector3::zeros());
     for t in &mesh.tris {
         let (n, c, area) = tri(v(t[0]), v(t[1]), v(t[2]));
         let mut volume = match method {
             MeshInertia::Shell => area,
-            _ => (c - facecen).dot(&n) * area / 3.0,
+            _ => uu_dot3(&(c - facecen), &n) * area / 3.0,
         };
         if method == MeshInertia::Legacy {
             volume = volume.abs();
         }
         vol += volume;
-        com += volume * (c * 0.75 + facecen * 0.25);
+        // `CoM += volume * (center * 3.0 / 4.0 + facecen / 4.0)`: the sum's terms are quotients, so only the
+        // accumulation fuses
+        let x = |k: usize| c[k] * 3.0 / 4.0 + facecen[k] / 4.0;
+        com = Vector3::new(volume.mul_add(x(0), com.x), volume.mul_add(x(1), com.y), volume.mul_add(x(2), com.z));
     }
     if vol < MINVAL {
         return Err(if vol < 0.0 { "mesh volume is negative (misoriented triangles)".into() } else { "mesh volume is too small".into() });
     }
-    com /= vol;
-    // pass 2: products of inertia about the CoM, volume recomputed with the CoM as apex
+    com = Vector3::new(com.x / vol, com.y / vol, com.z / vol);
+    // `ComputeInertia`: products of inertia about the CoM, volume recomputed with the CoM as apex
     let (mut total, mut p) = (0.0, [0.0f64; 6]);
     let k = [(0, 0), (1, 1), (2, 2), (0, 1), (0, 2), (1, 2)];
     let cdiv = if method == MeshInertia::Shell { 12.0 } else { 20.0 };
@@ -3033,18 +3040,98 @@ pub(crate) fn mesh_inertia_mujoco(mesh: &crate::TriMesh3, method: MeshInertia) -
         let (n, c, area) = tri(d, e, f);
         let mut volume = match method {
             MeshInertia::Shell => area,
-            _ => c.dot(&n) * area / 3.0,
+            _ => uu_dot3(&c, &n) * area / 3.0,
         };
         if method == MeshInertia::Legacy {
             volume = volume.abs();
         }
         total += volume;
         for (j, &(a, b)) in k.iter().enumerate() {
-            p[j] += volume / cdiv * (2.0 * (d[a] * d[b] + e[a] * e[b] + f[a] * f[b]) + d[a] * e[b] + d[b] * e[a] + d[a] * f[b] + d[b] * f[a] + e[a] * f[b] + e[b] * f[a]);
+            // `2*(DD + EE + FF) + DE + ED + DF + FD + EF + FE`, each later product fused into the running sum
+            let sq = f[a].mul_add(f[b], d[a].mul_add(d[b], e[a] * e[b]));
+            let mut sum = 2.0f64.mul_add(sq, d[a] * e[b]);
+            sum = d[b].mul_add(e[a], sum);
+            sum = d[a].mul_add(f[b], sum);
+            sum = d[b].mul_add(f[a], sum);
+            sum = e[a].mul_add(f[b], sum);
+            sum = e[b].mul_add(f[a], sum);
+            p[j] = (volume / cdiv).mul_add(sum, p[j]);
         }
     }
     let inertia = Matrix3::new(p[1] + p[2], -p[3], -p[4], -p[3], p[0] + p[2], -p[5], -p[4], -p[5], p[0] + p[1]);
     Ok((total, com, inertia))
+}
+
+// ⛔ MuJoCo's compiler is C++ that clang builds with `-ffp-contract=on` on the arm64 wheel, so the helpers
+// below fuse where clang fuses (the rule is in `mujoco_ccd`: the LEFT product of `a*b + c*d`, each later
+// product of a chain into the running sum, `s += a*b`). A stored mesh vertex is a double rounded to `f32`:
+// one ulp in the centre of mass can move a whole binade of vertices to the neighbouring float.
+
+/// `mjuu_dot3`, contracted.
+fn uu_dot3(a: &Vector3<f64>, b: &Vector3<f64>) -> f64 {
+    a.z.mul_add(b.z, a.x.mul_add(b.x, a.y * b.y))
+}
+
+/// `mjuu_crossvec` (`b × c`), contracted.
+fn uu_cross(b: &Vector3<f64>, c: &Vector3<f64>) -> Vector3<f64> {
+    Vector3::new(b.y.mul_add(c.z, -(b.z * c.y)), b.z.mul_add(c.x, -(b.x * c.z)), b.x.mul_add(c.y, -(b.y * c.x)))
+}
+
+/// `mjuu_normvec(vec, 4)`: the squared norm below `mjEPS` (1e-14) leaves the vector alone, and so does a norm
+/// within `mjEPS` of 1; otherwise each component is DIVIDED by the norm.
+fn uu_normvec4(q: &mut [f64; 4]) {
+    let n2 = q[3].mul_add(q[3], q[2].mul_add(q[2], q[1].mul_add(q[1], q[0] * q[0])));
+    if n2 < 1e-14 {
+        return;
+    }
+    let n = n2.sqrt();
+    if (n - 1.0).abs() > 1e-14 {
+        for x in q.iter_mut() {
+            *x /= n;
+        }
+    }
+}
+
+/// `mjuu_quat2mat` (its products are separate statements, so nothing fuses).
+fn uu_quat2mat(q: &[f64; 4]) -> Matrix3<f64> {
+    if q[0] == 1.0 && q[1] == 0.0 && q[2] == 0.0 && q[3] == 0.0 {
+        return Matrix3::identity();
+    }
+    let (q00, q01, q02, q03) = (q[0] * q[0], q[0] * q[1], q[0] * q[2], q[0] * q[3]);
+    let (q11, q12, q13) = (q[1] * q[1], q[1] * q[2], q[1] * q[3]);
+    let (q22, q23, q33) = (q[2] * q[2], q[2] * q[3], q[3] * q[3]);
+    Matrix3::new(
+        q00 + q11 - q22 - q33, 2.0 * (q12 - q03), 2.0 * (q13 + q02),
+        2.0 * (q12 + q03), q00 - q11 + q22 - q33, 2.0 * (q23 - q01),
+        2.0 * (q13 - q02), 2.0 * (q23 + q01), q00 - q11 - q22 + q33,
+    )
+}
+
+/// `mjuu_mulquat`, contracted, normalised as it normalises.
+fn uu_mulquat(a: &[f64; 4], b: &[f64; 4]) -> [f64; 4] {
+    let mut r = [
+        (-a[3]).mul_add(b[3], (-a[2]).mul_add(b[2], a[0].mul_add(b[0], -(a[1] * b[1])))),
+        (-a[3]).mul_add(b[2], a[2].mul_add(b[3], a[0].mul_add(b[1], a[1] * b[0]))),
+        a[3].mul_add(b[1], a[2].mul_add(b[0], a[0].mul_add(b[2], -(a[1] * b[3])))),
+        a[3].mul_add(b[0], (-a[2]).mul_add(b[1], a[0].mul_add(b[3], a[1] * b[2]))),
+    ];
+    uu_normvec4(&mut r);
+    r
+}
+
+/// `mjuu_mulmat` (3×3), contracted.
+fn uu_mulmat(a: &Matrix3<f64>, b: &Matrix3<f64>) -> Matrix3<f64> {
+    Matrix3::from_fn(|i, j| a[(i, 2)].mul_add(b[(2, j)], a[(i, 0)].mul_add(b[(0, j)], a[(i, 1)] * b[(1, j)])))
+}
+
+/// `mjuu_mulvecmat`: `mat · vec`, contracted.
+fn uu_mulvecmat(v: &Vector3<f64>, m: &Matrix3<f64>) -> Vector3<f64> {
+    Vector3::from_fn(|k, _| m[(k, 2)].mul_add(v.z, m[(k, 0)].mul_add(v.x, m[(k, 1)] * v.y)))
+}
+
+/// `mjuu_mulvecmatT`: `matᵀ · vec`, contracted.
+fn uu_mulvecmat_t(v: &Vector3<f64>, m: &Matrix3<f64>) -> Vector3<f64> {
+    Vector3::from_fn(|k, _| m[(2, k)].mul_add(v.z, m[(0, k)].mul_add(v.x, m[(1, k)] * v.y)))
 }
 
 /// **MuJoCo's `mjuu_eig3`, ported line for line** — a Jacobi iteration from the identity quaternion with its
@@ -3059,42 +3146,12 @@ pub(crate) fn mesh_inertia_mujoco(mesh: &crate::TriMesh3, method: MeshInertia) -
 /// MuJoCo and this port reproduces it.
 pub(crate) fn eig3_mujoco(mat: &Matrix3<f64>) -> ([f64; 3], [f64; 4]) {
     const EPS: f64 = 1e-12;
-    let quat2mat = |q: &[f64; 4]| -> Matrix3<f64> {
-        if q[0] == 1.0 && q[1] == 0.0 && q[2] == 0.0 && q[3] == 0.0 {
-            return Matrix3::identity();
-        }
-        let (q00, q01, q02, q03) = (q[0] * q[0], q[0] * q[1], q[0] * q[2], q[0] * q[3]);
-        let (q11, q12, q13) = (q[1] * q[1], q[1] * q[2], q[1] * q[3]);
-        let (q22, q23, q33) = (q[2] * q[2], q[2] * q[3], q[3] * q[3]);
-        Matrix3::new(
-            q00 + q11 - q22 - q33, 2.0 * (q12 - q03), 2.0 * (q13 + q02),
-            2.0 * (q12 + q03), q00 - q11 + q22 - q33, 2.0 * (q23 - q01),
-            2.0 * (q13 - q02), 2.0 * (q23 + q01), q00 - q11 - q22 + q33,
-        )
-    };
-    let normalize = |q: &mut [f64; 4]| {
-        let n = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
-        if n >= 1e-15 && (n - 1.0).abs() > 1e-15 {
-            for x in q.iter_mut() {
-                *x /= n;
-            }
-        }
-    };
-    let mulquat = |a: &[f64; 4], b: &[f64; 4]| -> [f64; 4] {
-        let mut r = [
-            a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
-            a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
-            a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1],
-            a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0],
-        ];
-        normalize(&mut r);
-        r
-    };
+    let (quat2mat, normalize, mulquat) = (uu_quat2mat, uu_normvec4, uu_mulquat);
     let mut quat = [1.0, 0.0, 0.0, 0.0];
     let mut eigval = [0.0; 3];
     for _ in 0..500 {
         let ev = quat2mat(&quat);
-        let d = ev.transpose() * mat * ev;
+        let d = uu_mulmat(&uu_mulmat(&ev.transpose(), mat), &ev);
         eigval = [d[(0, 0)], d[(1, 1)], d[(2, 2)]];
         let (rk, ck, rotk) = if d[(0, 1)].abs() > d[(0, 2)].abs() && d[(0, 1)].abs() > d[(1, 2)].abs() {
             (0, 1, 2)
@@ -3107,17 +3164,18 @@ pub(crate) fn eig3_mujoco(mat: &Matrix3<f64>) -> ([f64; 3], [f64; 4]) {
             break;
         }
         let tau = (d[(ck, ck)] - d[(rk, rk)]) / (2.0 * d[(rk, ck)]);
-        let t = if tau >= 0.0 { 1.0 / (tau + (1.0 + tau * tau).sqrt()) } else { -1.0 / (-tau + (1.0 + tau * tau).sqrt()) };
-        let c = 1.0 / (1.0 + t * t).sqrt();
+        let t = if tau >= 0.0 { 1.0 / (tau + tau.mul_add(tau, 1.0).sqrt()) } else { -1.0 / (-tau + tau.mul_add(tau, 1.0).sqrt()) };
+        let c = 1.0 / t.mul_add(t, 1.0).sqrt();
         if c > 1.0 - EPS {
             break;
         }
         let mut tmp = [0.0; 4];
-        tmp[rotk + 1] = if tau >= 0.0 { -(0.5 - 0.5 * c).sqrt() } else { (0.5 - 0.5 * c).sqrt() };
+        let half = (-0.5f64).mul_add(c, 0.5).sqrt();
+        tmp[rotk + 1] = if tau >= 0.0 { -half } else { half };
         if rotk == 1 {
             tmp[rotk + 1] = -tmp[rotk + 1];
         }
-        tmp[0] = (1.0 - tmp[rotk + 1] * tmp[rotk + 1]).sqrt();
+        tmp[0] = (-tmp[rotk + 1]).mul_add(tmp[rotk + 1], 1.0).sqrt();
         normalize(&mut tmp);
         quat = mulquat(&quat, &tmp);
         normalize(&mut quat);
@@ -3127,7 +3185,9 @@ pub(crate) fn eig3_mujoco(mat: &Matrix3<f64>) -> ([f64; 3], [f64; 4]) {
         let j1 = j % 2;
         if eigval[j1] + EPS < eigval[j1 + 1] {
             eigval.swap(j1, j1 + 1);
-            let mut tmp = [std::f64::consts::FRAC_1_SQRT_2, 0.0, 0.0, 0.0];
+            // ⛔ MuJoCo's literal, which is NOT the double nearest 1/√2 (that is 0.7071067811865476)
+            #[allow(clippy::approx_constant)]
+            let mut tmp = [0.707106781186548, 0.0, 0.0, 0.0];
             tmp[(j1 + 2) % 3 + 1] = tmp[0];
             quat = mulquat(&quat, &tmp);
             normalize(&mut quat);
@@ -4610,10 +4670,22 @@ impl Walk<'_> {
             *v = v.map(|x| x as f32 as f64);
         }
         self.mesh_file.insert(name.to_string(), mesh.clone());
+        // a mirroring `scale` (odd number of negative factors) would turn every face inside out, so
+        // `mjCMesh::Process` swaps each face's last two vertices first — after the hull, before the inertia
+        if asset.scale.x * asset.scale.y * asset.scale.z <= 0.0 {
+            for t in &mut mesh.tris {
+                t.swap(1, 2);
+            }
+        }
         // mjCMesh::ApplyTransformations — refpos, then the inverse refquat rotation, then scale
-        let rq = *asset.refquat.to_rotation_matrix().matrix();
+        let rq = (asset.refquat != [1.0, 0.0, 0.0, 0.0]).then(|| {
+            let mut q = asset.refquat;
+            uu_normvec4(&mut q);
+            uu_quat2mat(&q)
+        });
         for v in &mut mesh.verts {
-            let p = rq.transpose() * (*v - asset.refpos);
+            let p = *v - asset.refpos;
+            let p = rq.as_ref().map_or(p, |m| uu_mulvecmat_t(&p, m));
             *v = Vector3::new(p.x * asset.scale.x, p.y * asset.scale.y, p.z * asset.scale.z);
         }
         self.mesh_raw.insert(name.to_string(), mesh.clone());
@@ -4631,11 +4703,12 @@ impl Walk<'_> {
             0.5 * (6.0 * (eigval[0] + eigval[2] - eigval[1]) / volume).sqrt(),
             0.5 * (6.0 * (eigval[0] + eigval[1] - eigval[2]) / volume).sqrt(),
         ];
-        // the mesh is re-expressed centred at its CoM in its principal frame; the bounds are taken there
-        let r = quat_to_rotation(&quat);
+        // the mesh is re-expressed centred at its CoM in its principal frame (`mjCMesh::Rotate`: the matrix of
+        // the CONJUGATE quaternion, applied by `mjuu_mulvecmat`); the bounds are taken there
+        let rneg = uu_quat2mat(&[quat[0], -quat[1], -quat[2], -quat[3]]);
+        let final_f64: Vec<Vector3<f64>> = mesh.verts.iter().map(|v| uu_mulvecmat(&(*v - com), &rneg)).collect();
         let mut aamm = [f64::INFINITY, f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
-        for v in &mesh.verts {
-            let p = r.transpose() * (*v - com);
+        for p in &final_f64 {
             for k in 0..3 {
                 aamm[k] = aamm[k].min(p[k]);
                 aamm[k + 3] = aamm[k + 3].max(p[k]);
@@ -4643,7 +4716,6 @@ impl Walk<'_> {
         }
         let d = MeshData { volume, com, quat, boxsz, aamm };
         // what `mjCMesh::Process` stores back into its float vertex array: CoM-centred, in the principal frame
-        let final_f64: Vec<Vector3<f64>> = mesh.verts.iter().map(|v| r.transpose() * (*v - com)).collect();
         let stored = crate::TriMesh3 { verts: final_f64.iter().map(|v| v.map(|x| x as f32 as f64)).collect(), tris: mesh.tris.clone() };
         self.mesh_stored.insert(name.to_string(), stored);
         self.mesh_final.insert(name.to_string(), final_f64);
@@ -5344,9 +5416,9 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
                     if v.len() != 4 {
                         return Err(format!("mesh '{name}': refquat needs 4 numbers"));
                     }
-                    UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(v[0], v[1], v[2], v[3]))
+                    [v[0], v[1], v[2], v[3]]
                 }
-                None => UnitQuaternion::identity(),
+                None => [1.0, 0.0, 0.0, 0.0],
             };
             let inertia = match get("inertia").as_deref() {
                 None | Some("legacy") => MeshInertia::Legacy,
@@ -6991,6 +7063,38 @@ mod tests {
                     assert!((p.normal[k] - n[k]).abs() < 1e-9, "scale {scale}, polygon {verts:?}: normal {:?} vs MuJoCo {n:?}", p.normal);
                 }
             }
+        }
+    }
+
+    /// **What the mesh compiler stores, bit for bit against MuJoCo** — `mesh_pos`, `mesh_quat` and the `f32`
+    /// `mesh_vert` — for the prism as is, mirrored (`mjCMesh::Process` swaps each face's winding first),
+    /// mirrored with a non-uniform scale, moved by `refpos` and an unnormalised `refquat`, and mirrored AND
+    /// rotated. Products are fused where clang fuses MuJoCo's compiler on arm64, `mjuu_normvec` leaves a norm
+    /// within 1e-14 of one alone, and `mjuu_eig3`'s quarter turn is its literal `0.707106781186548`. Undoing
+    /// any of these breaks a bit here: the winding swap, the literal, the threshold, the fused face centroid,
+    /// CoM, cross product, `mjuu_mulmat`, and either rotation. The fused inertia accumulation does not change
+    /// this prism, but it does change 346 of the corpus's 2,339 frames (`examples/menagerie_mesh_store`).
+    /// Expected values are MuJoCo 3.13.0's, each case from its own file (MuJoCo caches a mesh asset by path,
+    /// so reusing one file measures the cache).
+    #[test]
+    fn the_mesh_compiler_stores_mujocos_frame_and_vertices_bit_for_bit() {
+        const PRISM: &str = "v 0 0 0\nv 0.3 0 0\nv 0.05 0.2 0\nv 0 0 0.12\nv 0.3 0 0.12\nv 0.05 0.2 0.12\nv 0.1 0.05 0.06\nf 1 3 2\nf 4 5 6\nf 1 2 5\nf 1 5 4\nf 2 3 6\nf 2 6 5\nf 3 1 4\nf 3 4 6\n";
+        #[allow(clippy::type_complexity)]
+        let cases: [(&str, [f64; 3], [f64; 4], [u32; 21]); 5] = [
+            (r#"scale="1 1 1""#, [0.11666667088866235, 0.06666666766007741, 0.0599999986588955], [0.1435361039704115, 0.6923852878686818, -0.1435361039704115, 0.6923852878686818], [0xbd75c28f, 0x3ddc43b8, 0xbda4f77d, 0xbd75c28f, 0xbc3fd1b1, 0x3e476670, 0xbd75c28f, 0xbdc44982, 0xbde9d562, 0x3d75c28f, 0x3ddc43b8, 0xbda4f77d, 0x3d75c28f, 0xbc3fd1b1, 0x3e476670, 0x3d75c28f, 0xbdc44982, 0xbde9d562, 0xa3111111, 0x3cb38ebc, 0xbc0e02de]),
+            (r#"scale="-1 1 1""#, [-0.11666667088866235, 0.06666666766007741, 0.0599999986588955], [-0.14353610397041147, 0.6923852878686818, 0.14353610397041147, 0.6923852878686818], [0xbd75c28f, 0x3ddc43b8, 0x3da4f77d, 0xbd75c28f, 0xbc3fd1b1, 0xbe476670, 0xbd75c28f, 0xbdc44982, 0x3de9d562, 0x3d75c28f, 0x3ddc43b8, 0x3da4f77d, 0x3d75c28f, 0xbc3fd1b1, 0xbe476670, 0x3d75c28f, 0xbdc44982, 0x3de9d562, 0xa2ddddde, 0x3cb38ebc, 0x3c0e02de]),
+            (r#"scale="0.5 -2 1.5""#, [0.05833333544433117, -0.1333333353201548, 0.08999999798834324], [0.7054104385769813, 0.7054104385769813, -0.04895010874994723, -0.04895010874994723], [0xbd9c099b, 0xbdb851eb, 0xbdfdf2e3, 0x3d9437d8, 0xbdb851eb, 0xbe143088, 0x3b7a3868, 0xbdb851eb, 0x3e8994fd, 0xbd9c099b, 0x3db851eb, 0xbdfdf2e3, 0x3d9437d8, 0x3db851eb, 0xbe143088, 0x3b7a3868, 0x3db851eb, 0x3e8994fd, 0xbc52a811, 0x00000000, 0xbd0282a0]),
+            (r#"refquat="1 -1 0.3 0" refpos="0.01 0.02 -0.03""#, [0.05824561799328291, -0.11473684199118726, 0.07140351099236919], [0.5233267598406292, 0.6080047538712383, 0.4345389905553699, 0.4094327629682389], [0x3d75c28a, 0xbddc43ba, 0xbda4f77d, 0x3d75c290, 0x3c3fd1a6, 0x3e476670, 0x3d75c293, 0x3dc44981, 0xbde9d562, 0xbd75c294, 0xbddc43b7, 0xbda4f77d, 0xbd75c28e, 0x3c3fd1bc, 0x3e476670, 0xbd75c28b, 0x3dc44983, 0xbde9d562, 0xb17e90f7, 0xbcb38ebc, 0xbc0e02de]),
+            (r#"scale="1 1 -1" refquat="0.9 0.1 0.2 0.3""#, [0.10649123216668764, 0.010175436735153203, -0.10105263218283654], [0.30406589296972475, 0.7519565609609825, -0.38723438184744163, 0.4383546471471347], [0x3d75c28f, 0x3ddc43b8, 0xbda4f77d, 0x3d75c28f, 0xbc3fd1b1, 0x3e476670, 0x3d75c28f, 0xbdc44982, 0xbde9d562, 0xbd75c28f, 0x3ddc43b8, 0xbda4f77d, 0xbd75c28f, 0xbc3fd1b1, 0x3e476670, 0xbd75c28f, 0xbdc44982, 0xbde9d562, 0x29d97476, 0x3cb38ebc, 0xbc0e02de]),
+        ];
+        for (attrs, pos, quat, vert) in cases {
+            let xml = format!(r#"<mujoco><asset><mesh name="p" file="prism.obj" {attrs}/></asset><worldbody><body><freejoint/><geom type="mesh" mesh="p"/></body></worldbody></mujoco>"#);
+            let t = tree_from_mjcf(&xml, &|p: &str| (p == "prism.obj").then(|| PRISM.as_bytes().to_vec())).unwrap();
+            let d = &t.mesh_props["p"];
+            assert_eq!([d.com.x, d.com.y, d.com.z], pos, "{attrs}: mesh_pos");
+            assert_eq!(d.quat, quat, "{attrs}: mesh_quat");
+            let got: Vec<u32> = t.mesh_hulls["p"].verts.iter().flat_map(|v| [v.x as f32, v.y as f32, v.z as f32]).map(f32::to_bits).collect();
+            assert_eq!(got, vert, "{attrs}: mesh_vert");
         }
     }
 
