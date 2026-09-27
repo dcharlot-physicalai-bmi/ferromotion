@@ -18,9 +18,9 @@
 //! transmission-reflected inertia `Σ diag(M)/gear²` at `qpos0`. It cannot be resolved while reading the file,
 //! because it needs the mass matrix; [`resolve_dampratio`] is applied by the loader once the tree exists.
 //!
-//! Carried here: fixed, affine and muscle gains; no, affine and muscle biases; and the activation laws
-//! `integrator`, `filter`, `filterexact` and `muscle` with `actrange` and `actearly` — every actuator in
-//! Menagerie but `shadow_dexee`'s `<plugin>` ones. The transmissions (joint, tendon, site, body) live with
+//! Carried here: fixed, affine and muscle gains; no, affine and muscle biases; the activation laws
+//! `integrator`, `filter`, `filterexact` and `muscle` with `actrange` and `actearly`; and the `mujoco.pid`
+//! actuator plugin ([`Pid`]) — every actuator in Menagerie. The transmissions (joint, tendon, site, body) live with
 //! the model in [`crate::MjcfTree`]. What is not carried — a `user` or `dcmotor` law, or a shortcut not yet
 //! resolved (`<position timeconst>`, `<intvelocity>`, `<cylinder>`, `<damper>`) — is refused by the loader
 //! rather than approximated.
@@ -84,6 +84,78 @@ pub enum DynTransmission {
     Body { body: String },
 }
 
+/// **The `mujoco.pid` actuator plugin** (MuJoCo 3.13.0, `plugin/actuator/pid.cc`): a PID servo on the
+/// transmission length, `force = kp·e + kd·ė + ki·∫e`, with an optional clamp on the integral and an
+/// optional slew limit on the setpoint, both carried as ACTIVATIONS — the error integral first (when
+/// `ki ≠ 0`), then the previous setpoint (when `slewmax` is set).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pid {
+    pub kp: f64,
+    pub ki: f64,
+    pub kd: f64,
+    /// the integral's clamp, `imax / ki` — the file states it as a FORCE
+    pub i_max: Option<f64>,
+    /// the setpoint's rate limit
+    pub slew_max: Option<f64>,
+}
+
+impl Pid {
+    /// `Pid::ActDim`: one activation for the integral, one for the slew limiter.
+    pub fn actdim(&self) -> usize {
+        usize::from(self.ki != 0.0) + usize::from(self.slew_max.is_some())
+    }
+
+    /// `Pid::GetCtrl`: the control clamped to `ctrlrange`, then rate-limited against the previous one —
+    /// but only once time has started (`d->time > 0`): at `t = 0` there is no previous setpoint.
+    fn setpoint(&self, a: &Actuator, ctrl: f64, act: &[f64], time: f64, h: f64) -> f64 {
+        let mut u = match a.ctrlrange {
+            Some([lo, hi]) => ctrl.clamp(lo, hi),
+            None => ctrl,
+        };
+        if let Some(slew) = self.slew_max.filter(|_| time > 0.0) {
+            let prev = act[usize::from(self.ki != 0.0)];
+            // contracted as the C compiles: `prev ∓ slew·h` is one fused multiply-add each way
+            u = u.clamp((-slew).mul_add(h, prev), slew.mul_add(h, prev));
+        }
+        u
+    }
+
+    /// The error integral one step on, clamped: `∫e + e·h`.
+    fn integral(&self, act: &[f64], error: f64, h: f64) -> f64 {
+        if self.ki == 0.0 {
+            return 0.0;
+        }
+        let i = error.mul_add(h, act[0]);
+        match self.i_max {
+            Some(m) => i.clamp(-m, m),
+            None => i,
+        }
+    }
+
+    /// `Pid::Compute`: the force, before `forcerange`. `act` is this actuator's own activations.
+    pub fn force(&self, a: &Actuator, length: f64, velocity: f64, ctrl: f64, act: &[f64], time: f64, h: f64) -> f64 {
+        let error = self.setpoint(a, ctrl, act, time, h) - length;
+        // `ctrl_dot` is zero for a stateless setpoint, so the error's rate is the transmission's
+        let error_dot = 0.0 - velocity;
+        self.ki.mul_add(self.integral(act, error, h), self.kd.mul_add(error_dot, self.kp * error))
+    }
+
+    /// `Pid::ActDot`: rates that land each activation exactly on its next value after one Euler step —
+    /// `(∫e_next − ∫e)/h` and `(setpoint − previous)/h`.
+    pub fn act_dot(&self, a: &Actuator, length: f64, ctrl: f64, act: &[f64], time: f64, h: f64) -> Vec<f64> {
+        let u = self.setpoint(a, ctrl, act, time, h);
+        let error = u - length;
+        let mut out = Vec::with_capacity(2);
+        if self.ki != 0.0 {
+            out.push((self.integral(act, error, h) - act[0]) / h);
+        }
+        if self.slew_max.is_some() {
+            out.push((u - act[out.len()]) / h);
+        }
+        out
+    }
+}
+
 /// One actuator's transmission evaluated at a state: what MuJoCo calls `actuator_moment`,
 /// `actuator_length` and `actuator_velocity`.
 #[derive(Clone, Debug, Default)]
@@ -138,6 +210,8 @@ pub struct Actuator {
     /// `actearly`: the force reads the activation at the END of the step, `next_activation(act, act')`,
     /// instead of the one it starts with — removing the one-step delay between a control and its force.
     pub actearly: bool,
+    /// A `mujoco.pid` plugin computes this actuator's force and activations in place of gain and bias.
+    pub pid: Option<Pid>,
 }
 
 impl Actuator {
@@ -152,6 +226,14 @@ impl Actuator {
     /// `actuator_velocity`.
     pub fn velocity(&self, qd: &[f64]) -> f64 {
         self.moment.iter().map(|(d, m)| m * qd[*d]).sum()
+    }
+
+    /// `actuator_actnum`: how many activations this actuator carries.
+    pub fn actnum(&self) -> usize {
+        match &self.pid {
+            Some(p) => p.actdim(),
+            None => usize::from(self.dynamics != ActDyn::None),
+        }
     }
 
     /// **`act_dot`**, as `mj_fwdActuation` computes it: from the control clamped to `ctrlrange`, and zero for
@@ -239,10 +321,14 @@ pub fn qfrc_actuator(acts: &[Actuator], q: &[f64], qd: &[f64], ctrl: &[f64], dof
 /// An EMPTY slice means every activation is zero, which is what `mj_resetData` leaves behind and therefore
 /// what a state sampled by `mj_forward` on a fresh `mjData` actually has.
 pub fn qfrc_actuator_with(acts: &[Actuator], state: &[ActState], ctrl: &[f64], act: &[f64], dof_force_range: &[Option<[f64; 2]>]) -> Vec<f64> {
+    let forces: Vec<f64> = acts.iter().enumerate().map(|(i, a)| state.get(i).map_or(0.0, |st| a.force(st.length, st.velocity, ctrl.get(i).copied().unwrap_or(0.0), act.get(i).copied().unwrap_or(0.0)))).collect();
+    qfrc_from_forces(state, &forces, dof_force_range)
+}
+
+/// `moment'·force`, then each joint's `actuatorfrcrange` — [`qfrc_actuator_with`] once the forces are known.
+pub fn qfrc_from_forces(state: &[ActState], forces: &[f64], dof_force_range: &[Option<[f64; 2]>]) -> Vec<f64> {
     let mut out = vec![0.0; dof_force_range.len()];
-    for (i, a) in acts.iter().enumerate() {
-        let Some(st) = state.get(i) else { continue };
-        let f = a.force(st.length, st.velocity, ctrl.get(i).copied().unwrap_or(0.0), act.get(i).copied().unwrap_or(0.0));
+    for (st, f) in state.iter().zip(forces) {
         for (d, m) in &st.moment {
             out[*d] += m * f;
         }
@@ -494,7 +580,7 @@ mod tests {
         Actuator {
             name: "a".into(), moment: vec![(0, 1.0)], dynamic: None, gear: 1.0, gain, gainprm, bias, biasprm,
             dynamics: ActDyn::None, dynprm: [0.0; 3], lengthrange: [0.0; 2], acc0: 0.0, ctrlrange: None, forcerange: None,
-            actrange: None, actearly: false,
+            actrange: None, actearly: false, pid: None,
         }
     }
 

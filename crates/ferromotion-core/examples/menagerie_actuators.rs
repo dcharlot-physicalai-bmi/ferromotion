@@ -35,6 +35,8 @@ struct OState {
     ctrl: Vec<f64>,
     /// one per ACTUATOR, zero where it carries no activation state
     act: Vec<f64>,
+    /// `d.act` itself, where the oracle wrote it
+    actfull: Vec<f64>,
     length: Vec<f64>,
     velocity: Vec<f64>,
     force: Vec<f64>,
@@ -93,7 +95,7 @@ fn main() {
                 });
             }
             "state" => models.last_mut().unwrap().states.push(OState::default()),
-            "qpos" | "qvel" | "ctrl" | "act" | "act_length" | "act_velocity" | "act_force" | "qfrc_actuator" => {
+            "qpos" | "qvel" | "ctrl" | "act" | "actfull" | "act_length" | "act_velocity" | "act_force" | "qfrc_actuator" => {
                 let v: Vec<f64> = t[1..].iter().map(|x| f(x)).collect();
                 let s = models.last_mut().unwrap().states.last_mut().unwrap();
                 match t[0] {
@@ -101,6 +103,7 @@ fn main() {
                     "qvel" => s.qvel = v,
                     "ctrl" => s.ctrl = v,
                     "act" => s.act = v,
+                    "actfull" => s.actfull = v,
                     "act_length" => s.length = v,
                     "act_velocity" => s.velocity = v,
                     "act_force" => s.force = v,
@@ -237,7 +240,8 @@ fn main() {
                 // ⛔ the moment for THIS state: a site transmission's turns with the model
                 let st = t.actuator_state_at(a, &q, &s.qvel);
                 let (l, v) = (st.length, st.velocity);
-                let force = a.force(l, v, s.ctrl[u], s.act.get(u).copied().unwrap_or(0.0));
+                // `d.act` where the oracle has it: a PID plugin's force reads its own activations
+                let force = if s.actfull.is_empty() { a.force(l, v, s.ctrl[u], s.act.get(u).copied().unwrap_or(0.0)) } else { t.actuator_force_at(&q, &s.qvel, &s.ctrl, &s.actfull, 0.0)[u] };
                 let (dl, dv, df) = ((l - s.length[u]).abs(), (v - s.velocity[u]).abs(), (force - s.force[u]).abs());
                 worst_len = worst_len.max(dl);
                 worst_vel = worst_vel.max(dv);
@@ -250,7 +254,7 @@ fn main() {
                 }
                 // qfrc_actuator, but only where we carry EVERY actuator — a missing one is a missing term
                 if t.actuators_unsupported.is_empty() && u + 1 == o.acts.len() {
-                    let mine = t.qfrc_actuator_act(&q, &s.qvel, &s.ctrl, &s.act);
+                    let mine = t.qfrc_actuator_act(&q, &s.qvel, &s.ctrl, if s.actfull.is_empty() { &s.act } else { &s.actfull });
                     let d = mine.iter().zip(&s.qfrc).map(|(x, y)| (x - y).abs()).fold(0.0, nan_max);
                     if d > 1e-6 && notes.len() < 8 {
                         notes.push(format!("{}: qfrc ours {:?} vs MuJoCo {:?}", o.rel, mine, s.qfrc));

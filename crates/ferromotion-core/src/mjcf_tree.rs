@@ -362,6 +362,11 @@ impl MjcfTree {
     /// ⛔ Undefined at gimbal lock, where `T` is singular — the Euler base's one real limitation, and the
     /// reason this returns an `Option`.
     pub fn qacc_smooth_mujoco(&self, q: &[f64], v_mujoco: &[f64], ctrl: &[f64], act: &[f64]) -> Option<Vec<f64>> {
+        self.qacc_smooth_mujoco_at(q, v_mujoco, ctrl, act, 0.0)
+    }
+
+    /// [`MjcfTree::qacc_smooth_mujoco`] at `time` (`d.time`, which a PID's slew limiter reads).
+    pub fn qacc_smooth_mujoco_at(&self, q: &[f64], v_mujoco: &[f64], ctrl: &[f64], act: &[f64], time: f64) -> Option<Vec<f64>> {
         let nv = self.tree.joints.len();
         let t = self.free_basis(q);
         let tinv = t.clone().try_inverse()?;
@@ -381,7 +386,7 @@ impl MjcfTree {
             }
         }
         let bias = crate::tree_dynamics::tree_inverse_dynamics(&self.tree.joints, &self.tree.inertia, &self.tree.parent, q, &qd, &vec![0.0; nv], self.gravity);
-        let act = self.qfrc_actuator_act(q, &qd, ctrl, act);
+        let act = self.qfrc_actuator_at(q, &qd, ctrl, act, time);
         let tdot_v = self.free_basis_dot(q, &qd) * &v;
         let c_ours = nalgebra::DVector::from_iterator(nv, (0..nv).map(|i| bias[i])) - &m_rigid * (&tinv * tdot_v);
         let m_mj = tinv.transpose() * &m_full * &tinv;
@@ -701,44 +706,105 @@ impl MjcfTree {
         self.qfrc_actuator_act(q, qd, ctrl, &[])
     }
 
-    /// [`MjcfTree::qfrc_actuator`] with the ACTIVATIONS given, in MuJoCo's own layout: `d.act`, one entry per
-    /// actuator that carries a state ([`MjcfTree::na`] of them), in actuator order. An empty slice is every
+    /// [`MjcfTree::qfrc_actuator`] with the ACTIVATIONS given, in MuJoCo's own layout: `d.act`, each
+    /// actuator's activations in actuator order ([`MjcfTree::na`] in all). An empty slice is every
     /// activation at zero, which is what `mj_resetData` leaves and therefore what a state sampled by
-    /// `mj_forward` on a fresh `mjData` has.
+    /// `mj_forward` on a fresh `mjData` has. At time zero; see [`MjcfTree::qfrc_actuator_at`].
     pub fn qfrc_actuator_act(&self, q: &[f64], qd: &[f64], ctrl: &[f64], act: &[f64]) -> Vec<f64> {
-        crate::mujoco_actuator::qfrc_actuator_with(&self.actuators, &self.actuator_state(q, qd), ctrl, &self.act_inputs(ctrl, act), &self.dof_actuator_force_range())
+        self.qfrc_actuator_at(q, qd, ctrl, act, 0.0)
     }
 
-    /// **`na`**: how many activations the model carries, one for each actuator with an activation state.
-    pub fn na(&self) -> usize {
-        self.actuators.iter().filter(|a| a.dynamics != crate::mujoco_actuator::ActDyn::None).count()
+    /// [`MjcfTree::qfrc_actuator_act`] at `time` (`d.time`), which a PID's slew limiter reads: it holds no
+    /// previous setpoint until time has started.
+    pub fn qfrc_actuator_at(&self, q: &[f64], qd: &[f64], ctrl: &[f64], act: &[f64], time: f64) -> Vec<f64> {
+        let states = self.actuator_state(q, qd);
+        let forces = self.actuator_forces(&states, ctrl, act, time);
+        crate::mujoco_actuator::qfrc_from_forces(&states, &forces, &self.dof_actuator_force_range())
     }
 
-    /// **`act_dot`**, in MuJoCo's layout (`na` entries): each stateful actuator's activation rate at this
-    /// control and activation, as `mj_fwdActuation` computes it. `act` is `d.act`; empty means zeros.
-    pub fn act_dot(&self, ctrl: &[f64], act: &[f64]) -> Vec<f64> {
+    /// **`actuator_force`**, one per actuator, at this state: gain and bias, or a PID plugin, then
+    /// `forcerange` — before any joint's `actuatorfrcrange`. `act` is `d.act`; `time` is `d.time`.
+    pub fn actuator_force_at(&self, q: &[f64], qd: &[f64], ctrl: &[f64], act: &[f64], time: f64) -> Vec<f64> {
+        self.actuator_forces(&self.actuator_state(q, qd), ctrl, act, time)
+    }
+
+    /// `actuator_force`, one per actuator: gain and bias, or a PID plugin, then `forcerange`.
+    fn actuator_forces(&self, states: &[crate::mujoco_actuator::ActState], ctrl: &[f64], act: &[f64], time: f64) -> Vec<f64> {
+        let inputs = self.act_inputs(ctrl, act);
+        let act = self.act_full(act);
         self.actuators
             .iter()
+            .zip(self.act_adr())
             .enumerate()
-            .filter(|(_, a)| a.dynamics != crate::mujoco_actuator::ActDyn::None)
-            .enumerate()
-            .map(|(k, (i, a))| a.act_dot(ctrl.get(i).copied().unwrap_or(0.0), act.get(k).copied().unwrap_or(0.0)))
+            .map(|(i, (a, (adr, num)))| {
+                let Some(st) = states.get(i) else { return 0.0 };
+                let u = ctrl.get(i).copied().unwrap_or(0.0);
+                match &a.pid {
+                    Some(pid) => {
+                        let f = pid.force(a, st.length, st.velocity, u, &act[adr..adr + num], time, self.timestep);
+                        a.forcerange.map_or(f, |[lo, hi]| f.clamp(lo, hi))
+                    }
+                    None => a.force(st.length, st.velocity, u, inputs[i]),
+                }
+            })
             .collect()
     }
 
-    /// The activation each actuator's force READS, one entry per actuator: `d.act` where it has a state, or
-    /// under `actearly` the activation at the end of the step; zero (unread) where it has none.
-    fn act_inputs(&self, ctrl: &[f64], act: &[f64]) -> Vec<f64> {
-        let mut k = 0usize;
+    /// `(actuator_actadr, actuator_actnum)` per actuator: where its activations sit in `d.act`.
+    pub fn act_adr(&self) -> Vec<(usize, usize)> {
+        let mut adr = 0usize;
         self.actuators
             .iter()
+            .map(|a| {
+                let here = (adr, a.actnum());
+                adr += a.actnum();
+                here
+            })
+            .collect()
+    }
+
+    /// `act` padded with zeros to [`MjcfTree::na`] entries (an empty slice is `mj_resetData`'s zeros).
+    fn act_full(&self, act: &[f64]) -> Vec<f64> {
+        (0..self.na()).map(|k| act.get(k).copied().unwrap_or(0.0)).collect()
+    }
+
+    /// **`na`**: how many activations the model carries — one for each actuator with an activation law,
+    /// and a PID plugin's own (its integral, its previous setpoint).
+    pub fn na(&self) -> usize {
+        self.actuators.iter().map(|a| a.actnum()).sum()
+    }
+
+    /// **`act_dot`**, in MuJoCo's layout ([`MjcfTree::na`] entries): every activation's rate at this state,
+    /// as `mj_fwdActuation` computes it. `act` is `d.act`; empty means zeros.
+    pub fn act_dot(&self, q: &[f64], ctrl: &[f64], act: &[f64], time: f64) -> Vec<f64> {
+        let act = self.act_full(act);
+        let lengths: Option<Vec<f64>> = self.actuators.iter().any(|a| a.pid.is_some()).then(|| self.actuator_state(q, &vec![0.0; q.len()]).iter().map(|s| s.length).collect());
+        let mut out = Vec::with_capacity(act.len());
+        for (i, (a, (adr, num))) in self.actuators.iter().zip(self.act_adr()).enumerate() {
+            let u = ctrl.get(i).copied().unwrap_or(0.0);
+            match &a.pid {
+                Some(pid) => out.extend(pid.act_dot(a, lengths.as_ref().map_or(0.0, |l| l[i]), u, &act[adr..adr + num], time, self.timestep)),
+                None if num > 0 => out.push(a.act_dot(u, act[adr + num - 1])),
+                None => {}
+            }
+        }
+        out
+    }
+
+    /// The activation each actuator's force READS, one entry per actuator: its last activation, or under
+    /// `actearly` that activation at the end of the step; zero (unread) where it has none or a plugin reads
+    /// its own.
+    fn act_inputs(&self, ctrl: &[f64], act: &[f64]) -> Vec<f64> {
+        let act = self.act_full(act);
+        self.actuators
+            .iter()
+            .zip(self.act_adr())
             .enumerate()
-            .map(|(i, a)| {
-                if a.dynamics == crate::mujoco_actuator::ActDyn::None {
+            .map(|(i, (a, (adr, num)))| {
+                if num == 0 || a.pid.is_some() {
                     return 0.0;
                 }
-                let x = act.get(k).copied().unwrap_or(0.0);
-                k += 1;
+                let x = act[adr + num - 1];
                 if a.actearly {
                     a.next_activation(x, a.act_dot(ctrl.get(i).copied().unwrap_or(0.0), x), self.timestep)
                 } else {
@@ -751,12 +817,14 @@ impl MjcfTree {
     /// **`mj_advance`'s activation half**: every activation one step of `h` on, from `act` and its rate
     /// `act_dot` (both MuJoCo's layout) — [`crate::mujoco_actuator::Actuator::next_activation`] in turn.
     pub fn next_activation(&self, act: &[f64], act_dot: &[f64], h: f64) -> Vec<f64> {
-        self.actuators
-            .iter()
-            .filter(|a| a.dynamics != crate::mujoco_actuator::ActDyn::None)
-            .enumerate()
-            .map(|(k, a)| a.next_activation(act.get(k).copied().unwrap_or(0.0), act_dot.get(k).copied().unwrap_or(0.0), h))
-            .collect()
+        let act = self.act_full(act);
+        let mut out = Vec::with_capacity(act.len());
+        for (a, (adr, num)) in self.actuators.iter().zip(self.act_adr()) {
+            for k in adr..adr + num {
+                out.push(a.next_activation(act[k], act_dot.get(k).copied().unwrap_or(0.0), h));
+            }
+        }
+        out
     }
 
     /// **`mj_inertiaBoxFluidModel`**: the ambient medium's drag on every body, from `<option density>`,
@@ -1299,6 +1367,11 @@ impl MjcfTree {
     /// `efc_aref` and `efc_D` do not move (`J·q̇` is the same number in either basis). With no such joint `T`
     /// is the identity.
     pub fn constraint_problem(&self, q: &[f64], v_mujoco: &[f64], ctrl: &[f64], act: &[f64], contacts: &[crate::mujoco_contact::ContactSpec]) -> Result<MjcfConstraintProblem, String> {
+        self.constraint_problem_at(q, v_mujoco, ctrl, act, 0.0, contacts)
+    }
+
+    /// [`MjcfTree::constraint_problem`] at `time` (`d.time`, which a PID's slew limiter reads).
+    pub fn constraint_problem_at(&self, q: &[f64], v_mujoco: &[f64], ctrl: &[f64], act: &[f64], time: f64, contacts: &[crate::mujoco_contact::ContactSpec]) -> Result<MjcfConstraintProblem, String> {
         let nv = self.tree.joints.len();
         let tinv = self.free_basis(q).try_inverse().ok_or("gimbal lock: the Euler base's basis map is singular")?;
         let qvel: Vec<f64> = (&tinv * nalgebra::DVector::from_row_slice(v_mujoco)).iter().copied().collect();
@@ -1308,7 +1381,7 @@ impl MjcfTree {
         contact.jac = &contact.jac * &tinv;
         rows.append(contact);
         let m = self.mass_matrix(q);
-        let a0 = self.qacc_smooth_mujoco(q, v_mujoco, ctrl, act).ok_or("gimbal lock: the Euler base's basis map is singular")?;
+        let a0 = self.qacc_smooth_mujoco_at(q, v_mujoco, ctrl, act, time).ok_or("gimbal lock: the Euler base's basis map is singular")?;
         Ok(MjcfConstraintProblem { m: tinv.transpose() * m * &tinv, a0: nalgebra::DVector::from_vec(a0), rows, contact_blocks_from })
     }
 
@@ -1326,6 +1399,12 @@ impl MjcfTree {
     /// Verified against MuJoCo 3.13.0 on Menagerie by `examples/menagerie_forward`, which runs this and
     /// checks it against the pipeline it assembles itself.
     pub fn forward_mujoco(&self, q: &[f64], v_mujoco: &[f64], ctrl: &[f64], act: &[f64]) -> Result<MjcfForward, String> {
+        self.forward_mujoco_at(q, v_mujoco, ctrl, act, 0.0)
+    }
+
+    /// [`MjcfTree::forward_mujoco`] at `time` (`d.time`). Only a PID plugin's slew limiter reads it: at
+    /// `time = 0` it has no previous setpoint to limit against, as a fresh `mjData` has none.
+    pub fn forward_mujoco_at(&self, q: &[f64], v_mujoco: &[f64], ctrl: &[f64], act: &[f64], time: f64) -> Result<MjcfForward, String> {
         let collision = self.collide(q);
         if let Some([i, j]) = collision.refused.first() {
             return Err(format!("geoms '{}' and '{}' need a collider this port does not carry", self.geoms[*i].name, self.geoms[*j].name));
@@ -1333,7 +1412,7 @@ impl MjcfTree {
         let frames = crate::tree_frames(&self.tree, q);
         let invweight0 = self.body_invweight0();
         let specs: Vec<crate::mujoco_contact::ContactSpec> = collision.contacts.iter().filter(|c| !c.record.exclude).map(|c| self.contact_spec(c, &frames, &invweight0)).collect();
-        let p = self.constraint_problem(q, v_mujoco, ctrl, act, &specs)?;
+        let p = self.constraint_problem_at(q, v_mujoco, ctrl, act, time, &specs)?;
         let mut solve = crate::mujoco_contact::solve_constraints_newton_blocks(&p.m, &p.a0, &p.rows.jac, &p.rows.aref, &p.rows.d, &p.rows.blocks, 1e-13, 200)?;
         // ⭐ `<option noslip_iterations>`: MuJoCo re-solves the friction forces after the main solve, so the
         // acceleration it reports is NOT the optimum of the main problem. Part of the problem statement.
@@ -1342,7 +1421,7 @@ impl MjcfTree {
             solve.qacc = crate::mujoco_contact::mujoco_noslip(&p.m, &p.a0, &p.rows.jac, &p.rows.aref, &p.rows.d, &p.rows.blocks, &mut force, self.noslip_iterations, self.noslip_tolerance, self.meaninertia)?;
             solve.force = force;
         }
-        Ok(MjcfForward { qacc: solve.qacc.iter().copied().collect(), qacc_smooth: p.a0.iter().copied().collect(), nefc: p.rows.aref.len(), collision, solve, m: p.m, act_dot: self.act_dot(ctrl, act) })
+        Ok(MjcfForward { qacc: solve.qacc.iter().copied().collect(), qacc_smooth: p.a0.iter().copied().collect(), nefc: p.rows.aref.len(), collision, solve, m: p.m, act_dot: self.act_dot(q, ctrl, act, time) })
     }
 
     /// MuJoCo's `qpos` address of each joint, in joint order.
@@ -1386,6 +1465,14 @@ impl MjcfTree {
     /// without a second check. [`MjcfStep::reset`] says which. ⛔ `mj_resetData` also zeroes `d.ctrl`, so a
     /// caller following MuJoCo's trajectory past a reset drives it with zero control from then on.
     pub fn step_mujoco(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64]) -> Result<MjcfStep, String> {
+        self.step_mujoco_at(qpos, qvel, ctrl, act, 0.0)
+    }
+
+    /// [`MjcfTree::step_mujoco`] from `time` (`d.time`); [`MjcfStep::time`] is where it ends. Only a PID
+    /// plugin's slew limiter reads the time — it has no previous setpoint until time has started — so a
+    /// model without one steps the same from any time. Chain `step.time` into the next call to follow
+    /// MuJoCo's trajectory.
+    pub fn step_mujoco_at(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64], time: f64) -> Result<MjcfStep, String> {
         let bad = |x: &f64| x.is_nan() || *x > MJ_MAXVAL || *x < -MJ_MAXVAL;
         if let Some(i) = qpos.iter().position(bad) {
             return self.step_after_reset(MjcfReset::BadQpos(i), true);
@@ -1393,24 +1480,24 @@ impl MjcfTree {
         if let Some(i) = qvel.iter().position(bad) {
             return self.step_after_reset(MjcfReset::BadQvel(i), true);
         }
-        self.step_checked(qpos, qvel, ctrl, act, true)
+        self.step_checked(qpos, qvel, ctrl, act, time, true)
     }
 
-    /// One step from `mj_resetData`'s state — `qpos0`, everything else zero, the control included.
+    /// One step from `mj_resetData`'s state — `qpos0`, time zero, everything else zero, the control included.
     fn step_after_reset(&self, why: MjcfReset, check_acc: bool) -> Result<MjcfStep, String> {
         let nv = self.tree.joints.len();
-        let mut s = self.step_checked(&self.qpos0(), &vec![0.0; nv], &vec![0.0; self.actuators.len()], &vec![0.0; self.na()], check_acc)?;
+        let mut s = self.step_checked(&self.qpos0(), &vec![0.0; nv], &vec![0.0; self.actuators.len()], &vec![0.0; self.na()], 0.0, check_acc)?;
         s.reset = Some(why);
         Ok(s)
     }
 
     /// [`MjcfTree::step_mujoco`] once `qpos` and `qvel` have passed `mj_checkPos`/`mj_checkVel`; `check_acc`
     /// is `mj_checkAcc`, which MuJoCo does not repeat after the reset it triggers.
-    fn step_checked(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64], check_acc: bool) -> Result<MjcfStep, String> {
+    fn step_checked(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64], time: f64, check_acc: bool) -> Result<MjcfStep, String> {
         use crate::mujoco_actuator::{ActBias, ActDyn, ActGain};
         // ⭐ near gimbal lock, the same step in a chart where the angles are zero
         if let Some(t) = self.chart_if_needed(qpos)? {
-            return t.step_checked(qpos, qvel, ctrl, act, check_acc);
+            return t.step_checked(qpos, qvel, ctrl, act, time, check_acc);
         }
         match self.integrator {
             MjcfIntegrator::Euler => {}
@@ -1418,12 +1505,12 @@ impl MjcfTree {
                 return Err("implicitfast with a fluid: the fluid force's velocity derivative is not carried".into());
             }
             MjcfIntegrator::ImplicitFast => {}
-            MjcfIntegrator::Rk4 => return self.step_rk4(qpos, qvel, ctrl, act, check_acc),
+            MjcfIntegrator::Rk4 => return self.step_rk4(qpos, qvel, ctrl, act, time, check_acc),
             other => return Err(format!("the {other:?} integrator is not carried")),
         }
         let qposadr = self.qposadr();
         let q = self.q_from_qpos(qpos, &qposadr)?;
-        let forward = self.forward_mujoco(&q, qvel, ctrl, act)?;
+        let forward = self.forward_mujoco_at(&q, qvel, ctrl, act, time)?;
         if let Some(i) = forward.qacc.iter().position(|x| check_acc && (x.is_nan() || x.abs() > MJ_MAXVAL)) {
             return self.step_after_reset(MjcfReset::BadQacc(i), false);
         }
@@ -1444,6 +1531,11 @@ impl MjcfTree {
             let qd_ours: Vec<f64> = (&tinv * nalgebra::DVector::from_row_slice(qvel)).iter().copied().collect();
             let act_in = self.act_inputs(ctrl, act);
             for (u, (a, st)) in self.actuators.iter().zip(self.actuator_state(&q, &qd_ours)).enumerate() {
+                // a plugin's velocity derivative is not carried by MuJoCo either (`pid.cc`: "allow actuator
+                // plugins to compute their derivatives wrt qvel" is a TODO)
+                if a.pid.is_some() {
+                    continue;
+                }
                 let input = ctrl.get(u).copied().unwrap_or(0.0);
                 // `actuatorDerivSkip`: a force pinned at its `forcerange` has no velocity derivative
                 if let Some([lo, hi]) = a.forcerange {
@@ -1601,7 +1693,7 @@ impl MjcfTree {
         let qvel_next: Vec<f64> = qvel.iter().zip(applied.iter()).map(|(v, a)| a.mul_add(h, *v)).collect();
         // `mj_integratePos`, with the new velocity
         let qpos_next = self.integrate_pos(qpos, &qvel_next, h);
-        Ok(MjcfStep { qpos: qpos_next, qvel: qvel_next, act: act_next, qacc_integrated: applied.iter().copied().collect(), forward, reset: None })
+        Ok(MjcfStep { qpos: qpos_next, qvel: qvel_next, act: act_next, time: time + h, qacc_integrated: applied.iter().copied().collect(), forward, reset: None })
     }
 
     /// **`mj_integratePos`**: `qpos` moved by `h·v`, a velocity in MuJoCo's basis — a hinge or slide by
@@ -1633,14 +1725,14 @@ impl MjcfTree {
     /// fused multiply-adds, as `mju_addToScl` compiles. The activations ride along as the last block of the
     /// state: each stage sets `act₀ + h·Σⱼ Aᵢⱼ·act'ⱼ` (no clamp), and the final step is `mj_nextActivation` on
     /// the B-weighted rate, which does clamp.
-    fn step_rk4(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64], check_acc: bool) -> Result<MjcfStep, String> {
+    fn step_rk4(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64], time: f64, check_acc: bool) -> Result<MjcfStep, String> {
         const A: [[f64; 3]; 3] = [[0.5, 0.0, 0.0], [0.0, 0.5, 0.0], [0.0, 0.0, 1.0]];
         const B: [f64; 4] = [1.0 / 6.0, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 6.0];
         let h = self.timestep;
         let qposadr = self.qposadr();
         let (nv, na) = (qvel.len(), self.na());
         let act0: Vec<f64> = (0..na).map(|k| act.get(k).copied().unwrap_or(0.0)).collect();
-        let forward0 = self.forward_mujoco(&self.q_from_qpos(qpos, &qposadr)?, qvel, ctrl, &act0)?;
+        let forward0 = self.forward_mujoco_at(&self.q_from_qpos(qpos, &qposadr)?, qvel, ctrl, &act0, time)?;
         if let Some(i) = forward0.qacc.iter().position(|x| check_acc && (x.is_nan() || x.abs() > MJ_MAXVAL)) {
             return self.step_after_reset(MjcfReset::BadQacc(i), false);
         }
@@ -1661,7 +1753,8 @@ impl MjcfTree {
             let xq = self.integrate_pos(qpos, &dv, h);
             let v: Vec<f64> = (0..nv).map(|k| da[k].mul_add(h, qvel[k])).collect();
             let x: Vec<f64> = (0..na).map(|k| dx[k].mul_add(h, act0[k])).collect();
-            let f = self.forward_mujoco(&self.q_from_qpos(&xq, &qposadr)?, &v, ctrl, &x)?;
+            // the stage's time, `t + Cᵢ·h` with `Cᵢ` the row sum of A
+            let f = self.forward_mujoco_at(&self.q_from_qpos(&xq, &qposadr)?, &v, ctrl, &x, A[i - 1].iter().sum::<f64>().mul_add(h, time))?;
             xv.push(v);
             fa.push(f.qacc);
             fx.push(f.act_dot);
@@ -1679,7 +1772,7 @@ impl MjcfTree {
         let act_next = self.next_activation(&act0, &dx, h);
         let qvel_next: Vec<f64> = (0..nv).map(|k| da[k].mul_add(h, qvel[k])).collect();
         let qpos_next = self.integrate_pos(qpos, &dv, h);
-        Ok(MjcfStep { qpos: qpos_next, qvel: qvel_next, act: act_next, qacc_integrated: da, forward: forward0, reset: None })
+        Ok(MjcfStep { qpos: qpos_next, qvel: qvel_next, act: act_next, time: time + h, qacc_integrated: da, forward: forward0, reset: None })
     }
 
     /// One entry per degree of freedom: the joint's cap on the total actuator force through it, for
@@ -1984,6 +2077,8 @@ pub struct MjcfStep {
     pub qvel: Vec<f64>,
     /// `d.act`, one step on ([`MjcfTree::na`] entries)
     pub act: Vec<f64>,
+    /// `d.time` after the step: the start time plus `<option timestep>`, or one timestep after an auto-reset
+    pub time: f64,
     /// the acceleration the integrator actually applied: `qacc` itself, or with damping the implicit
     /// `(M + h·D)⁻¹·M·qacc`
     pub qacc_integrated: Vec<f64>,
@@ -4522,10 +4617,22 @@ fn parse_actuators(root: &El, defaults: &Defaults, c: &Compiler, joints: &[MjcfJ
     let by_name: HashMap<&str, &MjcfJoint> = joints.iter().map(|j| (j.name.as_str(), j)).collect();
     let ten_by_name: HashMap<&str, (usize, &MjcfTendon)> = tendons.iter().enumerate().map(|(i, t)| (t.name.as_str(), (i, t))).collect();
     let (mut out, mut unsupported) = (Vec::new(), Vec::new());
+    // `<extension><plugin plugin="..."><instance name="..."><config key value/>`: named plugin configurations
+    // an actuator can point at with `instance=`
+    let mut instances: PluginInstances = HashMap::new();
+    for ext in root.children_named("extension") {
+        for pl in ext.children_named("plugin") {
+            let plugin = pl.attr("plugin").unwrap_or("").to_string();
+            for inst in pl.children_named("instance") {
+                let config = inst.children_named("config").filter_map(|c| Some((c.attr("key")?.to_string(), c.attr("value")?.to_string()))).collect();
+                instances.insert(inst.attr("name").unwrap_or("").to_string(), (plugin.clone(), config));
+            }
+        }
+    }
     for section in root.children_named("actuator") {
         for el in &section.children {
             let name = el.attr("name").map(|s| s.to_string()).unwrap_or_else(|| format!("actuator{}", out.len() + unsupported.len()));
-            match one_actuator(el, defaults, c, &by_name, &ten_by_name, section.attr("childclass"), &name) {
+            match one_actuator(el, defaults, c, &by_name, &ten_by_name, &instances, section.attr("childclass"), &name) {
                 Ok(a) => out.push(a),
                 Err(Unsupported(why)) => unsupported.push((name, why)),
                 Err(Bad(why)) => return Err(format!("actuator '{name}': {why}")),
@@ -4535,10 +4642,46 @@ fn parse_actuators(root: &El, defaults: &Defaults, c: &Compiler, joints: &[MjcfJ
     Ok((out, unsupported))
 }
 
+/// Plugin instances by name: the plugin's name and its `config` pairs.
+type PluginInstances = HashMap<String, (String, HashMap<String, String>)>;
+
+/// **`mujoco.pid`**, as `PidConfig::FromModel` reads it: `kp`, `ki`, `kd` (absent is zero), `imax` (a
+/// FORCE, turned into the integral's clamp by dividing by `ki`) and `slewmax`. From a named instance, or
+/// from `<config>` children of the actuator element itself.
+fn plugin_pid(el: &El, instances: &PluginInstances) -> Result<crate::mujoco_actuator::Pid, ActErr> {
+    let (plugin, config) = match el.attr("instance") {
+        Some(i) => instances.get(i).cloned().ok_or_else(|| Bad(format!("no plugin instance named '{i}'")))?,
+        None => (el.attr("plugin").unwrap_or("").to_string(), el.children_named("config").filter_map(|c| Some((c.attr("key")?.to_string(), c.attr("value")?.to_string()))).collect()),
+    };
+    if plugin != "mujoco.pid" {
+        return Err(Unsupported(format!("the '{plugin}' actuator plugin")));
+    }
+    let num = |k: &str| -> Result<Option<f64>, ActErr> {
+        match config.get(k).map(|v| v.trim()).filter(|v| !v.is_empty()) {
+            Some(v) => v.parse::<f64>().map(Some).map_err(|e| Bad(format!("pid {k}: {e}"))),
+            None => Ok(None),
+        }
+    };
+    let (kp, ki, kd) = (num("kp")?.unwrap_or(0.0), num("ki")?.unwrap_or(0.0), num("kd")?.unwrap_or(0.0));
+    let i_max = num("imax")?.filter(|_| ki != 0.0).map(|m| m / ki);
+    let slew_max = num("slewmax")?;
+    if i_max.is_some_and(|m| m < 0.0) {
+        return Err(Bad("pid: negative imax".into()));
+    }
+    if slew_max.is_some_and(|m| m < 0.0) {
+        return Err(Bad("pid: slewmax must be non-negative".into()));
+    }
+    Ok(crate::mujoco_actuator::Pid { kp, ki, kd, i_max, slew_max })
+}
+
 #[allow(clippy::too_many_arguments)]
-fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&str, &MjcfJoint>, ten_by_name: &HashMap<&str, (usize, &MjcfTendon)>, childclass: Option<&str>, name: &str) -> Result<crate::mujoco_actuator::Actuator, ActErr> {
+fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&str, &MjcfJoint>, ten_by_name: &HashMap<&str, (usize, &MjcfTendon)>, instances: &PluginInstances, childclass: Option<&str>, name: &str) -> Result<crate::mujoco_actuator::Actuator, ActErr> {
     use crate::mujoco_actuator::Actuator;
     let tag = el.name.as_str();
+    // an actuator `<plugin>` takes the general attribute table (transmission, ranges, `actdim`); the plugin
+    // computes its force
+    let pid = if tag == "plugin" { Some(plugin_pid(el, instances)?) } else { None };
+    let tag = if tag == "plugin" { "general" } else { tag };
     if !ACTUATOR_TAGS.contains(&tag) {
         // `<plugin>` and anything else MuJoCo accepts here is an actuator we do not model, not a broken file
         return Err(Unsupported(format!("<{tag}>")));
@@ -4651,10 +4794,19 @@ fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&s
     if actrange.is_some() && !stateful {
         return Err(Bad("actrange specified but dyntype is 'none' in actuator".into()));
     }
-    match rec.actdim {
-        Some(n) if n > 1 => return Err(Bad("actdim > 1 is only allowed for dyntype 'user' and 'dcmotor'".into())),
-        Some(1) if !stateful => return Err(Bad("invalid actdim 1 in stateless actuator".into())),
-        Some(0) if stateful => return Err(Bad("invalid actdim 0 in stateful actuator".into())),
+    match (&pid, rec.actdim) {
+        // `Pid::Create`: the plugin's own activations, which the file has to state
+        (Some(p), n) => {
+            if stateful {
+                return Err(Unsupported("a PID plugin whose setpoint has an activation law".into()));
+            }
+            if n != Some(p.actdim() as i64) {
+                return Err(Bad(format!("actuator has actdim {}, expected {}; add actdim=\"{}\" to the actuator plugin element", n.unwrap_or(0), p.actdim(), p.actdim())));
+            }
+        }
+        (None, Some(n)) if n > 1 => return Err(Bad("actdim > 1 is only allowed for dyntype 'user' and 'dcmotor'".into())),
+        (None, Some(1)) if !stateful => return Err(Bad("invalid actdim 1 in stateless actuator".into())),
+        (None, Some(0)) if stateful => return Err(Bad("invalid actdim 0 in stateful actuator".into())),
         _ => {}
     }
     Ok(Actuator {
@@ -4676,6 +4828,7 @@ fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&s
         forcerange,
         actrange,
         actearly: rec.actearly,
+        pid,
     })
 }
 
@@ -6177,6 +6330,65 @@ mod tests {
             }
         }
     }
+
+    /// **The `mujoco.pid` actuator plugin, against MuJoCo's `mj_step`.** One PID with all its parts (an
+    /// integral that reaches its `imax` clamp, a slew limiter, a force pinned at its `forcerange`) and one
+    /// bare PD, fifteen steps from `t = 0`
+    /// under each integrator. The slew limiter is idle at `t = 0` and live after it — and inside RK4's
+    /// stages, which run at `t + h/2` — so the step's `time` is carried from one call to the next.
+    #[test]
+    fn a_pid_plugin_steps_like_mujoco() {
+        type Want = ([f64; 2], [f64; 2], [f64; 2]);
+        let cases: [(&str, Want, Want); 3] = [
+            ("Euler", ([0.1965807539017862, -0.3592294124671274], [-0.6838492196427609, 8.154117506574524], [0.053500000000000006, 0.9]), ([0.22301724345770013, 0.5825004217957128], [4.100974848278261, 2.127321181409043], [0.08, 0.9])),
+            ("implicitfast", ([0.1965807539017862, -0.3592294124671274], [-0.6838492196427609, 8.154117506574524], [0.053500000000000006, 0.9]), ([0.22301724345770013, 0.5825004217957128], [4.100974848278261, 2.127321181409043], [0.08, 0.9])),
+            ("RK4", ([0.19968409888977318, -0.3815842647163792], [-0.5912666901467641, 7.400497689910254], [0.05155670829153824, 0.4083333333333333]), ([0.20047795416661005, 0.6010920520467117], [3.576285876095827, 3.5372361500089604], [0.07416701628118336, 0.5483333333333335])),
+        ];
+        let ctrl = [0.9, 0.6];
+        for (integrator, one, fifteen) in cases {
+            let t = tree_from_mjcf_str(&PID_MODEL.replace("INTEGRATOR", integrator)).unwrap();
+            assert!(t.actuators_unsupported.is_empty(), "{:?}", t.actuators_unsupported);
+            assert_eq!((t.na(), t.act_adr()), (2, vec![(0, 2), (2, 0)]));
+            let (mut qpos, mut qvel, mut act, mut time) = (vec![0.2, -0.4], vec![0.5, -0.3], vec![0.05, 0.3], 0.0);
+            for k in 1..=15 {
+                let st = t.step_mujoco_at(&qpos, &qvel, &ctrl, &act, time).unwrap();
+                (qpos, qvel, act, time) = (st.qpos, st.qvel, st.act, st.time);
+                let want = match k {
+                    1 => one,
+                    15 => fifteen,
+                    _ => continue,
+                };
+                for (what, got, w) in [("qpos", &qpos, want.0), ("qvel", &qvel, want.1), ("act", &act, want.2)] {
+                    for (i, (g, w)) in got.iter().zip(w).enumerate() {
+                        assert!((g - w).abs() < 1e-10 * w.abs().max(1.0), "{integrator} step {k}: {what}[{i}] {g} vs MuJoCo {w}");
+                    }
+                }
+            }
+            assert!((time - 0.075).abs() < 1e-15);
+        }
+    }
+
+    const PID_MODEL: &str = r#"<mujoco><option integrator="INTEGRATOR" timestep="0.005"/>
+<extension>
+  <plugin plugin="mujoco.pid">
+    <instance name="full"><config key="kp" value="3.0"/><config key="ki" value="5.0"/><config key="kd" value="0.2"/><config key="imax" value="0.4"/><config key="slewmax" value="2.0"/></instance>
+    <instance name="pd"><config key="kp" value="4.0"/><config key="kd" value="0.1"/></instance>
+  </plugin>
+</extension>
+<worldbody>
+  <body name="a" pos="0 0 1">
+    <joint name="j1" type="hinge" axis="0 1 0" damping="0.05"/>
+    <geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.03" mass="0.8" contype="0" conaffinity="0"/>
+    <body name="b" pos="0.3 0 0">
+      <joint name="j2" type="hinge" axis="0 1 0"/>
+      <geom type="capsule" fromto="0 0 0 0.2 0 0" size="0.02" mass="0.3" contype="0" conaffinity="0"/>
+    </body>
+  </body>
+</worldbody>
+<actuator>
+  <plugin name="p1" plugin="mujoco.pid" instance="full" joint="j1" ctrlrange="-1 1" forcerange="-1.5 1.5" actdim="2"/>
+  <plugin name="p2" plugin="mujoco.pid" instance="pd" joint="j2" actdim="0"/>
+</actuator></mujoco>"#;
 
     /// **A tendon limit on a SPINNING free body, against MuJoCo.** A limited spatial tendon from a site on a
     /// free body to a world site, stretched past its range with the body turning fast. MuJoCo carries `J̇·v`

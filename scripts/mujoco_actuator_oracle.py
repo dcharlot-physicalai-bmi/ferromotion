@@ -77,6 +77,9 @@ for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
         # one activation per ACTUATOR, zero where it carries no state, so a port can index it like `ctrl`
         actval = [float(d.act[int(m.actuator_actadr[u])]) if int(m.actuator_actadr[u]) >= 0 else 0.0 for u in range(m.nu)]
         lines.append("\t".join(["act"] + [repr(x) for x in actval]))
+        # and `d.act` itself: an actuator can carry more than one (a PID plugin keeps its integral and its
+        # previous setpoint)
+        lines.append("\t".join(["actfull"] + [repr(float(x)) for x in d.act]))
         for tag, v in (("qpos", d.qpos), ("qvel", d.qvel), ("ctrl", d.ctrl), ("act_length", d.actuator_length),
                        ("act_velocity", d.actuator_velocity), ("act_force", d.actuator_force), ("qfrc_actuator", d.qfrc_actuator)):
             lines.append("\t".join([tag] + [repr(float(x)) for x in v]))

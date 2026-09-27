@@ -140,16 +140,18 @@ fn main() {
             t.collide(&q).contacts.iter().any(|con| !con.record.exclude && con.geom.iter().any(|&g| t.geoms[g].kind == GeomType::Mesh))
         });
         let (mut qpos, mut qvel, mut act) = (c.start.clone(), c.startv.clone(), c.startact.clone());
+        // `d.time`, which a PID plugin's slew limiter reads; an auto-reset puts it back to zero
+        let mut time = 0.0;
         let mut failed = None;
         for k in 1..=last {
-            match t.step_mujoco(&qpos, &qvel, &ctrl, &act) {
+            match t.step_mujoco_at(&qpos, &qvel, &ctrl, &act, time) {
                 Ok(s) => {
                     // ⛔ `mj_resetData` zeroes `d.ctrl` too: MuJoCo's run goes on with no control
                     if s.reset.is_some() {
                         ours_reset.push(k);
                         ctrl.iter_mut().for_each(|u| *u = 0.0);
                     }
-                    (qpos, qvel, act) = (s.qpos, s.qvel, s.act);
+                    (qpos, qvel, act, time) = (s.qpos, s.qvel, s.act, s.time);
                 }
                 Err(e) => {
                     failed = Some(e);
