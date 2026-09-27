@@ -20,6 +20,7 @@ import mujoco
 import numpy as np
 
 root = sys.argv[1]
+root = os.path.abspath(root)  # ⛔ MuJoCo resolves a nested <include> against a RELATIVE path twice
 tot = bad = 0
 worst = (0.0, "")
 seen = set()

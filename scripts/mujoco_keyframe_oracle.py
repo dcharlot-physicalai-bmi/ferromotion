@@ -13,6 +13,7 @@ import sys
 import mujoco
 
 root, out = sys.argv[1], sys.argv[2]
+root = os.path.abspath(root)  # ⛔ MuJoCo resolves a nested <include> against a RELATIVE path twice
 lines, models = [], 0
 for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
     rel = os.path.relpath(f, root)

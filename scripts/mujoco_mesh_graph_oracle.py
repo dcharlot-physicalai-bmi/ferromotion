@@ -8,6 +8,7 @@ Run it with the working directory somewhere disposable: MuJoCo writes MUJOCO_LOG
 """
 import mujoco, os, sys, glob
 root, out = sys.argv[1], sys.argv[2]
+root = os.path.abspath(root)  # ⛔ MuJoCo resolves a nested <include> against a RELATIVE path twice
 lines, seen = [], set()
 for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
     rel = os.path.relpath(f, root)

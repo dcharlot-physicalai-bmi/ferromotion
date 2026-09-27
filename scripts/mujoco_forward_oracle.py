@@ -18,6 +18,7 @@ import mujoco
 import numpy as np
 
 root, out = sys.argv[1], sys.argv[2]
+root = os.path.abspath(root)  # ⛔ MuJoCo resolves a nested <include> against a RELATIVE path twice
 K = int(sys.argv[3]) if len(sys.argv) > 3 else 3
 rng = np.random.default_rng(20260917)
 JT = {v: k.replace("mjJNT_", "").lower() for k, v in mujoco.mjtJoint.__members__.items()}

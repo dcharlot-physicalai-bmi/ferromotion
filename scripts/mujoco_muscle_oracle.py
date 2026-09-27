@@ -22,6 +22,7 @@ import mujoco
 import numpy as np
 
 root, out = sys.argv[1], sys.argv[2]
+root = os.path.abspath(root)  # ⛔ MuJoCo resolves a nested <include> against a RELATIVE path twice
 lines = []
 
 # prm = (range[0], range[1], force, scale, lmin, lmax, vmax, fpmax, fvmax)

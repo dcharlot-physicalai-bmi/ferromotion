@@ -20,6 +20,7 @@ import mujoco
 import numpy as np
 
 root, out = sys.argv[1], sys.argv[2]
+root = os.path.abspath(root)  # ⛔ MuJoCo resolves a nested <include> against a RELATIVE path twice
 K = int(sys.argv[3]) if len(sys.argv) > 3 else 3
 MAXNV = int(os.environ.get("MAXNV", "40"))
 rng = np.random.default_rng(20260917)

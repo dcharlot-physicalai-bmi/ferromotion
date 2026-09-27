@@ -8,6 +8,7 @@ import numpy as np
 import mujoco
 
 root = sys.argv[1]
+root = os.path.abspath(root)  # ⛔ MuJoCo resolves a nested <include> against a RELATIVE path twice
 out_dir = sys.argv[2]
 K = int(sys.argv[3]) if len(sys.argv) > 3 else 4
 rng = np.random.default_rng(20260914)

@@ -6,12 +6,13 @@ contact into constraint rows (`tree_jacobian.rs`).
 Prints, at qpos0 unless a qpos is given: body_invweight0 per body, then per contact its geoms, bodies,
 condim, position and frame, and the `efc_J` rows MuJoCo built for it.
 """
+import os
 import sys
 
 import mujoco
 import numpy as np
 
-m = mujoco.MjModel.from_xml_path(sys.argv[1])
+m = mujoco.MjModel.from_xml_path(os.path.abspath(sys.argv[1]))  # ⛔ a nested <include> needs an absolute path
 d = mujoco.MjData(m)
 if len(sys.argv) > 2:
     d.qpos[:] = [float(x) for x in sys.argv[2:]]

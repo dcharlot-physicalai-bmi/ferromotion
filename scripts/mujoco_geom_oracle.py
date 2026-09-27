@@ -17,6 +17,7 @@ GT = {v: k.replace("mjGEOM_", "").lower() for k, v in mujoco.mjtGeom.__members__
 JT = {v: k.replace("mjJNT_", "").lower() for k, v in mujoco.mjtJoint.__members__.items()}
 
 root, out = sys.argv[1], sys.argv[2]
+root = os.path.abspath(root)  # ⛔ MuJoCo resolves a nested <include> against a RELATIVE path twice
 lines, models, failed = [], 0, 0
 for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
     rel = os.path.relpath(f, root)

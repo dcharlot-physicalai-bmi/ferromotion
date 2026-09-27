@@ -12,12 +12,14 @@ MuJoCo's own (possibly sparse) Jacobian, and MuJoCo scores it. The quadratic hal
 `mj_fullM`, which is the one piece `mj_constraintUpdate` does not carry.
 """
 
+import os
 import sys
 
 import mujoco
 import numpy as np
 
 root, oracle, ours_path = sys.argv[1], sys.argv[2], sys.argv[3]
+root = os.path.abspath(root)  # ⛔ MuJoCo resolves a nested <include> against a RELATIVE path twice
 
 # the port's answers, keyed by model and state
 ours = {}

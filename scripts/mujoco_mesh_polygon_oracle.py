@@ -18,6 +18,7 @@ import sys
 import mujoco
 
 root, out = sys.argv[1], sys.argv[2]
+root = os.path.abspath(root)  # ⛔ MuJoCo resolves a nested <include> against a RELATIVE path twice
 sub = sys.argv[3] if len(sys.argv) > 3 else None
 
 lines, seen, models, failed = [], set(), 0, 0
