@@ -1109,7 +1109,7 @@ impl MjcfTree {
         };
         // --- equality first: MuJoCo counts `ne` from the front, and a row's law is its position
         // a `connect` needs the CURRENT frames; a joint coupling does not, so only pay for them when asked
-        let frames = self.equalities.iter().any(|e| matches!(e.kind, EqualityKind::Connect { .. })).then(|| crate::tree_frames(&self.tree, q));
+        let frames = self.equalities.iter().any(|e| matches!(e.kind, EqualityKind::Connect { .. } | EqualityKind::Weld { .. })).then(|| crate::tree_frames(&self.tree, q));
         for e in &self.equalities {
             match &e.kind {
                 EqualityKind::Joint { joint1, joint2, reference, polycoef: c } => {
@@ -1164,6 +1164,63 @@ impl MjcfTree {
                         let jvel: f64 = (0..nv).map(|k| jac[k] * qd[k]).sum();
                         let (a, rr) = crate::mujoco_contact::row_reference_at(&solr(e.solref), &soli(e.solimp), norm, p1[r] - p2[r], 0.0, *diag_a, jvel, self.timestep);
                         push(jac, a - jdotqd[r], rr, EfcBlock::Equality { rows: 1 });
+                    }
+                }
+                EqualityKind::Weld { side1, side2, rot1, rot2, relpose, torquescale: ts, diag, .. } => {
+                    let frames = frames.as_ref().expect("frames are built whenever a connect or weld is present");
+                    let world_point = |(ride, local): &(Option<usize>, Vector3<f64>)| match ride {
+                        Some(r) => (frames[*r] * Point3::from(*local)).coords,
+                        None => *local,
+                    };
+                    let world_quat = |(ride, local): &(Option<usize>, UnitQuaternion<f64>)| {
+                        let q = match ride {
+                            Some(r) => frames[*r].rotation * local,
+                            None => *local,
+                        };
+                        [q.w, q.i, q.j, q.k]
+                    };
+                    let (p1, p2) = (world_point(side1), world_point(side2));
+                    let jlin = |ride: Option<usize>, p: Vector3<f64>| crate::tree_jacobian::tree_point_jacobian(&self.tree.joints, &self.tree.parent, frames, ride, p);
+                    let jang = |ride: Option<usize>| crate::tree_jacobian::tree_angular_jacobian(&self.tree.joints, &self.tree.parent, frames, ride);
+                    let (j1, j2, jr1, jr2) = (jlin(side1.0, p1), jlin(side2.0, p2), jang(rot1.0), jang(rot2.0));
+                    // the orientation residual, `mj_instantiateEquality`: quat = q0·relpose, quat1 = neg(q1)
+                    let q0 = world_quat(rot1);
+                    let q1 = world_quat(rot2);
+                    let q0r = quat_mul(&q0, relpose);
+                    let negq1 = quat_neg(&q1);
+                    let err = quat_mul(&negq1, &q0r);
+                    let cpos = [p1[0] - p2[0], p1[1] - p2[1], p1[2] - p2[2], ts * err[1], ts * err[2], ts * err[3]];
+                    // one impedance for the whole weld, at the norm of all six residuals
+                    let norm = -cpos.iter().map(|x| x * x).sum::<f64>().sqrt();
+                    // `mj_Jdotv`: the translational J̇·v as a connect's, and the rotational one by MuJoCo's
+                    // product rule (with its own quaternion rates, `mju_derivQuat` on the world ω)
+                    let bias = |ride: Option<usize>, p: Vector3<f64>| crate::tree_jacobian::tree_spatial_bias_acceleration(&self.tree.joints, &self.tree.parent, frames, qd, ride, p);
+                    let ((ab1, lb1), (ab2, lb2)) = (bias(side1.0, p1), bias(side2.0, p2));
+                    let (ab1, ab2) = (if rot1.0 == side1.0 { ab1 } else { bias(rot1.0, p1).0 }, if rot2.0 == side2.0 { ab2 } else { bias(rot2.0, p2).0 });
+                    let qdv = nalgebra::DVector::from_row_slice(qd);
+                    let (w1, w2) = (&jr1 * &qdv, &jr2 * &qdv);
+                    let (w1, w2) = ([w1[0], w1[1], w1[2]], [w2[0], w2[1], w2[2]]);
+                    let domega = [w1[0] - w2[0], w1[1] - w2[1], w1[2] - w2[2]];
+                    let djrdv = [ab1[0] - ab2[0], ab1[1] - ab2[1], ab1[2] - ab2[2]];
+                    let qdot0r = quat_mul(&quat_deriv(&q0, &w1), relpose);
+                    let negqdot1 = quat_neg(&quat_deriv(&q1, &w2));
+                    let t1 = quat_mul(&quat_mul_axis(&negqdot1, &domega), &q0r);
+                    let t2 = quat_mul(&quat_mul_axis(&negq1, &djrdv), &q0r);
+                    let t3 = quat_mul(&quat_mul_axis(&negq1, &domega), &qdot0r);
+                    let jdot_lin = lb1 - lb2;
+                    for r in 0..3 {
+                        let jac: Vec<f64> = (0..nv).map(|k| j1[(r, k)] - j2[(r, k)]).collect();
+                        let jvel: f64 = (0..nv).map(|k| jac[k] * qd[k]).sum();
+                        let (a, rr) = crate::mujoco_contact::row_reference_at(&solr(e.solref), &soli(e.solimp), norm, cpos[r], 0.0, diag[0], jvel, self.timestep);
+                        push(jac, a - jdot_lin[r], rr, EfcBlock::Equality { rows: 1 });
+                    }
+                    // the rotation rows: `0.5·neg(q1)·(J₀ − J₁)·q0·relpose`, column by column
+                    let rot_cols: Vec<[f64; 4]> = (0..nv).map(|k| quat_mul(&quat_mul_axis(&negq1, &[jr1[(0, k)] - jr2[(0, k)], jr1[(1, k)] - jr2[(1, k)], jr1[(2, k)] - jr2[(2, k)]]), &q0r)).collect();
+                    for r in 0..3 {
+                        let jac: Vec<f64> = rot_cols.iter().map(|c| 0.5 * c[1 + r] * ts).collect();
+                        let jvel: f64 = (0..nv).map(|k| jac[k] * qd[k]).sum();
+                        let (a, rr) = crate::mujoco_contact::row_reference_at(&solr(e.solref), &soli(e.solimp), norm, cpos[3 + r], 0.0, diag[1], jvel, self.timestep);
+                        push(jac, a - 0.5 * (t1[1 + r] + t2[1 + r] + t3[1 + r]) * ts, rr, EfcBlock::Equality { rows: 1 });
                     }
                 }
             }
@@ -1417,7 +1474,15 @@ impl MjcfTree {
         rows.jac = &rows.jac * &tinv;
         let basis_term = &rows.jac * (self.free_basis_dot(q, &qd) * &qvel);
         // the rows that carry `J̇·q̇`: each connect's three, in equality order
-        let carries: Vec<bool> = self.equalities.iter().flat_map(|e| std::iter::repeat_n(matches!(e.kind, EqualityKind::Connect { .. }), if matches!(e.kind, EqualityKind::Connect { .. }) { 3 } else { 1 })).collect();
+        let carries: Vec<bool> = self
+            .equalities
+            .iter()
+            .flat_map(|e| match e.kind {
+                EqualityKind::Connect { .. } => std::iter::repeat_n(true, 3),
+                EqualityKind::Weld { .. } => std::iter::repeat_n(true, 6),
+                _ => std::iter::repeat_n(false, 1),
+            })
+            .collect();
         for (i, (a, c)) in rows.aref.iter_mut().zip(basis_term.iter()).enumerate() {
             if carries.get(i).copied().unwrap_or(false) {
                 *a += c;
@@ -1870,8 +1935,8 @@ pub struct MjcfEquality {
     pub solimp: [f64; 5],
 }
 
-/// Which equality, and everything its rows need. ⛔ `<weld>` is absent on purpose: no Menagerie model uses
-/// one, and its rotational residual is a quaternion difference this port has not measured against MuJoCo.
+/// Which equality, and everything its rows need: `joint`, `connect` and `weld` (`tendon` and the flex
+/// equalities are named in [`MjcfTree::equalities_unsupported`] instead).
 #[derive(Clone, Debug)]
 pub enum EqualityKind {
     /// `<equality joint>`: a polynomial coupling between two single-dof joints. ONE row.
@@ -1900,6 +1965,23 @@ pub enum EqualityKind {
         diag_a: f64,
         /// the two BODIES (empty for the world): the constraint's force acts on them, which is where a
         /// force sensor's subtree sum has to see it
+        bodies: [String; 2],
+    },
+    /// `<equality weld>`: the two bodies (or sites) held at a fixed relative POSE. SIX rows: the three of a
+    /// connect between the two anchors, then three for orientation, `torquescale·Im(q̄₂·q₁·relpose)`, with
+    /// MuJoCo's `J̇·v` on all six.
+    Weld {
+        /// each anchor as `(the tree dof it rides, the point in THAT frame)`, `None` for the world
+        side1: (Option<usize>, Vector3<f64>),
+        side2: (Option<usize>, Vector3<f64>),
+        /// each object's orientation as `(the tree dof it rides, its rotation in THAT frame)`
+        rot1: (Option<usize>, UnitQuaternion<f64>),
+        rot2: (Option<usize>, UnitQuaternion<f64>),
+        /// `eq_data[6..10]`: the relative orientation held, `(w, x, y, z)` — the identity for sites
+        relpose: [f64; 4],
+        torquescale: f64,
+        /// `mj_diagApprox`: the two bodies' `body_invweight0`, translational and rotational, summed
+        diag: [f64; 2],
         bodies: [String; 2],
     },
 }
@@ -2223,6 +2305,41 @@ fn normvec(v: &mut [f64]) {
     if (nrm - 1.0).abs() > 1e-14 {
         v.iter_mut().for_each(|x| *x /= nrm);
     }
+}
+
+/// `mju_mulQuat`, on `(w, x, y, z)`.
+fn quat_mul(a: &[f64; 4], b: &[f64; 4]) -> [f64; 4] {
+    [
+        a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
+        a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
+        a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1],
+        a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0],
+    ]
+}
+
+/// `mju_mulQuatAxis`: `q·(0, axis)`.
+fn quat_mul_axis(q: &[f64; 4], axis: &[f64; 3]) -> [f64; 4] {
+    [
+        -q[1] * axis[0] - q[2] * axis[1] - q[3] * axis[2],
+        q[0] * axis[0] + q[2] * axis[2] - q[3] * axis[1],
+        q[0] * axis[1] + q[3] * axis[0] - q[1] * axis[2],
+        q[0] * axis[2] + q[1] * axis[1] - q[2] * axis[0],
+    ]
+}
+
+/// `mju_negQuat`: the conjugate.
+fn quat_neg(q: &[f64; 4]) -> [f64; 4] {
+    [q[0], -q[1], -q[2], -q[3]]
+}
+
+/// `mju_derivQuat`: `0.5·q·(0, vel)`.
+fn quat_deriv(q: &[f64; 4], v: &[f64; 3]) -> [f64; 4] {
+    [
+        0.5 * (-v[0] * q[1] - v[1] * q[2] - v[2] * q[3]),
+        0.5 * (v[0] * q[0] + v[1] * q[3] - v[2] * q[2]),
+        0.5 * (-v[0] * q[3] + v[1] * q[0] + v[2] * q[1]),
+        0.5 * (v[0] * q[2] - v[1] * q[1] + v[2] * q[0]),
+    ]
 }
 
 /// `mjMAXVAL`: past it, `mju_isBad` calls a number bad.
@@ -5326,7 +5443,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
                 if get("active").as_deref() == Some("false") {
                     continue;
                 }
-                if el.name != "joint" && el.name != "connect" {
+                if el.name != "joint" && el.name != "connect" && el.name != "weld" {
                     out.equalities_unsupported.push((name, format!("<{}>", el.name)));
                     continue;
                 }
@@ -5394,6 +5511,90 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
                     let body = |b: Option<&str>| b.filter(|b| *b != "world").unwrap_or("").to_string();
                     let bodies = [body(el.attr("body1")), body(el.attr("body2"))];
                     out.equalities.push(MjcfEquality { name, kind: EqualityKind::Connect { side1: local(ride1, world1), side2: local(ride2, world2), diag_a, bodies }, solref, solimp });
+                    continue;
+                }
+                if el.name == "weld" {
+                    let torquescale = get("torquescale").map(|v| v.trim().parse::<f64>().map_err(|e| format!("equality '{name}' torquescale: {e}"))).transpose()?.unwrap_or(1.0);
+                    let iw = |b: &str| invw.get(b).copied().unwrap_or(crate::mujoco_contact::InvWeight { tran: 0.0, rot: 0.0 });
+                    // the SITE form: the two sites' own positions and orientations, no relative pose
+                    if let (Some(s1), Some(s2)) = (el.attr("site1"), el.attr("site2")) {
+                        let at = |n: &str| -> Option<(Option<usize>, Iso, String)> {
+                            match out.site_frames.get(n) {
+                                Some((ride, off)) => Some((Some(*ride), *off, out.site_body.get(n).cloned().unwrap_or_default())),
+                                None => out.world_fixed.get(&format!("site:{n}")).map(|i| (None, *i, String::new())),
+                            }
+                        };
+                        let (Some((r1, o1, b1)), Some((r2, o2, b2))) = (at(s1), at(s2)) else {
+                            out.equalities_unsupported.push((name, format!("a weld between sites '{s1}' and '{s2}', one of which is not in the model")));
+                            continue;
+                        };
+                        let (w1, w2) = (iw(&b1), iw(&b2));
+                        out.equalities.push(MjcfEquality {
+                            name,
+                            kind: EqualityKind::Weld { side1: (r1, o1.translation.vector), side2: (r2, o2.translation.vector), rot1: (r1, o1.rotation), rot2: (r2, o2.rotation), relpose: [1.0, 0.0, 0.0, 0.0], torquescale, diag: [w1.tran + w2.tran, w1.rot + w2.rot], bodies: [b1, b2] },
+                            solref,
+                            solimp,
+                        });
+                        continue;
+                    }
+                    // the BODY form: `anchor` is in body2's frame; `relpose` (pos, quat) is body2's pose in
+                    // body1's, and when its quaternion is zero (the default) both are taken at `qpos0`
+                    let body_at = |b: Option<&str>| -> Result<(Option<usize>, Iso, Iso, String), String> {
+                        let Some(b) = b.filter(|b| *b != "world") else { return Ok((None, Iso::identity(), Iso::identity(), String::new())) };
+                        if let Some((ride, pre)) = out.body_frames.get(b) {
+                            return Ok((Some(*ride), *pre, frames0[*ride] * pre, b.to_string()));
+                        }
+                        match out.world_fixed.get(&format!("body:{b}")) {
+                            Some(iso) => Ok((None, *iso, *iso, b.to_string())),
+                            None => Err(format!("equality '{name}': no body named '{b}'")),
+                        }
+                    };
+                    let Some(b1) = el.attr("body1") else {
+                        out.equalities_unsupported.push((name, "a weld with neither body1 nor two sites".into()));
+                        continue;
+                    };
+                    let (ride1, pre1, x1, n1) = body_at(Some(b1))?;
+                    let (ride2, pre2, x2, n2) = body_at(el.attr("body2"))?;
+                    let anchor = get("anchor").map(|v| vec3(&v)).transpose()?.unwrap_or_else(Vector3::zeros);
+                    let mut relpose = [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+                    if let Some(v) = get("relpose") {
+                        for (i, x) in floats(&v)?.iter().take(7).enumerate() {
+                            relpose[i] = *x;
+                        }
+                    }
+                    let (anchor1, rel) = if relpose[3..7].iter().any(|x| *x != 0.0) {
+                        // `mj_setConst`: a stated relative pose is kept, its quaternion normalised
+                        let mut q = [relpose[3], relpose[4], relpose[5], relpose[6]];
+                        let n = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
+                        if n < 1e-15 {
+                            q = [1.0, 0.0, 0.0, 0.0];
+                        } else if (n - 1.0).abs() > 1e-15 {
+                            q.iter_mut().for_each(|x| *x *= 1.0 / n);
+                        }
+                        (Vector3::new(relpose[0], relpose[1], relpose[2]), q)
+                    } else {
+                        // at `qpos0`: body2's anchor seen from body1, and `neg(xquat1)·xquat2`
+                        let a1 = (x1.inverse() * (x2 * Point3::from(anchor))).coords;
+                        let (qa, qb) = (x1.rotation, x2.rotation);
+                        (a1, quat_mul(&quat_neg(&[qa.w, qa.i, qa.j, qa.k]), &[qb.w, qb.i, qb.j, qb.k]))
+                    };
+                    let local = |ride: Option<usize>, pre: Iso, p: Vector3<f64>| (ride, (pre * Point3::from(p)).coords);
+                    let (w1, w2) = (iw(&n1), iw(&n2));
+                    out.equalities.push(MjcfEquality {
+                        name,
+                        kind: EqualityKind::Weld {
+                            side1: local(ride1, pre1, anchor1),
+                            side2: local(ride2, pre2, anchor),
+                            rot1: (ride1, pre1.rotation),
+                            rot2: (ride2, pre2.rotation),
+                            relpose: rel,
+                            torquescale,
+                            diag: [w1.tran + w2.tran, w1.rot + w2.rot],
+                            bodies: [n1, n2],
+                        },
+                        solref,
+                        solimp,
+                    });
                     continue;
                 }
                 let j1 = el.attr("joint1").ok_or_else(|| format!("equality '{name}': needs joint1"))?;
@@ -6622,6 +6823,77 @@ mod tests {
   <plugin name="p1" plugin="mujoco.pid" instance="full" joint="j1" ctrlrange="-1 1" forcerange="-1.5 1.5" actdim="2"/>
   <plugin name="p2" plugin="mujoco.pid" instance="pd" joint="j2" actdim="0"/>
 </actuator></mujoco>"#;
+
+    /// **`<weld>` in every form, against MuJoCo.** An arm's forearm welded to a free box at their `qpos0`
+    /// pose (the relative pose computed by `mj_setConst`), a free ball welded to the world with a STATED
+    /// `relpose`, `anchor` and `torquescale` (and an impedance wide enough not to saturate, so it is the norm of
+    /// all SIX residuals that sets it), two sites welded (the site form, no relative pose), and a free
+    /// plate welded to that ball — all moving, all violated, so every row's residual, Jacobian and `J̇·v`
+    /// is at work. MuJoCo's `qacc`, then ten `mj_step`s.
+    #[test]
+    fn welds_match_mujoco_in_every_form() {
+        let t = tree_from_mjcf_str(WELD_MODEL).unwrap();
+        assert!(t.equalities_unsupported.is_empty(), "{:?}", t.equalities_unsupported);
+        let qpos = [0.3, -0.4, 0.36, 0.05, 1.02, 0.988851329954785, 0.03176851580115925, -0.07211804743841453, 0.12634395863718664, -0.3, 0.2, 0.8, 1.0, 0.0, 0.0, 0.0, 0.1, -0.3, 0.9, 1.0, 0.0, 0.0, 0.0];
+        let qvel: Vec<f64> = (0..20).map(|i| -0.5 + 1.1 * i as f64 / 19.0).collect();
+        let want_qacc = [-243.5613129785541, 175.19689224779685, -64.21618664252793, -59.891339299056646, -192.99830610320288, 231.44795796803703, -186.06991261861762, -429.69126965063094, 181.3729527397196, 17.70717444609069, -438.2736547531831, -1281.6237549776133, 245.5629362236282, -360.1148279329517, 14.872050535256632, -15.386382187592138, -10.669628658440594, -825.2298687242633, -249.2533065366348, -321.4013647256903];
+        let f = t.forward_mujoco(&t.q_from_qpos(&qpos, &t.qposadr()).unwrap(), &qvel, &[], &[]).unwrap();
+        assert_eq!(f.nefc, 24, "four welds, six rows each");
+        for (k, (g, w)) in f.qacc.iter().zip(&want_qacc).enumerate() {
+            assert!((g - w).abs() < 1e-8 * w.abs().max(1.0), "qacc[{k}] {g} vs MuJoCo {w}");
+        }
+        // the arm's force/torque site: its subtree carries a forearm and a site, both WELDED to the box, so
+        // the weld forces (and the weld torque) are external to it and have to be booked there
+        let sd = t.sensordata_with(&qpos, &qvel, &[], &[], 0.0, Some(&f)).unwrap();
+        let want_ft = [-4.09190892897531, -19.113241571051187, -9.411669965971562, 1.3232670554206547, 1.5076594245261965, -6.269422499047928];
+        let got_ft: Vec<f64> = sd.iter().flat_map(|v| v.clone().unwrap()).collect();
+        for (k, (g, w)) in got_ft.iter().zip(&want_ft).enumerate() {
+            assert!((g - w).abs() < 1e-8 * w.abs().max(1.0), "force/torque[{k}] {g} vs MuJoCo {w}");
+        }
+        let want_qpos = [0.268921680993056, -0.3851630903566696, 0.3449304137451297, 0.03728200373013553, 0.9909312312370034, 0.9906027883598434, 0.04775811477844495, -0.07956378428834306, 0.10047329195477585, -0.27207424879023845, 0.20145983923463553, 0.7307455503773158, 0.9972164995524224, -0.07059219092423387, 0.012840217004554833, -0.02027620349586223, 0.10836651729053051, -0.29477339048667645, 0.9060866336088069, 0.9976170169658066, -0.06581562634075785, -0.0064668503550642485, -0.019666485097860672];
+        let want_qvel = [-1.427933147837055, 1.2834241322394402, -0.8391306861360185, -0.6684397481327558, -1.8213811346601152, 1.9057364020673693, -0.9693224013008912, -3.454641029203958, 2.1915248314252276, -0.045835635270237804, -5.356642261068582, -8.384663628116838, 1.5450426077691637, -2.9785118593934636, 0.43524506664423257, 0.2596229476985236, 0.19062666510784068, -10.166319285734494, -1.244162978646895, -3.4086564730112263];
+        let (mut qp, mut qv) = (qpos.to_vec(), qvel.clone());
+        for _ in 0..10 {
+            let st = t.step_mujoco(&qp, &qv, &[], &[]).unwrap();
+            (qp, qv) = (st.qpos, st.qvel);
+        }
+        for (k, (g, w)) in qp.iter().zip(&want_qpos).chain(qv.iter().zip(&want_qvel)).enumerate() {
+            assert!((g - w).abs() < 1e-8 * w.abs().max(1.0), "after 10 steps [{k}] {g} vs MuJoCo {w}");
+        }
+    }
+
+    const WELD_MODEL: &str = r#"<mujoco><option timestep="0.002"/><worldbody>
+  <body name="arm" pos="0 0 1">
+    <joint name="j1" type="hinge" axis="0 1 0" damping="0.05"/>
+    <geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.03" mass="0.8" contype="0" conaffinity="0"/>
+    <site name="arm_ft" pos="0.05 0 0"/>
+    <site name="tool" pos="0.3 0 0" euler="0 20 10"/>
+    <body name="forearm" pos="0.3 0 0">
+      <joint name="j2" type="hinge" axis="0 0 1"/>
+      <geom type="capsule" fromto="0 0 0 0.2 0 0" size="0.02" mass="0.3" contype="0" conaffinity="0"/>
+    </body>
+  </body>
+  <body name="box" pos="0.35 0.05 1.02" euler="5 -10 15">
+    <freejoint/>
+    <geom type="box" size="0.05 0.04 0.03" mass="0.4" contype="0" conaffinity="0"/>
+    <site name="grip" pos="0.01 0 0.02" euler="0 15 0"/>
+  </body>
+  <body name="ball" pos="-0.3 0.2 0.8">
+    <freejoint/>
+    <geom type="sphere" size="0.05" mass="0.2" contype="0" conaffinity="0"/>
+  </body>
+  <body name="plate" pos="0.1 -0.3 0.9">
+    <freejoint/>
+    <geom type="box" size="0.08 0.08 0.01" mass="0.3" contype="0" conaffinity="0"/>
+  </body>
+</worldbody>
+<equality>
+  <weld name="grasp" body1="forearm" body2="box" solref="0.02 1" solimp="0.9 0.95 0.001"/>
+  <weld name="tether" body1="ball" relpose="0.1 0 -0.2 0.9 0.1 0.2 -0.1" anchor="0.02 0.01 0" torquescale="0.5" solimp="0.5 0.95 5 0.5 2"/>
+  <weld name="sites" site1="tool" site2="grip" torquescale="2"/>
+  <weld name="plate_to_ball" body1="plate" body2="ball" anchor="0 0 0.05"/>
+</equality>
+<sensor><force name="f" site="arm_ft"/><torque name="t" site="arm_ft"/></sensor></mujoco>"#;
 
     /// **Keyframes as `mjCKey::Compile` completes them, against MuJoCo.** A zero quaternion on a free base
     /// becomes the identity and a (0, 0, 3, 4) ball quaternion is normalised; a partial key takes `qpos0`

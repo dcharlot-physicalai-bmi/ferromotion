@@ -552,6 +552,20 @@ impl MjcfTree {
                     external.push((b[1].clone(), at(side2), -f, Vector3::zeros()));
                     row += 3;
                 }
+                // a weld's six: the force at each anchor, and its last three rows taken as a world torque,
+                // as `mj_rnePostConstraint` takes them
+                crate::EqualityKind::Weld { side1, side2, bodies: b, .. } => {
+                    let fr = &forward.solve.force;
+                    let f = Vector3::new(fr[row], fr[row + 1], fr[row + 2]);
+                    let tau = Vector3::new(fr[row + 3], fr[row + 4], fr[row + 5]);
+                    let at = |(ride, local): &(Option<usize>, Vector3<f64>)| match ride {
+                        Some(r) => (frames[*r] * nalgebra::Point3::from(*local)).coords,
+                        None => *local,
+                    };
+                    external.push((b[0].clone(), at(side1), f, tau));
+                    external.push((b[1].clone(), at(side2), -f, -tau));
+                    row += 6;
+                }
                 _ => row += 1,
             }
         }
