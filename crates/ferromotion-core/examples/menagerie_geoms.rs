@@ -42,6 +42,17 @@ struct OModel {
     geoms: Vec<OGeom>,
 }
 
+
+/// ⛔ `f64::max` DROPS a NaN (`1.0f64.max(NAN) == 1.0`), so a worst-error fold over a state that went
+/// non-finite reads as agreement. This one makes any NaN the worst possible error.
+fn nan_max(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::INFINITY
+    } else {
+        a.max(b)
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
@@ -156,7 +167,7 @@ fn main() {
         for (i, g) in t.geoms.iter().enumerate() {
             ngeom += 1;
             let e = &o.geoms[i];
-            let ds = (0..3).map(|k| (g.size[k] - e.size[k]).abs()).fold(0.0, f64::max);
+            let ds = (0..3).map(|k| (g.size[k] - e.size[k]).abs()).fold(0.0, nan_max);
             worst_size = worst_size.max(ds);
             let p = g.params;
             let same = p.condim == e.condim

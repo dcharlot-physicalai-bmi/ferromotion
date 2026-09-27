@@ -119,9 +119,12 @@ fn main() {
             *counts.entry("gimbal lock: the basis map is singular").or_default() += 1;
             continue;
         };
-        let qd: Vec<f64> = (&tinv * nalgebra::DVector::from_row_slice(&c.qvel)).iter().copied().collect();
-        let mut mine = t.joint_constraint_rows(&q, &qd, &iw);
-        mine.jac = &mine.jac * &tinv;
+        let _ = tinv;
+        // the library's own mapping into MuJoCo's basis, including the connect rows' `J·Ṫ·q̇` term
+        let Ok(mine) = t.joint_constraint_rows_mujoco(&q, &c.qvel, &iw) else {
+            *counts.entry("gimbal lock: the basis map is singular").or_default() += 1;
+            continue;
+        };
         // MuJoCo's order: equality, friction, limits, contacts — and this port builds the first three
         // ⛔ only where it MATTERS: a spatial tendon this loader does not carry contributes nothing to
         // `efc` unless MuJoCo gave it a row, and blocking on its mere presence throws away 27 states whose

@@ -79,6 +79,17 @@ struct OModel {
     states: Vec<OState>,
 }
 
+
+/// ⛔ `f64::max` DROPS a NaN (`1.0f64.max(NAN) == 1.0`), so a worst-error fold over a state that went
+/// non-finite reads as agreement. This one makes any NaN the worst possible error.
+fn nan_max(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::INFINITY
+    } else {
+        a.max(b)
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
@@ -401,7 +412,7 @@ fn main() {
             let qvel: Vec<f64> = (&tinv * DVector::from_row_slice(&s.qvel)).iter().copied().collect();
             let bias = tree_inverse_dynamics(joints, inertia, parent, &q, &qvel, &vec![0.0; nv], o.gravity);
             // ⛔ `qfrc_bias` is a vector in the DOF basis, so it can only be compared where the bases agree
-            let db = bias.iter().zip(&s.qfrc_bias).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+            let db = bias.iter().zip(&s.qfrc_bias).map(|(a, b)| (a - b).abs()).fold(0.0, nan_max);
             if elementwise {
                 worst_bias = worst_bias.max(db);
             }
@@ -423,7 +434,7 @@ fn main() {
                 *skip.entry("gimbal lock: the Euler base's basis map is singular").or_default() += 1;
                 continue;
             };
-            let dp = (0..nv).map(|i| (passive[i] - s.qfrc_passive[i]).abs()).fold(0.0, f64::max);
+            let dp = (0..nv).map(|i| (passive[i] - s.qfrc_passive[i]).abs()).fold(0.0, nan_max);
             // ⭐ `qfrc_passive` is a SUM of four terms MuJoCo keeps apart, so a residual can be
             // ATTRIBUTED instead of guessed at — and the attribution decides whether the state is
             // comparable at all. A term this port does not carry means the answer would be wrong for a
@@ -434,7 +445,7 @@ fn main() {
                 .try_inverse()
                 .map(|tinv| {
                     let g = tinv.transpose() * DVector::from_vec(t.qfrc_gravcomp(&q));
-                    (0..nv.min(g.len())).map(|i| (g[i] - s.qfrc_gravcomp.get(i).copied().unwrap_or(0.0)).abs()).fold(0.0, f64::max)
+                    (0..nv.min(g.len())).map(|i| (g[i] - s.qfrc_gravcomp.get(i).copied().unwrap_or(0.0)).abs()).fold(0.0, nan_max)
                 })
                 .unwrap_or(f64::NAN);
             let explained_by_gravcomp = (dp - dgc).abs() <= 0.01 * dp;
@@ -449,7 +460,7 @@ fn main() {
                 // be attributed instead of guessed at. `qfrc_gravcomp` is the one this port computes on its
                 // own; the rest are named so a missing term is named rather than lumped into "tendon,
                 // fluid" whether or not the model has either.
-                let part = |v: &Vec<f64>| v.iter().map(|x| x.abs()).fold(0.0, f64::max);
+                let part = |v: &Vec<f64>| v.iter().map(|x| x.abs()).fold(0.0, nan_max);
                 if notes.len() < 60 {
                     notes.push(format!(
                         "{}: passive off {dp:.2e} — MuJoCo's parts: spring {:.2e}, damper {:.2e}, gravcomp {:.2e} (ours off {dgc:.2e}), fluid {:.2e}",
@@ -468,7 +479,7 @@ fn main() {
             // ⛔ RELATIVE, against the magnitude of the answer. A joint with a stiff servo accelerates at
             // hundreds of rad/s², so an absolute 1e-6 is a tolerance on the eighth significant digit for one
             // model and on the second for another — the same number meaning two different claims.
-            let rel = |a: &[f64], b: &[f64]| (0..a.len()).map(|i| (a[i] - b[i]).abs() / b[i].abs().max(1.0)).fold(0.0, f64::max);
+            let rel = |a: &[f64], b: &[f64]| (0..a.len()).map(|i| (a[i] - b[i]).abs() / b[i].abs().max(1.0)).fold(0.0, nan_max);
             // ⭐ the basis-free check: every body's PROPER acceleration in the world frame, which is what an
             // accelerometer on it would read. Valid only at rest — at speed the velocity products enter and
             // `J·q̈` is no longer the whole story — and that is stated rather than hidden, because a resting
@@ -535,7 +546,7 @@ fn main() {
                     *skip.entry("gimbal lock: the Euler base's basis map is singular").or_default() += 1;
                     continue;
                 };
-                let dq = (0..nv).map(|i| (a_mj[i] - s.qacc_smooth[i]).abs() / s.qacc_smooth[i].abs().max(1.0)).fold(0.0, f64::max);
+                let dq = (0..nv).map(|i| (a_mj[i] - s.qacc_smooth[i]).abs() / s.qacc_smooth[i].abs().max(1.0)).fold(0.0, nan_max);
                 chain_tried += 1;
                 if dq < 1e-6 {
                     chain_ok += 1;
@@ -825,7 +836,7 @@ fn main() {
                         lib_compared += 1;
                         match t.forward_mujoco(&q, &s.qvel, &vec![0.0; t.actuators.len()]) {
                             Ok(f) if f.qacc.iter().zip(sol.qacc.iter()).all(|(x, y)| x.to_bits() == y.to_bits()) => lib_identical += 1,
-                            Ok(f) => notes.push(format!("{}: forward_mujoco differs from the assembled solve by {:.2e}", o.rel, f.qacc.iter().zip(sol.qacc.iter()).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max))),
+                            Ok(f) => notes.push(format!("{}: forward_mujoco differs from the assembled solve by {:.2e}", o.rel, f.qacc.iter().zip(sol.qacc.iter()).map(|(x, y)| (x - y).abs()).fold(0.0, nan_max))),
                             Err(e) => notes.push(format!("{}: forward_mujoco refused a state the sweep solved: {e}", o.rel)),
                         }
                     }
@@ -836,7 +847,7 @@ fn main() {
                     // is counted and named below instead of being charged to the contact model.
                     let target: &[f64] = if s.qacc_converged.len() == nv { &s.qacc_converged } else { &s.qacc };
                     let truncated = (s.qacc_converged.len() == nv).then(|| {
-                        (0..nv).map(|i| (s.qacc[i] - s.qacc_converged[i]).abs() / s.qacc_converged[i].abs().max(1.0)).fold(0.0, f64::max)
+                        (0..nv).map(|i| (s.qacc[i] - s.qacc_converged[i]).abs() / s.qacc_converged[i].abs().max(1.0)).fold(0.0, nan_max)
                     });
                     if let Some(g) = truncated.filter(|g| *g >= 1e-6) {
                         trunc_states += 1;
@@ -845,7 +856,7 @@ fn main() {
                             worst_trunc_where = format!("{} (iterations {}, ls_iterations {})", o.rel, o.iterations, o.ls_iterations);
                         }
                     }
-                    let dq = (0..nv).map(|i| (sol.qacc[i] - target[i]).abs() / target[i].abs().max(1.0)).fold(0.0, f64::max);
+                    let dq = (0..nv).map(|i| (sol.qacc[i] - target[i]).abs() / target[i].abs().max(1.0)).fold(0.0, nan_max);
                     if !any_mesh {
                         solved_nomesh += 1;
                         worst_qacc_nomesh = worst_qacc_nomesh.max(dq);

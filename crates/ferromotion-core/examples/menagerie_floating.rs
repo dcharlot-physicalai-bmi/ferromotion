@@ -41,6 +41,17 @@ struct State {
     m: Vec<Vec<f64>>,
 }
 
+
+/// ⛔ `f64::max` DROPS a NaN (`1.0f64.max(NAN) == 1.0`), so a worst-error fold over a state that went
+/// non-finite reads as agreement. This one makes any NaN the worst possible error.
+fn nan_max(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::INFINITY
+    } else {
+        a.max(b)
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
@@ -115,7 +126,7 @@ fn main() {
         {
             iw_seen += 1;
             let ours = t.dof_invweight0_mujoco();
-            let e = (0..nv).map(|i| (ours[i] - c.invweight0[i]).abs() / c.invweight0[i].abs().max(1e-9)).fold(0.0, f64::max);
+            let e = (0..nv).map(|i| (ours[i] - c.invweight0[i]).abs() / c.invweight0[i].abs().max(1e-9)).fold(0.0, nan_max);
             if e < 1e-9 {
                 iw_ok += 1;
             } else {
@@ -147,7 +158,7 @@ fn main() {
             let _ = &c.armature;
             let tmat = t.free_basis(&q);
             let mapped = tmat.transpose() * &theirs_bare * &tmat;
-            let d = (0..nv).map(|r| (0..nv).map(|k| (mapped[(r, k)] - ours_bare[(r, k)]).abs()).fold(0.0, f64::max)).fold(0.0, f64::max);
+            let d = (0..nv).map(|r| (0..nv).map(|k| (mapped[(r, k)] - ours_bare[(r, k)]).abs()).fold(0.0, nan_max)).fold(0.0, nan_max);
             let scale = ours_bare.amax().max(1e-12);
             if d / scale > worst {
                 worst = d / scale;
@@ -160,7 +171,7 @@ fn main() {
                 *acc_skip.entry("an actuator or tendon this port does not carry").or_default() += 1;
             } else if let Some(a_mj) = t.qacc_smooth_mujoco(&q, &s.qvel, &vec![0.0; t.actuators.len()]) {
                 acc_seen += 1;
-                let e = (0..nv).map(|i| (a_mj[i] - s.smooth[i]).abs() / s.smooth[i].abs().max(1.0)).fold(0.0, f64::max);
+                let e = (0..nv).map(|i| (a_mj[i] - s.smooth[i]).abs() / s.smooth[i].abs().max(1.0)).fold(0.0, nan_max);
                 let moving = s.qvel.iter().any(|v| *v != 0.0);
                 if e > acc_worst {
                     acc_worst = e;
@@ -177,7 +188,7 @@ fn main() {
             } else if notes.len() < 8 {
                 // WHICH block: the base's own 6x6, the coupling to the joints, or the joints themselves
                 let blk = |r0: usize, r1: usize, k0: usize, k1: usize| {
-                    (r0..r1).flat_map(|r| (k0..k1).map(move |k| (r, k))).map(|(r, k)| (mapped[(r, k)] - ours_bare[(r, k)]).abs()).fold(0.0, f64::max) / scale
+                    (r0..r1).flat_map(|r| (k0..k1).map(move |k| (r, k))).map(|(r, k)| (mapped[(r, k)] - ours_bare[(r, k)]).abs()).fold(0.0, nan_max) / scale
                 };
                 notes.push(format!(
                     "{}: total mass {} vs {}; M off {:.2e} relative — base-base {:.2e} (trans {:.2e}, rot {:.2e}, cross {:.2e}), base-joint {:.2e}, joint-joint {:.2e}",

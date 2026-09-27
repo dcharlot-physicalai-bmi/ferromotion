@@ -49,6 +49,17 @@ struct OModel {
     states: Vec<OState>,
 }
 
+
+/// ⛔ `f64::max` DROPS a NaN (`1.0f64.max(NAN) == 1.0`), so a worst-error fold over a state that went
+/// non-finite reads as agreement. This one makes any NaN the worst possible error.
+fn nan_max(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::INFINITY
+    } else {
+        a.max(b)
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
@@ -237,7 +248,7 @@ fn main() {
                 // qfrc_actuator, but only where we carry EVERY actuator — a missing one is a missing term
                 if t.actuators_unsupported.is_empty() && u + 1 == o.acts.len() {
                     let mine = t.qfrc_actuator_act(&q, &s.qvel, &s.ctrl, &s.act);
-                    let d = mine.iter().zip(&s.qfrc).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
+                    let d = mine.iter().zip(&s.qfrc).map(|(x, y)| (x - y).abs()).fold(0.0, nan_max);
                     if d > 1e-6 && notes.len() < 8 {
                         notes.push(format!("{}: qfrc ours {:?} vs MuJoCo {:?}", o.rel, mine, s.qfrc));
                     }

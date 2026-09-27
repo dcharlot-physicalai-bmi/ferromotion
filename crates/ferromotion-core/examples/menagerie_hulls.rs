@@ -24,6 +24,17 @@ struct OMesh {
     polys: Vec<(usize, Vector3<f64>)>,
 }
 
+
+/// ⛔ `f64::max` DROPS a NaN (`1.0f64.max(NAN) == 1.0`), so a worst-error fold over a state that went
+/// non-finite reads as agreement. This one makes any NaN the worst possible error.
+fn nan_max(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::INFINITY
+    } else {
+        a.max(b)
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
@@ -151,7 +162,7 @@ fn main() {
     // a capped hull (`<mesh maxhullvert>`) is a deliberate under-approximation and MuJoCo's is too, so it
     // cannot be asked to contain every vertex; it is counted apart rather than scored as a failure
     let unsound: Vec<_> = soundness.iter().filter(|&(k, &o)| o > 1e-9 && !capped.contains(k)).collect();
-    let worst_out = soundness.iter().filter(|(k, _)| !capped.contains(*k)).map(|(_, &v)| v).fold(0.0, f64::max);
+    let worst_out = soundness.iter().filter(|(k, _)| !capped.contains(*k)).map(|(_, &v)| v).fold(0.0, nan_max);
     println!(
         "  SOUND (no mesh vertex outside our own hull): {} of {} uncapped; {} meshes are capped by maxhullvert; worst excursion {:.2e} m",
         meshes - capped.len() - unsound.len(),

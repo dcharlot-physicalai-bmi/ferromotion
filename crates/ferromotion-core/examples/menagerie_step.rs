@@ -29,6 +29,17 @@ struct Case {
     steps: BTreeMap<usize, (Vec<f64>, Vec<f64>)>,
 }
 
+
+/// ⛔ `f64::max` DROPS a NaN (`1.0f64.max(NAN) == 1.0`), so a worst-error fold over a state that went
+/// non-finite reads as agreement. This one makes any NaN the worst possible error.
+fn nan_max(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::INFINITY
+    } else {
+        a.max(b)
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
@@ -114,7 +125,7 @@ fn main() {
                 }
             }
             if let Some((wq, wv)) = c.steps.get(&k) {
-                let rel = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| (x - y).abs() / y.abs().max(1.0)).fold(0.0, f64::max);
+                let rel = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| (x - y).abs() / y.abs().max(1.0)).fold(0.0, nan_max);
                 let e = rel(&qpos, wq).max(rel(&qvel, wv));
                 let entry = tally.entry((k, mesh_in_contact)).or_insert((0, 0, 0, 0.0, String::new()));
                 entry.0 += 1;

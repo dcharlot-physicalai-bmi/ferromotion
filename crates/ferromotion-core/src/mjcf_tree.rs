@@ -1186,6 +1186,28 @@ impl MjcfTree {
         }
     }
 
+    /// [`MjcfTree::joint_constraint_rows`] posed in MuJoCo's coordinates: every Jacobian mapped as `J·T⁻¹`,
+    /// with `v_mujoco` brought into this port's basis first.
+    ///
+    /// ⛔⛔ And the `J̇·q̇` a connect row carries has to move with it. This port builds that term in its own
+    /// (Euler) basis, `J̇_ours·q̇_ours`. The residual's second derivative is basis-free, but splitting it into
+    /// `J·q̈ + J̇·q̇` is not: with `v_mj = T·q̇`, `J̇_mj·v_mj = J̇_ours·q̇ − J_mj·Ṫ·q̇`. So every row whose reference
+    /// was built with `J̇_ours·q̇` needs `+J_mj·Ṫ·q̇` in MuJoCo's basis. The term is exactly zero on any row
+    /// without a free or ball dof in its Jacobian (Ṫ lives only in those blocks), so it is added to every
+    /// joint row. Missing it put cassie's moving constrained acceleration 2.65e-3 off; with it, 6.7e-10.
+    pub fn joint_constraint_rows_mujoco(&self, q: &[f64], v_mujoco: &[f64], dof_invweight0: &[f64]) -> Result<crate::mujoco_contact::AssembledRows, String> {
+        let tinv = self.free_basis(q).try_inverse().ok_or("gimbal lock: the Euler base's basis map is singular")?;
+        let qvel = &tinv * nalgebra::DVector::from_row_slice(v_mujoco);
+        let qd: Vec<f64> = qvel.iter().copied().collect();
+        let mut rows = self.joint_constraint_rows(q, &qd, dof_invweight0);
+        rows.jac = &rows.jac * &tinv;
+        let basis_term = &rows.jac * (self.free_basis_dot(q, &qd) * &qvel);
+        for (a, c) in rows.aref.iter_mut().zip(basis_term.iter()) {
+            *a += c;
+        }
+        Ok(rows)
+    }
+
     /// **The constrained problem `mj_forward` solves at one state, in MUJOCO's coordinates**: the mass
     /// matrix, the unconstrained acceleration, and every constraint row in MuJoCo's order (equality,
     /// friction, limits, then `contacts`), each with its `efc_aref`, `efc_D` and law.
@@ -1199,10 +1221,11 @@ impl MjcfTree {
         let nv = self.tree.joints.len();
         let tinv = self.free_basis(q).try_inverse().ok_or("gimbal lock: the Euler base's basis map is singular")?;
         let qvel: Vec<f64> = (&tinv * nalgebra::DVector::from_row_slice(v_mujoco)).iter().copied().collect();
-        let mut rows = self.joint_constraint_rows(q, &qvel, &self.dof_invweight0());
+        let mut rows = self.joint_constraint_rows_mujoco(q, v_mujoco, &self.dof_invweight0())?;
         let contact_blocks_from = rows.blocks.len();
-        rows.append(crate::mujoco_contact::contact_rows(contacts, nv, &qvel, self.cone, self.impratio, self.timestep)?);
-        rows.jac = &rows.jac * &tinv;
+        let mut contact = crate::mujoco_contact::contact_rows(contacts, nv, &qvel, self.cone, self.impratio, self.timestep)?;
+        contact.jac = &contact.jac * &tinv;
+        rows.append(contact);
         let m = self.mass_matrix(q);
         let a0 = self.qacc_smooth_mujoco(q, v_mujoco, ctrl).ok_or("gimbal lock: the Euler base's basis map is singular")?;
         Ok(MjcfConstraintProblem { m: tinv.transpose() * m * &tinv, a0: nalgebra::DVector::from_vec(a0), rows, contact_blocks_from })
@@ -1276,6 +1299,7 @@ impl MjcfTree {
                 return Err("implicitfast with a fluid: the fluid force's velocity derivative is not carried".into());
             }
             MjcfIntegrator::ImplicitFast => {}
+            MjcfIntegrator::Rk4 => return self.step_rk4(qpos, qvel, ctrl),
             other => return Err(format!("the {other:?} integrator is not carried")),
         }
         let qposadr = self.qposadr();
@@ -1439,24 +1463,73 @@ impl MjcfTree {
                 }
             }
         }
-        let qvel_next: Vec<f64> = qvel.iter().zip(applied.iter()).map(|(v, a)| v + h * a).collect();
+        // `mju_addToScl(qvel, qacc, h)`: fused, as it compiles
+        let qvel_next: Vec<f64> = qvel.iter().zip(applied.iter()).map(|(v, a)| a.mul_add(h, *v)).collect();
         // `mj_integratePos`, with the new velocity
-        let mut qpos_next = qpos.to_vec();
+        let qpos_next = self.integrate_pos(qpos, &qvel_next, h);
+        Ok(MjcfStep { qpos: qpos_next, qvel: qvel_next, qacc_integrated: applied.iter().copied().collect(), forward })
+    }
+
+    /// **`mj_integratePos`**: `qpos` moved by `h·v`, a velocity in MuJoCo's basis — a hinge or slide by
+    /// `h·v`, a free joint's position by `h·v` and every quaternion by `mju_quatIntegrate`.
+    pub fn integrate_pos(&self, qpos: &[f64], v: &[f64], h: f64) -> Vec<f64> {
+        let mut out = qpos.to_vec();
         let mut vadr = 0usize;
-        for (j, &padr) in self.joints.iter().zip(&qposadr) {
+        for (j, padr) in self.joints.iter().zip(self.qposadr()) {
             match j.kind {
-                MjcfJointKind::Hinge | MjcfJointKind::Slide => qpos_next[padr] += h * qvel_next[vadr],
+                MjcfJointKind::Hinge | MjcfJointKind::Slide => out[padr] = h.mul_add(v[vadr], out[padr]),
                 MjcfJointKind::Free => {
                     for k in 0..3 {
-                        qpos_next[padr + k] += h * qvel_next[vadr + k];
+                        out[padr + k] = h.mul_add(v[vadr + k], out[padr + k]);
                     }
-                    quat_integrate(&mut qpos_next[padr + 3..padr + 7], &qvel_next[vadr + 3..vadr + 6], h);
+                    quat_integrate(&mut out[padr + 3..padr + 7], &v[vadr + 3..vadr + 6], h);
                 }
-                MjcfJointKind::Ball => quat_integrate(&mut qpos_next[padr..padr + 4], &qvel_next[vadr..vadr + 3], h),
+                MjcfJointKind::Ball => quat_integrate(&mut out[padr..padr + 4], &v[vadr..vadr + 3], h),
             }
             vadr += j.kind.dofs();
         }
-        Ok(MjcfStep { qpos: qpos_next, qvel: qvel_next, qacc_integrated: applied.iter().copied().collect(), forward })
+        out
+    }
+
+    /// **`mj_RungeKutta`, `N = 4`**, ported from MuJoCo 3.13.0: four forward passes at the stage states
+    /// `X₀ ⊕ h·Σⱼ Aᵢⱼ·(v, a)ⱼ` of the classic tableau (A = ½, ½, 1 on the sub-diagonal; B = ⅙, ⅓, ⅓, ⅙),
+    /// positions composed through `mj_integratePos` from the ORIGINAL `qpos` at every stage, and the final
+    /// step taken with the B-weighted velocity and acceleration: `qvel += h·Σ Bⱼ aⱼ`, and `qpos` moved by
+    /// `h·Σ Bⱼ vⱼ` — the WEIGHTED velocity, not the new one. There is no implicit damping. Accumulations are
+    /// fused multiply-adds, as `mju_addToScl` compiles.
+    fn step_rk4(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64]) -> Result<MjcfStep, String> {
+        const A: [[f64; 3]; 3] = [[0.5, 0.0, 0.0], [0.0, 0.5, 0.0], [0.0, 0.0, 1.0]];
+        const B: [f64; 4] = [1.0 / 6.0, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 6.0];
+        let h = self.timestep;
+        let qposadr = self.qposadr();
+        let nv = qvel.len();
+        let forward0 = self.forward_mujoco(&self.q_from_qpos(qpos, &qposadr)?, qvel, ctrl)?;
+        let mut xv: Vec<Vec<f64>> = vec![qvel.to_vec()];
+        let mut fa: Vec<Vec<f64>> = vec![forward0.qacc.clone()];
+        for i in 1..4 {
+            let (mut dv, mut da) = (vec![0.0; nv], vec![0.0; nv]);
+            for j in 0..i {
+                for k in 0..nv {
+                    dv[k] = xv[j][k].mul_add(A[i - 1][j], dv[k]);
+                    da[k] = fa[j][k].mul_add(A[i - 1][j], da[k]);
+                }
+            }
+            let xq = self.integrate_pos(qpos, &dv, h);
+            let v: Vec<f64> = (0..nv).map(|k| da[k].mul_add(h, qvel[k])).collect();
+            let f = self.forward_mujoco(&self.q_from_qpos(&xq, &qposadr)?, &v, ctrl)?;
+            xv.push(v);
+            fa.push(f.qacc);
+        }
+        let (mut dv, mut da) = (vec![0.0; nv], vec![0.0; nv]);
+        for j in 0..4 {
+            for k in 0..nv {
+                dv[k] = xv[j][k].mul_add(B[j], dv[k]);
+                da[k] = fa[j][k].mul_add(B[j], da[k]);
+            }
+        }
+        let qvel_next: Vec<f64> = (0..nv).map(|k| da[k].mul_add(h, qvel[k])).collect();
+        let qpos_next = self.integrate_pos(qpos, &dv, h);
+        Ok(MjcfStep { qpos: qpos_next, qvel: qvel_next, qacc_integrated: da, forward: forward0 })
     }
 
     /// One entry per degree of freedom: the joint's cap on the total actuator force through it, for
@@ -5599,6 +5672,49 @@ mod tests {
         near(&qvel, &[0.11828805485946914, 0.21556122827087396, -0.7752658029575709, 3.1305892176094394, -1.2844060516761395, 5.23209093858203, 5.630739997332279, 0.28443201416748676, -0.031611412945476945], 1e-7, "step 25 qvel");
     }
 
+    /// **`RK4`, against MuJoCo's own trajectory.** A damped double pendulum (whose accelerations depend
+    /// strongly on position, so a stage evaluated at the wrong position shows) beside a spinning free body
+    /// (so every stage composes a quaternion). One step to 1e-13, twenty-five to 1e-10.
+    #[test]
+    fn step_mujoco_follows_mujocos_rk4_trajectory() {
+        let t = tree_from_mjcf_str(RK4_MODEL).unwrap();
+        assert_eq!(t.integrator, MjcfIntegrator::Rk4);
+        let (mut qpos, mut qvel) = (
+            vec![0.4, -0.7, 1.0, 0.0, 2.0, 0.9535826651341416, 0.10037712264569912, -0.20075424529139824, 0.20075424529139824],
+            vec![0.5, -1.2, 0.1, 0.0, 0.3, 2.0, -3.0, 4.0],
+        );
+        let near = |got: &[f64], want: &[f64], tol: f64, what: &str| {
+            for (k, (g, w)) in got.iter().zip(want).enumerate() {
+                assert!((g - w).abs() < tol * w.abs().max(1.0), "{what}[{k}] {g} vs MuJoCo {w}");
+            }
+        };
+        for k in 1..=25 {
+            let st = t.step_mujoco(&qpos, &qvel, &[]).unwrap();
+            (qpos, qvel) = (st.qpos, st.qvel);
+            if k == 1 {
+                near(&qpos, &[0.4065548904268078, -0.7127477564085901, 1.001, 0.0, 2.0025095, 0.9452088759680639, 0.10895365820470451, -0.21480300140460598, 0.22038364672219776], 1e-13, "step 1 qpos");
+                near(&qvel, &[0.8100800075771147, -1.3462424410623726, 0.1, 0.0, 0.20189999999999997, 2.0560849137108663, -2.9319656411257933, 4.036092615011649], 1e-13, "step 1 qvel");
+            }
+        }
+        near(&qpos, &[1.1322821854482021, -0.29929360309755704, 1.0249999999999972, 0.0, 1.7684374999999999, 0.5643603657602463, 0.2701423967690588, -0.36015299916286625, 0.6919611840420108], 1e-10, "step 25 qpos");
+        near(&qvel, &[2.387657516718123, 11.472761626118137, 0.1, 0.0, -2.1525000000000007, 2.9765787970938073, -0.6147526956155133, 4.711319057619501], 1e-10, "step 25 qvel");
+    }
+
+    const RK4_MODEL: &str = r#"<mujoco><compiler angle="radian"/><option integrator="RK4" timestep="0.01"/><worldbody>
+  <body name="l1" pos="0 0 1">
+    <joint name="h1" type="hinge" axis="0 1 0" damping="0.05"/>
+    <geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.02" mass="0.6"/>
+    <body name="l2" pos="0.3 0 0">
+      <joint name="h2" type="hinge" axis="0 1 0"/>
+      <geom type="capsule" fromto="0 0 0 0.25 0 0.05" size="0.02" mass="0.4"/>
+    </body>
+  </body>
+  <body name="spinner" pos="1 0 2">
+    <freejoint/>
+    <geom type="box" size="0.1 0.05 0.03" mass="0.5"/>
+  </body>
+</worldbody></mujoco>"#;
+
     const IMPLICITFAST_MODEL: &str = r#"<mujoco><compiler angle="radian"/><option integrator="implicitfast"/><worldbody>
   <geom name="floor" type="plane" size="2 2 0.1"/>
   <body name="tumbler" pos="0 0 0.3">
@@ -5640,6 +5756,46 @@ mod tests {
     <geom type="capsule" size="0.02 0.1" fromto="0 0 0 0.1 0.05 -0.25" mass="0.3"/>
   </body>
 </worldbody></mujoco>"#;
+
+    /// **A connect row on a moving free base, against MuJoCo.** A free pelvis carries a loop closed by a
+    /// `<connect>` through a ball joint, all moving. The row's `J̇·q̇` is built in this port's Euler basis,
+    /// and posing it in MuJoCo's needs the basis term `J·Ṫ·q̇` ([`MjcfTree::joint_constraint_rows_mujoco`]);
+    /// without it this state fails (the base's first acceleration alone is 2e-4 off).
+    #[test]
+    fn a_connect_on_a_moving_free_base_matches_mujoco() {
+        let t = tree_from_mjcf_str(LOOP_MODEL).unwrap();
+        let qpos = [0.0, 0.0, 1.0, 0.9759716969200002, 0.10061563885773199, -0.15092345828659798, 0.12073876662927838, 0.05, -0.04, 1.0, 0.0, 0.0, 0.0];
+        let qvel = [0.3, -0.2, 0.1, 1.5, -2.0, 2.5, 0.8, -0.6, 0.4, -0.3, 0.2];
+        let q = t.q_from_qpos(&qpos, &t.qposadr()).unwrap();
+        let f = t.forward_mujoco(&q, &qvel, &[]).unwrap();
+        assert_eq!(f.nefc, 7, "3 connect rows and one pyramidal contact");
+        let want = [-3.2148317422921644, -0.08016359738568923, -9.760127323568188, -34.24292916867317, 61.004861351132476, 197.3940511854931, -306.4759751575595, -34.697554052837724, -3514.6476773385607, 515.191190718718, 156.86010838363552];
+        for (k, w) in want.iter().enumerate() {
+            assert!((f.qacc[k] - w).abs() < 1e-8 * w.abs().max(1.0), "qacc[{k}] {} vs MuJoCo {w}", f.qacc[k]);
+        }
+    }
+
+    const LOOP_MODEL: &str = r#"<mujoco><compiler angle="radian"/><worldbody>
+  <body name="pelvis" pos="0 0 1">
+    <freejoint/>
+    <geom type="box" size="0.1 0.08 0.05" mass="2"/>
+    <body name="a" pos="0.1 0 0">
+      <joint name="ha" type="hinge" axis="0 1 0" damping="0.1"/>
+      <geom type="capsule" fromto="0 0 0 0 0 -0.3" size="0.02" mass="0.3"/>
+      <site name="tip_a" pos="0 0 -0.3"/>
+    </body>
+    <body name="b" pos="-0.1 0 0">
+      <joint name="hb" type="hinge" axis="0 1 0"/>
+      <geom type="capsule" fromto="0 0 0 0.1 0 -0.28" size="0.02" mass="0.3"/>
+      <body name="c" pos="0.1 0 -0.28">
+        <joint name="hc" type="ball"/>
+        <geom type="capsule" fromto="0 0 0 0.1 0 -0.02" size="0.015" mass="0.1"/>
+      </body>
+    </body>
+  </body>
+</worldbody>
+<equality><connect body1="c" body2="a" anchor="0.1 0 -0.02"/></equality>
+</mujoco>"#;
 
     const FORWARD_MODEL: &str = r#"<mujoco><compiler angle="radian"/><option impratio="3" cone="CONE"/><worldbody>
   <geom name="floor" type="plane" size="2 2 0.1"/>

@@ -26,6 +26,17 @@ struct Mesh {
     nface: usize,
 }
 
+
+/// ⛔ `f64::max` DROPS a NaN (`1.0f64.max(NAN) == 1.0`), so a worst-error fold over a state that went
+/// non-finite reads as agreement. This one makes any NaN the worst possible error.
+fn nan_max(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::INFINITY
+    } else {
+        a.max(b)
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
@@ -109,7 +120,7 @@ fn main() {
             if let (Some(d), false) = (t.mesh_props.get(&m.name), m.com[0].is_nan()) {
                 props_tried += 1;
                 let scale = m.com.iter().fold(0.0f64, |a, b| a.max(b.abs())).max(1e-6);
-                let e = (0..3).map(|k| (d.com[k] - m.com[k]).abs() / scale).fold(0.0, f64::max);
+                let e = (0..3).map(|k| (d.com[k] - m.com[k]).abs() / scale).fold(0.0, nan_max);
                 if e < 1e-9 {
                     props_ok += 1;
                 }
@@ -182,7 +193,7 @@ fn main() {
                 let mut myplanes: Vec<[f64; 4]> = hull.polygons.iter().map(|p| plane(p.normal.as_slice(), p.verts[0])).collect();
                 let theirplanes: Vec<[f64; 4]> = m.polys.iter().map(|(n, v)| plane(n, v[0])).collect();
                 // the mesh's own size, so the offset tolerance is relative to the object and not to a metre
-                let extent = hull.verts.iter().map(|v| v.amax()).fold(0.0, f64::max).max(1e-9);
+                let extent = hull.verts.iter().map(|v| v.amax()).fold(0.0, nan_max).max(1e-9);
                 let close = |a: &[f64; 4], b: &[f64; 4]| {
                     (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] > 0.999_999) && (a[3] - b[3]).abs() < 1e-6 * extent
                 };
@@ -260,7 +271,7 @@ fn main() {
                 v.sort_unstable();
                 if let Some(n) = by_verts.get(&v) {
                     shared_faces += 1;
-                    let d = (0..3).map(|k| (p.normal[k] - n[k]).abs()).fold(0.0, f64::max);
+                    let d = (0..3).map(|k| (p.normal[k] - n[k]).abs()).fold(0.0, nan_max);
                     let dot: f64 = (0..3).map(|k| p.normal[k] * n[k]).sum();
                     if d > 1e-6 {
                         normal_off += 1;
@@ -287,7 +298,7 @@ fn main() {
                         // storage precision. A normal that is genuinely reversed puts a vertex a whole
                         // polytope width outside its plane, which is nowhere near either number.
                         let v0 = hull.verts[p.verts[0]];
-                        let extent = hull.verts.iter().map(|v| v.amax()).fold(0.0, f64::max).max(1e-9);
+                        let extent = hull.verts.iter().map(|v| v.amax()).fold(0.0, nan_max).max(1e-9);
                         let outward = |nn: [f64; 3]| {
                             let d = nn[0] * v0.x + nn[1] * v0.y + nn[2] * v0.z;
                             let slack = hull.hull_verts.iter().map(|&i| nn[0] * hull.verts[i].x + nn[1] * hull.verts[i].y + nn[2] * hull.verts[i].z - d).fold(f64::NEG_INFINITY, f64::max);
