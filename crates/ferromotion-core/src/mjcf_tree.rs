@@ -578,6 +578,10 @@ impl MjcfTree {
     /// scale a tendon limit row regularises against, the tendon counterpart of `dof_invweight0`. Cached once
     /// by MuJoCo, like every other `*_invweight0`.
     pub fn tendon_invweight0(&self) -> Vec<f64> {
+        self.invweight0().tendon.clone()
+    }
+
+    fn compute_tendon_invweight0(&self) -> Vec<f64> {
         let nv = self.tree.joints.len();
         let Some(chol) = self.mass_matrix(&self.reference_q).cholesky() else {
             return vec![0.0; self.tendons.len()];
@@ -888,6 +892,17 @@ impl MjcfTree {
     /// MuJoCo computes it ONCE at the reference configuration — not at the current state — so a row's
     /// stiffness does not change as the model moves.
     pub fn dof_invweight0(&self) -> Vec<f64> {
+        self.invweight0().dof.clone()
+    }
+
+    /// The three `*_invweight0`, computed once. ⛔ In the chart the model was LOADED in: the free joint's
+    /// rotational mean below is basis-free only where the map to MuJoCo's basis is orthogonal, so a copy
+    /// re-charted by [`MjcfTree::charted`] must inherit these, never recompute them.
+    fn invweight0(&self) -> &Invweight0 {
+        self.invweight0_cache.get_or_init(|| Invweight0 { dof: self.compute_dof_invweight0(), body: self.compute_body_invweight0(), tendon: self.compute_tendon_invweight0() })
+    }
+
+    fn compute_dof_invweight0(&self) -> Vec<f64> {
         let nv = self.tree.joints.len();
         let mut out = self.dof_invweight0_general();
         // ⛔⛔ MuJoCo does NOT use `(M⁻¹)ᵢᵢ` for a "simple body with no rotations" — it uses `1/mass`, which
@@ -977,6 +992,10 @@ impl MjcfTree {
     /// A body welded to the world is absent from the map and takes [`InvWeight::STATIC`](crate::mujoco_contact::InvWeight::STATIC), which is what an
     /// immovable body means.
     pub fn body_invweight0(&self) -> BTreeMap<String, crate::mujoco_contact::InvWeight> {
+        self.invweight0().body.clone()
+    }
+
+    fn compute_body_invweight0(&self) -> BTreeMap<String, crate::mujoco_contact::InvWeight> {
         let nv = self.tree.joints.len();
         let zero = self.reference_q.clone();
         let _ = nv;
@@ -1379,6 +1398,10 @@ impl MjcfTree {
     /// is `mj_checkAcc`, which MuJoCo does not repeat after the reset it triggers.
     fn step_checked(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64], check_acc: bool) -> Result<MjcfStep, String> {
         use crate::mujoco_actuator::{ActBias, ActDyn, ActGain};
+        // ⭐ near gimbal lock, the same step in a chart where the angles are zero
+        if let Some(t) = self.chart_if_needed(qpos)? {
+            return t.step_checked(qpos, qvel, ctrl, act, check_acc);
+        }
         match self.integrator {
             MjcfIntegrator::Euler => {}
             MjcfIntegrator::ImplicitFast if self.density > 0.0 || self.viscosity > 0.0 => {
@@ -1752,6 +1775,13 @@ pub struct MjcfTree {
     /// The pose a free-jointed body's `<body>` element states — the free joint carries it, so it is not in
     /// the tree's own geometry, and [`MjcfTree::reference_q`] is where it goes.
     pub free_base_pose: BTreeMap<String, Iso>,
+    /// **The chart each free or ball joint's three Euler hinges are measured from**, keyed by index into
+    /// [`MjcfTree::joints`]: the joint's rotation is `chart · Rz(yaw)·Ry(pitch)·Rx(roll)`. Empty (every chart
+    /// the identity) as loaded; [`MjcfTree::charted`] moves it. See there for why.
+    pub chart: BTreeMap<usize, UnitQuaternion<f64>>,
+    /// `dof_invweight0`, `body_invweight0` and `tendon_invweight0`, computed on first use at `qpos0` in the
+    /// LOADED chart and kept, as MuJoCo compiles them once
+    invweight0_cache: std::sync::OnceLock<Invweight0>,
     /// `<option density>`, `<option viscosity>` and `<option wind>` — the ambient medium. With both density
     /// and viscosity zero there is no fluid force at all, which is MuJoCo's default.
     pub density: f64,
@@ -1965,6 +1995,18 @@ pub enum MjcfReset {
 /// `mjMAXVAL`: past it, `mju_isBad` calls a number bad.
 const MJ_MAXVAL: f64 = 1e10;
 
+/// The three `*_invweight0`, as [`MjcfTree`] keeps them.
+#[derive(Clone, Debug)]
+struct Invweight0 {
+    dof: Vec<f64>,
+    body: BTreeMap<String, crate::mujoco_contact::InvWeight>,
+    tendon: Vec<f64>,
+}
+
+/// Past this `|cos(pitch)|` a step re-charts ([`MjcfTree::charted`]): the Euler basis's condition number
+/// is `1/|cos(pitch)|`, so this bounds what the chart costs in digits to one bit.
+const CHART_COS: f64 = 0.5;
+
 /// One contact [`MjcfTree::collide`] found: the two geoms (indices into [`MjcfTree::geoms`], lower first,
 /// as MuJoCo orders them) and the contact as `mj_setContact` completes it.
 #[derive(Clone, Debug)]
@@ -2037,6 +2079,61 @@ impl MjcfTree {
         out
     }
 
+    /// **This model with every free and ball joint RE-CHARTED at `qpos`**, so that its Euler angles there
+    /// are zero.
+    ///
+    /// ⛔⛔ This port gives a free or ball joint three hinges, yaw-pitch-roll, and the map from their rates to
+    /// MuJoCo's angular velocity is SINGULAR at a pitch of ±90° — gimbal lock — and ill-conditioned near it
+    /// (`1/|cos(pitch)|`). A robot that falls flat on its face goes straight through it. The cure is a moving
+    /// chart: put a constant rotation `C` ahead of the yaw hinge, `R = C·Rz·Ry·Rx`, and choose `C` as the
+    /// current rotation, so the angles are zero and the map is a permutation. `C` is constant, so the
+    /// body-frame angular velocity is the same function of the Euler rates and nothing downstream changes.
+    ///
+    /// Everything in MuJoCo's coordinates — `qpos`, `qvel`, `qacc`, forces, the mass matrix — is the same in
+    /// any chart up to rounding. The `*_invweight0` are inherited from this model, not recomputed.
+    /// [`MjcfTree::step_mujoco`] re-charts on its own once a pitch passes 60°; a caller of
+    /// [`MjcfTree::forward_mujoco`] near the singularity should call this first and pass `q_from_qpos` of the
+    /// result.
+    pub fn charted(&self, qpos: &[f64]) -> Result<MjcfTree, String> {
+        let _ = self.invweight0();
+        let qposadr = self.qposadr();
+        let mut t = self.clone();
+        for (ji, j) in self.joints.iter().enumerate() {
+            let (padr, hinge, reference) = match j.kind {
+                MjcfJointKind::Free => (qposadr[ji] + 3, j.first + 3, self.free_base_pose.get(&j.body).map_or_else(UnitQuaternion::identity, |p| p.rotation)),
+                MjcfJointKind::Ball => (qposadr[ji], j.first, UnitQuaternion::identity()),
+                _ => continue,
+            };
+            let w = qpos.get(padr..padr + 4).ok_or("charted: qpos is too short")?;
+            let r = UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(w[0], w[1], w[2], w[3]));
+            let old = self.chart.get(&ji).copied().unwrap_or_else(UnitQuaternion::identity);
+            let origin = self.tree.joints[hinge].origin;
+            t.tree.joints[hinge].origin = Iso::from_parts(origin.translation, origin.rotation * old.inverse() * r);
+            t.chart.insert(ji, r);
+            let (roll, pitch, yaw) = (r.inverse() * reference).euler_angles();
+            t.reference_q[hinge..hinge + 3].copy_from_slice(&[yaw, pitch, roll]);
+        }
+        Ok(t)
+    }
+
+    /// `Some` re-charted copy when a free or ball joint's pitch at `qpos` is past [`CHART_COS`].
+    fn chart_if_needed(&self, qpos: &[f64]) -> Result<Option<MjcfTree>, String> {
+        let qposadr = self.qposadr();
+        let near = self.joints.iter().enumerate().any(|(ji, j)| {
+            let padr = match j.kind {
+                MjcfJointKind::Free => qposadr[ji] + 3,
+                MjcfJointKind::Ball => qposadr[ji],
+                _ => return false,
+            };
+            qpos.get(padr..padr + 4).is_some_and(|w| ypr_in(w, self.chart.get(&ji)).1.cos().abs() < CHART_COS)
+        });
+        if near {
+            self.charted(qpos).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
     /// **Map MuJoCo's `qpos` onto this tree's `q`.** `qposadr` gives each MuJoCo joint's address, in the order
     /// of [`MjcfTree::joints`]. Hinge and slide copy through; a ball's quaternion becomes `(yaw, pitch, roll)`
     /// on its three hinges; a free joint copies its translation and does the same with its quaternion.
@@ -2045,7 +2142,7 @@ impl MjcfTree {
             return Err(format!("{} qpos addresses for {} joints", qposadr.len(), self.joints.len()));
         }
         let mut q = vec![0.0; self.tree.dof()];
-        for (j, &adr) in self.joints.iter().zip(qposadr) {
+        for (ji, (j, &adr)) in self.joints.iter().zip(qposadr).enumerate() {
             let need = adr + j.kind.qpos_width();
             if need > qpos.len() {
                 return Err(format!("joint '{}' reads qpos[{adr}..{need}] of {}", j.name, qpos.len()));
@@ -2053,14 +2150,14 @@ impl MjcfTree {
             match j.kind {
                 MjcfJointKind::Hinge | MjcfJointKind::Slide => q[j.first] = qpos[adr],
                 MjcfJointKind::Ball => {
-                    let (yaw, pitch, roll) = ypr(&qpos[adr..adr + 4]);
+                    let (yaw, pitch, roll) = ypr_in(&qpos[adr..adr + 4], self.chart.get(&ji));
                     q[j.first] = yaw;
                     q[j.first + 1] = pitch;
                     q[j.first + 2] = roll;
                 }
                 MjcfJointKind::Free => {
                     q[j.first..j.first + 3].copy_from_slice(&qpos[adr..adr + 3]);
-                    let (yaw, pitch, roll) = ypr(&qpos[adr + 3..adr + 7]);
+                    let (yaw, pitch, roll) = ypr_in(&qpos[adr + 3..adr + 7], self.chart.get(&ji));
                     q[j.first + 3] = yaw;
                     q[j.first + 4] = pitch;
                     q[j.first + 5] = roll;
@@ -2071,9 +2168,14 @@ impl MjcfTree {
     }
 }
 
-/// `(yaw, pitch, roll)` of a MuJoCo `(w, x, y, z)` quaternion, in the order the three hinges take them.
-fn ypr(wxyz: &[f64]) -> (f64, f64, f64) {
+/// `(yaw, pitch, roll)` of a MuJoCo `(w, x, y, z)` quaternion, in the order the three hinges take them,
+/// measured from `chart` (the identity when `None`).
+fn ypr_in(wxyz: &[f64], chart: Option<&UnitQuaternion<f64>>) -> (f64, f64, f64) {
     let q = UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(wxyz[0], wxyz[1], wxyz[2], wxyz[3]));
+    let q = match chart {
+        Some(c) => c.inverse() * q,
+        None => q,
+    };
     let (roll, pitch, yaw) = q.euler_angles();
     (yaw, pitch, roll)
 }
@@ -4645,6 +4747,8 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             gravity: Vector3::new(0.0, 0.0, -9.81),
             reference_q: Vec::new(),
             free_base_pose: BTreeMap::new(),
+            chart: BTreeMap::new(),
+            invweight0_cache: std::sync::OnceLock::new(),
             density: 0.0,
             viscosity: 0.0,
             wind: Vector3::zeros(),
@@ -5035,6 +5139,9 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             return Err("internal error: joints are not in topological order".into());
         }
     }
+    // the loader read inverse weights while the model was still being built; the first caller after it
+    // computes them from the finished one
+    out.invweight0_cache = std::sync::OnceLock::new();
     Ok(out)
 }
 
@@ -6060,6 +6167,53 @@ mod tests {
             }
         }
     }
+
+    /// **Through gimbal lock, against MuJoCo.** A free base that STARTS at a pitch of exactly 90° — where
+    /// this port's Euler-rate basis is singular and a step used to refuse the state — with a hinge and a ball
+    /// below it, the ball also at 90°, all turning. Twenty steps under each integrator, compared to MuJoCo's
+    /// `mj_step`: the step re-charts ([`MjcfTree::charted`]) and MuJoCo's coordinates never notice.
+    #[test]
+    fn step_mujoco_goes_through_gimbal_lock_like_mujoco() {
+        let s2 = 0.5f64.sqrt();
+        let qpos0 = [0.1, -0.2, 1.0, s2, 0.0, s2, 0.0, 0.3, s2, 0.0, s2, 0.0];
+        let qvel0 = [0.2, -0.1, 0.3, 0.3, -0.2, 0.5, -0.4, 0.2, 0.1, -0.3];
+        let euler = (
+            [0.10804389152599277, -0.20400533150524294, 1.0037106268004348, 0.7104691552668625, 0.01107271155054746, 0.7036350567098751, 0.002946428719789748, 0.2897345040312094, 0.7077805769911099, -0.0010178021614747686, 0.7064305112655508, -0.0012456588557764846],
+            [0.2017194966296767, -0.10016500356322214, -0.0946796272682277, 0.28410230573061823, -0.2674104105858261, 0.4950443358779727, -0.16597216460081382, 1.0743437232637642e-05, -0.08065675153217357, -0.013717550126385319],
+        );
+        let rk4 = (
+            [0.10804317070726957, -0.20400535321891186, 1.004105200470931, 0.7104568853373144, 0.011072016327269287, 0.7036474590184834, 0.0029458357187373777, 0.28960431037385725, 0.7077850172906829, -0.0010282339392657057, 0.7064260285365054, -0.0012562801975344068],
+            [0.20174708241614164, -0.10016699878878345, -0.09469263035333003, 0.28394732154847185, -0.2684216479337131, 0.49496807397106923, -0.16277928025239366, 3.786330660829462e-05, -0.08221567265601067, -0.011215533340992323],
+        );
+        for (integrator, (want_qpos, want_qvel)) in [("Euler", euler), ("implicitfast", euler), ("RK4", rk4)] {
+            let t = tree_from_mjcf_str(&GIMBAL_MODEL.replace("INTEGRATOR", integrator)).unwrap();
+            // in the loaded chart the start IS the singularity, to rounding
+            assert!(t.q_from_qpos(&qpos0, &t.qposadr()).unwrap()[4].cos().abs() < 1e-7, "{integrator}: the test starts at gimbal lock");
+            let (mut qpos, mut qvel) = (qpos0.to_vec(), qvel0.to_vec());
+            for _ in 0..20 {
+                let st = t.step_mujoco(&qpos, &qvel, &[], &[]).unwrap();
+                (qpos, qvel) = (st.qpos, st.qvel);
+            }
+            for (k, (g, w)) in qpos.iter().zip(&want_qpos).chain(qvel.iter().zip(&want_qvel)).enumerate() {
+                assert!((g - w).abs() < 1e-10 * w.abs().max(1.0), "{integrator}: [{k}] {g} vs MuJoCo {w}");
+            }
+        }
+    }
+
+    const GIMBAL_MODEL: &str = r#"<mujoco><option integrator="INTEGRATOR"/><worldbody>
+  <body name="base" pos="0 0 1">
+    <freejoint/>
+    <geom type="box" size="0.2 0.1 0.05" mass="3" contype="0" conaffinity="0"/>
+    <body name="arm" pos="0.2 0 0">
+      <joint name="hinge" type="hinge" axis="0 1 0" damping="0.2"/>
+      <geom type="capsule" fromto="0 0 0 0.25 0 0" size="0.03" mass="0.4" contype="0" conaffinity="0"/>
+      <body name="wrist" pos="0.25 0 0">
+        <joint name="ball" type="ball" damping="0.05"/>
+        <geom type="box" size="0.05 0.03 0.02" pos="0.05 0 0" mass="0.2" contype="0" conaffinity="0"/>
+      </body>
+    </body>
+  </body>
+</worldbody></mujoco>"#;
 
     /// **`qpos0` and the auto-reset, against MuJoCo.** A free base posed by `euler` (in degrees, the compiler
     /// default), a hinge with a `ref` (also degrees) and a ball. A NaN velocity trips `mj_checkVel` and a
