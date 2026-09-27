@@ -17,9 +17,12 @@
 //! collider reads the final vertices rounded to `f32`. On a MIRRORED mesh (negative scale product) a
 //! polygon wound outward in the file is wound inward once mirrored, and MuJoCo keeps it that way.
 //!
-//! The hull itself is computed here by [`crate::try_convex_hull_3d`], not qhull. The vertex set and the
-//! polytope agree with MuJoCo's; which of several coplanar vertices qhull keeps, the order it emits faces
-//! in, and so the ORDER and STARTING vertex of each polygon, are qhull's and are not reproduced.
+//! ⭐ The hull is qhull's own ([`crate::qhull::mesh_graph`], a port verified integer for integer against
+//! MuJoCo's `mesh_graph` on all 794 Menagerie collision meshes): the same vertices in the same order, each
+//! vertex's neighbours in the same order, the same triangles in the same order and orientation — so the
+//! polygons merge from the same faces in the same sequence, and the support function climbs the same graph
+//! from the same seeds (`mesh_extrema`). A mesh the port refuses (a qhull path it does not carry) falls back
+//! to [`crate::try_convex_hull_3d`]: the same polytope, not the same order.
 
 use crate::TriMesh3;
 use nalgebra::Vector3;
@@ -50,6 +53,31 @@ pub struct MeshHull {
     pub polygons: Vec<HullPolygon>,
     /// For each mesh vertex, the polygons it belongs to (`mesh_polymap`).
     pub polymap: Vec<Vec<usize>>,
+    /// qhull's hull graph as MuJoCo stores it (`mesh_graph`) and the 27 seeds its hill-climbing support
+    /// starts from (`mesh_extrema`); `None` when the hull did not come from the qhull port.
+    pub graph: Option<MeshGraph>,
+}
+
+/// `mesh_graph` split into its arrays, with `mesh_extrema`.
+#[derive(Clone, Debug)]
+pub struct MeshGraph {
+    /// Per hull vertex, where its neighbour list starts in `edge_localid`.
+    pub vert_edgeadr: Vec<usize>,
+    /// Per hull vertex, its index in the mesh's vertex list.
+    pub vert_globalid: Vec<usize>,
+    /// Neighbour lists (hull-local indices), each ended by −1.
+    pub edge_localid: Vec<i32>,
+    /// For the 27 features of a unit cube (`cx, cy, cz ∈ {−1, 0, 1}`, x slowest), the hull vertex furthest
+    /// along it, in `f32` as MuJoCo computes it from the stored vertices.
+    pub extrema: [usize; 27],
+}
+
+/// `mjMESH_HILLCLIMB_MIN`: below this many mesh vertices MuJoCo scans them all instead of climbing.
+const HILLCLIMB_MIN: usize = 10;
+
+/// `dot3f` as clang contracts it: `a·b` with the first product fused.
+fn dot3f(a: &Vector3<f64>, b: &Vector3<f64>) -> f64 {
+    a.z.mul_add(b.z, a.x.mul_add(b.x, a.y * b.y))
 }
 
 const MINVAL: f64 = 1e-15;
@@ -80,17 +108,52 @@ impl MeshHull {
         if key_verts.len() != verts.len() || final_f64.len() != verts.len() {
             return None;
         }
-        let hull = crate::try_convex_hull_3d_capped(&key_verts, max_verts)?;
-        // the hull mesh's vertices are a subset of the file's (same coordinates); map each back to its index
-        let mut index_of: HashMap<[u64; 3], usize> = HashMap::new();
-        for (i, v) in key_verts.iter().enumerate() {
-            index_of.entry([v.x.to_bits(), v.y.to_bits(), v.z.to_bits()]).or_insert(i);
-        }
-        let back: Vec<usize> = hull.verts.iter().map(|v| index_of[&[v.x.to_bits(), v.y.to_bits(), v.z.to_bits()]]).collect();
-        let hull_faces: Vec<[usize; 3]> = hull.tris.iter().map(|t| [back[t[0]], back[t[1]], back[t[2]]]).collect();
-        let mut hull_verts: Vec<usize> = back.clone();
-        hull_verts.sort_unstable();
-        hull_verts.dedup();
+        let pts: Vec<[f64; 3]> = key_verts.iter().map(|v| [v.x, v.y, v.z]).collect();
+        let (hull_faces, hull_verts, graph) = match crate::qhull::mesh_graph(&pts, max_verts) {
+            Ok(g) => {
+                let nv = g[0] as usize;
+                let nf = g[1] as usize;
+                let vert_edgeadr: Vec<usize> = g[2..2 + nv].iter().map(|&x| x as usize).collect();
+                let vert_globalid: Vec<usize> = g[2 + nv..2 + 2 * nv].iter().map(|&x| x as usize).collect();
+                let edge_localid: Vec<i32> = g[2 + 2 * nv..2 + 3 * nv + 3 * nf].to_vec();
+                let faces: Vec<[usize; 3]> = g[2 + 3 * nv + 3 * nf..].chunks(3).map(|t| [t[0] as usize, t[1] as usize, t[2] as usize]).collect();
+                // `mesh_extrema`, from the stored float vertices in float arithmetic
+                let mut max_val = [f32::MIN; 27];
+                let mut extrema = [0usize; 27];
+                for (local, &global) in vert_globalid.iter().enumerate() {
+                    let (x, y, z) = (verts[global].x as f32, verts[global].y as f32, verts[global].z as f32);
+                    let mut k = 0;
+                    for cx in -1..=1 {
+                        for cy in -1..=1 {
+                            for cz in -1..=1 {
+                                let dot = x * cx as f32 + y * cy as f32 + z * cz as f32;
+                                if dot > max_val[k] {
+                                    max_val[k] = dot;
+                                    extrema[k] = local;
+                                }
+                                k += 1;
+                            }
+                        }
+                    }
+                }
+                let hull_verts = vert_globalid.clone();
+                (faces, hull_verts, Some(MeshGraph { vert_edgeadr, vert_globalid, edge_localid, extrema }))
+            }
+            Err(_) => {
+                let hull = crate::try_convex_hull_3d_capped(&key_verts, max_verts)?;
+                // the hull mesh's vertices are a subset of the file's (same coordinates); map each back to its index
+                let mut index_of: HashMap<[u64; 3], usize> = HashMap::new();
+                for (i, v) in key_verts.iter().enumerate() {
+                    index_of.entry([v.x.to_bits(), v.y.to_bits(), v.z.to_bits()]).or_insert(i);
+                }
+                let back: Vec<usize> = hull.verts.iter().map(|v| index_of[&[v.x.to_bits(), v.y.to_bits(), v.z.to_bits()]]).collect();
+                let hull_faces: Vec<[usize; 3]> = hull.tris.iter().map(|t| [back[t[0]], back[t[1]], back[t[2]]]).collect();
+                let mut hull_verts: Vec<usize> = back.clone();
+                hull_verts.sort_unstable();
+                hull_verts.dedup();
+                (hull_faces, hull_verts, None)
+            }
+        };
         let polygons = make_polygons(&key_verts, &hull_faces, final_f64);
         let mut polymap = vec![Vec::new(); verts.len()];
         for (pi, p) in polygons.iter().enumerate() {
@@ -98,7 +161,7 @@ impl MeshHull {
                 polymap[v].push(pi);
             }
         }
-        Some(Self { verts, hull_verts, hull_faces, polygons, polymap, max_verts })
+        Some(Self { verts, hull_verts, hull_faces, polygons, polymap, max_verts, graph })
     }
 
     /// `mjc_meshSupport`: the vertex most along `local_dir` (mesh frame), scanning the hull's vertices from
@@ -125,6 +188,67 @@ impl MeshHull {
         (imax, self.verts[imax])
     }
 
+    /// **MuJoCo's mesh support, exactly**: `mjc_hillclimbSupport` on the hull graph for a mesh of at least
+    /// ten vertices — seeded at `mesh_extrema` for the direction's cube feature, or at the cached `meshindex`
+    /// when that is at least as far along — and `mjc_meshSupport`'s scan of every mesh vertex otherwise (from
+    /// the cached `vertindex`, first maximum wins). Updates both caches as MuJoCo does; returns the vertex in
+    /// the mesh frame.
+    pub fn support_mujoco(&self, local_dir: &Vector3<f64>, vertindex: &mut i64, meshindex: &mut i64) -> Vector3<f64> {
+        match &self.graph {
+            Some(g) if self.verts.len() >= HILLCLIMB_MIN => {
+                let c = |x: f64| (x > 0.4) as usize + 1 - (x < -0.4) as usize;
+                let grid_idx = g.extrema[c(local_dir.x) * 9 + c(local_dir.y) * 3 + c(local_dir.z)];
+                let at = |local: usize| dot3f(local_dir, &self.verts[g.vert_globalid[local]]);
+                let mut imax = if *meshindex >= 0 {
+                    let cached = at(*meshindex as usize);
+                    let seed = at(grid_idx);
+                    if seed > cached {
+                        grid_idx
+                    } else {
+                        *meshindex as usize
+                    }
+                } else {
+                    grid_idx
+                };
+                let mut max = at(imax);
+                let mut prev = usize::MAX;
+                while imax != prev {
+                    prev = imax;
+                    let mut i = g.vert_edgeadr[imax];
+                    while g.edge_localid[i] >= 0 {
+                        let sub = g.edge_localid[i] as usize;
+                        let vdot = at(sub);
+                        if vdot > max {
+                            max = vdot;
+                            imax = sub;
+                        }
+                        i += 1;
+                    }
+                }
+                *meshindex = imax as i64;
+                *vertindex = g.vert_globalid[imax] as i64;
+                self.verts[g.vert_globalid[imax]]
+            }
+            _ => {
+                let mut max = -(f32::MAX as f64);
+                let mut imax = 0usize;
+                if *vertindex >= 0 {
+                    imax = *vertindex as usize;
+                    max = dot3f(local_dir, &self.verts[imax]);
+                }
+                for (i, v) in self.verts.iter().enumerate() {
+                    let vdot = dot3f(local_dir, v);
+                    if vdot > max {
+                        max = vdot;
+                        imax = i;
+                    }
+                }
+                *vertindex = imax as i64;
+                self.verts[imax]
+            }
+        }
+    }
+
     /// `mjCGeom::GetRBound` for a mesh geom: the norm of the half-extents of the vertex bounds, which are
     /// symmetric about the origin only by accident — MuJoCo takes the larger magnitude per axis.
     pub fn rbound(&self) -> f64 {
@@ -138,10 +262,20 @@ impl MeshHull {
     }
 }
 
+/// `mjuu_crossvec` as clang contracts it: each component's first product fused.
+fn crossvec(b: &Vector3<f64>, c: &Vector3<f64>) -> Vector3<f64> {
+    Vector3::new(b.y.mul_add(c.z, -(b.z * c.y)), b.z.mul_add(c.x, -(b.x * c.z)), b.x.mul_add(c.y, -(b.y * c.x)))
+}
+
+/// `mjuu_dot3` as clang contracts it.
+fn dot3(a: &Vector3<f64>, b: &Vector3<f64>) -> f64 {
+    a.z.mul_add(b.z, a.x.mul_add(b.x, a.y * b.y))
+}
+
 /// `MeshPolygonKey`: the rounded spherical angles of a face normal, or `None` for a degenerate face.
 fn polygon_key(v1: &Vector3<f64>, v2: &Vector3<f64>, v3: &Vector3<f64>) -> Option<(i64, i64)> {
-    let n = (v2 - v1).cross(&(v3 - v1));
-    let norm = n.norm();
+    let n = crossvec(&(v2 - v1), &(v3 - v1));
+    let norm = dot3(&n, &n).sqrt();
     if norm < MINVAL {
         return None;
     }
@@ -316,9 +450,8 @@ fn make_polygons(verts: &[Vector3<f64>], faces: &[[usize; 3]], normal_verts: &[V
 /// `mjuu_makenormal`: the unit normal of `(b − a) × (c − a)`, or `(1, 0, 0)` below `mjEPS` = 1e-14. The
 /// winding is whatever the three vertices carry; nothing here reorients it.
 fn make_normal(a: &Vector3<f64>, b: &Vector3<f64>, c: &Vector3<f64>) -> Vector3<f64> {
-    let (ab, ac) = (b - a, c - a);
-    let n = Vector3::new(ab.y * ac.z - ab.z * ac.y, ab.z * ac.x - ab.x * ac.z, ab.x * ac.y - ab.y * ac.x);
-    let nrm = (n.x * n.x + n.y * n.y + n.z * n.z).sqrt();
+    let n = crossvec(&(b - a), &(c - a));
+    let nrm = dot3(&n, &n).sqrt();
     if nrm < 1e-14 {
         return Vector3::x();
     }

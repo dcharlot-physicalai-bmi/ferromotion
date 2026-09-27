@@ -57,6 +57,8 @@ pub struct CcdObj<'a> {
     /// The last support vertex index (box corner code, cylinder cap, mesh vertex) — MuJoCo caches it in the
     /// object and the multi-contact stage reads it back through the polytope vertices.
     vertindex: i64,
+    /// The hill-climbing support's cached hull vertex (`obj->meshindex`, a hull-local index).
+    meshindex: i64,
     /// Sphere/capsule shortcut: the support is a point or a segment while this is set.
     reduced: Option<Reduced>,
 }
@@ -69,7 +71,7 @@ enum Reduced {
 
 impl<'a> CcdObj<'a> {
     pub fn new(kind: GeomType, pose: GeomPose, size: [f64; 3], hull: Option<&'a MeshHull>, margin: f64) -> Self {
-        Self { kind, pose, size, hull, margin, vertindex: -1, reduced: None }
+        Self { kind, pose, size, hull, margin, vertindex: -1, meshindex: -1, reduced: None }
     }
 
     fn center(&self) -> V3 {
@@ -142,10 +144,12 @@ impl<'a> CcdObj<'a> {
             }
             GeomType::Mesh => {
                 let hull = self.hull.expect("mesh geom without hull data");
-                let start = if self.vertindex >= 0 { Some(self.vertindex as usize) } else { None };
-                let (i, v) = hull.support(&local_dir, start);
-                self.vertindex = i as i64;
-                mat * v + pos
+                // `mulMatTVec3` and `localToGlobal` as clang contracts them: each row's first product fused
+                let m = &mat;
+                let row = |a: f64, b: f64, c: f64, x: &V3| c.mul_add(x.z, a.mul_add(x.x, b * x.y));
+                let ld = V3::new(row(m[(0, 0)], m[(1, 0)], m[(2, 0)], dir), row(m[(0, 1)], m[(1, 1)], m[(2, 1)], dir), row(m[(0, 2)], m[(1, 2)], m[(2, 2)], dir));
+                let v = hull.support_mujoco(&ld, &mut self.vertindex, &mut self.meshindex);
+                V3::new(row(m[(0, 0)], m[(0, 1)], m[(0, 2)], &v) + pos.x, row(m[(1, 0)], m[(1, 1)], m[(1, 2)], &v) + pos.y, row(m[(2, 0)], m[(2, 1)], m[(2, 2)], &v) + pos.z)
             }
             GeomType::Plane | GeomType::HField => pos,
         }
@@ -1617,6 +1621,7 @@ pub fn plane_convex(margin: f64, plane: &GeomPose, obj: &mut CcdObj) -> Vec<PreC
     let normal = plane.axis();
     let dir = -normal;
     obj.vertindex = -1;
+    obj.meshindex = -1;
     let v = obj.support(&dir);
     let dist = normal.dot(&(v - plane.pos));
     if dist > margin {
