@@ -40,13 +40,19 @@
 //!   walked in order, as MuJoCo merges them. `fromto` on a site puts the frame at the segment midpoint, +z along it.
 //! * `<frame>` is a pure transform applied to its children. Jointless bodies weld into the nearest jointed
 //!   ancestor exactly as the URDF tree loader welds fixed joints; their frames stay addressable.
+//! * `<attach model body prefix>` grafts the named body of another model (`<asset><model>`) in place, with
+//!   every name, class and asset reference prefixed, and brings that model's defaults, assets, tendons,
+//!   equalities, actuators, sensors and contact pairs with it. The subtree keeps ITS model's `<compiler>`
+//!   (angle unit, Euler sequence, inertia inference) and its asset files resolve against ITS directory and
+//!   `meshdir` — `iit_softfoot` attaches a radian model into a degree one.
 //! * Angles default to **degrees** (`euler`, `axisangle`, hinge `range`, hinge `ref`); `<compiler
 //!   angle="radian">` switches. `<compiler autolimits>` defaults to true, and MuJoCo itself refuses a `range`
 //!   without `limited` when it is false, so that combination is refused here too rather than guessed at.
 //!
 //! # What is refused, loudly
 //!
-//! `<replicate>`, `<attach>`, `<composite>` and `<flexcomp>` (procedural model generation), a free joint on a
+//! `<replicate>`, `<composite>` and `<flexcomp>` (procedural model generation), an `<attach>` of a frame or of a
+//! model that carries keyframes, a free joint on a
 //! body that is not a child of the world, unknown joint types, `settotalmass`, `shellinertia` on a geom,
 //! `inertia="convex"` on a mesh, and mesh files that are neither OBJ nor STL.
 //!
@@ -2949,6 +2955,153 @@ fn expand_includes(el: &mut El, resolve: &dyn Fn(&str) -> Option<Vec<u8>>, dir: 
     Ok(())
 }
 
+/// The index, into the loader's list of compilers, of the model an `<attach>`ed subtree came from.
+const COMPILER_OF: &str = "__compiler";
+/// An asset file path already resolved against its own model's directory and `meshdir`.
+const DIRECT_FILE: &str = "__direct_file";
+/// Marks a default class with no parent: an attached model's own `main`.
+const ROOT_CLASS: &str = "__root";
+
+/// **`<attach model="…" body="…" prefix="…"/>`** (`mjs_attach`): the named body of another model — declared
+/// as `<asset><model name file/>` — grafted in place of the element, with everything it needs brought
+/// along under the prefix: its subtree (every name, class and asset reference prefixed), the other model's
+/// default classes (its `main` becomes `prefix + "main"`, a root of its own, and the subtree's default),
+/// its assets (files resolved against ITS directory and `meshdir`), and its tendons, equalities,
+/// actuators, sensors and contact pairs/excludes. The subtree keeps the other model's `<compiler>`
+/// (angle unit, Euler sequence, inertia inference…): each attached body records which one in
+/// [`COMPILER_OF`], an index into `compilers`.
+fn expand_attach(root: &mut El, resolve: &dyn Fn(&str) -> Option<Vec<u8>>, compilers: &mut Vec<Compiler>) -> Result<(), String> {
+    fn has_attach(el: &El) -> bool {
+        el.children.iter().any(|c| c.name == "attach" || has_attach(c))
+    }
+    if !has_attach(root) {
+        return Ok(());
+    }
+    let models: HashMap<String, String> = root.children_named("asset").flat_map(|a| a.children_named("model")).filter_map(|m| Some((m.attr("name")?.to_string(), m.attr("file")?.to_string()))).collect();
+    const REFS: [&str; 24] = [
+        "joint", "joint1", "joint2", "jointinparent", "body", "body1", "body2", "site", "site1", "site2", "refsite", "cranksite", "slidersite", "geom", "geom1", "geom2", "sidesite", "tendon", "tendon1", "tendon2", "actuator", "objname", "refname", "target",
+    ];
+    const ASSET_REFS: [&str; 4] = ["mesh", "material", "hfield", "texture"];
+    fn set(el: &mut El, k: &str, v: String) {
+        match el.attrs.iter_mut().find(|(a, _)| a == k) {
+            Some(slot) => slot.1 = v,
+            None => el.attrs.push((k.to_string(), v)),
+        }
+    }
+    /// prefix every name, class and reference in `el` and below
+    fn rename(el: &mut El, p: &str, refs: &[&str], default_class: bool) {
+        for (k, v) in el.attrs.iter_mut() {
+            if k == "name" || k == "class" || k == "childclass" || refs.contains(&k.as_str()) || ASSET_REFS.contains(&k.as_str()) {
+                *v = format!("{p}{v}");
+            }
+        }
+        if default_class && el.attr("class").is_none() {
+            set(el, "class", format!("{p}main"));
+        }
+        for c in el.children.iter_mut() {
+            rename(c, p, refs, false);
+        }
+    }
+    fn find_body<'a>(el: &'a El, name: &str) -> Option<&'a El> {
+        for c in &el.children {
+            if c.name == "body" && c.attr("name") == Some(name) {
+                return Some(c);
+            }
+            if let Some(b) = find_body(c, name) {
+                return Some(b);
+            }
+        }
+        None
+    }
+    let mut extra: Vec<El> = Vec::new();
+    let mut failure: Option<String> = None;
+    fn graft(el: &mut El, f: &mut dyn FnMut(&El) -> Result<El, String>, failure: &mut Option<String>) {
+        for c in el.children.iter_mut() {
+            if c.name == "attach" {
+                match f(c) {
+                    Ok(b) => *c = b,
+                    Err(e) => {
+                        failure.get_or_insert(e);
+                    }
+                }
+            } else {
+                graft(c, f, failure);
+            }
+        }
+    }
+    let mut attach_one = |a: &El| -> Result<El, String> {
+        let model = a.attr("model").ok_or("<attach> without `model` (a self-attach) is outside this loader's subset")?;
+        let body = a.attr("body").ok_or("<attach> of a frame is outside this loader's subset")?;
+        let prefix = a.attr("prefix").unwrap_or("").to_string();
+        let file = models.get(model).ok_or_else(|| format!("<attach model=\"{model}\">: no <asset><model name=\"{model}\">"))?;
+        let bytes = resolve(file).ok_or_else(|| format!("attached model file '{file}' could not be resolved"))?;
+        let dir = file.rfind('/').map_or(String::new(), |i| file[..=i].to_string());
+        let mut child = parse_xml(&String::from_utf8_lossy(&bytes)).map_err(|e| format!("in attached model '{file}': {e}"))?;
+        expand_includes(&mut child, resolve, &dir, 0, &mut std::collections::HashSet::new())?;
+        if child.children_named("keyframe").next().is_some() {
+            return Err(format!("attached model '{file}' carries keyframes, which MuJoCo merges into the parent's; outside this loader's subset"));
+        }
+        let mut cc = compiler(&child)?;
+        let meshdir = if cc.meshdir.starts_with('/') { cc.meshdir.clone() } else if cc.meshdir.is_empty() { dir.clone() } else { format!("{dir}{}/", cc.meshdir.trim_end_matches('/')) };
+        cc.meshdir = String::new();
+        let idx = compilers.len();
+        compilers.push(cc);
+        // the subtree
+        let world = child.child("worldbody").ok_or("attached model has no <worldbody>")?;
+        let mut b = find_body(world, body).ok_or_else(|| format!("attached model '{file}' has no body '{body}'"))?.clone();
+        rename(&mut b, &prefix, &REFS, false);
+        set(&mut b, COMPILER_OF, idx.to_string());
+        if b.attr("childclass").is_none() {
+            set(&mut b, "childclass", format!("{prefix}main"));
+        }
+        // its default classes, as a separate root
+        for d in child.children_named("default") {
+            let mut d = d.clone();
+            rename(&mut d, &prefix, &REFS, true);
+            set(&mut d, ROOT_CLASS, "1".into());
+            extra.push(d);
+        }
+        // its assets, files resolved where that model resolves them
+        let mut assets = El { name: "asset".into(), attrs: Vec::new(), children: Vec::new() };
+        for a in child.children_named("asset") {
+            for e in &a.children {
+                let mut e = e.clone();
+                if e.name == "model" {
+                    continue;
+                }
+                if let Some(f) = e.attr("file").map(|s| s.to_string()) {
+                    if e.attr("name").is_none() {
+                        let stem = f.rsplit('/').next().unwrap_or(&f);
+                        set(&mut e, "name", stem.rsplit_once('.').map_or(stem, |(s, _)| s).to_string());
+                    }
+                    let path = if f.starts_with('/') { f.clone() } else { format!("{meshdir}{f}") };
+                    set(&mut e, DIRECT_FILE, path);
+                }
+                rename(&mut e, &prefix, &REFS, true);
+                assets.children.push(e);
+            }
+        }
+        extra.push(assets);
+        // the elements that refer into it
+        for section in ["tendon", "equality", "actuator", "sensor", "contact"] {
+            for s in child.children_named(section) {
+                let mut s = s.clone();
+                for e in s.children.iter_mut() {
+                    rename(e, &prefix, &REFS, true);
+                }
+                extra.push(s);
+            }
+        }
+        Ok(b)
+    };
+    graft(root, &mut attach_one, &mut failure);
+    if let Some(e) = failure {
+        return Err(e);
+    }
+    root.children.extend(extra);
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------------------------
 // <compiler> and <default>
 // ---------------------------------------------------------------------------------------------
@@ -3091,6 +3244,8 @@ struct GeomSpec {
 
 struct MeshAsset {
     file: String,
+    /// `file` is already the full path (an attached model's mesh, resolved against its own directory)
+    direct: bool,
     /// `<mesh maxhullvert>`: the collision hull is capped at this many vertices (MuJoCo's qhull `Q9 TA`).
     /// `None` is MJCF's `-1`, an uncapped hull. Three Menagerie families set it to 64.
     maxhullvert: Option<usize>,
@@ -3891,6 +4046,10 @@ impl Defaults {
             match self.parent.get(&class) {
                 // MuJoCo refuses a repeated class name; merging silently would hide a real authoring error
                 Some(_) => return Err(format!("default class '{class}' is defined twice")),
+                // an attached model's own main: the root of its classes, inheriting nothing from this model
+                None if def.attr(ROOT_CLASS).is_some() => {
+                    self.parent.insert(class.clone(), None);
+                }
                 None => {
                     self.parent.insert(class.clone(), Some(parent.unwrap_or(MAIN).to_string()));
                 }
@@ -4379,6 +4538,8 @@ struct Walk<'a> {
     unnamed_joints: usize,
     meshes: &'a HashMap<String, MeshAsset>,
     hfields: &'a BTreeMap<String, crate::mujoco_collision::HField>,
+    /// the `<compiler>`s of attached models, by [`COMPILER_OF`]
+    compilers: &'a [Compiler],
     /// per mesh name: what `mjCMesh::Process` leaves behind, in the mesh's frame
     mesh_cache: HashMap<String, MeshData>,
     /// per mesh name: the vertices as MuJoCo stores them after processing (CoM-centred, principal frame)
@@ -4406,7 +4567,7 @@ struct Walk<'a> {
     resolve: &'a dyn Fn(&str) -> Option<Vec<u8>>,
 }
 
-const REFUSED: [&str; 4] = ["replicate", "attach", "composite", "flexcomp"];
+const REFUSED: [&str; 3] = ["replicate", "composite", "flexcomp"];
 
 impl Walk<'_> {
     /// Visit the children of a body-like element (`worldbody`, `body`, `frame`).
@@ -4592,7 +4753,19 @@ impl Walk<'_> {
         Ok(())
     }
 
+    /// A body; an `<attach>`ed one is compiled under its own model's `<compiler>`, and so is its subtree.
     fn body(&mut self, b: &El, parent: isize, carry: Iso, childclass: Option<&str>, frame: Option<MjPose>) -> Result<(), String> {
+        let Some(idx) = b.attr(COMPILER_OF) else {
+            return self.body_here(b, parent, carry, childclass, frame);
+        };
+        let saved = self.c;
+        self.c = idx.parse::<usize>().ok().and_then(|i| self.compilers.get(i)).ok_or("an attached body names no compiler")?;
+        let r = self.body_here(b, parent, carry, childclass, frame);
+        self.c = saved;
+        r
+    }
+
+    fn body_here(&mut self, b: &El, parent: isize, carry: Iso, childclass: Option<&str>, frame: Option<MjPose>) -> Result<(), String> {
         let name = match b.attr("name") {
             Some(n) => n.to_string(),
             None => {
@@ -5158,7 +5331,9 @@ impl Walk<'_> {
             return Ok(*d);
         }
         let asset = self.meshes.get(name).ok_or_else(|| format!("geom references mesh '{name}', which no <asset><mesh> declares"))?;
-        let path = if asset.file.starts_with('/') || self.c.meshdir.is_empty() || self.c.meshdir.ends_with('/') {
+        let path = if asset.direct {
+            asset.file.clone()
+        } else if asset.file.starts_with('/') || self.c.meshdir.is_empty() || self.c.meshdir.ends_with('/') {
             format!("{}{}", if asset.file.starts_with('/') { "" } else { self.c.meshdir.as_str() }, asset.file)
         } else {
             format!("{}/{}", self.c.meshdir, asset.file)
@@ -5949,13 +6124,16 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
     }
     expand_includes(&mut root, resolve, "", 0, &mut std::collections::HashSet::new())?;
     let c = compiler(&root)?;
+    let mut attached_compilers: Vec<Compiler> = Vec::new();
+    expand_attach(&mut root, resolve, &mut attached_compilers)?;
     let defaults = Defaults::collect(&root)?;
     // <asset><mesh name file scale refpos refquat inertia> — several <asset> blocks can arrive through includes
     let mut meshes: HashMap<String, MeshAsset> = HashMap::new();
     for asset in root.children_named("asset") {
         for m in asset.children_named("mesh") {
             let get = |k: &str| defaults.get(m, "mesh", k, None).map(|s| s.to_string());
-            let file = get("file").ok_or("<mesh> needs a file")?;
+            let direct = m.attr(DIRECT_FILE).is_some();
+            let file = m.attr(DIRECT_FILE).map(|s| s.to_string()).or_else(|| get("file")).ok_or("<mesh> needs a file")?;
             let stem = file.rsplit('/').next().unwrap_or(&file);
             let stem = stem.rsplit_once('.').map(|(s, _)| s).unwrap_or(stem);
             let name = m.attr("name").map(|s| s.to_string()).unwrap_or_else(|| stem.to_string());
@@ -5984,7 +6162,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
                 .transpose()?
                 .filter(|&v| v > -1)
                 .map(|v| v.max(4) as usize);
-            meshes.insert(name, MeshAsset { file, include_dir, maxhullvert, scale, refpos, refquat, inertia });
+            meshes.insert(name, MeshAsset { file, direct, include_dir, maxhullvert, scale, refpos, refquat, inertia });
         }
     }
     // <asset><hfield>: `mjCHField::Compile` — a PNG (grey = the red channel, rows reversed), MuJoCo's own
@@ -5993,7 +6171,8 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
     for asset in root.children_named("asset") {
         for h in asset.children_named("hfield") {
             let get = |k: &str| h.attr(k).map(|s| s.to_string());
-            let file = get("file");
+            let file = h.attr(DIRECT_FILE).map(|s| s.to_string()).or_else(|| get("file"));
+            let direct = h.attr(DIRECT_FILE).is_some();
             let name = get("name").or_else(|| file.as_ref().map(|f| {
                 let stem = f.rsplit('/').next().unwrap_or(f);
                 stem.rsplit_once('.').map(|(s, _)| s).unwrap_or(stem).to_string()
@@ -6003,7 +6182,13 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
                 return Err(format!("hfield '{name}': size needs 4 positive numbers"));
             }
             let (nrow, ncol, mut data): (usize, usize, Vec<f32>) = if let Some(f) = &file {
-                let path = if f.starts_with('/') || c.meshdir.is_empty() || c.meshdir.ends_with('/') { format!("{}{f}", if f.starts_with('/') { "" } else { c.meshdir.as_str() }) } else { format!("{}/{f}", c.meshdir) };
+                let path = if direct {
+                    f.clone()
+                } else if f.starts_with('/') || c.meshdir.is_empty() || c.meshdir.ends_with('/') {
+                    format!("{}{f}", if f.starts_with('/') { "" } else { c.meshdir.as_str() })
+                } else {
+                    format!("{}/{f}", c.meshdir)
+                };
                 let include_dir = h.attr(INCLUDE_DIR).or_else(|| asset.attr(INCLUDE_DIR)).unwrap_or("");
                 let bytes = resolve(&path).or_else(|| resolve(&format!("{include_dir}{f}"))).ok_or_else(|| format!("hfield '{name}': file '{path}' could not be resolved"))?;
                 if f.to_ascii_lowercase().ends_with(".png") || get("content_type").as_deref() == Some("image/png") {
@@ -6124,6 +6309,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
         unnamed_joints: 0,
         meshes: &meshes,
         hfields: &hfields,
+        compilers: &attached_compilers,
         mesh_cache: HashMap::new(),
         mesh_stored: HashMap::new(),
         mesh_raw: HashMap::new(),
@@ -6900,6 +7086,54 @@ mod tests {
         // and the failure is reported with BOTH places that were tried, not just one
         let e = tree_from_mjcf(r#"<mujoco><worldbody><include file="nope.xml"/></worldbody></mujoco>"#, &|_: &str| None).unwrap_err();
         assert!(e.contains("nope.xml"), "{e}");
+    }
+
+    /// `<attach>`: the attached subtree keeps its own model's `<compiler angle="radian">` inside a degree
+    /// model, its own default classes (its `main` included) and its own tendons and equalities, all under the
+    /// prefix. Every expected value below is MuJoCo 3.13.0's for the same two files.
+    #[test]
+    fn an_attached_model_keeps_its_own_compiler_and_defaults_under_the_prefix() {
+        let files: std::collections::HashMap<&str, &str> = [(
+            "parts/hand.xml",
+            r#"<mujoco><compiler angle="radian"/>
+            <default><geom type="capsule" size="0.02 0.1"/><joint range="-1 1" damping="0.5"/>
+              <default class="tip"><geom type="sphere" size="0.03"/></default></default>
+            <worldbody><body name="unused"/><body name="palm" euler="0 0 1.5707963267948966">
+              <joint name="wrist" axis="0 1 0"/><geom name="pg"/>
+              <body name="finger" pos="0 0 0.2" childclass="tip"><joint name="knuckle" axis="1 0 0"/><geom name="fg"/><site name="s"/></body>
+            </body></worldbody>
+            <tendon><fixed name="couple"><joint joint="wrist" coef="1"/><joint joint="knuckle" coef="-1"/></fixed></tendon>
+            <equality><joint joint1="wrist" joint2="knuckle"/></equality>
+            </mujoco>"#,
+        )]
+        .into_iter()
+        .collect();
+        let xml = r#"<mujoco><asset><model name="hand" file="parts/hand.xml"/></asset>
+            <default><geom type="box" size="0.1 0.1 0.1"/></default>
+            <worldbody><body name="arm" euler="0 0 90"><joint name="shoulder" axis="0 0 1" range="-90 90"/><geom name="ag" size="0.05 0.05 0.3"/>
+              <attach model="hand" body="palm" prefix="h_"/>
+            </body></worldbody></mujoco>"#;
+        let t = tree_from_mjcf(xml, &|p: &str| files.get(p).map(|s| s.as_bytes().to_vec())).expect("loads");
+        let names: Vec<&str> = t.joints.iter().map(|j| j.name.as_str()).collect();
+        assert_eq!(names, ["shoulder", "h_wrist", "h_knuckle"]);
+        let half_pi = std::f64::consts::FRAC_PI_2;
+        assert_eq!(t.joints[0].range, Some((-half_pi, half_pi)), "the parent's degrees");
+        for j in &t.joints[1..] {
+            assert_eq!(j.range, Some((-1.0, 1.0)), "{}: the attached model's radians", j.name);
+            assert_eq!(j.damping, 0.5, "{}: the attached model's main default", j.name);
+        }
+        let geom = |n: &str| t.geoms.iter().find(|g| g.name == n).unwrap_or_else(|| panic!("no geom {n}"));
+        assert_eq!((geom("ag").kind, geom("ag").size), (crate::GeomType::Box, [0.05, 0.05, 0.3]));
+        assert_eq!((geom("h_pg").kind, geom("h_pg").size), (crate::GeomType::Capsule, [0.02, 0.1, 0.0]));
+        assert_eq!((geom("h_fg").kind, geom("h_fg").size), (crate::GeomType::Sphere, [0.03, 0.1, 0.0]));
+        // body_quat: the parent's `euler` in degrees and the child's in radians land on the same bits
+        let quat = |b: usize| t.mj_kin.bodies[b].quat.map(f64::to_bits);
+        let mj = [f64::from_bits(0x3fe6a09e667f3bcd), 0.0, 0.0, f64::from_bits(0x3fe6a09e667f3bcc)].map(f64::to_bits);
+        assert_eq!((quat(1), quat(2)), (mj, mj));
+        assert!(!t.body_frames.contains_key("h_unused"), "only the named body is attached");
+        assert!(t.site_frames.contains_key("h_s"));
+        assert_eq!(t.tendons.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["h_couple"]);
+        assert_eq!(t.equalities.len() + t.equalities_unsupported.len(), 1);
     }
 
     /// ⛔ A geom with its own `quat` inside a class that states `euler` is NOT "two orientations given" —

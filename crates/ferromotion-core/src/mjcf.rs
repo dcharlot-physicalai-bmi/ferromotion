@@ -30,7 +30,7 @@ use nalgebra::{Matrix3, Translation3, Unit, UnitQuaternion, Vector3};
 // Mini XML: permissive, non-validating, enough for MJCF.
 // ---------------------------------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct El {
     pub(crate) name: String,
     pub(crate) attrs: Vec<(String, String)>,
