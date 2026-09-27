@@ -111,7 +111,7 @@ fn mul_mat_vec3(m: &[f64; 9], v: &[f64; 3]) -> [f64; 3] {
 }
 
 /// `mji_mulQuat` / `mju_mulQuat` (no normalisation), contracted.
-fn mul_quat(a: &[f64; 4], b: &[f64; 4]) -> [f64; 4] {
+pub(crate) fn mul_quat(a: &[f64; 4], b: &[f64; 4]) -> [f64; 4] {
     [
         (-a[3]).mul_add(b[3], (-a[2]).mul_add(b[2], a[0].mul_add(b[0], -(a[1] * b[1])))),
         (-a[3]).mul_add(b[2], a[2].mul_add(b[3], a[0].mul_add(b[1], a[1] * b[0]))),
@@ -139,7 +139,7 @@ fn rot_vec_quat(v: &[f64; 3], q: &[f64; 4]) -> [f64; 3] {
 
 /// `mju_normalize4`: below `mjMINVAL` the unit quaternion; within `mjMINVAL` of 1 left alone; otherwise
 /// MULTIPLIED by the reciprocal of the norm.
-fn normalize4(q: &mut [f64; 4]) {
+pub(crate) fn normalize4(q: &mut [f64; 4]) {
     let norm = q[3].mul_add(q[3], q[2].mul_add(q[2], q[0].mul_add(q[0], q[1] * q[1]))).sqrt();
     if norm < 1e-15 {
         *q = [1.0, 0.0, 0.0, 0.0];
@@ -152,7 +152,7 @@ fn normalize4(q: &mut [f64; 4]) {
 }
 
 /// `mju_quat2Mat` (its products are separate statements, so nothing fuses).
-fn quat2mat(q: &[f64; 4]) -> [f64; 9] {
+pub(crate) fn quat2mat(q: &[f64; 4]) -> [f64; 9] {
     if q[0] == 1.0 && q[1] == 0.0 && q[2] == 0.0 && q[3] == 0.0 {
         return [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
     }
@@ -203,6 +203,11 @@ fn mj_local2global(body: (&[f64; 3], &[f64; 4], &[f64; 9]), inertial: &XFrame, p
 impl MjKinematics {
     /// `mj_kinematics`: every geom's world frame (`geom_xpos`, `geom_xmat`) at `qpos` (MuJoCo's layout).
     pub(crate) fn geom_frames(&self, qpos: &[f64]) -> Vec<XFrame> {
+        self.frames(qpos).0
+    }
+
+    /// `mj_kinematics`: every geom's world frame, and every body's inertial frame (`xipos`, `ximat`).
+    pub(crate) fn frames(&self, qpos: &[f64]) -> (Vec<XFrame>, Vec<XFrame>) {
         let n = self.bodies.len();
         let mut xpos = vec![[0.0f64; 3]; n];
         let mut xquat = vec![[1.0f64, 0.0, 0.0, 0.0]; n];
@@ -263,7 +268,8 @@ impl MjKinematics {
             let world: XFrame = ([0.0; 3], [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
             xi[i] = mj_local2global((&xpos[i], &xquat[i], &xmat[i]), &world, &b.ipos, &b.iquat, b.sameframe);
         }
-        self.geoms.iter().map(|g| mj_local2global((&xpos[g.body], &xquat[g.body], &xmat[g.body]), &xi[g.body], &g.pos, &g.quat, g.sameframe)).collect()
+        let geoms = self.geoms.iter().map(|g| mj_local2global((&xpos[g.body], &xquat[g.body], &xmat[g.body]), &xi[g.body], &g.pos, &g.quat, g.sameframe)).collect();
+        (geoms, xi)
     }
 }
 

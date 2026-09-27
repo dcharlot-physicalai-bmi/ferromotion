@@ -1364,9 +1364,11 @@ impl MjcfTree {
     }
 
     /// **`mj_collision`**: every contact this state produces, geom pair by geom pair, in MuJoCo's order —
-    /// the same gates in the same sequence (`contype`/`conaffinity`, the weld-tree body filter,
-    /// `<contact><exclude>`), an explicit `<pair>` bypassing them with its own parameters, detection at
-    /// `margin + gap`, and `mj_setContact` completing each one.
+    /// the same gates in the same sequence (the broadphase's weld-tree body filter and sweep-and-prune,
+    /// `contype`/`conaffinity`, `<contact><exclude>`, the BVH midphase over each body's geoms — see
+    /// [`crate::MjBvh`]), an explicit `<pair>` bypassing them with its own parameters, detection at
+    /// `margin + gap`, and `mj_setContact` completing each one. Both the sweep and the midphase are
+    /// MuJoCo's to the bit, which matters where surfaces touch to the last bits: MuJoCo can call them apart.
     ///
     /// Contacts found in the gap band are KEPT, flagged by `record.exclude`: the solver skips them, but an
     /// adhesion actuator counts them. A pair that needs a collider this port does not carry (a height
@@ -1387,9 +1389,8 @@ impl MjcfTree {
 
     fn collide_static(&self) -> &CollideStatic {
         use crate::mujoco_collision::GeomType;
+        use crate::mujoco_midphase::{BvLeaf, Driver, DriverGeom, MjBvh};
         self.collide_cache.get_or_init(|| {
-            let welds = self.body_welds();
-            let body_id: HashMap<&str, usize> = self.geoms.iter().map(|g| g.body.as_str()).chain(self.contact_excludes.iter().flat_map(|(a, b)| [a.as_str(), b.as_str()])).collect::<BTreeSet<&str>>().into_iter().enumerate().map(|(i, b)| (b, i)).collect();
             let geom_id: HashMap<&str, usize> = self.geoms.iter().enumerate().map(|(i, g)| (g.name.as_str(), i)).collect();
             let mut pairs = HashMap::new();
             for (k, p) in self.contact_pairs.iter().enumerate() {
@@ -1399,39 +1400,61 @@ impl MjcfTree {
                 }
             }
             // `mjCGeom::GetRBound`, contracted; a mesh's is the corner of its box of half-sizes (`geom_size`)
-            let rbound = self
+            let rbound = self.geoms.iter().map(|g| {
+                let s = g.size;
+                match g.kind {
+                    GeomType::Sphere => s[0],
+                    GeomType::Capsule => s[0] + s[1],
+                    GeomType::Cylinder => s[0].mul_add(s[0], s[1] * s[1]).sqrt(),
+                    GeomType::Ellipsoid => s[0].max(s[1]).max(s[2]),
+                    GeomType::Box | GeomType::Mesh => s[2].mul_add(s[2], s[0].mul_add(s[0], s[1] * s[1])).sqrt(),
+                    GeomType::HField => g.hfield.as_ref().and_then(|h| self.hfields.get(h)).map_or(0.0, |h| {
+                        let hs = h.size;
+                        (hs[0].mul_add(hs[0], hs[1] * hs[1]) + (hs[2] * hs[2]).max(hs[3] * hs[3])).sqrt()
+                    }),
+                    _ => 0.0,
+                }
+            });
+            // what `mj_broadphase` and `mj_collideTree` read, and each body's hierarchy as
+            // `mjCBody::ComputeBVH` builds it over its collidable geoms
+            let kin = &self.mj_kin;
+            let geom: Vec<DriverGeom> = self
                 .geoms
                 .iter()
-                .map(|g| {
-                    let s = g.size;
-                    match g.kind {
-                        GeomType::Sphere => s[0],
-                        GeomType::Capsule => s[0] + s[1],
-                        GeomType::Cylinder => s[0].mul_add(s[0], s[1] * s[1]).sqrt(),
-                        GeomType::Ellipsoid => s[0].max(s[1]).max(s[2]),
-                        GeomType::Box | GeomType::Mesh => s[2].mul_add(s[2], s[0].mul_add(s[0], s[1] * s[1])).sqrt(),
-                        GeomType::HField => g.hfield.as_ref().and_then(|h| self.hfields.get(h)).map_or(0.0, |h| {
-                            let hs = h.size;
-                            (hs[0].mul_add(hs[0], hs[1] * hs[1]) + (hs[2] * hs[2]).max(hs[3] * hs[3])).sqrt()
-                        }),
-                        _ => 0.0,
-                    }
+                .zip(&kin.geoms)
+                .zip(rbound)
+                .map(|((g, k), rbound)| DriverGeom { body: k.body, plane: g.kind == GeomType::Plane, rbound, aabb: g.aabb, margin: g.params.margin, gap: g.params.gap, contype: g.params.contype, conaffinity: g.params.conaffinity })
+                .collect();
+            let mut driver = Driver::new(kin.bodies.iter().map(|b| b.parent).collect(), kin.bodies.iter().map(|b| !b.joints.is_empty()).collect(), geom);
+            for (b, body) in kin.bodies.iter().enumerate() {
+                let leaves: Vec<BvLeaf> = driver.geoms[b]
+                    .clone()
+                    .filter(|&g| driver.geom[g].contype != 0 || driver.geom[g].conaffinity != 0)
+                    .map(|g| BvLeaf { id: g, pos: kin.geoms[g].pos, quat: kin.geoms[g].quat, aabb: driver.geom[g].aabb })
+                    .collect();
+                if !leaves.is_empty() {
+                    driver.bvh[b] = Some(MjBvh::build(&body.ipos, &body.iquat, &leaves, uu_rot_vec_quat));
+                }
+            }
+            let body_index: HashMap<&str, usize> = self.mj_body_names.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect();
+            let excludes = self
+                .contact_excludes
+                .iter()
+                .filter_map(|(a, b)| {
+                    let (x, y) = (*body_index.get(a.as_str())?, *body_index.get(b.as_str())?);
+                    Some((x.min(y), x.max(y)))
                 })
                 .collect();
-            let mut per_body: HashMap<&str, usize> = HashMap::new();
-            for g in &self.geoms {
-                *per_body.entry(g.body.as_str()).or_default() += 1;
-            }
-            let multi = self.geoms.iter().map(|g| per_body[g.body.as_str()] > 1).collect();
-            CollideStatic {
-                weld: self.geoms.iter().map(|g| welds.get(&g.body).copied().unwrap_or((0, 0, 0))).collect(),
-                excludes: self.contact_excludes.iter().flat_map(|(a, b)| [(body_id[a.as_str()], body_id[b.as_str()]), (body_id[b.as_str()], body_id[a.as_str()])]).collect(),
-                body: self.geoms.iter().map(|g| body_id[g.body.as_str()]).collect(),
-                pairs,
-                rbound,
-                multi,
-            }
+            CollideStatic { excludes, pairs, driver }
         })
+    }
+
+    /// **Each body's bounding-volume hierarchy as MuJoCo's compiler builds it** (`bvh_aabb`, `bvh_child`,
+    /// `bvh_nodeid`, `bvh_depth`), in MuJoCo's body order, `None` for a body with no collidable geom — the
+    /// boxes [`MjcfTree::collide`]'s midphase descends. With each body's `body_margin`.
+    pub fn body_bvhs(&self) -> Vec<(Option<&crate::mujoco_midphase::MjBvh>, f64)> {
+        let d = &self.collide_static().driver;
+        d.bvh.iter().zip(&d.margin).map(|(b, &m)| (b.as_ref(), m)).collect()
     }
 
     /// **Every geom's world frame as MuJoCo's `mj_kinematics` computes it** (`geom_xpos`, `geom_xmat`), from
@@ -1461,8 +1484,9 @@ impl MjcfTree {
 
     fn collide_qpos_impl(&self, qpos: &[f64], explain: bool) -> MjcfCollision {
         use crate::mujoco_collision::GeomPose;
-        let poses: Vec<GeomPose> = self.geom_frames_mujoco(qpos).into_iter().map(|(pos, mat)| GeomPose { pos, mat }).collect();
-        self.collide_at(&poses, explain)
+        let (gx, xi) = self.mj_kin.frames(qpos);
+        let poses: Vec<GeomPose> = gx.into_iter().map(|(p, m)| GeomPose { pos: Vector3::from(p), mat: Matrix3::new(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]) }).collect();
+        self.collide_at(&poses, &xi, explain)
     }
 
     fn collide_impl(&self, q: &[f64], explain: bool) -> MjcfCollision {
@@ -1479,12 +1503,28 @@ impl MjcfTree {
                 GeomPose { pos: world.translation.vector, mat: *world.rotation.to_rotation_matrix().matrix() }
             })
             .collect();
-        self.collide_at(&poses, explain)
+        // every body's inertial frame, which the midphase's boxes are in
+        let xi: Vec<crate::mujoco_kinematics::XFrame> = self
+            .mj_body_names
+            .iter()
+            .map(|name| {
+                let pose = match self.body_frames.get(name) {
+                    Some((j, off)) => frames[*j] * off,
+                    None => self.world_fixed.get(&format!("body:{name}")).copied().unwrap_or_else(Iso::identity),
+                };
+                let (ipos, imat) = self.inertial_rt(name);
+                let (p, m) = (pose * nalgebra::Point3::from(ipos), pose.rotation.to_rotation_matrix().matrix() * imat);
+                ([p.x, p.y, p.z], [m[(0, 0)], m[(0, 1)], m[(0, 2)], m[(1, 0)], m[(1, 1)], m[(1, 2)], m[(2, 0)], m[(2, 1)], m[(2, 2)]])
+            })
+            .collect();
+        self.collide_at(&poses, &xi, explain)
     }
 
-    fn collide_at(&self, poses: &[crate::mujoco_collision::GeomPose], explain: bool) -> MjcfCollision {
-        use crate::mujoco_collision::{can_collide, collide_pair_with, contact_param, filter_body_pair, margin_and_gap, set_contact, CollideOptions, CollisionGeom, GeomType, PairParams};
+    fn collide_at(&self, poses: &[crate::mujoco_collision::GeomPose], xi: &[crate::mujoco_kinematics::XFrame], explain: bool) -> MjcfCollision {
+        use crate::mujoco_collision::{can_collide, collide_pair_with, contact_param, margin_and_gap, set_contact, CollideOptions, CollisionGeom, GeomType, PairParams};
+        use crate::mujoco_midphase::filter_sphere;
         let st = self.collide_static();
+        let dr = &st.driver;
         let opts = CollideOptions::default();
         let geoms: Vec<Option<CollisionGeom>> = self
             .geoms
@@ -1498,110 +1538,128 @@ impl MjcfTree {
                 Some(CollisionGeom { kind: g.kind, pose: *pose, size: g.size, hull, hfield: g.hfield.as_ref().and_then(|h| self.hfields.get(h)) })
             })
             .collect();
+        let gx: Vec<crate::mujoco_kinematics::XFrame> = poses
+            .iter()
+            .map(|p| ([p.pos.x, p.pos.y, p.pos.z], [p.mat[(0, 0)], p.mat[(0, 1)], p.mat[(0, 2)], p.mat[(1, 0)], p.mat[(1, 1)], p.mat[(1, 2)], p.mat[(2, 0)], p.mat[(2, 1)], p.mat[(2, 2)]]))
+            .collect();
         let mut out = MjcfCollision::default();
         let why = |out: &mut MjcfCollision, key: (usize, usize), f: &dyn Fn() -> String| {
             if explain {
                 out.why.insert(key, f());
             }
         };
+        // `mj_broadphase`, then for each body pair what `mj_collision` does with it: the body-level
+        // `contype`/`conaffinity` and `<exclude>` gates, then two single-geom bodies straight to the pair
+        // filter, and any other two through the BVH midphase (`mj_collideTree`)
+        let body_pairs = dr.broadphase(&gx, true);
+        let mut auto: Vec<(usize, usize)> = Vec::new();
+        for &(b1, b2) in &body_pairs {
+            if !dr.can_collide2(b1, b2) || st.excludes.contains(&(b1, b2)) {
+                continue;
+            }
+            let (r1, r2) = (dr.geoms[b1].clone(), dr.geoms[b2].clone());
+            if r1.len() == 1 && r2.len() == 1 {
+                auto.push((r1.start, r2.start));
+            } else if dr.bvh[b1].is_some() && dr.bvh[b2].is_some() {
+                dr.collide_tree(b1, b2, &gx, xi, &mut auto, &mut out.bvh_active);
+            } else {
+                auto.extend(r1.flat_map(|i| r2.clone().map(move |j| (i, j))));
+            }
+        }
+        out.bvh_active.sort_unstable();
+        out.bvh_active.dedup();
         // ⛔ `mj_collision`'s ORDER, which the solver's arithmetic follows: body pairs by signature (the two
         // MuJoCo body ids, smaller first); within one, the explicit `<pair>`s first, in their order, then the
         // pair's contacts by `(geom1, geom2)` as MuJoCo labels them (stable, so a collider's own order stays)
-        let body_of = |g: usize| self.mj_kin.geoms.get(g).map_or(0, |k| k.body);
-        let pair_index: HashMap<(usize, usize), usize> = st.pairs.iter().map(|(&k, &v)| (k, v)).collect();
+        let body_of = |g: usize| dr.geom[g].body;
         let mut keyed: Vec<((usize, usize, usize, usize, usize), MjcfContact)> = Vec::new();
-        for i in 0..self.geoms.len() {
-            for j in i + 1..self.geoms.len() {
-                let (gi, gj) = (&self.geoms[i], &self.geoms[j]);
-                let (Some(ci), Some(cj)) = (&geoms[i], &geoms[j]) else { continue };
-                // MuJoCo has no plane–height-field or height-field–height-field collider
-                if (ci.kind == GeomType::HField && matches!(cj.kind, GeomType::HField | GeomType::Plane)) || (cj.kind == GeomType::HField && ci.kind == GeomType::Plane) {
-                    continue;
-                }
-                let key = (i, j);
-                let pair = st.pairs.get(&key).map(|&k| &self.contact_pairs[k]);
-                let (margin, gap, params) = if let Some(p) = pair {
-                    (p.margin, p.gap, PairParams { condim: p.condim, solref: p.solref, solimp: p.solimp, friction: p.friction, adhesion: p.adhesion })
-                } else {
-                    if !can_collide(gi.params.contype, gi.params.conaffinity, gj.params.contype, gj.params.conaffinity) {
-                        why(&mut out, key, &|| "contype/conaffinity".into());
-                        continue;
-                    }
-                    let ((w1, pw1, n1), (w2, pw2, n2)) = (st.weld[i], st.weld[j]);
-                    if filter_body_pair(w1, pw1, n1, w2, pw2, n2, true) {
-                        why(&mut out, key, &|| "the body filter (same weld, both static, or parent and child)".into());
-                        continue;
-                    }
-                    if st.excludes.contains(&(st.body[i], st.body[j])) {
-                        why(&mut out, key, &|| "<contact><exclude>".into());
-                        continue;
-                    }
-                    let (m, g) = margin_and_gap(&gi.params, &gj.params);
-                    (m, g, contact_param(&gi.params, &gj.params))
-                };
-                // `mj_filterSphere`: two bounding spheres further apart than the margin, or a plane further
-                // from a geom's centre than its bound, cannot touch — the pair is never handed to a collider.
-                // A pure saving: the test is conservative, so no contact is lost to it.
-                let rb = &st.rbound;
-                // `filterSphere` / `planeGeomDist`, contracted, bounds associated as MuJoCo adds them
-                let dot3 = |a: &Vector3<f64>, b: &Vector3<f64>| a.z.mul_add(b.z, a.x.mul_add(b.x, a.y * b.y));
-                let sphere_far = |mg: f64| {
-                    if rb[i] > 0.0 && rb[j] > 0.0 {
-                        let d = ci.pose.pos - cj.pose.pos;
-                        let b = rb[i] + rb[j] + mg;
-                        dot3(&d, &d) > b * b
-                    } else if ci.kind == GeomType::Plane && rb[j] > 0.0 && dot3(&(cj.pose.pos - ci.pose.pos), &ci.pose.mat.column(2).into()) > mg + rb[j] {
-                        true
-                    } else {
-                        cj.kind == GeomType::Plane && rb[i] > 0.0 && dot3(&(ci.pose.pos - cj.pose.pos), &cj.pose.mat.column(2).into()) > mg + rb[i]
-                    }
-                };
-                if sphere_far(margin + gap) {
-                    why(&mut out, key, &|| "the bounding-sphere filter".into());
-                    continue;
-                }
-                // ⛔ the BVH midphase: a pair not between two single-geom bodies reaches its collider only past
-                // `mj_collideOBB` on the two `geom_aabb`s, with the SUMMED margins and gaps. ⚠ Only this LEAF
-                // test is carried: `mj_collideTree` also tests the bodies' BVH nodes (boxes over their geoms,
-                // in the inertial frames) on the way down, and that is where franka's finger pads, touching
-                // at rest 7.8e-18 apart, are called separated — so this port still collides them.
-                if pair.is_none() && (st.multi[i] || st.multi[j]) {
-                    let mg = (gi.params.margin + gj.params.margin) + (gi.params.gap + gj.params.gap);
-                    if sphere_far(mg) || !collide_obb(&gi.aabb, &ci.pose, &gj.aabb, &cj.pose, mg) {
-                        why(&mut out, key, &|| "the midphase's bounding-box test (mj_collideOBB)".into());
-                        continue;
-                    }
-                }
-                // ⛔ MuJoCo's LABELS: the lower body's geom first — an explicit `<pair>` too, whichever way it
-                // was written (`mjCPair::ResolveReferences` swaps it) — then the lower geom TYPE first
-                // (`pushGeomGeom`). The normal runs from geom1 to geom2 and the contact frame is built from it,
-                // so the other labelling is a different friction pyramid. (Geoms are body-major: i's body is
-                // the lower.)
-                let (mut g1, mut g2) = (i, j);
-                if self.geoms[g1].kind > self.geoms[g2].kind {
-                    std::mem::swap(&mut g1, &mut g2);
-                }
-                let (c1, c2) = if g1 == i { (ci, cj) } else { (cj, ci) };
-                let Ok(pre) = collide_pair_with(&opts, margin + gap, c1, c2) else {
-                    out.refused.push([i, j]);
-                    why(&mut out, key, &|| "a pair the collider refuses".into());
-                    continue;
-                };
-                if pre.is_empty() {
-                    why(&mut out, key, &|| "no contact: the collider found them apart".into());
-                } else {
-                    why(&mut out, key, &|| format!("the collider found {} witness(es) at dist {:?}, includemargin {margin}", pre.len(), pre.iter().map(|p| p.dist).collect::<Vec<_>>()));
-                }
-                let (b1, b2) = (body_of(i), body_of(j));
-                let sort = match pair_index.get(&key) {
-                    Some(&k) => (b1.min(b2), b1.max(b2), 0, k, 0),
-                    None => (b1.min(b2), b1.max(b2), 1, g1, g2),
-                };
-                keyed.extend(pre.iter().map(|p| (sort, MjcfContact { geom: [g1, g2], record: set_contact(p, &params, margin) })));
+        // every explicit `<pair>`, whatever the broadphase said, then every automatic candidate that is not one
+        let mut explicit: Vec<(usize, usize)> = st.pairs.keys().copied().filter(|&(i, j)| i < j).collect();
+        explicit.sort_unstable();
+        let candidates = explicit.iter().map(|&k| (k, true)).chain(auto.iter().map(|&k| (k, false)));
+        for ((i, j), is_explicit) in candidates {
+            let key = (i, j);
+            let (gi, gj) = (&self.geoms[i], &self.geoms[j]);
+            let (Some(ci), Some(cj)) = (&geoms[i], &geoms[j]) else { continue };
+            let pair = if is_explicit {
+                Some(&self.contact_pairs[st.pairs[&key]])
+            } else if st.pairs.contains_key(&key) {
+                // `filterCollisionPair`: a geom pair an explicit `<pair>` names is collided as that pair only
+                continue;
+            } else {
+                None
+            };
+            // MuJoCo has no plane–height-field or height-field–height-field collider
+            if (ci.kind == GeomType::HField && matches!(cj.kind, GeomType::HField | GeomType::Plane)) || (cj.kind == GeomType::HField && ci.kind == GeomType::Plane) {
+                continue;
             }
+            let (margin, gap, params) = if let Some(p) = pair {
+                (p.margin, p.gap, PairParams { condim: p.condim, solref: p.solref, solimp: p.solimp, friction: p.friction, adhesion: p.adhesion })
+            } else {
+                if !can_collide(gi.params.contype, gi.params.conaffinity, gj.params.contype, gj.params.conaffinity) {
+                    why(&mut out, key, &|| "contype/conaffinity".into());
+                    continue;
+                }
+                let (m, g) = margin_and_gap(&gi.params, &gj.params);
+                (m, g, contact_param(&gi.params, &gj.params))
+            };
+            // `mj_filterSphere`: two bounding spheres further apart than the margin, or a plane further
+            // from a geom's centre than its bound, cannot touch — the pair is never handed to a collider
+            if filter_sphere(&dr.geom[i], &dr.geom[j], &gx[i].0, &gx[j].0, &gx[i].1, &gx[j].1, margin + gap) {
+                why(&mut out, key, &|| "the bounding-sphere filter".into());
+                continue;
+            }
+            // ⛔ MuJoCo's LABELS: the lower body's geom first — an explicit `<pair>` too, whichever way it
+            // was written (`mjCPair::ResolveReferences` swaps it) — then the lower geom TYPE first
+            // (`pushGeomGeom`). The normal runs from geom1 to geom2 and the contact frame is built from it,
+            // so the other labelling is a different friction pyramid. (Geoms are body-major: i's body is
+            // the lower.)
+            let (mut g1, mut g2) = (i, j);
+            if self.geoms[g1].kind > self.geoms[g2].kind {
+                std::mem::swap(&mut g1, &mut g2);
+            }
+            let (c1, c2) = if g1 == i { (ci, cj) } else { (cj, ci) };
+            let Ok(pre) = collide_pair_with(&opts, margin + gap, c1, c2) else {
+                out.refused.push([i, j]);
+                why(&mut out, key, &|| "a pair the collider refuses".into());
+                continue;
+            };
+            if pre.is_empty() {
+                why(&mut out, key, &|| "no contact: the collider found them apart".into());
+            } else {
+                why(&mut out, key, &|| format!("the collider found {} witness(es) at dist {:?}, includemargin {margin}", pre.len(), pre.iter().map(|p| p.dist).collect::<Vec<_>>()));
+            }
+            let (b1, b2) = (body_of(i), body_of(j));
+            let sort = if is_explicit { (b1.min(b2), b1.max(b2), 0, st.pairs[&key], 0) } else { (b1.min(b2), b1.max(b2), 1, g1, g2) };
+            keyed.extend(pre.iter().map(|p| (sort, MjcfContact { geom: [g1, g2], record: set_contact(p, &params, margin) })));
         }
         keyed.sort_by_key(|(k, _)| *k);
         out.contacts = keyed.into_iter().map(|(_, c)| c).collect();
+        // the pairs no collider saw, by the gate that kept them out
+        if explain {
+            let listed: std::collections::HashSet<(usize, usize)> = body_pairs.iter().copied().collect();
+            for i in 0..self.geoms.len() {
+                for j in i + 1..self.geoms.len() {
+                    if out.why.contains_key(&(i, j)) {
+                        continue;
+                    }
+                    let (gi, gj) = (&dr.geom[i], &dr.geom[j]);
+                    let bp = (gi.body.min(gj.body), gi.body.max(gj.body));
+                    let reason = if !can_collide(gi.contype, gi.conaffinity, gj.contype, gj.conaffinity) {
+                        "contype/conaffinity"
+                    } else if dr.filter_body_pair(bp.0, bp.1, true) {
+                        "the body filter (same weld, both static, or parent and child)"
+                    } else if !listed.contains(&bp) {
+                        "the broadphase's sweep-and-prune (mj_broadphase)"
+                    } else if st.excludes.contains(&bp) {
+                        "<contact><exclude>"
+                    } else {
+                        "the midphase: a BVH node, or the leaf's bounding sphere or box (mj_collideTree)"
+                    };
+                    out.why.insert((i, j), reason.into());
+                }
+            }
+        }
         out
     }
 
@@ -2318,6 +2376,8 @@ pub struct MjcfTree {
     pub body_inertial_runtime: BTreeMap<String, (Vector3<f64>, Matrix3<f64>)>,
     /// MuJoCo's compiled kinematic data, for placing geoms in MuJoCo's own arithmetic
     pub(crate) mj_kin: crate::mujoco_kinematics::MjKinematics,
+    /// every body's name in MuJoCo's body order, the world first
+    pub(crate) mj_body_names: Vec<String>,
     /// Every `<hfield>` asset, compiled (`hfield_nrow`, `hfield_ncol`, `hfield_size`, `hfield_data`).
     pub hfields: BTreeMap<String, crate::mujoco_collision::HField>,
     /// Each body's mass after MuJoCo's `boundmass` floor, and its `<body gravcomp>` where it is non-zero —
@@ -2677,18 +2737,12 @@ const MJ_MAXVAL: f64 = 1e10;
 /// The per-geom facts [`MjcfTree::collide`] filters by, resolved from names to indices once.
 #[derive(Clone, Debug)]
 struct CollideStatic {
-    /// `(weld body, its parent's weld, the weld's dof count)` per geom — `filter_body_pair`'s inputs
-    weld: Vec<(usize, usize, usize)>,
-    /// `<contact><exclude>` as geom-body index pairs, both orders
+    /// `<contact><exclude>` as MuJoCo body id pairs, the lower first
     excludes: std::collections::HashSet<(usize, usize)>,
-    body: Vec<usize>,
     /// explicit `<contact><pair>`s by geom index pair, both orders
     pairs: HashMap<(usize, usize), usize>,
-    /// `geom_rbound`
-    rbound: Vec<f64>,
-    /// whether the geom's body holds more than one geom — `mj_collision` sends a pair through the BVH
-    /// midphase, and its leaf test `mj_collideOBB`, unless both bodies hold exactly one
-    multi: Vec<bool>,
+    /// what `mj_broadphase` and `mj_collideTree` read, the bodies' hierarchies included
+    driver: crate::mujoco_midphase::Driver,
 }
 
 /// The three `*_invweight0`, as [`MjcfTree`] keeps them.
@@ -2721,6 +2775,9 @@ pub struct MjcfCollision {
     /// for each pair considered, what happened to it — the gate that dropped it, or what the collider found;
     /// filled only by [`MjcfTree::collide_explained`]
     pub why: BTreeMap<(usize, usize), String>,
+    /// `(body, node)` of every node of the bodies' hierarchies ([`MjcfTree::body_bvhs`]) the midphase found
+    /// overlapping on its way down — what MuJoCo marks in `bvh_active`
+    pub bvh_active: Vec<(usize, usize)>,
 }
 
 /// An explicit `<contact><pair>`: the two geoms and the contact parameters MuJoCo uses for that pair
@@ -3336,45 +3393,6 @@ pub(crate) fn mesh_inertia_mujoco(mesh: &crate::TriMesh3, method: MeshInertia) -
     }
     let inertia = Matrix3::new(p[1] + p[2], -p[3], -p[4], -p[3], p[0] + p[2], -p[5], -p[4], -p[5], p[0] + p[1]);
     Ok((total, com, inertia))
-}
-
-/// `mj_collideOBB` without its precomputed products (the leaf test of `mj_collideTree`): do two geoms'
-/// bounding boxes (`geom_aabb`, centre and half-sizes in the geom frame) overlap, within `margin`, along
-/// any of their six face normals? A box at least one of whose half-sizes is `mjMAXVAL` (a plane) is
-/// never tested against.
-fn collide_obb(aabb1: &[f64; 6], p1: &crate::mujoco_collision::GeomPose, aabb2: &[f64; 6], p2: &crate::mujoco_collision::GeomPose, margin: f64) -> bool {
-    const MAXVAL: f64 = 1e10;
-    let dot3 = |a: &Vector3<f64>, b: &Vector3<f64>| a.z.mul_add(b.z, a.x.mul_add(b.x, a.y * b.y));
-    let inf = |a: &[f64; 6]| [a[3] >= MAXVAL, a[4] >= MAXVAL, a[5] >= MAXVAL];
-    let (inf1, inf2) = (inf(aabb1), inf(aabb2));
-    if inf1.iter().all(|&x| x) || inf2.iter().all(|&x| x) {
-        return true;
-    }
-    let aabb = [aabb1, aabb2];
-    let pose = [p1, p2];
-    let infinite = [inf1.iter().any(|&x| x), inf2.iter().any(|&x| x)];
-    let xcenter: [Vector3<f64>; 2] = std::array::from_fn(|i| {
-        let (m, c) = (&pose[i].mat, Vector3::new(aabb[i][0], aabb[i][1], aabb[i][2]));
-        Vector3::from_fn(|r, _| m[(r, 2)].mul_add(c.z, m[(r, 0)].mul_add(c.x, m[(r, 1)] * c.y))) + pose[i].pos
-    });
-    let normal = |i: usize, j: usize| -> Vector3<f64> { pose[i].mat.column(j).into() };
-    for j in 0..2 {
-        if infinite[1 - j] {
-            continue;
-        }
-        for k in 0..3 {
-            let njk = normal(j, k);
-            let (mut proj, mut radius) = ([0.0; 2], [0.0; 2]);
-            for i in 0..2 {
-                proj[i] = dot3(&xcenter[i], &njk);
-                radius[i] = (aabb[i][3] * dot3(&normal(i, 0), &njk)).abs() + (aabb[i][4] * dot3(&normal(i, 1), &njk)).abs() + (aabb[i][5] * dot3(&normal(i, 2), &njk)).abs();
-            }
-            if radius[0] + radius[1] + margin < (proj[1] - proj[0]).abs() {
-                return false;
-            }
-        }
-    }
-    true
 }
 
 // ⛔ MuJoCo's compiler is C++ that clang builds with `-ffp-contract=on` on the arm64 wheel, so the helpers
@@ -4201,7 +4219,7 @@ impl MjPose {
 }
 
 /// `mjuu_rotVecQuat`, contracted.
-fn uu_rot_vec_quat(v: &[f64; 3], q: &[f64; 4]) -> [f64; 3] {
+pub(crate) fn uu_rot_vec_quat(v: &[f64; 3], q: &[f64; 4]) -> [f64; 3] {
     if v[0] == 0.0 && v[1] == 0.0 && v[2] == 0.0 {
         return [0.0; 3];
     }
@@ -6287,6 +6305,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             body_iquat_wxyz: BTreeMap::new(),
             body_inertial_runtime: BTreeMap::new(),
             mj_kin: Default::default(),
+            mj_body_names: Vec::new(),
             hfields: BTreeMap::new(),
             body_mass: BTreeMap::new(),
             body_gravcomp: BTreeMap::new(),
@@ -6354,6 +6373,10 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
         }
     }
     out.mj_kin = crate::mujoco_kinematics::MjKinematics { bodies: kin_bodies, geoms: kin_geoms };
+    out.mj_body_names = vec!["world".to_string(); walk.body_ids.len() + 1];
+    for (name, &id) in &walk.body_ids {
+        out.mj_body_names[id] = name.clone();
+    }
     for name in &walk.collidable_meshes {
         let stored = &walk.mesh_stored[name];
         let cap = walk.meshes.get(name).and_then(|a| a.maxhullvert);
@@ -7086,6 +7109,45 @@ mod tests {
         // and the failure is reported with BOTH places that were tried, not just one
         let e = tree_from_mjcf(r#"<mujoco><worldbody><include file="nope.xml"/></worldbody></mujoco>"#, &|_: &str| None).unwrap_err();
         assert!(e.contains("nope.xml"), "{e}");
+    }
+
+    /// ⛔⛔ **MuJoCo's midphase can call touching surfaces apart.** franka's fingertip pads meet at `qpos0`:
+    /// with the hand where the arm puts it, the colliders find 16 contacts 7.8e-18 deep (MuJoCo with
+    /// `mjDSBL_MIDPHASE` reports exactly those), but `mj_collideTree` rejects the two fingers' ROOT boxes, in
+    /// their inertial frames, by a rounding — and MuJoCo 3.13.0 reports no contact and marks no node. Turn
+    /// the hand square to the world and the same pads give MuJoCo its 16, every node but the two big pads'.
+    #[test]
+    fn the_midphase_rejects_frankas_touching_pads_as_mujoco_does() {
+        let pads = r#"
+            <geom type="box" size="0.0085 0.004 0.0085" pos="0 0.0055 0.0445"/>
+            <geom type="box" size="0.003 0.002 0.003" pos="0.0055 0.002 0.05"/>
+            <geom type="box" size="0.003 0.002 0.003" pos="-0.0055 0.002 0.05"/>
+            <geom type="box" size="0.003 0.002 0.0035" pos="0.0055 0.002 0.0395"/>
+            <geom type="box" size="0.003 0.002 0.0035" pos="-0.0055 0.002 0.0395"/>"#;
+        let model = |pos: &str, quat: &str| {
+            format!(
+                r#"<mujoco><worldbody><body name="hand" pos="{pos}" quat="{quat}">
+                  <body name="left" pos="0 0 0.0584"><inertial mass="0.015" pos="0 0 0" diaginertia="2.375e-6 2.375e-6 7.5e-7"/>
+                    <joint name="j1" type="slide" axis="0 1 0" range="0 0.04"/>{pads}</body>
+                  <body name="right" pos="0 0 0.0584" quat="0 0 0 1"><inertial mass="0.015" pos="0 0 0" diaginertia="2.375e-6 2.375e-6 7.5e-7"/>
+                    <joint name="j2" type="slide" axis="0 1 0" range="0 0.04"/>{pads}</body>
+                </body></worldbody></mujoco>"#
+            )
+        };
+        // the hand's world pose in franka_emika_panda/panda.xml at qpos0, as MuJoCo computes it
+        let at_rest = tree_from_mjcf_str(&model("0.08799999999999993 -4.2095075660180295e-17 0.9259999999999998", "-9.434696949983121e-17 0.9238795391929059 0.3826834162342324 3.9079792405710604e-17")).unwrap();
+        let c = at_rest.collide_qpos_explained(&[0.0, 0.0]);
+        assert!(c.contacts.is_empty(), "MuJoCo reports no contact here, this port {}", c.contacts.len());
+        assert!(c.bvh_active.is_empty(), "MuJoCo marks no node: {:?}", c.bvh_active);
+        assert!(c.why[&(1, 7)].contains("midphase"), "{}", c.why[&(1, 7)]);
+        let square = tree_from_mjcf_str(&model("0 0 0", "1 0 0 0")).unwrap();
+        let c = square.collide_qpos(&[0.0, 0.0]);
+        assert_eq!(c.contacts.len(), 16);
+        assert!(c.contacts.iter().all(|k| k.record.dist == 0.0));
+        // MuJoCo's `bvh_active` 0–4, 6–8 (left, body 2) and 9–13, 15–17 (right, body 3): all but each finger's
+        // node 5
+        let want: Vec<(usize, usize)> = [2, 3].into_iter().flat_map(|b| [0, 1, 2, 3, 4, 6, 7, 8].map(|n| (b, n))).collect();
+        assert_eq!(c.bvh_active, want);
     }
 
     /// `<attach>`: the attached subtree keeps its own model's `<compiler angle="radian">` inside a degree
