@@ -553,7 +553,7 @@ fn main() {
                 } else if notes.len() < 12 {
                     notes.push(format!("{}: floating qacc_smooth off {dq:.2e} in MuJoCo's basis", o.rel));
                 }
-                worst_chain = worst_chain.max(dq);
+                worst_chain = nan_max(worst_chain, dq);
             }
             // ⛔ SMOOTH counts the models whose dofs correspond one for one; a free or ball base is counted
             // on the FLOATING BASE line instead, against the same oracle in MuJoCo's coordinates. Counting
@@ -828,7 +828,17 @@ fn main() {
             // ⛔ the solve happens in MUJOCO'S coordinates, because that is where its answer lives; the
             // library has already mapped the rows (`J·T⁻¹`) and the mass matrix (`T⁻ᵀ·M·T⁻¹`)
             let (jac, m_mj, a0_mj, set) = (&problem.rows.jac, &problem.m, &problem.a0, &problem.rows);
-            match ferromotion_core::solve_constraints_newton_blocks(m_mj, a0_mj, jac, &set.aref, &set.d, &set.blocks, 1e-13, 200) {
+            // ⭐ and MuJoCo's noslip pass after it, where the model asks for one: the acceleration MuJoCo
+            // reports on a noslip model is not the optimum of the main problem
+            let solved_rows = ferromotion_core::solve_constraints_newton_blocks(m_mj, a0_mj, jac, &set.aref, &set.d, &set.blocks, 1e-13, 200).and_then(|mut sol| {
+                if t.noslip_iterations > 0 {
+                    let mut force = sol.force.clone();
+                    sol.qacc = ferromotion_core::mujoco_noslip(m_mj, a0_mj, jac, &set.aref, &set.d, &set.blocks, &mut force, t.noslip_iterations, t.noslip_tolerance, t.meaninertia)?;
+                    sol.force = force;
+                }
+                Ok(sol)
+            });
+            match solved_rows {
                 Ok(sol) => {
                     // ⭐ and the ONE-CALL library forward must be this very answer: same contacts, same rows,
                     // same solve. Only where the contacts were not swapped for MuJoCo's (`MJSUB`).
@@ -841,10 +851,11 @@ fn main() {
                         }
                     }
                     // ⛔⛔ compare against the OPTIMUM OF THE ROWS MUJOCO BUILT, not against the iterate it
-                    // happened to stop on. On the 181 models that let the solver run these are the same
-                    // number to the last bit, and the sweep is unchanged. On the 29 that cap `iterations`
-                    // they are not, and the gap is MuJoCo's stopping rule, not this port's physics — so it
-                    // is counted and named below instead of being charged to the contact model.
+                    // happened to stop on. On the 29 models that cap `iterations` the two differ, and so
+                    // they do on uncapped ones where MuJoCo's default `tolerance` (1e-8) ends the solve
+                    // early (`toddlerbot_2xc` 2.33e-4, `i2rt_yam` 5.74e-5): the oracle converges at
+                    // tolerance 0. The gap is MuJoCo's stopping rule, not this port's physics, so it is
+                    // counted and named below instead of being charged to the contact model.
                     let target: &[f64] = if s.qacc_converged.len() == nv { &s.qacc_converged } else { &s.qacc };
                     let truncated = (s.qacc_converged.len() == nv).then(|| {
                         (0..nv).map(|i| (s.qacc[i] - s.qacc_converged[i]).abs() / s.qacc_converged[i].abs().max(1.0)).fold(0.0, nan_max)
@@ -859,7 +870,7 @@ fn main() {
                     let dq = (0..nv).map(|i| (sol.qacc[i] - target[i]).abs() / target[i].abs().max(1.0)).fold(0.0, nan_max);
                     if !any_mesh {
                         solved_nomesh += 1;
-                        worst_qacc_nomesh = worst_qacc_nomesh.max(dq);
+                        worst_qacc_nomesh = nan_max(worst_qacc_nomesh, dq);
                     }
                     if dq > worst_qacc {
                         worst_qacc = dq;
@@ -869,11 +880,14 @@ fn main() {
                     // solve converged, so of course our answer minimises our problem; a wrong contact set
                     // would pass this test every time. It is only evidence where the rows are known to be
                     // MuJoCo's, which here means a state with NO CONTACTS — those rows are the joint rows
-                    // `examples/menagerie_rows` checks against MuJoCo, 236 of 236. `umi_gripper`, whose
-                    // eight dof-friction rows all sit at their bounds, is that case: run on MuJoCo's OWN
-                    // rows by `examples/menagerie_efc` it lands 3.2e-3 away at a cost no worse, so the
-                    // difference is MuJoCo's iteration limit and not this port.
-                    if dq >= 1e-6 && contacts.is_empty() {
+                    // `examples/menagerie_rows` checks against MuJoCo, 236 of 236. And only without noslip:
+                    // MuJoCo's answer after a noslip pass is MEANT to leave the optimum of the main problem.
+                    //
+                    // ⛔⛔ CORRECTED 2026-09-27: this said `umi_gripper`, "whose eight dof-friction rows all
+                    // sit at their bounds", lands 3.2e-3 from MuJoCo "at a cost no worse, so the difference
+                    // is MuJoCo's iteration limit". It was noslip (`umi_gripper` sets `noslip_iterations` 2);
+                    // with `mujoco_noslip` applied the state agrees.
+                    if dq >= 1e-6 && contacts.is_empty() && t.noslip_iterations == 0 {
                         let cost_at = |a: &DVector<f64>| {
                             let jar: Vec<f64> = (jac * a - DVector::from_row_slice(&set.aref)).iter().copied().collect();
                             let u = ferromotion_core::mujoco_constraint_update_blocks(&set.blocks, &set.d, &jar);

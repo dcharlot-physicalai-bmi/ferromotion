@@ -111,17 +111,23 @@ for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
                        ("qfrc_spring", d.qfrc_spring), ("qfrc_damper", d.qfrc_damper), ("qfrc_gravcomp", d.qfrc_gravcomp), ("qfrc_fluid", d.qfrc_fluid),
                        ("qacc_smooth", d.qacc_smooth), ("qacc", d.qacc)):
             lines.append("\t".join([tag] + [repr(float(x)) for x in v]))
-        # ⭐ the SAME problem solved to convergence: what the rows MuJoCo built actually imply. On a
-        # model that does not cap the solver this is `qacc` to the last bit; on an `*_mjx.xml` it is
-        # 18-74% away from it. Restored afterwards so nothing downstream sees the raised limits.
-        it0, ls0 = int(m.opt.iterations), int(m.opt.ls_iterations)
+        # ⭐ the SAME problem solved to convergence: what the rows MuJoCo built actually imply. On an
+        # `*_mjx.xml` it is 18-74% away from `qacc`. Restored afterwards so nothing downstream sees the
+        # raised limits.
+        #
+        # ⛔⛔ `tolerance` too, not only `iterations`. This used to keep the model's `tolerance` (1e-8 by
+        # default), claiming the result was "`qacc` to the last bit" on every uncapped model. It is not:
+        # MuJoCo's default tolerance ends the main solve with `qacc` still 2e-5 to 6e-5 from the optimum on
+        # `i2rt_yam`, `toddlerbot_2xc` and `hello_robot_stretch(_3)` (measured by `examples/menagerie_efc`
+        # against the same state at tolerance 0), and a port that solves to 1e-14 is charged for it.
+        it0, ls0, tol0 = int(m.opt.iterations), int(m.opt.ls_iterations), float(m.opt.tolerance)
         qpos_k, qvel_k = d.qpos.copy(), d.qvel.copy()
-        m.opt.iterations, m.opt.ls_iterations = max(it0, 500), max(ls0, 50)
+        m.opt.iterations, m.opt.ls_iterations, m.opt.tolerance = max(it0, 500), max(ls0, 50), 0.0
         mujoco.mj_resetData(m, d)
         d.qpos[:], d.qvel[:] = qpos_k, qvel_k
         mujoco.mj_forward(m, d)
         lines.append("\t".join(["qacc_converged"] + [repr(float(x)) for x in d.qacc]))
-        m.opt.iterations, m.opt.ls_iterations = it0, ls0
+        m.opt.iterations, m.opt.ls_iterations, m.opt.tolerance = it0, ls0, tol0
         mujoco.mj_resetData(m, d)
         d.qpos[:], d.qvel[:] = qpos_k, qvel_k
         mujoco.mj_forward(m, d)

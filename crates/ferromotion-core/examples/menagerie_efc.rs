@@ -12,8 +12,9 @@
 //! cargo run --release --example menagerie_efc -- <efc oracle txt> [substring]
 //! ```
 //!
-//! The comparison is the ANSWER, never the path: a disagreement is reported as a failure only if our cost
-//! is also worse than MuJoCo's.
+//! The comparison is the ANSWER, never the path: a disagreement with the `qacc` a model ships is reported
+//! as a failure unless ours is the answer MuJoCo reaches when told to converge and, where no noslip pass
+//! runs, our cost is no worse than MuJoCo's.
 //!
 //! ⛔⛔ and that verdict is only as good as OUR cost. The rows here are MuJoCo's to the last bit, but the
 //! map from a row's residual to a cost is this port's own, and a row's LINEAR TAIL — the part that bites
@@ -25,17 +26,33 @@
 //! python scripts/mujoco_cost_at.py <menagerie root> <efc oracle txt> /tmp/ours.txt
 //! ```
 //!
-//! which rebuilds each state and scores both answers with `mj_constraintUpdate`. Measured against MuJoCo
-//! 3.13.0 on Menagerie: of the 40 states where the two answers differ by more than 1e-6, ZERO cost more
-//! under MuJoCo's own cost function. MuJoCo's solver stalls short of the optimum of its own rows — not
-//! only on the models that cap `iterations`, but on `robot_soccer_kit`, `hello_robot_stretch`,
-//! `hello_robot_stretch_3`, `flybody`, `umi_gripper` and `i2rt_yam`, which all leave the default 100 in place.
+//! which rebuilds each state and scores both answers with `mj_constraintUpdate`.
 //!
-//! ⛔ CORRECTED 2026-09-24: an earlier version of this header also named `rainbow_robotics_rby1` here, and
-//! the commit that wrote it named `tetheria_aero_hand_open` too. Both CAP their solver (30 and 5
-//! iterations), so neither shows that the stall happens without a cap.
+//! ⭐ The verdict no longer rests on a cost. The oracle also records `qacc_conv`: the same state with
+//! MuJoCo's main solve told to converge (`iterations` 1000, `tolerance` 0), noslip still running after it
+//! where the model asks for one. The optimum of the rows is unique, so that is the answer a converged solver
+//! owes, and it is MuJoCo's own. Measured against MuJoCo 3.13.0 on Menagerie: 503 of 504 states within 1e-9
+//! of it, all 504 within 1e-6. Against `qacc` as each model ships, 476 of 504 agree within 1e-6, and every
+//! one of the 28 that differ is MuJoCo stopping short under its own options:
+//!
+//! - 21 on files that cap `iterations`: 19 on the MJX variants that cap it at 1, one on
+//!   `rainbow_robotics_rby1` at 30 and one on `tetheria_aero_hand_open` at 5;
+//! - 4 on `i2rt_yam` and `toddlerbot_2xc`, where MuJoCo's DEFAULT `tolerance` of 1e-8 ends the main solve
+//!   with `qacc` still 2e-5 to 6e-5 from the optimum;
+//! - 3 on `hello_robot_stretch` and `hello_robot_stretch_3`, the same early stop, with noslip then run on
+//!   the unconverged forces.
+//!
+//! ⛔⛔ CORRECTED 2026-09-27: this header used to say MuJoCo's solver "stalls short of the optimum of its own
+//! rows" on `robot_soccer_kit`, `hello_robot_stretch`, `hello_robot_stretch_3`, `flybody`, `umi_gripper` and
+//! `i2rt_yam`, "which all leave the default 100 in place". Five of the six set `noslip_iterations`, so the
+//! `qacc` MuJoCo reports is the answer AFTER noslip, which is meant to leave the optimum of these rows; the
+//! cost comparison could not see that, because it judged both answers by the main problem alone. With
+//! `mujoco_noslip` applied, 36 of the 39 states on noslip models agree to 1e-6. The sixth, `i2rt_yam`, and the three that
+//! remain are not a stall either: MuJoCo reaches our answer when told to converge.
+//! (The 2026-09-24 correction still stands: `rainbow_robotics_rby1` and `tetheria_aero_hand_open` cap their
+//! solver, so they never showed anything about an uncapped one.)
 
-use ferromotion_core::{mujoco_constraint_update_blocks, solve_constraints_newton_blocks, Cone, ConeContact, EfcBlock};
+use ferromotion_core::{mujoco_constraint_update_blocks, mujoco_noslip, solve_constraints_newton_blocks, Cone, ConeContact, EfcBlock};
 use nalgebra::{DMatrix, DVector};
 use std::collections::BTreeMap;
 
@@ -54,10 +71,14 @@ struct Case {
     floss: Vec<f64>,
     qacc_smooth: Vec<f64>,
     qacc: Vec<f64>,
+    /// the same state with MuJoCo's main solve told to converge
+    qacc_conv: Vec<f64>,
     j: Vec<Vec<f64>>,
     m: Vec<Vec<f64>>,
     /// `(efc_address, condim, mu, friction)` for each contact that actually has rows
     contacts: Vec<(usize, usize, f64, [f64; 5])>,
+    /// `(noslip_iterations, noslip_tolerance, meaninertia, iterations, tolerance)`
+    opt: Option<(usize, f64, f64, usize, f64)>,
 }
 
 fn main() {
@@ -88,9 +109,10 @@ fn main() {
                 let fr = [f(t[4]), f(t[5]), f(t[6]), f(t[7]), f(t[8])];
                 cases.last_mut().unwrap().contacts.push((t[1].parse().unwrap(), t[2].parse().unwrap(), f(t[3]), fr));
             }
+            "opt" => cases.last_mut().unwrap().opt = Some((t[1].parse().unwrap(), f(t[2]), f(t[3]), t[4].parse().unwrap(), f(t[5]))),
             "J" => cases.last_mut().unwrap().j.push(t[1..].iter().map(|x| f(x)).collect()),
             "M" => cases.last_mut().unwrap().m.push(t[1..].iter().map(|x| f(x)).collect()),
-            "aref" | "D" | "R" | "floss" | "qacc_smooth" | "qacc" => {
+            "aref" | "D" | "R" | "floss" | "qacc_smooth" | "qacc" | "qacc_conv" => {
                 let v: Vec<f64> = t[1..].iter().map(|x| f(x)).collect();
                 let c = cases.last_mut().unwrap();
                 match t[0] {
@@ -99,6 +121,7 @@ fn main() {
                     "floss" => c.floss = v,
                     "qacc_smooth" => c.qacc_smooth = v,
                     "qacc" => c.qacc = v,
+                    "qacc_conv" => c.qacc_conv = v,
                     _ => {}
                 }
             }
@@ -108,6 +131,8 @@ fn main() {
 
     let (mut seen, mut ok, mut better, mut worse) = (0usize, 0usize, 0usize, 0usize);
     let mut worst = (0.0f64, String::new());
+    // against MuJoCo CONVERGED: (compared, within 1e-9, within 1e-6, worst)
+    let mut conv = (0usize, 0usize, 0usize, (0.0f64, String::new()));
     let mut worst_gap = (0.0f64, String::new());
     let dump_qacc = std::env::var("DUMP_QACC").ok();
     if let Some(p) = &dump_qacc {
@@ -115,6 +140,9 @@ fn main() {
     }
     let mut by_kind: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
     let mut notes: Vec<String> = Vec::new();
+    // every state where the answers differ at a cost no worse than MuJoCo's, and what MuJoCo was told
+    let mut short: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut noslip_states = 0usize;
     for c in &cases {
         if filter.as_ref().is_some_and(|fl| !c.rel.contains(fl.as_str())) {
             continue;
@@ -178,7 +206,19 @@ fn main() {
         let jac = DMatrix::from_fn(c.nefc, c.nv, |r, k| c.j[r][k]);
         let a_smooth = DVector::from_row_slice(&c.qacc_smooth);
         let want = DVector::from_row_slice(&c.qacc);
-        match solve_constraints_newton_blocks(&m, &a_smooth, &jac, &c.aref, &c.d, &blocks, 1e-14, 300) {
+        let solved = solve_constraints_newton_blocks(&m, &a_smooth, &jac, &c.aref, &c.d, &blocks, 1e-14, 300).and_then(|mut sol| {
+            // ⭐ MuJoCo's noslip pass, where the model asks for one: the `qacc` MuJoCo reports is then
+            // AFTER that pass, not the optimum of the rows, so the solve is compared after it too
+            if let Some((iters, tol, meaninertia, ..)) = c.opt.filter(|o| o.0 > 0) {
+                let mut force = sol.force.clone();
+                sol.qacc = mujoco_noslip(&m, &a_smooth, &jac, &c.aref, &c.d, &blocks, &mut force, iters, tol, meaninertia)?;
+                sol.force = force;
+            }
+            Ok(sol)
+        });
+        let noslip = c.opt.is_some_and(|o| o.0 > 0);
+        noslip_states += usize::from(noslip);
+        match solved {
             Ok(sol) => {
                 // ⭐ our answer, written out so MuJoCo's OWN cost function can be evaluated at it. "Our
                 // cost is no worse" is only as good as our cost: the rows are MuJoCo's, but the map from
@@ -192,6 +232,17 @@ fn main() {
                 }
                 let scale = want.amax().max(1.0);
                 let err = (&sol.qacc - &want).amax() / scale;
+                // ⭐ the claim: against MuJoCo told to converge, the optimum is unique, so the two must agree
+                let err_conv = (!c.qacc_conv.is_empty()).then(|| (&sol.qacc - DVector::from_row_slice(&c.qacc_conv)).amax() / scale);
+                if let Some(e) = err_conv {
+                    conv.0 += 1;
+                    conv.1 += usize::from(e < 1e-9);
+                    conv.2 += usize::from(e < 1e-6);
+                    // a NaN is the worst error, never a skipped one
+                    if e.is_nan() || e > conv.3 .0 {
+                        conv.3 = (e, format!("{} [{}]", c.rel, c.state));
+                    }
+                }
                 if err > worst.0 {
                     worst = (err, format!("{} [{}]", c.rel, c.state));
                 }
@@ -219,17 +270,28 @@ fn main() {
                         0.5 * (da.transpose() * &m * &da)[(0, 0)] + u.cost
                     };
                     let (ours, theirs) = (cost_at(&sol.qacc), cost_at(&want));
-                    if ours <= theirs {
+                    // two witnesses that MuJoCo, not this port, is the one short of the optimum: ours
+                    // is the answer MuJoCo itself reaches when told to converge, and (without noslip,
+                    // whose answer is MEANT to leave the optimum of these rows) ours costs no more
+                    if err_conv.is_some_and(|e| e < 1e-6) && (noslip || ours <= theirs) {
                         better += 1;
                         let gap = (theirs - ours) / theirs.abs().max(1.0);
-                        if gap > worst_gap.0 {
+                        let told = match c.opt {
+                            Some((_, _, _, it, _)) if it < 100 => format!("its file caps iterations at {it}"),
+                            Some((_, _, _, _, tol)) if tol > 1e-8 => format!("its file loosens tolerance to {tol:e}"),
+                            Some((ns, _, _, it, tol)) => format!("MuJoCo's defaults (iterations {it}, tolerance {tol:e}) stop the main solve early{}", if ns > 0 { ", and noslip runs on those forces" } else { "" }),
+                            None => "options not recorded".into(),
+                        };
+                        short.entry(told).or_default().push(format!("{} [{}] qacc off {err:.1e}{}", c.rel, c.state, if noslip { String::new() } else { format!(", cost deficit {gap:.1e}") }));
+                        if !noslip && gap > worst_gap.0 {
                             worst_gap = (gap, format!("{} [{}]: qacc off {err:.2e}", c.rel, c.state));
                         }
                         by_kind.entry(kind).or_default().0 += 1;
                     } else {
                         worse += 1;
                         if notes.len() < 10 {
-                            notes.push(format!("{} [{}]: qacc off {err:.2e} at a HIGHER cost ({ours} vs {theirs}), {} rows ne {} nf {}", c.rel, c.state, c.nefc, c.ne, c.nf));
+                            let conv = err_conv.map_or("not recorded".into(), |e| format!("{e:.2e}"));
+                            notes.push(format!("{} [{}]: qacc off {err:.2e}{}, off MuJoCo-converged {conv}, cost ours {ours} vs {theirs}, {} rows ne {} nf {}", c.rel, c.state, if noslip { " after noslip" } else { "" }, c.nefc, c.ne, c.nf));
                         }
                     }
                 }
@@ -243,12 +305,21 @@ fn main() {
         }
     }
     println!("constraint sets solved from MuJoCo's own rows: {seen}");
-    println!("  reach MuJoCo's qacc within 1e-6 relative: {ok}");
-    println!("  differ, but at a cost no worse than MuJoCo's: {better}; worst cost DEFICIT (relative) {:.2e} on {} — the minimiser is unique (the Gauss term is strictly convex), so a deficit above rounding means MuJoCo's solver stopped short of it", worst_gap.0, worst_gap.1);
-    println!("  differ AND cost more — ours is wrong: {worse}");
+    println!("  against MuJoCo told to CONVERGE: {} of {} within 1e-9 relative, {} within 1e-6; worst {:.2e} on {}", conv.1, conv.0, conv.2, conv.3 .0, conv.3 .1);
+    println!("  against MuJoCo as the model ships it: {ok} within 1e-6 relative");
+    println!("  differ, because MuJoCo stops short (ours is MuJoCo's own converged answer): {better}; worst cost DEFICIT (relative) {:.2e} on {} — the minimiser is unique (the Gauss term is strictly convex), so a deficit above rounding means MuJoCo's solver stopped short of it", worst_gap.0, worst_gap.1);
+    println!("  differ otherwise — ours is wrong: {worse}");
     println!("  worst relative qacc {:.2e} on {}", worst.0, worst.1);
     for (k, (good, n)) in &by_kind {
         println!("    {good:>4} of {n:<4} {k}");
+    }
+    println!("  {noslip_states} states are on models that ask for noslip, and are compared after it");
+    println!("  where MuJoCo stopped short, by what it was told:");
+    for (told, v) in &short {
+        println!("    {:>4}  {told}", v.len());
+        for x in v.iter().take(if told.starts_with("MuJoCo's defaults") { 20 } else { 3 }) {
+            println!("            {x}");
+        }
     }
     for n in notes.iter().take(10) {
         println!("  {n}");

@@ -1251,7 +1251,14 @@ impl MjcfTree {
         let invweight0 = self.body_invweight0();
         let specs: Vec<crate::mujoco_contact::ContactSpec> = collision.contacts.iter().filter(|c| !c.record.exclude).map(|c| self.contact_spec(c, &frames, &invweight0)).collect();
         let p = self.constraint_problem(q, v_mujoco, ctrl, &specs)?;
-        let solve = crate::mujoco_contact::solve_constraints_newton_blocks(&p.m, &p.a0, &p.rows.jac, &p.rows.aref, &p.rows.d, &p.rows.blocks, 1e-13, 200)?;
+        let mut solve = crate::mujoco_contact::solve_constraints_newton_blocks(&p.m, &p.a0, &p.rows.jac, &p.rows.aref, &p.rows.d, &p.rows.blocks, 1e-13, 200)?;
+        // ⭐ `<option noslip_iterations>`: MuJoCo re-solves the friction forces after the main solve, so the
+        // acceleration it reports is NOT the optimum of the main problem. Part of the problem statement.
+        if self.noslip_iterations > 0 {
+            let mut force = solve.force.clone();
+            solve.qacc = crate::mujoco_contact::mujoco_noslip(&p.m, &p.a0, &p.rows.jac, &p.rows.aref, &p.rows.d, &p.rows.blocks, &mut force, self.noslip_iterations, self.noslip_tolerance, self.meaninertia)?;
+            solve.force = force;
+        }
         Ok(MjcfForward { qacc: solve.qacc.iter().copied().collect(), qacc_smooth: p.a0.iter().copied().collect(), nefc: p.rows.aref.len(), collision, solve, m: p.m })
     }
 
@@ -1646,6 +1653,12 @@ pub struct MjcfTree {
     pub impratio: f64,
     /// `<option integrator>`: which of MuJoCo's integrators [`MjcfTree::step_mujoco`] must reproduce.
     pub integrator: MjcfIntegrator,
+    /// `<option noslip_iterations>` (default 0) and `noslip_tolerance` (default 1e-6): when non-zero, every
+    /// forward pass re-solves the friction forces after the main solve ([`crate::mujoco_noslip`]).
+    pub noslip_iterations: usize,
+    pub noslip_tolerance: f64,
+    /// MuJoCo's `stat.meaninertia`: the mean diagonal of the mass matrix at `qpos0`, in MuJoCo's basis.
+    pub meaninertia: f64,
     /// `<option><flag eulerdamp>`, default enabled: whether the `Euler` integrator treats dof damping
     /// implicitly. Every Menagerie file written for MJX disables it.
     pub eulerdamp: bool,
@@ -4440,6 +4453,9 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             impratio: 1.0,
             integrator: MjcfIntegrator::Euler,
             eulerdamp: true,
+            noslip_iterations: 0,
+            noslip_tolerance: 1e-6,
+            meaninertia: 1.0,
             body_iinertia: BTreeMap::new(),
             body_iquat: BTreeMap::new(),
             body_mass: BTreeMap::new(),
@@ -4518,6 +4534,12 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
         }
         if let Some(v) = el.attr("impratio") {
             out.impratio = v.trim().parse::<f64>().map_err(|e| format!("<option impratio>: {e}"))?;
+        }
+        if let Some(v) = el.attr("noslip_iterations") {
+            out.noslip_iterations = v.trim().parse::<usize>().map_err(|e| format!("<option noslip_iterations>: {e}"))?;
+        }
+        if let Some(v) = el.attr("noslip_tolerance") {
+            out.noslip_tolerance = v.trim().parse::<f64>().map_err(|e| format!("<option noslip_tolerance>: {e}"))?;
         }
         for flag in el.children_named("flag") {
             if let Some(v) = flag.attr("eulerdamp") {
@@ -4635,6 +4657,14 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             let inertia = ndim as f64 / (0..ndim).map(|k| invweight[j.first + k]).sum::<f64>().max(1e-15);
             j.stiffness = inertia / (timeconst * timeconst * dampratio * dampratio).max(1e-15);
             j.damping = 2.0 * inertia / timeconst.max(1e-15);
+        }
+    }
+    // `stat.meaninertia` (`mj_setConst`): the mean diagonal of M at qpos0, in MuJoCo's basis
+    if !out.tree.joints.is_empty() {
+        let tinv = out.free_basis(&out.reference_q).try_inverse();
+        if let Some(tinv) = tinv {
+            let mm = tinv.transpose() * out.mass_matrix(&out.reference_q) * &tinv;
+            out.meaninertia = mm.diagonal().sum() / mm.nrows() as f64;
         }
     }
     // <equality>: the `joint` coupling and `connect`; the rest are named rather than dropped
@@ -5774,6 +5804,50 @@ mod tests {
             assert!((f.qacc[k] - w).abs() < 1e-8 * w.abs().max(1.0), "qacc[{k}] {} vs MuJoCo {w}", f.qacc[k]);
         }
     }
+
+    /// **`noslip`, against MuJoCo.** A block resting on a 0.2 rad slope and two arms on dry-friction hinges,
+    /// all nearly at rest. MuJoCo's noslip pass moves `qacc` by 5.29: the arm whose gravity torque (0.49) is
+    /// under its `frictionloss` (1.0) is held exactly instead of creeping, while the one over its loss (0.3)
+    /// still falls at the clamp. Five variants cover every branch: pyramidal at condim 3 and 6 (paired edges),
+    /// and elliptic at condim 3, 4 and 6 (`mju_QCQP2`, `mju_QCQP3` and the dense `mju_QCQP`).
+    #[test]
+    fn noslip_matches_mujoco_on_every_cone_branch() {
+        let qpos = [0.0, 0.0, 0.0492, 0.9950041652780258, 0.0, 0.09983341664682815, 0.0, 0.0, 0.0];
+        let qvel = [0.001, 0.0, -0.0005, 0.0, 0.002, 0.0, 0.0, 0.0];
+        let cases: [(&str, &str, usize, [f64; 8]); 5] = [
+            ("pyramidal", "3", 18, [0.8139417833716127, -2.565346625497493e-06, 4.4578210156693885, -5.107428800551414e-05, 0.3129934991356733, 5.521138936649959e-05, 1.4210854715202004e-14, 20.52981157659209]),
+            ("pyramidal", "6", 42, [0.8114809475341013, -4.107825191113079e-14, 4.5716665678900075, 5.711283716849816e-13, -0.19730704391441561, 1.1076650644710803e-14, 1.4210854715202004e-14, 20.52981157659209]),
+            ("elliptic", "3", 14, [0.8046735836031695, -1.8565471483531046e-06, 4.459699772773551, -3.696257761390441e-05, 0.12040403547146435, 3.6717659464763824e-05, 1.4210854715202004e-14, 20.52981157659209]),
+            ("elliptic", "4", 18, [0.804675179098578, -1.2471948007535838e-16, 4.459699449350618, -2.967275923143441e-14, 0.12038484799091274, 3.203228665470154e-15, 1.4210854715202004e-14, 20.52981157659209]),
+            ("elliptic", "6", 26, [0.7887481882927976, 4.870127041270169e-16, 4.462928010222404, -1.3593574431771503e-14, -0.21052631578946962, -1.4233155935978153e-15, 1.4210854715202004e-14, 20.52981157659209]),
+        ];
+        for (cone, condim, nefc, want) in cases {
+            let t = tree_from_mjcf_str(&NOSLIP_MODEL.replace("CONE", cone).replace("CONDIM", condim)).unwrap();
+            assert_eq!(t.noslip_iterations, 4);
+            let q = t.q_from_qpos(&qpos, &t.qposadr()).unwrap();
+            let f = t.forward_mujoco(&q, &qvel, &[]).unwrap();
+            assert_eq!(f.nefc, nefc, "{cone} condim {condim}: rows");
+            for (k, w) in want.iter().enumerate() {
+                assert!((f.qacc[k] - w).abs() < 1e-8 * w.abs().max(1.0), "{cone} condim {condim}: qacc[{k}] {} vs MuJoCo {w}", f.qacc[k]);
+            }
+        }
+    }
+
+    const NOSLIP_MODEL: &str = r#"<mujoco><compiler angle="radian"/><option cone="CONE" noslip_iterations="4"/><worldbody>
+  <body name="ramp" euler="0 0.2 0"><geom name="slope" type="box" size="1 1 0.05" pos="0 0 -0.05" friction="0.8 0.02 0.001"/></body>
+  <body name="block" pos="0 0 0.0495" euler="0 0.2 0">
+    <freejoint/>
+    <geom type="box" size="0.1 0.07 0.05" mass="1.2" condim="CONDIM"/>
+  </body>
+  <body name="arm" pos="0.6 0 0.4">
+    <joint name="shoulder" type="hinge" axis="0 1 0" frictionloss="1.0"/>
+    <geom type="capsule" fromto="0 0 0 0.2 0 -0.1" size="0.03" mass="0.5"/>
+  </body>
+  <body name="arm2" pos="0.6 0.5 0.4">
+    <joint name="elbow" type="hinge" axis="0 1 0" frictionloss="0.3"/>
+    <geom type="capsule" fromto="0 0 0 0.2 0 -0.1" size="0.03" mass="0.5"/>
+  </body>
+</worldbody></mujoco>"#;
 
     const LOOP_MODEL: &str = r#"<mujoco><compiler angle="radian"/><worldbody>
   <body name="pelvis" pos="0 0 1">

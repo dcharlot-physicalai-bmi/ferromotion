@@ -710,6 +710,251 @@ pub fn solve_constraints_newton(
     solve_constraints_newton_blocks(m, a_smooth, jac, aref, d, &blocks, tol, max_iter)
 }
 
+/// **`mj_solNoSlip`**, ported from MuJoCo 3.13.0's `solNoSlip` (monolithic): after the main solve, the
+/// FRICTION forces are re-solved in the dual with their regularisation removed, so friction holds instead of
+/// creeping. Only three kinds of row move: dof and tendon friction (a projected Gauss-Seidel step clamped to
+/// ±`frictionloss`), each pair of opposing pyramid edges of a pyramidal contact (their sum, the normal share,
+/// is kept and only the split moves), and the tangential rows of an elliptic contact (a QCQP against the
+/// friction ellipsoid at the contact's normal force). Equality, limit and normal forces stay where the main
+/// solve put them.
+///
+/// `m`, `jac`, `aref`, `d` and `blocks` are the problem as posed (MuJoCo's basis); `force` is `efc_force`
+/// from the main solve and is updated in place. Returns the new `qacc = a₀ + M⁻¹·Jᵀ·f`.
+///
+/// `meaninertia` is MuJoCo's `stat.meaninertia` (the mean diagonal of `M` at `qpos0`): it only scales the
+/// improvement that the `noslip_tolerance` test compares, and so decides WHEN the sweep stops.
+#[allow(clippy::too_many_arguments)]
+pub fn mujoco_noslip(m: &DMatrix<f64>, a_smooth: &DVector<f64>, jac: &DMatrix<f64>, aref: &[f64], d: &[f64], blocks: &[EfcBlock], force: &mut [f64], maxiter: usize, tolerance: f64, meaninertia: f64) -> Result<DVector<f64>, String> {
+    const MINVAL: f64 = 1e-15;
+    let (nv, nefc) = (m.nrows(), jac.nrows());
+    let chol = m.clone().cholesky().ok_or("noslip: the mass matrix is not positive definite")?;
+    let minv_jt = chol.solve(&jac.transpose());
+    // `efc_AR` without `R`, since every noslip step runs with `flg_subR`: A = J·M⁻¹·Jᵀ
+    let a = jac * &minv_jt;
+    let r: Vec<f64> = d.iter().map(|x| 1.0 / x).collect();
+    let b: Vec<f64> = (jac * a_smooth).iter().zip(aref).map(|(ja, ar)| ja - ar).collect();
+    // `residual(.., flg_subR)`: b + (A + R)·f − R·f
+    let residual = |f: &[f64], i: usize| -> f64 { b[i] + (0..nefc).map(|k| a[(i, k)] * f[k]).sum::<f64>() };
+    // `extractBlock(.., flg_subR)`: the block of A, its diagonal clamped at 1e-10
+    let block = |start: usize, n: usize| -> Vec<f64> {
+        let mut ac = vec![0.0; n * n];
+        for rr in 0..n {
+            for cc in 0..n {
+                ac[rr * n + cc] = a[(start + rr, start + cc)];
+            }
+            ac[rr * (n + 1)] = ac[rr * (n + 1)].max(1e-10);
+        }
+        ac
+    };
+    // `costChange`: a step that raises the cost is undone
+    let cost_change = |ac: &[f64], f: &mut [f64], old: &[f64], res: &[f64], n: usize| -> f64 {
+        let delta: Vec<f64> = (0..n).map(|k| f[k] - old[k]).collect();
+        let change = if n == 1 {
+            0.5 * delta[0] * delta[0] * ac[0] + delta[0] * res[0]
+        } else {
+            let quad: f64 = (0..n).map(|rr| delta[rr] * (0..n).map(|cc| ac[rr * n + cc] * delta[cc]).sum::<f64>()).sum();
+            0.5 * quad + (0..n).map(|k| delta[k] * res[k]).sum::<f64>()
+        };
+        if change > 1e-10 {
+            f[..n].copy_from_slice(&old[..n]);
+            0.0
+        } else {
+            change
+        }
+    };
+    let scale = 1.0 / (meaninertia * (nv.max(1) as f64));
+    let mut iter = 0;
+    while iter < maxiter {
+        let mut improvement = 0.0;
+        if iter == 0 {
+            improvement += (0..nefc).map(|i| 0.5 * force[i] * force[i] * r[i]).sum::<f64>();
+        }
+        let mut row = 0usize;
+        for bk in blocks {
+            let rows = bk.rows();
+            match bk {
+                // dry friction: one row, a Gauss-Seidel step clamped to ±frictionloss
+                EfcBlock::Friction { loss } => {
+                    let i = row;
+                    let res = residual(force, i);
+                    let old = force[i];
+                    let arinv = 1.0 / a[(i, i)].max(MINVAL);
+                    force[i] = (force[i] - res * arinv).clamp(-loss, *loss);
+                    let delta = force[i] - old;
+                    improvement -= 0.5 * delta * delta / arinv + delta * res;
+                }
+                EfcBlock::Contact(c) if c.condim > 1 && c.cone == Cone::Pyramidal => {
+                    // opposing pyramid edges in pairs: keep their sum, move their split
+                    for j in (row..row + 2 * (c.condim - 1)).step_by(2) {
+                        let res = [residual(force, j), residual(force, j + 1)];
+                        let old = [force[j], force[j + 1]];
+                        let ac = block(j, 2);
+                        let bc = [res[0] - (ac[0] * old[0] + ac[1] * old[1]), res[1] - (ac[2] * old[0] + ac[3] * old[1])];
+                        let mid = 0.5 * (force[j] + force[j + 1]);
+                        let k1 = ac[0] + ac[3] - ac[1] - ac[2];
+                        let k0 = mid * (ac[0] - ac[3]) + bc[0] - bc[1];
+                        if k1 < MINVAL {
+                            force[j] = mid;
+                            force[j + 1] = mid;
+                        } else {
+                            let y = -k0 / k1;
+                            if y < -mid {
+                                force[j] = 0.0;
+                                force[j + 1] = 2.0 * mid;
+                            } else if y > mid {
+                                force[j] = 2.0 * mid;
+                                force[j + 1] = 0.0;
+                            } else {
+                                force[j] = mid + y;
+                                force[j + 1] = mid - y;
+                            }
+                        }
+                        improvement -= cost_change(&ac, &mut force[j..j + 2], &old, &res, 2);
+                    }
+                }
+                EfcBlock::Contact(c) if c.condim > 1 && c.cone == Cone::Elliptic => {
+                    // the tangential rows, against the friction ellipsoid at this normal force
+                    let (i, n) = (row, c.condim - 1);
+                    let res: Vec<f64> = (0..n).map(|k| residual(force, i + 1 + k)).collect();
+                    let old: Vec<f64> = force[i + 1..i + 1 + n].to_vec();
+                    let ac = block(i + 1, n);
+                    let bc: Vec<f64> = (0..n).map(|rr| res[rr] - (0..n).map(|cc| ac[rr * n + cc] * old[cc]).sum::<f64>()).collect();
+                    if force[i] < MINVAL {
+                        force[i + 1..i + 1 + n].iter_mut().for_each(|x| *x = 0.0);
+                    } else {
+                        let mu = &c.friction[..n];
+                        let (mut v, active) = qcqp(&ac, &bc, mu, force[i], n);
+                        if active {
+                            // put v on the ellipsoid, in case the QCQP is approximate
+                            let s: f64 = (0..n).map(|k| v[k] * v[k] / (mu[k] * mu[k])).sum();
+                            let scl = (force[i] * force[i] / s.max(MINVAL)).sqrt();
+                            v.iter_mut().for_each(|x| *x *= scl);
+                        }
+                        force[i + 1..i + 1 + n].copy_from_slice(&v);
+                    }
+                    improvement -= cost_change(&ac, &mut force[i + 1..i + 1 + n], &old, &res, n);
+                }
+                _ => {}
+            }
+            row += rows;
+        }
+        improvement *= scale;
+        iter += 1;
+        if improvement < tolerance {
+            break;
+        }
+    }
+    // `mj_dualFinish`: back to joint space
+    let f = DVector::from_row_slice(force);
+    Ok(a_smooth + &minv_jt * f)
+}
+
+/// `mju_QCQP2`, line by line.
+fn qcqp2(ain: &[f64], bin: &[f64], d: &[f64], r: f64) -> (Vec<f64>, bool) {
+    let (b1, b2) = (bin[0] * d[0], bin[1] * d[1]);
+    let (a11, a22, a12) = (ain[0] * d[0] * d[0], ain[3] * d[1] * d[1], ain[1] * d[0] * d[1]);
+    let (mut la, mut v1, mut v2) = (0.0f64, 0.0f64, 0.0f64);
+    for _ in 0..20 {
+        let det = (a11 + la) * (a22 + la) - a12 * a12;
+        if det < 1e-10 {
+            return (vec![0.0, 0.0], false);
+        }
+        let detinv = 1.0 / det;
+        let (p11, p22, p12) = ((a22 + la) * detinv, (a11 + la) * detinv, -a12 * detinv);
+        v1 = -p11 * b1 - p12 * b2;
+        v2 = -p12 * b1 - p22 * b2;
+        let val = v1 * v1 + v2 * v2 - r * r;
+        if val < 1e-10 {
+            break;
+        }
+        let deriv = -2.0 * (p11 * v1 * v1 + 2.0 * p12 * v1 * v2 + p22 * v2 * v2);
+        let delta = -val / deriv;
+        if delta < 1e-10 {
+            break;
+        }
+        la += delta;
+    }
+    (vec![v1 * d[0], v2 * d[1]], la != 0.0)
+}
+
+/// `mju_QCQP3`, line by line.
+fn qcqp3(ain: &[f64], bin: &[f64], d: &[f64], r: f64) -> (Vec<f64>, bool) {
+    let (b1, b2, b3) = (bin[0] * d[0], bin[1] * d[1], bin[2] * d[2]);
+    let (a11, a22, a33) = (ain[0] * d[0] * d[0], ain[4] * d[1] * d[1], ain[8] * d[2] * d[2]);
+    let (a12, a13, a23) = (ain[1] * d[0] * d[1], ain[2] * d[0] * d[2], ain[5] * d[1] * d[2]);
+    let (mut la, mut v1, mut v2, mut v3) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    for _ in 0..20 {
+        let mut p11 = (a22 + la) * (a33 + la) - a23 * a23;
+        let mut p22 = (a11 + la) * (a33 + la) - a13 * a13;
+        let mut p33 = (a11 + la) * (a22 + la) - a12 * a12;
+        let mut p12 = a13 * a23 - a12 * (a33 + la);
+        let mut p13 = a12 * a23 - a13 * (a22 + la);
+        let mut p23 = a12 * a13 - a23 * (a11 + la);
+        let det = (a11 + la) * p11 + a12 * p12 + a13 * p13;
+        if det < 1e-10 {
+            return (vec![0.0, 0.0, 0.0], false);
+        }
+        let detinv = 1.0 / det;
+        p11 *= detinv;
+        p22 *= detinv;
+        p33 *= detinv;
+        p12 *= detinv;
+        p13 *= detinv;
+        p23 *= detinv;
+        v1 = -p11 * b1 - p12 * b2 - p13 * b3;
+        v2 = -p12 * b1 - p22 * b2 - p23 * b3;
+        v3 = -p13 * b1 - p23 * b2 - p33 * b3;
+        let val = v1 * v1 + v2 * v2 + v3 * v3 - r * r;
+        if val < 1e-10 {
+            break;
+        }
+        let deriv = -2.0 * (p11 * v1 * v1 + p22 * v2 * v2 + p33 * v3 * v3) - 4.0 * (p12 * v1 * v2 + p13 * v1 * v3 + p23 * v2 * v3);
+        let delta = -val / deriv;
+        if delta < 1e-10 {
+            break;
+        }
+        la += delta;
+    }
+    (vec![v1 * d[0], v2 * d[1], v3 * d[2]], la != 0.0)
+}
+
+/// `mju_QCQP2`, `mju_QCQP3` and `mju_QCQP`: `min ½xᵀAx + bᵀx` subject to `Σ (xₖ/dₖ)² ≤ r²`, by Newton on the
+/// multiplier after scaling the constraint to a ball. Returns the solution and whether the constraint was
+/// active. Sizes 2 and 3 follow MuJoCo's closed forms line by line (their SPD test is on the determinant,
+/// not on a Cholesky pivot); larger sizes follow the dense `mju_QCQP`.
+fn qcqp(ain: &[f64], bin: &[f64], dsc: &[f64], r: f64, n: usize) -> (Vec<f64>, bool) {
+    match n {
+        2 => return qcqp2(ain, bin, dsc, r),
+        3 => return qcqp3(ain, bin, dsc, r),
+        _ => {}
+    }
+    let b: Vec<f64> = (0..n).map(|i| bin[i] * dsc[i]).collect();
+    let a: Vec<f64> = (0..n * n).map(|k| ain[k] * dsc[k / n] * dsc[k % n]).collect();
+    let mut la = 0.0;
+    let mut res = vec![0.0; n];
+    for _ in 0..20 {
+        let ala = DMatrix::from_fn(n, n, |i, j| a[i * n + j] + if i == j { la } else { 0.0 });
+        // factorize, with MuJoCo's rank check at 1e-10
+        let Some(ch) = ala.clone().cholesky().filter(|ch| (0..n).all(|k| ch.l()[(k, k)] * ch.l()[(k, k)] >= 1e-10)) else {
+            return (vec![0.0; n], false);
+        };
+        let x = -ch.solve(&DVector::from_row_slice(&b));
+        res = x.iter().copied().collect();
+        let val = x.dot(&x) - r * r;
+        if val < 1e-10 {
+            break;
+        }
+        let tmp = ch.solve(&x);
+        let deriv = -2.0 * x.dot(&tmp);
+        let delta = -val / deriv;
+        if delta < 1e-10 {
+            break;
+        }
+        la += delta;
+    }
+    ((0..n).map(|i| res[i] * dsc[i]).collect(), la != 0.0)
+}
+
 /// The same solve over MuJoCo's full row set — equality, friction and limit rows as well as contacts.
 /// `blocks` describes the rows of `jac` in order, and their order is MuJoCo's: equality, friction, then
 /// limits and contacts.

@@ -480,7 +480,7 @@ pub use mujoco_collision::{box_box, can_collide, capsule_box, capsule_capsule, c
 pub use mujoco_ccd::{ccd, convex_pair, max_contacts, plane_convex, CcdConfig, CcdObj, CcdStatus};
 pub use mujoco_hull::{HullPolygon, MeshHull};
 pub use mujoco_actuator::{qfrc_actuator, resolve_dampratio, ActBias, ActGain, Actuator};
-pub use mujoco_contact::{contact_rows, mujoco_cone_adjust, row_reference, AssembledRows, ContactSpec, mujoco_constraint_hessian_blocks, mujoco_constraint_update_blocks, solve_constraints_newton_blocks, EfcBlock, mujoco_cone_rows, mujoco_constraint_hessian, mujoco_constraint_update, solve_constraints_newton, NewtonSolve, mujoco_diag_approx, mujoco_impedance, mujoco_kbip, solve_contacts_mujoco, Cone, ConeContact, ConstraintState, ConstraintUpdate, InvWeight, MjContact, MjContactSolve, SolImp, SolRef};
+pub use mujoco_contact::{contact_rows, mujoco_cone_adjust, row_reference, AssembledRows, ContactSpec, mujoco_constraint_hessian_blocks, mujoco_constraint_update_blocks, mujoco_noslip, solve_constraints_newton_blocks, EfcBlock, mujoco_cone_rows, mujoco_constraint_hessian, mujoco_constraint_update, solve_constraints_newton, NewtonSolve, mujoco_diag_approx, mujoco_impedance, mujoco_kbip, solve_contacts_mujoco, Cone, ConeContact, ConstraintState, ConstraintUpdate, InvWeight, MjContact, MjContactSolve, SolImp, SolRef};
 pub use usda::{axis_token, parse_usda, robot_from_usda, usda_from_robot, ParseError, Prim, UsdaStage, Value};
 pub use urdf::from_urdf_full;
 pub use robust::solve_ik_robust;

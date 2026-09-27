@@ -4,7 +4,9 @@
 
 Per sampled state with at least one constraint row: `ne`/`nf` (MuJoCo decides a row's LAW from its position,
 so the two counts are part of the data), every row's type, `efc_J`, `efc_aref`, `efc_D`, `efc_R` and
-`efc_frictionloss`, each contact's cone parameters, the dense mass matrix, `qacc_smooth` and `qacc`. Enough
+`efc_frictionloss`, each contact's cone parameters, the dense mass matrix, `qacc_smooth`, `qacc`, and the
+options that decide which `qacc` MuJoCo reports (noslip, `iterations`, `tolerance`), and `qacc_conv`, the
+same state with the main solve told to converge. Enough
 to test a solver against MuJoCo's answer using MuJoCo's own rows, which separates the solver from the
 assembly that builds them. Tab separated.
 """
@@ -51,6 +53,10 @@ for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
         mujoco.mj_fullM(m, d, M)
         lines.append(f"case\t{rel}\t{k}\t{m.nv}\t{nefc}\t{int(d.ne)}\t{int(d.nf)}\t{int(m.opt.cone)}")
         lines.append("\t".join(["type"] + [CT[int(t)] for t in d.efc_type[:nefc]]))
+        # ⭐ the solver options that shape `qacc`: a model that asks for noslip reports the acceleration AFTER
+        # that pass, which is not the optimum of the rows above, and one that caps `iterations` or sets a
+        # loose `tolerance` reports wherever the main solve stopped
+        lines.append(f"opt\t{int(m.opt.noslip_iterations)}\t{float(m.opt.noslip_tolerance)!r}\t{float(m.stat.meaninertia)!r}\t{int(m.opt.iterations)}\t{float(m.opt.tolerance)!r}")
         for j in range(m.njnt):
             lines.append("\t".join(["joint", mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_JOINT, j) or f"joint{j}",
                                     {int(v): k.replace("mjJNT_", "").lower() for k, v in mujoco.mjtJoint.__members__.items()}[int(m.jnt_type[j])],
@@ -69,6 +75,14 @@ for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
             if int(c.efc_address) < 0:
                 continue
             lines.append("\t".join(["contact", str(int(c.efc_address)), str(int(c.dim)), repr(float(c.mu))] + [repr(float(x)) for x in c.friction]))
+        # ⭐ and the same state with MuJoCo's main solve told to CONVERGE (noslip, if asked for, still runs after
+        # it): the optimum of these rows is unique, so this is the answer a converged solver owes, while `qacc`
+        # above is wherever MuJoCo stopped under the model's own `iterations` and `tolerance`
+        opts = (m.opt.iterations, m.opt.tolerance, m.opt.ls_iterations)
+        m.opt.iterations, m.opt.tolerance, m.opt.ls_iterations = 1000, 0.0, 50
+        mujoco.mj_forward(m, d)
+        lines.append("\t".join(["qacc_conv"] + [repr(float(x)) for x in d.qacc]))
+        m.opt.iterations, m.opt.tolerance, m.opt.ls_iterations = opts
 with open(out, "w") as fh:
     fh.write("\n".join(lines) + "\n")
 print(f"{models} models, {kept} states with 1..{MAXROWS} constraint rows -> {out}")
