@@ -350,6 +350,7 @@ mod mjcf_tree;
 pub mod qhull;
 pub(crate) mod mujoco_kinematics;
 pub(crate) mod mujoco_midphase;
+pub(crate) mod mujoco_smooth;
 pub(crate) mod png;
 pub mod mjcf_sensor;
 pub mod mujoco_actuator;

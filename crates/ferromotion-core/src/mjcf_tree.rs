@@ -1449,6 +1449,31 @@ impl MjcfTree {
         })
     }
 
+    fn smooth_model(&self) -> &crate::mujoco_smooth::SmoothModel {
+        self.smooth_cache.get_or_init(|| {
+            let mass = self.mj_body_names.iter().map(|n| self.body_mass.get(n).copied().unwrap_or(0.0)).collect();
+            let inertia = self.mj_body_names.iter().map(|n| self.body_iinertia.get(n).copied().unwrap_or([0.0; 3])).collect();
+            let armature: Vec<f64> = self.joints.iter().map(|j| j.armature).collect();
+            crate::mujoco_smooth::SmoothModel::new(&self.mj_kin, mass, inertia, &armature, &self.qpos0(), [self.gravity.x, self.gravity.y, self.gravity.z])
+        })
+    }
+
+    /// **MuJoCo's compiled model arrays, by their `mjModel` names**, as this port computes them for MuJoCo's own
+    /// smooth dynamics ([`MjcfTree::mujoco_native_forward`]) — `body_subtreemass`, `dof_parentid`,
+    /// `dof_simplenum`, `dof_M0`, the sparse layout of `M`… Integers are given as floats. For comparison
+    /// with MuJoCo's own, array by array (`examples/menagerie_native.rs`).
+    pub fn mujoco_native_model(&self) -> Vec<(&'static str, Vec<f64>)> {
+        self.smooth_model().arrays()
+    }
+
+    /// **MuJoCo's own smooth dynamics at `qpos`, `qvel`, by their `mjData` names** — `mj_kinematics`,
+    /// `mj_comPos`, `mj_crb`, `mj_factorM`, `mj_comVel` and `mj_rne` in MuJoCo's coordinates and arithmetic:
+    /// `xpos`…`xaxis`, `subtree_com`, `cinert`, `cdof`, `crb`, `M`, `qLD`, `qLDiagInv`, `cvel`, `cdof_dot`,
+    /// `qfrc_bias`, flattened as MuJoCo stores them.
+    pub fn mujoco_native_forward(&self, qpos: &[f64], qvel: &[f64]) -> Vec<(&'static str, Vec<f64>)> {
+        self.smooth_model().forward(qpos, qvel).arrays()
+    }
+
     /// **Each body's bounding-volume hierarchy as MuJoCo's compiler builds it** (`bvh_aabb`, `bvh_child`,
     /// `bvh_nodeid`, `bvh_depth`), in MuJoCo's body order, `None` for a body with no collidable geom — the
     /// boxes [`MjcfTree::collide`]'s midphase descends. With each body's `body_margin`.
@@ -2343,6 +2368,8 @@ pub struct MjcfTree {
     invweight0_cache: std::sync::OnceLock<Invweight0>,
     /// what `collide` reads that does not move — the weld filter, excludes, explicit pairs, bounds — by index
     collide_cache: std::sync::OnceLock<CollideStatic>,
+    /// the compiled arrays MuJoCo's own smooth dynamics read ([`crate::mujoco_smooth`]), built on first use
+    smooth_cache: std::sync::OnceLock<crate::mujoco_smooth::SmoothModel>,
     /// `<option density>`, `<option viscosity>` and `<option wind>` — the ambient medium. With both density
     /// and viscosity zero there is no fluid force at all, which is MuJoCo's default.
     pub density: f64,
@@ -6290,6 +6317,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             magnetic: Vector3::new(0.0, -0.5, 0.0),
             invweight0_cache: std::sync::OnceLock::new(),
             collide_cache: std::sync::OnceLock::new(),
+            smooth_cache: std::sync::OnceLock::new(),
             density: 0.0,
             viscosity: 0.0,
             wind: Vector3::zeros(),
@@ -6882,6 +6910,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
     // computes them from the finished one
     out.invweight0_cache = std::sync::OnceLock::new();
     out.collide_cache = std::sync::OnceLock::new();
+    out.smooth_cache = std::sync::OnceLock::new();
     Ok(out)
 }
 
@@ -7109,6 +7138,49 @@ mod tests {
         // and the failure is reported with BOTH places that were tried, not just one
         let e = tree_from_mjcf(r#"<mujoco><worldbody><include file="nope.xml"/></worldbody></mujoco>"#, &|_: &str| None).unwrap_err();
         assert!(e.contains("nope.xml"), "{e}");
+    }
+
+    /// ⭐ **MuJoCo's smooth dynamics to the bit**: a free base carrying a tilted hinge, a slide and a ball with
+    /// armature, at a moving state — `M` in MuJoCo's sparse layout (its 66 entries, the free base's simple
+    /// block included) and `qfrc_bias` exactly as MuJoCo 3.13.0's `mj_forward` leaves them.
+    #[test]
+    fn the_native_mass_matrix_and_bias_are_mujocos_bit_for_bit() {
+        let xml = r#"<mujoco><compiler angle="radian"/><worldbody>
+            <body name="base" pos="0.1 0.2 1" quat="0.9 0.1 0.3 0.2"><freejoint/><geom type="box" size="0.2 0.1 0.05" mass="3"/>
+              <body name="arm" pos="0.2 0 0"><joint name="h" type="hinge" axis="0.3 1 0.2" pos="0.01 0 0"/><geom type="capsule" fromto="0 0 0 0.3 0 0.1" size="0.03" mass="0.7"/>
+                <body name="slider" pos="0.3 0 0.1"><joint name="s" type="slide" axis="0 0 1"/><geom type="sphere" size="0.04" mass="0.2"/>
+                  <body name="wrist" pos="0 0.05 0"><joint name="b" type="ball" armature="0.01"/><geom type="ellipsoid" size="0.05 0.02 0.03" pos="0.02 0 0" mass="0.1"/></body>
+                </body>
+              </body>
+            </body></worldbody></mujoco>"#;
+        let t = tree_from_mjcf_str(xml).unwrap();
+        let qpos = [0.3, -0.2, 0.9, 0.8, 0.2, -0.3, 0.4, 0.7, 0.05, 0.6, 0.3, -0.5, 0.2];
+        let qvel = [0.5, -0.3, 0.2, 1.1, -0.7, 0.4, 2.0, -0.6, 0.9, -1.3, 0.8];
+        let got: BTreeMap<&str, Vec<f64>> = t.mujoco_native_forward(&qpos, &qvel).into_iter().collect();
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<u64>>();
+        let m: [u64; 66] = [
+            0x4010000000000000, 0x0000000000000000, 0x4010000000000000, 0x0000000000000000, 0x0000000000000000,
+            0x4010000000000000, 0xbfa7e4c5f7dcb4ad, 0x3f839e197093d3f9, 0x3f98232faf5484ac, 0x3f916b4f44bfd581,
+            0x3fbe5616075ccd01, 0x3fcc01124ce06cea, 0xbfd4b7184d2b01e6, 0xbf8acea34ab1643e, 0x3fccaa9e3a0aca22,
+            0xbfd6068a55012c12, 0x3fcba479a74ab23d, 0x3f9084c7903e905b, 0x3f954d329842b09a, 0x3f58ad0cf9cfa6b8,
+            0x3fcd68e116e38908, 0xbf61735bd07ed108, 0x3fbb909f74824d30, 0xbfc3f3cab603ea5c, 0xbf6d03830f7d5894,
+            0x3fb64f001377c556, 0x3f99ae7a0b260d8a, 0x3fa90758957a8762, 0x3fa4a9036870c638, 0xbfaea94d00ea36b2,
+            0x3fd2a2af03f4b8f0, 0x3f8249ad8ddb224d, 0xbfc1027a95fe7178, 0xbf9ffcee0a3c33dd, 0xbfb4b4d3a5fdc4c6,
+            0x3fd3333333333335, 0xbc40de72d34fe700, 0x3c401b67817cc7d4, 0x3c3ce470d8b0c9c4, 0x3ef527d96acd848f,
+            0xbed325c06a660feb, 0x3ef08437573ac0f0, 0x3ed24ca3cca5446c, 0x3c31130a415e5d19, 0x3f848882f0e0a84d,
+            0xbf4b9ab94f55157c, 0x3f5d43166aef0493, 0x3f34c633c2850f6d, 0xbef36a74e0e2f476, 0x3f341cda892a027d,
+            0x3f4e62972cb80b3f, 0x3f324f07506c7087, 0xbf2541425dc3e368, 0x3c3d000000000000, 0x3f84b380cb6c7a7d,
+            0xbf5c1ddb5eac087e, 0xbf4d6c8dd63b8a36, 0x3f40572f244bf2a6, 0x3f1ffaf194a7d8a0, 0xbf4b1f1880d1bb5e,
+            0x3f438ad8185bbf14, 0xbf3889d8c636a469, 0x3f3c570327afd9e6, 0xbc3ea00000000000, 0x3c33000000000000,
+            0x3f84ae429e0a41a2
+        ];
+        let bias: [u64; 11] = [
+            0xbff69d73f7c7182e, 0xbfe3fd29118b356e, 0x4043a77646ad3c06, 0x3fd3d4926bc5bc91, 0xc00cad53d0c7545c,
+            0x3fe2b7dad6673bc0, 0xbffa49e717d710ba, 0x4006a84dc82ffb13, 0xbf004a89de8dc000, 0x3f6da7ac2028ee80,
+            0x3f86d08772248040
+        ];
+        assert_eq!(bits(&got["M"]), m);
+        assert_eq!(bits(&got["qfrc_bias"]), bias);
     }
 
     /// ⛔⛔ **MuJoCo's midphase can call touching surfaces apart.** franka's fingertip pads meet at `qpos0`:

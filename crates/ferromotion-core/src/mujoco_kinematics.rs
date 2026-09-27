@@ -208,11 +208,26 @@ impl MjKinematics {
 
     /// `mj_kinematics`: every geom's world frame, and every body's inertial frame (`xipos`, `ximat`).
     pub(crate) fn frames(&self, qpos: &[f64]) -> (Vec<XFrame>, Vec<XFrame>) {
+        let k = self.state(qpos);
+        let geoms = self.geoms.iter().map(|g| mj_local2global((&k.xpos[g.body], &k.xquat[g.body], &k.xmat[g.body]), &(k.xipos[g.body], k.ximat[g.body]), &g.pos, &g.quat, g.sameframe)).collect();
+        (geoms, k.xipos.into_iter().zip(k.ximat).collect())
+    }
+
+    /// **`mj_kinematics1`** and the bodies' half of `mj_kinematics2`: every body's frame and inertial frame,
+    /// and every joint's anchor and axis in the world (joints numbered body by body, as MuJoCo numbers them).
+    pub(crate) fn state(&self, qpos: &[f64]) -> KinState {
         let n = self.bodies.len();
-        let mut xpos = vec![[0.0f64; 3]; n];
-        let mut xquat = vec![[1.0f64, 0.0, 0.0, 0.0]; n];
-        let mut xmat = vec![[1.0f64, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]; n];
-        let mut xi: Vec<XFrame> = vec![([0.0; 3], [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]); n];
+        let njnt: usize = self.bodies.iter().map(|b| b.joints.len()).sum();
+        let mut k = KinState {
+            xpos: vec![[0.0f64; 3]; n],
+            xquat: vec![[1.0f64, 0.0, 0.0, 0.0]; n],
+            xmat: vec![[1.0f64, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]; n],
+            xipos: vec![[0.0f64; 3]; n],
+            ximat: vec![[1.0f64, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]; n],
+            xanchor: vec![[0.0f64; 3]; njnt],
+            xaxis: vec![[0.0f64; 3]; njnt],
+        };
+        let mut jid = 0;
         for i in 1..n {
             let b = &self.bodies[i];
             let (mut p, mut q);
@@ -221,12 +236,15 @@ impl MjKinematics {
                 p = [qpos[a], qpos[a + 1], qpos[a + 2]];
                 q = [qpos[a + 3], qpos[a + 4], qpos[a + 5], qpos[a + 6]];
                 normalize4(&mut q);
+                k.xanchor[jid] = p;
+                k.xaxis[jid] = b.joints[0].axis;
+                jid += 1;
             } else {
                 let pid = b.parent;
                 if pid != 0 {
-                    let v = mul_mat_vec3(&xmat[pid], &b.pos);
-                    p = [v[0] + xpos[pid][0], v[1] + xpos[pid][1], v[2] + xpos[pid][2]];
-                    q = mul_quat(&xquat[pid], &b.quat);
+                    let v = mul_mat_vec3(&k.xmat[pid], &b.pos);
+                    p = [v[0] + k.xpos[pid][0], v[1] + k.xpos[pid][1], v[2] + k.xpos[pid][2]];
+                    q = mul_quat(&k.xquat[pid], &b.quat);
                 } else {
                     p = b.pos;
                     q = b.quat;
@@ -256,21 +274,37 @@ impl MjKinematics {
                         // a free joint that is not its body's only joint: the compiler refuses the model
                         KinJointKind::Free => {}
                     }
+                    k.xanchor[jid] = xanchor;
+                    k.xaxis[jid] = xaxis;
+                    jid += 1;
                 }
             }
             normalize4(&mut q);
-            xpos[i] = p;
-            xquat[i] = q;
-            xmat[i] = quat2mat(&q);
+            k.xpos[i] = p;
+            k.xquat[i] = q;
+            k.xmat[i] = quat2mat(&q);
         }
         for i in 1..n {
             let b = &self.bodies[i];
             let world: XFrame = ([0.0; 3], [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
-            xi[i] = mj_local2global((&xpos[i], &xquat[i], &xmat[i]), &world, &b.ipos, &b.iquat, b.sameframe);
+            let (p, m) = mj_local2global((&k.xpos[i], &k.xquat[i], &k.xmat[i]), &world, &b.ipos, &b.iquat, b.sameframe);
+            k.xipos[i] = p;
+            k.ximat[i] = m;
         }
-        let geoms = self.geoms.iter().map(|g| mj_local2global((&xpos[g.body], &xquat[g.body], &xmat[g.body]), &xi[g.body], &g.pos, &g.quat, g.sameframe)).collect();
-        (geoms, xi)
+        k
     }
+}
+
+/// What `mj_kinematics` leaves in `mjData` for the bodies and joints.
+#[derive(Clone, Debug)]
+pub(crate) struct KinState {
+    pub(crate) xpos: Vec<[f64; 3]>,
+    pub(crate) xquat: Vec<[f64; 4]>,
+    pub(crate) xmat: Vec<[f64; 9]>,
+    pub(crate) xipos: Vec<[f64; 3]>,
+    pub(crate) ximat: Vec<[f64; 9]>,
+    pub(crate) xanchor: Vec<[f64; 3]>,
+    pub(crate) xaxis: Vec<[f64; 3]>,
 }
 
 #[cfg(test)]
