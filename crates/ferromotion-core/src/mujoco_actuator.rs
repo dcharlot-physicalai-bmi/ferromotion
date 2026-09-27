@@ -18,15 +18,24 @@
 //! transmission-reflected inertia `Σ diag(M)/gear²` at `qpos0`. It cannot be resolved while reading the file,
 //! because it needs the mass matrix; [`resolve_dampratio`] is applied by the loader once the tree exists.
 //!
-//! Carried here: a **joint** transmission (hinge or slide) with a **fixed** gain, **no** or an **affine**
-//! bias, and no activation state — which is 2,827 of Menagerie's 4,693 actuators, and every `motor`,
-//! `position` and `velocity` among them. Tendon transmissions, muscles, adhesion and stateful dynamics are
-//! refused by the loader rather than approximated.
+//! Carried here: fixed, affine and muscle gains; no, affine and muscle biases; and the activation laws
+//! `integrator`, `filter`, `filterexact` and `muscle` with `actrange` and `actearly` — every actuator in
+//! Menagerie but `shadow_dexee`'s `<plugin>` ones. The transmissions (joint, tendon, site, body) live with
+//! the model in [`crate::MjcfTree`]. What is not carried — a `user` or `dcmotor` law, or a shortcut not yet
+//! resolved (`<position timeconst>`, `<intvelocity>`, `<cylinder>`, `<damper>`) — is refused by the loader
+//! rather than approximated.
 
-/// `mjtDyn`, restricted to what this port carries: no state, or a muscle's activation filter.
+/// `mjtDyn`: whether an actuator carries an activation state, and under what law (`mj_fwdActuation`).
+/// Every one but `None` makes the ACTIVATION the gain's input in place of the control.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActDyn {
     None,
+    /// `act' = ctrl`.
+    Integrator,
+    /// `act' = (ctrl − act) / τ`, `τ = dynprm[0]`, integrated like any other state.
+    Filter,
+    /// The same filter, integrated EXACTLY over the step: `act += act'·τ·(1 − e^(−h/τ))`.
+    FilterExact,
     /// `act' = mju_muscleDynamics(ctrl, act, dynprm)` — see [`muscle_dynamics`].
     Muscle,
 }
@@ -123,6 +132,12 @@ pub struct Actuator {
     pub ctrlrange: Option<[f64; 2]>,
     /// `forcerange` when `forcelimited`; the force is clamped into it after gain and bias.
     pub forcerange: Option<[f64; 2]>,
+    /// `actrange` when `actlimited`: the activation is clamped into it each time it is INTEGRATED
+    /// ([`Actuator::next_activation`]), never when it is read.
+    pub actrange: Option<[f64; 2]>,
+    /// `actearly`: the force reads the activation at the END of the step, `next_activation(act, act')`,
+    /// instead of the one it starts with — removing the one-step delay between a control and its force.
+    pub actearly: bool,
 }
 
 impl Actuator {
@@ -139,6 +154,37 @@ impl Actuator {
         self.moment.iter().map(|(d, m)| m * qd[*d]).sum()
     }
 
+    /// **`act_dot`**, as `mj_fwdActuation` computes it: from the control clamped to `ctrlrange`, and zero for
+    /// an actuator with no state.
+    pub fn act_dot(&self, ctrl: f64, act: f64) -> f64 {
+        let ctrl = match self.ctrlrange {
+            Some([lo, hi]) => ctrl.clamp(lo, hi),
+            None => ctrl,
+        };
+        match self.dynamics {
+            ActDyn::None => 0.0,
+            ActDyn::Integrator => ctrl,
+            ActDyn::Filter | ActDyn::FilterExact => (ctrl - act) / self.dynprm[0].max(MINVAL),
+            ActDyn::Muscle => muscle_dynamics(ctrl, act, &self.dynprm),
+        }
+    }
+
+    /// **`mj_nextActivation`**: the activation one step of `h` later — `act + h·act'`, or for `FilterExact`
+    /// the exact solution `act + act'·τ·(1 − e^(−h/τ))` — then clamped to `actrange` where it is limited.
+    /// This is both how `mj_advance` integrates the state and what an `actearly` force reads.
+    pub fn next_activation(&self, act: f64, act_dot: f64, h: f64) -> f64 {
+        let next = if self.dynamics == ActDyn::FilterExact {
+            let tau = self.dynprm[0].max(MINVAL);
+            (act_dot * tau).mul_add(1.0 - (-h / tau).exp(), act)
+        } else {
+            act_dot.mul_add(h, act)
+        };
+        match self.actrange {
+            Some([lo, hi]) => next.clamp(lo, hi),
+            None => next,
+        }
+    }
+
     /// `actuator_force`: the scalar force, before the transmission carries it to the joint.
     ///
     /// ⛔ The input to the gain is the ACTIVATION where the actuator has one, and the control only where it
@@ -152,7 +198,7 @@ impl Actuator {
         };
         let input = match self.dynamics {
             ActDyn::None => ctrl,
-            ActDyn::Muscle => act,
+            _ => act,
         };
         let gain = match self.gain {
             ActGain::Fixed => self.gainprm[0],
@@ -308,6 +354,27 @@ pub fn muscle_gain(len: f64, vel: f64, lengthrange: &[f64; 2], acc0: f64, prm: &
     -force * fl * fv
 }
 
+/// **`mjd_muscleGain_vel`**: `∂ muscle_gain / ∂ velocity`, the one velocity derivative of a muscle's force
+/// that an implicit integrator carries (the passive force has no velocity term). The same curve as
+/// [`muscle_gain`], differentiated piece by piece.
+pub fn muscle_gain_vel(len: f64, vel: f64, lengthrange: &[f64; 2], acc0: f64, prm: &[f64; 9]) -> f64 {
+    let force = if prm[2] < 0.0 { prm[3] / acc0.max(MINVAL) } else { prm[2] };
+    let (l, l0) = muscle_normalise(len, lengthrange, prm);
+    let v = vel / (l0 * prm[6]).max(MINVAL);
+    let fl = muscle_gain_length(l, prm[4], prm[5]);
+    let y = prm[8] - 1.0;
+    let dfv = if v <= -1.0 {
+        0.0
+    } else if v <= 0.0 {
+        2.0 * v + 2.0
+    } else if v <= y {
+        (-2.0 * v + 2.0 * y) / y.max(MINVAL)
+    } else {
+        0.0
+    };
+    -force * fl * dfv / (l0 * prm[6]).max(MINVAL)
+}
+
 /// **`mju_muscleBias`** — the PASSIVE force, from the tissue being stretched past its optimum. Zero up to
 /// the optimal length, half-quadratic to the knee at `(1+lmax)/2`, and LINEAR beyond it, so a muscle
 /// stretched far past its range keeps resisting instead of saturating.
@@ -427,6 +494,7 @@ mod tests {
         Actuator {
             name: "a".into(), moment: vec![(0, 1.0)], dynamic: None, gear: 1.0, gain, gainprm, bias, biasprm,
             dynamics: ActDyn::None, dynprm: [0.0; 3], lengthrange: [0.0; 2], acc0: 0.0, ctrlrange: None, forcerange: None,
+            actrange: None, actearly: false,
         }
     }
 

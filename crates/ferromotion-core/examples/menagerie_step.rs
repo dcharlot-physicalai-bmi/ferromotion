@@ -10,6 +10,9 @@
 //! cargo run --release --example menagerie_step -- <menagerie root> <step oracle txt> [substring]
 //! ```
 //!
+//! ⭐ A model with ACTIVATIONS (the six `ms_human_700` files) starts from random activations under a random
+//! control held for the whole run, and its activations are compared with `qpos` and `qvel`.
+//!
 //! ⛔ A trajectory with contacts is chaotic: two answers that agree to 1e-12 at step 1 can part by far more
 //! after twenty steps, because a contact that is barely made in one and barely missed in the other changes
 //! everything after it. So step 1 is the claim, and steps 5 and 20 are reported as how far agreement
@@ -25,8 +28,13 @@ struct Case {
     joints: Vec<(String, String, usize)>,
     start: Vec<f64>,
     startv: Vec<f64>,
+    /// the control, held for the whole run (zero unless the model has activations)
+    ctrl: Vec<f64>,
+    startact: Vec<f64>,
     /// step → (qpos, qvel)
     steps: BTreeMap<usize, (Vec<f64>, Vec<f64>)>,
+    /// step → act
+    acts: BTreeMap<usize, Vec<f64>>,
 }
 
 
@@ -58,6 +66,12 @@ fn main() {
             "joint" => cases.last_mut().unwrap().joints.push((t[1].to_string(), t[2].to_string(), t[3].parse().unwrap())),
             "start" => cases.last_mut().unwrap().start = t[1..].iter().map(|x| f(x)).collect(),
             "startv" => cases.last_mut().unwrap().startv = t[1..].iter().map(|x| f(x)).collect(),
+            "ctrl" => cases.last_mut().unwrap().ctrl = t[1..].iter().map(|x| f(x)).collect(),
+            "startact" => cases.last_mut().unwrap().startact = t[1..].iter().map(|x| f(x)).collect(),
+            "stepact" => {
+                let k: usize = t[1].parse().unwrap();
+                cases.last_mut().unwrap().acts.insert(k, t[2..].iter().map(|x| f(x)).collect());
+            }
             "step" => {
                 let k: usize = t[1].parse().unwrap();
                 cases.last_mut().unwrap().steps.entry(k).or_default().0 = t[2..].iter().map(|x| f(x)).collect();
@@ -108,17 +122,22 @@ fn main() {
             notes.push(format!("{}: joints do not line up", c.rel));
             continue;
         }
-        let ctrl = vec![0.0; t.actuators.len()];
+        let ctrl = if c.ctrl.is_empty() { vec![0.0; t.actuators.len()] } else { c.ctrl.clone() };
+        if t.na() != c.startact.len() {
+            *skip.entry("the activations do not line up with MuJoCo's".into()).or_default() += 1;
+            notes.push(format!("{}: na {} vs MuJoCo {}", c.rel, t.na(), c.startact.len()));
+            continue;
+        }
         // ⭐ whether a MESH is in contact at the start: the one collider still known to disagree with
         // MuJoCo's, so the split says whether a divergence can be charged to it
         let mesh_in_contact = t.q_from_qpos(&c.start, &t.qposadr()).ok().is_some_and(|q| {
             t.collide(&q).contacts.iter().any(|con| !con.record.exclude && con.geom.iter().any(|&g| t.geoms[g].kind == GeomType::Mesh))
         });
-        let (mut qpos, mut qvel) = (c.start.clone(), c.startv.clone());
+        let (mut qpos, mut qvel, mut act) = (c.start.clone(), c.startv.clone(), c.startact.clone());
         let mut failed = None;
         for k in 1..=last {
-            match t.step_mujoco(&qpos, &qvel, &ctrl) {
-                Ok(s) => (qpos, qvel) = (s.qpos, s.qvel),
+            match t.step_mujoco(&qpos, &qvel, &ctrl, &act) {
+                Ok(s) => (qpos, qvel, act) = (s.qpos, s.qvel, s.act),
                 Err(e) => {
                     failed = Some(e);
                     break;
@@ -126,7 +145,7 @@ fn main() {
             }
             if let Some((wq, wv)) = c.steps.get(&k) {
                 let rel = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| (x - y).abs() / y.abs().max(1.0)).fold(0.0, nan_max);
-                let e = rel(&qpos, wq).max(rel(&qvel, wv));
+                let e = nan_max(nan_max(rel(&qpos, wq), rel(&qvel, wv)), c.acts.get(&k).map_or(0.0, |wa| rel(&act, wa)));
                 let entry = tally.entry((k, mesh_in_contact)).or_insert((0, 0, 0, 0.0, String::new()));
                 entry.0 += 1;
                 if e < 1e-8 {
@@ -145,17 +164,13 @@ fn main() {
             }
         }
         if let Some(e) = failed {
-            let why = if e.contains("activation") {
-                "an actuator with an activation state (the step integrates qpos and qvel only)"
-            } else if e.contains("collider") {
+            let why = if e.contains("collider") {
                 "a geom pair this port cannot collide (height field)"
             } else {
                 "the step refused the state"
             };
             *skip.entry(why.into()).or_default() += 1;
-            if !e.contains("activation") {
-                notes.push(format!("{}: {e}", c.rel));
-            }
+            notes.push(format!("{}: {e}", c.rel));
             continue;
         }
         stepped += 1;

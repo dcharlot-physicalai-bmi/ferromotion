@@ -169,7 +169,7 @@ fn main() {
             // base's `qacc_smooth` becomes comparable entry by entry for the first time.
             if !t.actuators_unsupported.is_empty() || !t.tendons_unsupported.is_empty() {
                 *acc_skip.entry("an actuator or tendon this port does not carry").or_default() += 1;
-            } else if let Some(a_mj) = t.qacc_smooth_mujoco(&q, &s.qvel, &vec![0.0; t.actuators.len()]) {
+            } else if let Some(a_mj) = t.qacc_smooth_mujoco(&q, &s.qvel, &vec![0.0; t.actuators.len()], &[]) {
                 acc_seen += 1;
                 let e = (0..nv).map(|i| (a_mj[i] - s.smooth[i]).abs() / s.smooth[i].abs().max(1.0)).fold(0.0, nan_max);
                 let moving = s.qvel.iter().any(|v| *v != 0.0);

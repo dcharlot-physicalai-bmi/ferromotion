@@ -361,7 +361,7 @@ impl MjcfTree {
     ///
     /// ⛔ Undefined at gimbal lock, where `T` is singular — the Euler base's one real limitation, and the
     /// reason this returns an `Option`.
-    pub fn qacc_smooth_mujoco(&self, q: &[f64], v_mujoco: &[f64], ctrl: &[f64]) -> Option<Vec<f64>> {
+    pub fn qacc_smooth_mujoco(&self, q: &[f64], v_mujoco: &[f64], ctrl: &[f64], act: &[f64]) -> Option<Vec<f64>> {
         let nv = self.tree.joints.len();
         let t = self.free_basis(q);
         let tinv = t.clone().try_inverse()?;
@@ -381,7 +381,7 @@ impl MjcfTree {
             }
         }
         let bias = crate::tree_dynamics::tree_inverse_dynamics(&self.tree.joints, &self.tree.inertia, &self.tree.parent, q, &qd, &vec![0.0; nv], self.gravity);
-        let act = self.qfrc_actuator(q, &qd, ctrl);
+        let act = self.qfrc_actuator_act(q, &qd, ctrl, act);
         let tdot_v = self.free_basis_dot(q, &qd) * &v;
         let c_ours = nalgebra::DVector::from_iterator(nv, (0..nv).map(|i| bias[i])) - &m_rigid * (&tinv * tdot_v);
         let m_mj = tinv.transpose() * &m_full * &tinv;
@@ -697,11 +697,62 @@ impl MjcfTree {
         self.qfrc_actuator_act(q, qd, ctrl, &[])
     }
 
-    /// [`MjcfTree::qfrc_actuator`] with the ACTIVATIONS given — one entry per actuator, read only by the
-    /// ones that carry a state. An empty slice is every activation at zero, which is what `mj_resetData`
-    /// leaves and therefore what a state sampled by `mj_forward` on a fresh `mjData` has.
+    /// [`MjcfTree::qfrc_actuator`] with the ACTIVATIONS given, in MuJoCo's own layout: `d.act`, one entry per
+    /// actuator that carries a state ([`MjcfTree::na`] of them), in actuator order. An empty slice is every
+    /// activation at zero, which is what `mj_resetData` leaves and therefore what a state sampled by
+    /// `mj_forward` on a fresh `mjData` has.
     pub fn qfrc_actuator_act(&self, q: &[f64], qd: &[f64], ctrl: &[f64], act: &[f64]) -> Vec<f64> {
-        crate::mujoco_actuator::qfrc_actuator_with(&self.actuators, &self.actuator_state(q, qd), ctrl, act, &self.dof_actuator_force_range())
+        crate::mujoco_actuator::qfrc_actuator_with(&self.actuators, &self.actuator_state(q, qd), ctrl, &self.act_inputs(ctrl, act), &self.dof_actuator_force_range())
+    }
+
+    /// **`na`**: how many activations the model carries, one for each actuator with an activation state.
+    pub fn na(&self) -> usize {
+        self.actuators.iter().filter(|a| a.dynamics != crate::mujoco_actuator::ActDyn::None).count()
+    }
+
+    /// **`act_dot`**, in MuJoCo's layout (`na` entries): each stateful actuator's activation rate at this
+    /// control and activation, as `mj_fwdActuation` computes it. `act` is `d.act`; empty means zeros.
+    pub fn act_dot(&self, ctrl: &[f64], act: &[f64]) -> Vec<f64> {
+        self.actuators
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.dynamics != crate::mujoco_actuator::ActDyn::None)
+            .enumerate()
+            .map(|(k, (i, a))| a.act_dot(ctrl.get(i).copied().unwrap_or(0.0), act.get(k).copied().unwrap_or(0.0)))
+            .collect()
+    }
+
+    /// The activation each actuator's force READS, one entry per actuator: `d.act` where it has a state, or
+    /// under `actearly` the activation at the end of the step; zero (unread) where it has none.
+    fn act_inputs(&self, ctrl: &[f64], act: &[f64]) -> Vec<f64> {
+        let mut k = 0usize;
+        self.actuators
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                if a.dynamics == crate::mujoco_actuator::ActDyn::None {
+                    return 0.0;
+                }
+                let x = act.get(k).copied().unwrap_or(0.0);
+                k += 1;
+                if a.actearly {
+                    a.next_activation(x, a.act_dot(ctrl.get(i).copied().unwrap_or(0.0), x), self.timestep)
+                } else {
+                    x
+                }
+            })
+            .collect()
+    }
+
+    /// **`mj_advance`'s activation half**: every activation one step of `h` on, from `act` and its rate
+    /// `act_dot` (both MuJoCo's layout) — [`crate::mujoco_actuator::Actuator::next_activation`] in turn.
+    pub fn next_activation(&self, act: &[f64], act_dot: &[f64], h: f64) -> Vec<f64> {
+        self.actuators
+            .iter()
+            .filter(|a| a.dynamics != crate::mujoco_actuator::ActDyn::None)
+            .enumerate()
+            .map(|(k, a)| a.next_activation(act.get(k).copied().unwrap_or(0.0), act_dot.get(k).copied().unwrap_or(0.0), h))
+            .collect()
     }
 
     /// **`mj_inertiaBoxFluidModel`**: the ambient medium's drag on every body, from `<option density>`,
@@ -1212,12 +1263,13 @@ impl MjcfTree {
     /// matrix, the unconstrained acceleration, and every constraint row in MuJoCo's order (equality,
     /// friction, limits, then `contacts`), each with its `efc_aref`, `efc_D` and law.
     ///
-    /// `q` is this port's coordinates (from [`MjcfTree::q_from_qpos`]); `v_mujoco` and `ctrl` are MuJoCo's.
+    /// `q` is this port's coordinates (from [`MjcfTree::q_from_qpos`]); `v_mujoco`, `ctrl` and `act` (`d.act`,
+    /// empty for zeros) are MuJoCo's.
     /// ⛔ The problem is posed where MuJoCo's answer lives. On a free or ball joint this port's velocity
     /// basis is not MuJoCo's, so a row's Jacobian maps as `J·T⁻¹` and the mass matrix as `T⁻ᵀ·M·T⁻¹`, while
     /// `efc_aref` and `efc_D` do not move (`J·q̇` is the same number in either basis). With no such joint `T`
     /// is the identity.
-    pub fn constraint_problem(&self, q: &[f64], v_mujoco: &[f64], ctrl: &[f64], contacts: &[crate::mujoco_contact::ContactSpec]) -> Result<MjcfConstraintProblem, String> {
+    pub fn constraint_problem(&self, q: &[f64], v_mujoco: &[f64], ctrl: &[f64], act: &[f64], contacts: &[crate::mujoco_contact::ContactSpec]) -> Result<MjcfConstraintProblem, String> {
         let nv = self.tree.joints.len();
         let tinv = self.free_basis(q).try_inverse().ok_or("gimbal lock: the Euler base's basis map is singular")?;
         let qvel: Vec<f64> = (&tinv * nalgebra::DVector::from_row_slice(v_mujoco)).iter().copied().collect();
@@ -1227,7 +1279,7 @@ impl MjcfTree {
         contact.jac = &contact.jac * &tinv;
         rows.append(contact);
         let m = self.mass_matrix(q);
-        let a0 = self.qacc_smooth_mujoco(q, v_mujoco, ctrl).ok_or("gimbal lock: the Euler base's basis map is singular")?;
+        let a0 = self.qacc_smooth_mujoco(q, v_mujoco, ctrl, act).ok_or("gimbal lock: the Euler base's basis map is singular")?;
         Ok(MjcfConstraintProblem { m: tinv.transpose() * m * &tinv, a0: nalgebra::DVector::from_vec(a0), rows, contact_blocks_from })
     }
 
@@ -1240,9 +1292,11 @@ impl MjcfTree {
     /// `*_mjx.xml` in Menagerie) gets an answer MuJoCo itself only approaches. `Err` for a state this port
     /// cannot pose: a height field, or a gimbal-locked Euler base.
     ///
+    /// `act` is MuJoCo's `d.act` ([`MjcfTree::na`] entries; empty for zeros).
+    ///
     /// Verified against MuJoCo 3.13.0 on Menagerie by `examples/menagerie_forward`, which runs this and
     /// checks it against the pipeline it assembles itself.
-    pub fn forward_mujoco(&self, q: &[f64], v_mujoco: &[f64], ctrl: &[f64]) -> Result<MjcfForward, String> {
+    pub fn forward_mujoco(&self, q: &[f64], v_mujoco: &[f64], ctrl: &[f64], act: &[f64]) -> Result<MjcfForward, String> {
         let collision = self.collide(q);
         if let Some([i, j]) = collision.refused.first() {
             return Err(format!("geoms '{}' and '{}' need a collider this port does not carry", self.geoms[*i].name, self.geoms[*j].name));
@@ -1250,7 +1304,7 @@ impl MjcfTree {
         let frames = crate::tree_frames(&self.tree, q);
         let invweight0 = self.body_invweight0();
         let specs: Vec<crate::mujoco_contact::ContactSpec> = collision.contacts.iter().filter(|c| !c.record.exclude).map(|c| self.contact_spec(c, &frames, &invweight0)).collect();
-        let p = self.constraint_problem(q, v_mujoco, ctrl, &specs)?;
+        let p = self.constraint_problem(q, v_mujoco, ctrl, act, &specs)?;
         let mut solve = crate::mujoco_contact::solve_constraints_newton_blocks(&p.m, &p.a0, &p.rows.jac, &p.rows.aref, &p.rows.d, &p.rows.blocks, 1e-13, 200)?;
         // ⭐ `<option noslip_iterations>`: MuJoCo re-solves the friction forces after the main solve, so the
         // acceleration it reports is NOT the optimum of the main problem. Part of the problem statement.
@@ -1259,7 +1313,7 @@ impl MjcfTree {
             solve.qacc = crate::mujoco_contact::mujoco_noslip(&p.m, &p.a0, &p.rows.jac, &p.rows.aref, &p.rows.d, &p.rows.blocks, &mut force, self.noslip_iterations, self.noslip_tolerance, self.meaninertia)?;
             solve.force = force;
         }
-        Ok(MjcfForward { qacc: solve.qacc.iter().copied().collect(), qacc_smooth: p.a0.iter().copied().collect(), nefc: p.rows.aref.len(), collision, solve, m: p.m })
+        Ok(MjcfForward { qacc: solve.qacc.iter().copied().collect(), qacc_smooth: p.a0.iter().copied().collect(), nefc: p.rows.aref.len(), collision, solve, m: p.m, act_dot: self.act_dot(ctrl, act) })
     }
 
     /// MuJoCo's `qpos` address of each joint, in joint order.
@@ -1288,30 +1342,28 @@ impl MjcfTree {
     ///
     /// Then `qvel += h·qacc`, and positions move with the NEW velocity: a hinge or slide by `h·qvel`, a free
     /// joint's position by `h·v`, every quaternion by `mju_quatIntegrate` (the rotation `h·ω` in the body's
-    /// own frame, applied on the right after normalising).
+    /// own frame, applied on the right after normalising). Each activation moves by `mj_nextActivation` on
+    /// the rate the forward pass computed at the START of the step (`act` is `d.act`; empty for zeros).
     ///
     /// ⛔ The modified mass matrix is inverted in THIS port's coordinates, `T·(M − h·Q)⁻¹·M·T⁻¹`, where the
     /// damping becomes `Tᵀ·D·T` — the same answer as MuJoCo's basis, without forming `T⁻ᵀ·M·T⁻¹`, which on a
     /// tilted Euler base is badly conditioned. The constraint solve is converged (see
-    /// [`MjcfTree::forward_mujoco`]). Refused: `RK4` and `implicit` (not carried), `implicitfast` with a
-    /// fluid (its derivative is not carried), and any actuator with an activation state.
-    pub fn step_mujoco(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64]) -> Result<MjcfStep, String> {
+    /// [`MjcfTree::forward_mujoco`]). Refused: `implicit` (not carried) and `implicitfast` with a fluid (its
+    /// derivative is not carried).
+    pub fn step_mujoco(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64]) -> Result<MjcfStep, String> {
         use crate::mujoco_actuator::{ActBias, ActDyn, ActGain};
-        if let Some(a) = self.actuators.iter().find(|a| a.dynamics != ActDyn::None) {
-            return Err(format!("actuator '{}' carries an activation state, which this step does not integrate", a.name));
-        }
         match self.integrator {
             MjcfIntegrator::Euler => {}
             MjcfIntegrator::ImplicitFast if self.density > 0.0 || self.viscosity > 0.0 => {
                 return Err("implicitfast with a fluid: the fluid force's velocity derivative is not carried".into());
             }
             MjcfIntegrator::ImplicitFast => {}
-            MjcfIntegrator::Rk4 => return self.step_rk4(qpos, qvel, ctrl),
+            MjcfIntegrator::Rk4 => return self.step_rk4(qpos, qvel, ctrl, act),
             other => return Err(format!("the {other:?} integrator is not carried")),
         }
         let qposadr = self.qposadr();
         let q = self.q_from_qpos(qpos, &qposadr)?;
-        let forward = self.forward_mujoco(&q, qvel, ctrl)?;
+        let forward = self.forward_mujoco(&q, qvel, ctrl, act)?;
         let h = self.timestep;
         let nv = self.tree.joints.len();
         // dof damping in MuJoCo's dof order: a joint's own value on each of its dofs
@@ -1327,19 +1379,29 @@ impl MjcfTree {
         let mut rank_one: Vec<(f64, nalgebra::DVector<f64>)> = Vec::new();
         if self.integrator == MjcfIntegrator::ImplicitFast {
             let qd_ours: Vec<f64> = (&tinv * nalgebra::DVector::from_row_slice(qvel)).iter().copied().collect();
+            let act_in = self.act_inputs(ctrl, act);
             for (u, (a, st)) in self.actuators.iter().zip(self.actuator_state(&q, &qd_ours)).enumerate() {
                 let input = ctrl.get(u).copied().unwrap_or(0.0);
                 // `actuatorDerivSkip`: a force pinned at its `forcerange` has no velocity derivative
                 if let Some([lo, hi]) = a.forcerange {
-                    let f = a.force(st.length, st.velocity, input, 0.0);
+                    let f = a.force(st.length, st.velocity, input, act_in[u]);
                     if f <= lo || f >= hi {
                         continue;
                     }
                 }
-                // `actuatorVelDeriv`: kv from an affine bias, plus an affine gain's kv times the CLAMPED control
+                // `actuatorInput`: the CLAMPED control, or where there is a state the activation the force
+                // reads (the next one under `actearly`)
+                let input = if a.dynamics == ActDyn::None { a.ctrlrange.map_or(input, |[lo, hi]| input.clamp(lo, hi)) } else { act_in[u] };
+                // `actuatorVelDeriv`: kv from an affine bias, plus the gain's velocity derivative times the input
                 let mut rate = if a.bias == ActBias::Affine { a.biasprm[2] } else { 0.0 };
-                if a.gain == ActGain::Affine {
-                    rate += a.gainprm[2] * a.ctrlrange.map_or(input, |[lo, hi]| input.clamp(lo, hi));
+                match a.gain {
+                    ActGain::Affine => rate += a.gainprm[2] * input,
+                    ActGain::Muscle => {
+                        let mut prm = [0.0; 9];
+                        prm.copy_from_slice(&a.gainprm[..9]);
+                        rate += crate::mujoco_actuator::muscle_gain_vel(st.length, st.velocity, &a.lengthrange, a.acc0, &prm) * input;
+                    }
+                    ActGain::Fixed => {}
                 }
                 if rate != 0.0 {
                     let mut mv = nalgebra::DVector::<f64>::zeros(nv);
@@ -1470,11 +1532,13 @@ impl MjcfTree {
                 }
             }
         }
+        // `mj_advance`: the activations first, on the rate at the start of the step
+        let act_next = self.next_activation(act, &forward.act_dot, h);
         // `mju_addToScl(qvel, qacc, h)`: fused, as it compiles
         let qvel_next: Vec<f64> = qvel.iter().zip(applied.iter()).map(|(v, a)| a.mul_add(h, *v)).collect();
         // `mj_integratePos`, with the new velocity
         let qpos_next = self.integrate_pos(qpos, &qvel_next, h);
-        Ok(MjcfStep { qpos: qpos_next, qvel: qvel_next, qacc_integrated: applied.iter().copied().collect(), forward })
+        Ok(MjcfStep { qpos: qpos_next, qvel: qvel_next, act: act_next, qacc_integrated: applied.iter().copied().collect(), forward })
     }
 
     /// **`mj_integratePos`**: `qpos` moved by `h·v`, a velocity in MuJoCo's basis — a hinge or slide by
@@ -1503,40 +1567,53 @@ impl MjcfTree {
     /// positions composed through `mj_integratePos` from the ORIGINAL `qpos` at every stage, and the final
     /// step taken with the B-weighted velocity and acceleration: `qvel += h·Σ Bⱼ aⱼ`, and `qpos` moved by
     /// `h·Σ Bⱼ vⱼ` — the WEIGHTED velocity, not the new one. There is no implicit damping. Accumulations are
-    /// fused multiply-adds, as `mju_addToScl` compiles.
-    fn step_rk4(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64]) -> Result<MjcfStep, String> {
+    /// fused multiply-adds, as `mju_addToScl` compiles. The activations ride along as the last block of the
+    /// state: each stage sets `act₀ + h·Σⱼ Aᵢⱼ·act'ⱼ` (no clamp), and the final step is `mj_nextActivation` on
+    /// the B-weighted rate, which does clamp.
+    fn step_rk4(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64]) -> Result<MjcfStep, String> {
         const A: [[f64; 3]; 3] = [[0.5, 0.0, 0.0], [0.0, 0.5, 0.0], [0.0, 0.0, 1.0]];
         const B: [f64; 4] = [1.0 / 6.0, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 6.0];
         let h = self.timestep;
         let qposadr = self.qposadr();
-        let nv = qvel.len();
-        let forward0 = self.forward_mujoco(&self.q_from_qpos(qpos, &qposadr)?, qvel, ctrl)?;
+        let (nv, na) = (qvel.len(), self.na());
+        let act0: Vec<f64> = (0..na).map(|k| act.get(k).copied().unwrap_or(0.0)).collect();
+        let forward0 = self.forward_mujoco(&self.q_from_qpos(qpos, &qposadr)?, qvel, ctrl, &act0)?;
         let mut xv: Vec<Vec<f64>> = vec![qvel.to_vec()];
         let mut fa: Vec<Vec<f64>> = vec![forward0.qacc.clone()];
+        let mut fx: Vec<Vec<f64>> = vec![forward0.act_dot.clone()];
         for i in 1..4 {
-            let (mut dv, mut da) = (vec![0.0; nv], vec![0.0; nv]);
+            let (mut dv, mut da, mut dx) = (vec![0.0; nv], vec![0.0; nv], vec![0.0; na]);
             for j in 0..i {
                 for k in 0..nv {
                     dv[k] = xv[j][k].mul_add(A[i - 1][j], dv[k]);
                     da[k] = fa[j][k].mul_add(A[i - 1][j], da[k]);
                 }
+                for k in 0..na {
+                    dx[k] = fx[j][k].mul_add(A[i - 1][j], dx[k]);
+                }
             }
             let xq = self.integrate_pos(qpos, &dv, h);
             let v: Vec<f64> = (0..nv).map(|k| da[k].mul_add(h, qvel[k])).collect();
-            let f = self.forward_mujoco(&self.q_from_qpos(&xq, &qposadr)?, &v, ctrl)?;
+            let x: Vec<f64> = (0..na).map(|k| dx[k].mul_add(h, act0[k])).collect();
+            let f = self.forward_mujoco(&self.q_from_qpos(&xq, &qposadr)?, &v, ctrl, &x)?;
             xv.push(v);
             fa.push(f.qacc);
+            fx.push(f.act_dot);
         }
-        let (mut dv, mut da) = (vec![0.0; nv], vec![0.0; nv]);
+        let (mut dv, mut da, mut dx) = (vec![0.0; nv], vec![0.0; nv], vec![0.0; na]);
         for j in 0..4 {
             for k in 0..nv {
                 dv[k] = xv[j][k].mul_add(B[j], dv[k]);
                 da[k] = fa[j][k].mul_add(B[j], da[k]);
             }
+            for k in 0..na {
+                dx[k] = fx[j][k].mul_add(B[j], dx[k]);
+            }
         }
+        let act_next = self.next_activation(&act0, &dx, h);
         let qvel_next: Vec<f64> = (0..nv).map(|k| da[k].mul_add(h, qvel[k])).collect();
         let qpos_next = self.integrate_pos(qpos, &dv, h);
-        Ok(MjcfStep { qpos: qpos_next, qvel: qvel_next, qacc_integrated: da, forward: forward0 })
+        Ok(MjcfStep { qpos: qpos_next, qvel: qvel_next, act: act_next, qacc_integrated: da, forward: forward0 })
     }
 
     /// One entry per degree of freedom: the joint's cap on the total actuator force through it, for
@@ -1809,6 +1886,8 @@ pub struct MjcfForward {
     pub solve: crate::mujoco_contact::NewtonSolve,
     /// the mass matrix in MuJoCo's coordinates, `T⁻ᵀ·M·T⁻¹` — what an integrator needs next
     pub m: nalgebra::DMatrix<f64>,
+    /// `d.act_dot`: each activation's rate ([`MjcfTree::na`] entries)
+    pub act_dot: Vec<f64>,
 }
 
 /// `<option integrator>`. Menagerie uses `implicitfast` on 109 models, `Euler` (the default) on 99 and `RK4`
@@ -1826,6 +1905,8 @@ pub enum MjcfIntegrator {
 pub struct MjcfStep {
     pub qpos: Vec<f64>,
     pub qvel: Vec<f64>,
+    /// `d.act`, one step on ([`MjcfTree::na`] entries)
+    pub act: Vec<f64>,
     /// the acceleration the integrator actually applied: `qacc` itself, or with damping the implicit
     /// `(M + h·D)⁻¹·M·qacc`
     pub qacc_integrated: Vec<f64>,
@@ -3864,6 +3945,11 @@ struct ActRecord {
     ctrllimited: Option<bool>,
     forcerange: [f64; 2],
     forcelimited: Option<bool>,
+    actrange: [f64; 2],
+    actlimited: Option<bool>,
+    actearly: bool,
+    /// `actdim`, where the file states it; MuJoCo's default is one activation per stateful actuator
+    actdim: Option<i64>,
     inheritrange: f64,
     /// the transmission as `(kind, target)`; only `joint`/`jointinparent` are carried
     trn: Option<(String, String)>,
@@ -3891,6 +3977,10 @@ impl Default for ActRecord {
             ctrllimited: None,
             forcerange: [0.0; 2],
             forcelimited: None,
+            actrange: [0.0; 2],
+            actlimited: None,
+            actearly: false,
+            actdim: None,
             inheritrange: 0.0,
             trn: None,
             unsupported: None,
@@ -3953,9 +4043,22 @@ impl ActRecord {
             Some(o) => self.unsupported = Some(format!("biastype '{o}'")),
         }
         match at("dyntype") {
-            None | Some("none") => {}
+            None => {}
+            Some("none") => self.dynamics = crate::mujoco_actuator::ActDyn::None,
+            Some("integrator") => self.dynamics = crate::mujoco_actuator::ActDyn::Integrator,
+            Some("filter") => self.dynamics = crate::mujoco_actuator::ActDyn::Filter,
+            Some("filterexact") => self.dynamics = crate::mujoco_actuator::ActDyn::FilterExact,
             Some("muscle") => self.dynamics = crate::mujoco_actuator::ActDyn::Muscle,
-            Some(o) => self.unsupported = Some(format!("dyntype '{o}' carries an activation state")),
+            Some(o) => self.unsupported = Some(format!("dyntype '{o}'")),
+        }
+        match at("actearly") {
+            None => {}
+            Some("true") => self.actearly = true,
+            Some("false") => self.actearly = false,
+            Some(o) => return Err(Bad(format!("actuator actearly '{o}' is not true/false"))),
+        }
+        if let Some(v) = at("actdim") {
+            self.actdim = Some(v.trim().parse::<i64>().map_err(|e| Bad(format!("actuator actdim: {e}")))?);
         }
         vecn("gainprm", &mut self.gainprm)?;
         vecn("biasprm", &mut self.biasprm)?;
@@ -3979,6 +4082,7 @@ impl ActRecord {
         };
         rng("ctrlrange", "ctrllimited", &mut self.ctrlrange, &mut self.ctrllimited)?;
         rng("forcerange", "forcelimited", &mut self.forcerange, &mut self.forcelimited)?;
+        rng("actrange", "actlimited", &mut self.actrange, &mut self.actlimited)?;
         if let Some(v) = num("inheritrange")? {
             self.inheritrange = v;
         }
@@ -4312,18 +4416,20 @@ fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&s
         }
         _ => return Err(Unsupported(format!("a {kind} transmission"))),
     };
-    // `limited="auto"`: under `autolimits` a stated range limits and an unstated one does not, and with
-    // autolimits off MuJoCo refuses a range with no `limited`
+    // `limited="auto"` (`islimited`): limited exactly when the range is a range, `lo < hi`; and with autolimits
+    // off MuJoCo refuses any nonzero range with no `limited` (`checklimited`).
+    //
+    // ⛔ "a stated range limits" is NOT the rule. `actrange="1 -1"` under auto is stated, and MuJoCo leaves
+    // the actuator UNLIMITED and compiles it; reading it as limited refuses the model as an invalid range.
     let limit = |r: [f64; 2], lim: Option<bool>, what: &str| -> Result<Option<[f64; 2]>, ActErr> {
         let on = match lim {
             Some(v) => v,
-            None if r != [0.0, 0.0] => {
-                if !c.autolimits {
+            None => {
+                if r != [0.0, 0.0] && !c.autolimits {
                     return Err(Bad(format!("{what}range is given but {what}limited is not, and autolimits is off")));
                 }
-                true
+                r[0] < r[1]
             }
-            None => false,
         };
         Ok(on.then_some(r))
     };
@@ -4348,6 +4454,21 @@ fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&s
     if ctrlrange.is_some_and(|r| r[0] >= r[1]) {
         return Err(Bad("invalid control range for actuator".into()));
     }
+    // the activation's range and count, by `mjCActuator::Compile`'s rules
+    let actrange = limit(rec.actrange, rec.actlimited, "act")?;
+    let stateful = rec.dynamics != crate::mujoco_actuator::ActDyn::None;
+    if actrange.is_some_and(|r| r[0] >= r[1]) {
+        return Err(Bad("invalid actrange for actuator".into()));
+    }
+    if actrange.is_some() && !stateful {
+        return Err(Bad("actrange specified but dyntype is 'none' in actuator".into()));
+    }
+    match rec.actdim {
+        Some(n) if n > 1 => return Err(Bad("actdim > 1 is only allowed for dyntype 'user' and 'dcmotor'".into())),
+        Some(1) if !stateful => return Err(Bad("invalid actdim 1 in stateless actuator".into())),
+        Some(0) if stateful => return Err(Bad("invalid actdim 0 in stateful actuator".into())),
+        _ => {}
+    }
     Ok(Actuator {
         name: name.to_string(),
         moment,
@@ -4365,6 +4486,8 @@ fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&s
         acc0: 0.0,
         ctrlrange,
         forcerange,
+        actrange,
+        actearly: rec.actearly,
     })
 }
 
@@ -5598,7 +5721,7 @@ mod tests {
         for (cone, nefc, qacc) in want {
             let t = tree_from_mjcf_str(&FORWARD_MODEL.replace("CONE", cone)).unwrap();
             let q = t.q_from_qpos(&qpos, &[0, 7]).unwrap();
-            let f = t.forward_mujoco(&q, &qvel, &[]).unwrap();
+            let f = t.forward_mujoco(&q, &qvel, &[], &[]).unwrap();
             assert_eq!(f.nefc, nefc, "{cone}: rows");
             assert_eq!(f.collision.contacts.len(), 2, "{cone}: contacts");
             for k in 0..7 {
@@ -5650,7 +5773,7 @@ mod tests {
             let t = tree_from_mjcf_str(&STEP_MODEL.replace("DAMP", damp)).unwrap();
             let (mut qpos, mut qvel) = (qpos0.to_vec(), qvel0.to_vec());
             for k in 1..=25 {
-                let st = t.step_mujoco(&qpos, &qvel, &[]).unwrap();
+                let st = t.step_mujoco(&qpos, &qvel, &[], &[]).unwrap();
                 (qpos, qvel) = (st.qpos, st.qvel);
                 if k == 1 {
                     near(&qpos, &one.0, 1e-10, &format!("damping {damp}, step 1: qpos"));
@@ -5664,7 +5787,7 @@ mod tests {
         // a force, but the velocity is integrated EXPLICITLY in it
         let t = tree_from_mjcf_str(&STEP_MODEL.replace("DAMP", "0.2").replace("<worldbody>", r#"<option><flag eulerdamp="disable"/></option><worldbody>"#)).unwrap();
         assert!(!t.eulerdamp);
-        let st = t.step_mujoco(&qpos0, &qvel0, &[]).unwrap();
+        let st = t.step_mujoco(&qpos0, &qvel0, &[], &[]).unwrap();
         near(&st.qvel, &[0.19010857134188877, -0.09285827113086964, -0.05390060056502038, 0.2628236267671595, 0.28803632298975274, -0.058350521262796745, 0.2718214265355253, 0.5751878886107167, -0.15442634068772546, -0.1480369835302928], 1e-10, "eulerdamp disabled: qvel");
     }
 
@@ -5691,7 +5814,7 @@ mod tests {
             }
         };
         for k in 1..=25 {
-            let st = t.step_mujoco(&qpos, &qvel, &ctrl).unwrap();
+            let st = t.step_mujoco(&qpos, &qvel, &ctrl, &[]).unwrap();
             (qpos, qvel) = (st.qpos, st.qvel);
             if k == 1 {
                 near(&qpos, &[0.01020172181685666, -0.01959891925532773, 0.29936188978505046, 0.9701961287279255, 0.10220854248728502, -0.20244375230181513, 0.08537805805904039, 0.402194902373685, 0.010624545454545454, -0.005357272727272727], 1e-10, "step 1 qpos");
@@ -5719,7 +5842,7 @@ mod tests {
             }
         };
         for k in 1..=25 {
-            let st = t.step_mujoco(&qpos, &qvel, &[]).unwrap();
+            let st = t.step_mujoco(&qpos, &qvel, &[], &[]).unwrap();
             (qpos, qvel) = (st.qpos, st.qvel);
             if k == 1 {
                 near(&qpos, &[0.4065548904268078, -0.7127477564085901, 1.001, 0.0, 2.0025095, 0.9452088759680639, 0.10895365820470451, -0.21480300140460598, 0.22038364672219776], 1e-13, "step 1 qpos");
@@ -5797,13 +5920,90 @@ mod tests {
         let qpos = [0.0, 0.0, 1.0, 0.9759716969200002, 0.10061563885773199, -0.15092345828659798, 0.12073876662927838, 0.05, -0.04, 1.0, 0.0, 0.0, 0.0];
         let qvel = [0.3, -0.2, 0.1, 1.5, -2.0, 2.5, 0.8, -0.6, 0.4, -0.3, 0.2];
         let q = t.q_from_qpos(&qpos, &t.qposadr()).unwrap();
-        let f = t.forward_mujoco(&q, &qvel, &[]).unwrap();
+        let f = t.forward_mujoco(&q, &qvel, &[], &[]).unwrap();
         assert_eq!(f.nefc, 7, "3 connect rows and one pyramidal contact");
         let want = [-3.2148317422921644, -0.08016359738568923, -9.760127323568188, -34.24292916867317, 61.004861351132476, 197.3940511854931, -306.4759751575595, -34.697554052837724, -3514.6476773385607, 515.191190718718, 156.86010838363552];
         for (k, w) in want.iter().enumerate() {
             assert!((f.qacc[k] - w).abs() < 1e-8 * w.abs().max(1.0), "qacc[{k}] {} vs MuJoCo {w}", f.qacc[k]);
         }
     }
+
+    /// **Activations, against MuJoCo's `mj_step`.** One actuator of every law this port carries on a
+    /// three-hinge arm: an integrator servo whose `actrange` clamp binds, a filtered motor, an `actearly`
+    /// exact filter with an affine (velocity-dependent) gain, and a muscle. Ten steps under each integrator
+    /// the file can ask for: `Euler` (with implicit dof damping), `implicitfast` (where the muscle gain's
+    /// velocity derivative and the activation-as-input enter the modified mass matrix) and `RK4` (where the
+    /// activations ride along as the last block of the state).
+    #[test]
+    fn step_mujoco_integrates_every_activation_law_like_mujoco() {
+        let cases: [(&str, [f64; 3], [f64; 3], [f64; 4]); 3] = [
+            ("Euler", [0.10938355310581413, -0.26232040273315615, 0.13019692942416222], [-2.356487648621272, 5.265759975936574, -4.762078101750861], [0.5, 0.90724665183, -0.6300119574461944, 0.7952200727116999]),
+            ("implicitfast", [0.11307784334355178, -0.27450581665350465, 0.1350899542153339], [-2.6122162969576195, 5.942100227423588, -4.501561061158574], [0.5, 0.90724665183, -0.6300119574461944, 0.7952200727116999]),
+            ("RK4", [0.11815451674406732, -0.28230838325995716, 0.13782354707999936], [-2.673430809497219, 6.043041690289047, -4.797248178380324], [0.5, 0.8746043834987527, -0.6040614148142172, 0.7910749661574509]),
+        ];
+        let ctrl = [1.5, 1.5, -0.8, 0.8];
+        let near = |got: &[f64], want: &[f64], tol: f64, what: &str| {
+            for (i, (g, w)) in got.iter().zip(want).enumerate() {
+                assert!((g - w).abs() <= tol * w.abs().max(1.0), "{what}[{i}]: {g} vs MuJoCo {w}");
+            }
+        };
+        for (integrator, want_qpos, want_qvel, want_act) in cases {
+            let t = tree_from_mjcf_str(&ACT_MODEL.replace("INTEGRATOR", integrator)).unwrap();
+            assert!(t.actuators_unsupported.is_empty(), "{:?}", t.actuators_unsupported);
+            assert_eq!(t.na(), 4);
+            let (mut qpos, mut qvel, mut act) = (vec![0.3, -0.7, 0.2], vec![0.4, -0.9, 1.3], vec![0.45, -0.2, 0.1, 0.6]);
+            for _ in 0..10 {
+                let st = t.step_mujoco(&qpos, &qvel, &ctrl, &act).unwrap();
+                (qpos, qvel, act) = (st.qpos, st.qvel, st.act);
+            }
+            near(&qpos, &want_qpos, 1e-10, &format!("{integrator}: qpos"));
+            near(&qvel, &want_qvel, 1e-10, &format!("{integrator}: qvel"));
+            near(&act, &want_act, 1e-12, &format!("{integrator}: act"));
+        }
+    }
+
+    /// **What MuJoCo refuses, and what it quietly leaves unlimited.** Each verdict is MuJoCo 3.13.0's on the
+    /// same one-actuator model.
+    #[test]
+    fn activation_ranges_and_counts_compile_by_mujocos_rules() {
+        let model = |a: &str| format!(r#"<mujoco><worldbody><body><joint name="j" type="hinge"/><geom size="0.1" mass="1"/></body></worldbody><actuator>{a}</actuator></mujoco>"#);
+        for (a, why) in [
+            (r#"<general joint="j" actrange="-1 1"/>"#, "actrange specified but dyntype is 'none'"),
+            (r#"<general joint="j" dyntype="integrator" actdim="2"/>"#, "actdim > 1"),
+            (r#"<general joint="j" actdim="1"/>"#, "invalid actdim 1"),
+            (r#"<general joint="j" dyntype="filter" actdim="0"/>"#, "invalid actdim 0"),
+            (r#"<general joint="j" dyntype="filter" actlimited="true"/>"#, "invalid actrange"),
+        ] {
+            let e = tree_from_mjcf_str(&model(a)).err().unwrap_or_else(|| panic!("MuJoCo refuses {a}"));
+            assert!(e.contains(why), "{a}: {e}");
+        }
+        // under `auto` a reversed range is not a range: MuJoCo compiles it UNLIMITED
+        let t = tree_from_mjcf_str(&model(r#"<general joint="j" dyntype="filter" actrange="1 -1"/>"#)).unwrap();
+        assert_eq!((t.na(), t.actuators[0].actrange), (1, None));
+        let t = tree_from_mjcf_str(&model(r#"<general joint="j" dyntype="filter" actrange="-1 1"/>"#)).unwrap();
+        assert_eq!(t.actuators[0].actrange, Some([-1.0, 1.0]));
+    }
+
+    const ACT_MODEL: &str = r#"<mujoco><option integrator="INTEGRATOR" timestep="0.005"/><worldbody>
+  <body name="upper" pos="0 0 1">
+    <joint name="shoulder" type="hinge" axis="0 1 0" range="-2 2" damping="0.3"/>
+    <geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.03" mass="1.1"/>
+    <body name="fore" pos="0.3 0 0">
+      <joint name="elbow" type="hinge" axis="0 1 0" range="-2.5 0.5"/>
+      <geom type="capsule" fromto="0 0 0 0.25 0 0.05" size="0.025" mass="0.7"/>
+      <body name="wrist" pos="0.25 0 0.05">
+        <joint name="twist" type="hinge" axis="1 0 0"/>
+        <geom type="box" size="0.08 0.06 0.04" mass="0.5"/>
+      </body>
+    </body>
+  </body>
+</worldbody>
+<actuator>
+  <general name="integ" joint="shoulder" dyntype="integrator" gainprm="30" biastype="affine" biasprm="0 -30 -2" actlimited="true" actrange="-0.5 0.5"/>
+  <general name="filt" joint="elbow" dyntype="filter" dynprm="0.05" gainprm="2"/>
+  <general name="exact" joint="twist" dyntype="filterexact" dynprm="0.03" actearly="true" gaintype="affine" gainprm="0.3 0 0.02"/>
+  <muscle name="flexor" joint="elbow" lengthrange="-2.5 0.5" force="40" ctrllimited="true" ctrlrange="0 1"/>
+</actuator></mujoco>"#;
 
     /// **`noslip`, against MuJoCo.** A block resting on a 0.2 rad slope and two arms on dry-friction hinges,
     /// all nearly at rest. MuJoCo's noslip pass moves `qacc` by 5.29: the arm whose gravity torque (0.49) is
@@ -5825,7 +6025,7 @@ mod tests {
             let t = tree_from_mjcf_str(&NOSLIP_MODEL.replace("CONE", cone).replace("CONDIM", condim)).unwrap();
             assert_eq!(t.noslip_iterations, 4);
             let q = t.q_from_qpos(&qpos, &t.qposadr()).unwrap();
-            let f = t.forward_mujoco(&q, &qvel, &[]).unwrap();
+            let f = t.forward_mujoco(&q, &qvel, &[], &[]).unwrap();
             assert_eq!(f.nefc, nefc, "{cone} condim {condim}: rows");
             for (k, w) in want.iter().enumerate() {
                 assert!((f.qacc[k] - w).abs() < 1e-8 * w.abs().max(1.0), "{cone} condim {condim}: qacc[{k}] {} vs MuJoCo {w}", f.qacc[k]);
@@ -6051,13 +6251,13 @@ mod tests {
         .unwrap();
         let qm = moving.q_from_qpos(&qpos, &[0, 7]).unwrap();
         let v = [0.4, -0.3, 0.25, 0.7, -0.5, 0.9, -0.6];
-        let got = moving.qacc_smooth_mujoco(&qm, &v, &[]).unwrap();
+        let got = moving.qacc_smooth_mujoco(&qm, &v, &[], &[]).unwrap();
         let want = [-0.40776163054058184, 1.0160972487730715, -9.159571401180923, -11.697022186283133, 4.64153544898943, -8.757526118453406, -1.8570604740614982];
         for (i, w) in want.iter().enumerate() {
             assert!((got[i] - w).abs() < 1e-9, "moving qacc_smooth[{i}] {} vs {w}", got[i]);
         }
         // without the velocity term the answer is wrong, and only while moving — the check that it is wired
-        let still = moving.qacc_smooth_mujoco(&qm, &[0.0; 7], &[]).unwrap();
+        let still = moving.qacc_smooth_mujoco(&qm, &[0.0; 7], &[], &[]).unwrap();
         assert!(still.iter().zip(&got).any(|(a, b)| (a - b).abs() > 1.0), "the velocity term does something");
     }
 
@@ -6094,7 +6294,7 @@ mod tests {
             }
         }
         let want = [-6.46750362599345, 9.001436644526741, -6.399013262157424, 4.021208453117406];
-        let got = t.qacc_smooth_mujoco(&q, &[0.0; 4], &[]).unwrap();
+        let got = t.qacc_smooth_mujoco(&q, &[0.0; 4], &[], &[]).unwrap();
         for (i, w) in want.iter().enumerate() {
             assert!((got[i] - w).abs() < 1e-9, "qacc_smooth[{i}] {} vs {w}", got[i]);
         }

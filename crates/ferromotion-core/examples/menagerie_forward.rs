@@ -542,7 +542,7 @@ fn main() {
                 // ⭐⭐ the WHOLE acceleration, in MuJoCo's own coordinates — all six of the base's dofs
                 // included, at rest and moving. `v_mujoco = T·v_ours`, so `a_mujoco = T·a_ours + Ṫ·v_ours`,
                 // and armature and damping on the base go where MuJoCo puts them: on ITS diagonal.
-                let Some(a_mj) = t.qacc_smooth_mujoco(&q, &s.qvel, &vec![0.0; t.actuators.len()]) else {
+                let Some(a_mj) = t.qacc_smooth_mujoco(&q, &s.qvel, &vec![0.0; t.actuators.len()], &[]) else {
                     *skip.entry("gimbal lock: the Euler base's basis map is singular").or_default() += 1;
                     continue;
                 };
@@ -751,7 +751,7 @@ fn main() {
             }
             // the whole row set, in MuJoCo's order: equality, friction, limits, then contacts — posed by the
             // library, in MuJoCo's coordinates
-            let problem = match t.constraint_problem(&q, &s.qvel, &vec![0.0; t.actuators.len()], &contacts) {
+            let problem = match t.constraint_problem(&q, &s.qvel, &vec![0.0; t.actuators.len()], &[], &contacts) {
                 Ok(problem) => {
                     let row0: usize = problem.rows.blocks[..problem.contact_blocks_from].iter().map(|b| b.rows()).sum();
                     let cr = ferromotion_core::AssembledRows {
@@ -844,7 +844,7 @@ fn main() {
                     // same solve. Only where the contacts were not swapped for MuJoCo's (`MJSUB`).
                     if mjsub.is_none() {
                         lib_compared += 1;
-                        match t.forward_mujoco(&q, &s.qvel, &vec![0.0; t.actuators.len()]) {
+                        match t.forward_mujoco(&q, &s.qvel, &vec![0.0; t.actuators.len()], &[]) {
                             Ok(f) if f.qacc.iter().zip(sol.qacc.iter()).all(|(x, y)| x.to_bits() == y.to_bits()) => lib_identical += 1,
                             Ok(f) => notes.push(format!("{}: forward_mujoco differs from the assembled solve by {:.2e}", o.rel, f.qacc.iter().zip(sol.qacc.iter()).map(|(x, y)| (x - y).abs()).fold(0.0, nan_max))),
                             Err(e) => notes.push(format!("{}: forward_mujoco refused a state the sweep solved: {e}", o.rel)),

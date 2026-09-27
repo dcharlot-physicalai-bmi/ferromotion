@@ -196,6 +196,9 @@ fn main() {
             };
             let dyn_ = match a.dynamics {
                 ferromotion_core::mujoco_actuator::ActDyn::None => "none",
+                ferromotion_core::mujoco_actuator::ActDyn::Integrator => "integrator",
+                ferromotion_core::mujoco_actuator::ActDyn::Filter => "filter",
+                ferromotion_core::mujoco_actuator::ActDyn::FilterExact => "filterexact",
                 ferromotion_core::mujoco_actuator::ActDyn::Muscle => "muscle",
             };
             let close = |x: [f64; 10], y: [f64; 10]| (0..10).all(|k| (x[k] - y[k]).abs() <= 1e-9 * y[k].abs().max(1.0));
