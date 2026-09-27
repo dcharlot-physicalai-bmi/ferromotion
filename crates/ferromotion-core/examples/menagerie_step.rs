@@ -35,6 +35,8 @@ struct Case {
     steps: BTreeMap<usize, (Vec<f64>, Vec<f64>)>,
     /// step → act
     acts: BTreeMap<usize, Vec<f64>>,
+    /// the steps at which MuJoCo's auto-reset fired
+    resets: Vec<usize>,
 }
 
 
@@ -67,6 +69,7 @@ fn main() {
             "start" => cases.last_mut().unwrap().start = t[1..].iter().map(|x| f(x)).collect(),
             "startv" => cases.last_mut().unwrap().startv = t[1..].iter().map(|x| f(x)).collect(),
             "ctrl" => cases.last_mut().unwrap().ctrl = t[1..].iter().map(|x| f(x)).collect(),
+            "resets" => cases.last_mut().unwrap().resets = t[1..].iter().map(|x| x.parse().unwrap()).collect(),
             "startact" => cases.last_mut().unwrap().startact = t[1..].iter().map(|x| f(x)).collect(),
             "stepact" => {
                 let k: usize = t[1].parse().unwrap();
@@ -90,6 +93,8 @@ fn main() {
     let mut tally: BTreeMap<(usize, bool), Tally> = BTreeMap::new();
     let mut notes: Vec<String> = Vec::new();
     let mut stepped = 0usize;
+    // models MuJoCo reset during the run, and the steps at which each side did
+    let mut resets: Vec<(String, Vec<usize>, Vec<usize>)> = Vec::new();
     for c in &cases {
         if filter.as_ref().is_some_and(|fl| !c.rel.contains(fl.as_str())) {
             continue;
@@ -122,7 +127,8 @@ fn main() {
             notes.push(format!("{}: joints do not line up", c.rel));
             continue;
         }
-        let ctrl = if c.ctrl.is_empty() { vec![0.0; t.actuators.len()] } else { c.ctrl.clone() };
+        let mut ctrl = if c.ctrl.is_empty() { vec![0.0; t.actuators.len()] } else { c.ctrl.clone() };
+        let mut ours_reset: Vec<usize> = Vec::new();
         if t.na() != c.startact.len() {
             *skip.entry("the activations do not line up with MuJoCo's".into()).or_default() += 1;
             notes.push(format!("{}: na {} vs MuJoCo {}", c.rel, t.na(), c.startact.len()));
@@ -137,7 +143,14 @@ fn main() {
         let mut failed = None;
         for k in 1..=last {
             match t.step_mujoco(&qpos, &qvel, &ctrl, &act) {
-                Ok(s) => (qpos, qvel, act) = (s.qpos, s.qvel, s.act),
+                Ok(s) => {
+                    // ⛔ `mj_resetData` zeroes `d.ctrl` too: MuJoCo's run goes on with no control
+                    if s.reset.is_some() {
+                        ours_reset.push(k);
+                        ctrl.iter_mut().for_each(|u| *u = 0.0);
+                    }
+                    (qpos, qvel, act) = (s.qpos, s.qvel, s.act);
+                }
                 Err(e) => {
                     failed = Some(e);
                     break;
@@ -174,6 +187,9 @@ fn main() {
             continue;
         }
         stepped += 1;
+        if !c.resets.is_empty() || !ours_reset.is_empty() {
+            resets.push((c.rel.clone(), c.resets.clone(), ours_reset));
+        }
     }
     println!("models stepped {stepped} of {} ({last} steps each, from the same start as MuJoCo)", cases.len());
     for ((k, mesh), (n, tight, loose, worst, at)) in &tally {
@@ -181,6 +197,11 @@ fn main() {
             "  after step {k:>2}, {}: {tight} of {n} within 1e-8, {loose} within 1e-4; worst {worst:.2e} on {at}",
             if *mesh { "a MESH in contact at the start" } else { "no mesh in contact       " }
         );
+    }
+    let same = resets.iter().filter(|(_, a, b)| a == b).count();
+    println!("  auto-resets (mj_checkPos/Vel/Acc): {} models reset by either side, at the SAME steps on {same}", resets.len());
+    for (rel, theirs, ours) in resets.iter().filter(|(_, a, b)| a != b) {
+        println!("    MuJoCo at {theirs:?}, ours at {ours:?}: {rel}");
     }
     println!("  not stepped:");
     for (why, n) in &skip {

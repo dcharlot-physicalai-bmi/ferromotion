@@ -14,7 +14,10 @@ optimum of the rows it builds, which is what `MjcfTree::step_mujoco` takes. A mo
 
 Tab separated: `model rel nq nv capped na`, one `joint name type qposadr` per joint, then `start qpos...`,
 `startv qvel...`, and `step k qpos...` / `stepv k qvel...` after steps 1, 5 and the last; with activations
-also `ctrl ...`, `startact act...` and `stepact k act...`.
+also `ctrl ...`, `startact act...` and `stepact k act...`. Last, `resets k...`: every step at which MuJoCo's
+auto-reset fired (`mj_checkPos`/`Vel`/`Acc`), which puts the state back at `qpos0` with zero control.
+⛔ Read per step, with the counters zeroed before each one: `mj_resetData` clears `d.warning` along with
+everything else, so a run's total reads 1 however many times it reset (`rby1` resets every sixth step).
 """
 
 import glob
@@ -60,13 +63,21 @@ for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
             d.ctrl[i] = rng_act.uniform(lo, hi)
         lines.append("\t".join(["ctrl"] + [repr(float(x)) for x in d.ctrl]))
         lines.append("\t".join(["startact"] + [repr(float(x)) for x in d.act]))
+    W = mujoco.mjtWarning
+    bad = (W.mjWARN_BADQPOS, W.mjWARN_BADQVEL, W.mjWARN_BADQACC)
+    reset_steps = []
     for k in range(1, N + 1):
+        for w in bad:
+            d.warning[w].number = 0
         mujoco.mj_step(m, d)
+        if any(d.warning[w].number for w in bad):
+            reset_steps.append(k)
         if k in (1, 5, N):
             lines.append("\t".join(["step", str(k)] + [repr(float(x)) for x in d.qpos]))
             lines.append("\t".join(["stepv", str(k)] + [repr(float(x)) for x in d.qvel]))
             if m.na:
                 lines.append("\t".join(["stepact", str(k)] + [repr(float(x)) for x in d.act]))
+    lines.append("\t".join(["resets"] + [str(k) for k in reset_steps]))
 with open(out, "w") as fh:
     fh.write("\n".join(lines) + "\n")
 print(f"{models} models ({failed} would not compile), {N} steps each -> {out}")
