@@ -289,8 +289,12 @@ fn main() {
             let hull = match o.meshes.get(name) {
                 Some((pos, q)) => {
                     let r = *nalgebra::UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(q[0], q[1], q[2], q[3])).to_rotation_matrix().matrix();
-                    let stored = ferromotion_core::TriMesh3 { verts: raw.verts.iter().map(|v| (r.transpose() * (v - pos)).map(|x| x as f32 as f64)).collect(), tris: raw.tris.clone() };
-                    MeshHull::new(&stored)
+                    // the hull and its polygons from the FILE's frame, the normals from the final one, as
+                    // `mjCMesh::Process` builds them
+                    let final_f64: Vec<nalgebra::Vector3<f64>> = raw.verts.iter().map(|v| r.transpose() * (v - pos)).collect();
+                    let stored = ferromotion_core::TriMesh3 { verts: final_f64.clone(), tris: raw.tris.clone() };
+                    let cap = t.mesh_hulls.get(name).and_then(|h| h.max_verts);
+                    MeshHull::from_frames(&t.mesh_file[name].verts, &stored, &final_f64, cap)
                 }
                 None => t.mesh_hulls.get(name).cloned(),
             };

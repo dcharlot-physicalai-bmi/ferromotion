@@ -278,16 +278,18 @@ fn main() {
                     }
                     if dot < -0.99 {
                         normal_flipped += 1;
-                        // ⛔⛔ "flipped" is only a convention if both are consistent. An outward normal is
-                        // NOT a convention — the polytope determines it — so whichever of the two points
-                        // inward is wrong, and on this corpus that is MUJOCO'S, on about 5% of polygons.
-                        // Verified with MuJoCo's own data and nothing of ours: of 315,431 polygons across
-                        // 804 meshes, 16,164 put one of MuJoCo's OWN hull corners more than 1e-3 of the
-                        // part outside the polygon's own plane, worst 2.53 — a whole polytope width, which
-                        // only a reversed normal produces. `aloha/d405_solid poly3899` is outward under
-                        // `−n` (2.5e-5) and 2.53 out under `+n`; a clean 8-vertex box compiled through the
-                        // same path has all six outward, so the convention and the indexing are right and
-                        // the reversals are real.
+                        // ⛔⛔ An INWARD normal is real in MuJoCo and is not a defect to be scored against
+                        // it. Of 315,431 polygons across 804 meshes, 16,164 of MuJoCo's own put one of its
+                        // hull corners more than 1e-3 of the part outside the polygon's plane (worst 2.53, a
+                        // whole polytope width). CORRECTED 2026-09-27: this used to call them "a MuJoCo
+                        // defect". They follow from where `mjCMesh::Process` does things: the polygons are
+                        // traced in the FILE's frame and their normals recomputed, never reoriented, in the
+                        // final one, so a MIRRORED mesh (negative scale product — pal_talos, pal_tiago_dual)
+                        // keeps every normal inward, and on a positive-scale mesh a path that STARTS at a
+                        // reflex-looking corner of a slightly non-planar merged polygon takes its normal
+                        // from three vertices that wind the other way. This port now builds its polygons the
+                        // same way, and reproduces the mirrored ones; the path-start ones need qhull's face
+                        // order. The collider reads the normals as they are, so matching them is the goal.
                         // ⛔ the test is SUPPORT, not a centroid: a normal is outward exactly when every
                         // hull vertex is on or behind its own plane. A centroid test needs the centroid to
                         // be interior and says nothing on a sliver.
@@ -347,7 +349,7 @@ fn main() {
     println!("    and the principal FRAME as a rotation: {frame_differs} of {props_tried} differ, which counts a PERMUTATION of equal principal values as a difference and so is an upper bound");
     println!("collision meshes compared: {seen}");
     println!("  same polygon COUNT as MuJoCo: {same_count}");
-    println!("  of the reversed ones, only OURS points inward: {flip_ours_inward}; only MUJOCO'S does: {flip_theirs_inward} (a MuJoCo defect, not a convention — see the note above); undecided: {flip_ambiguous}");
+    println!("  of the reversed ones, only OURS points inward: {flip_ours_inward}; only MUJOCO'S does: {flip_theirs_inward} (MuJoCo keeps inward normals; see the note above); undecided: {flip_ambiguous}");
     println!("  shared faces whose normal lies on the SAME LINE (a winding convention): {normal_same_line}; on a DIFFERENT line (a different plane through the same corners): {normal_other_line}, worst 1-|n·n'| {worst_line:.2e} on {worst_line_where}");
     println!("  same polygon SET (every face, by its vertices): {same_faces}");
     println!("  ⭐⭐ same SUPPORT FUNCTION over 256 directions (the polytope itself, faces and vertex lists aside): {support_same} of {support_tried}; worst {worst_support:.2e} relative to the mesh's own size on {worst_support_where}");

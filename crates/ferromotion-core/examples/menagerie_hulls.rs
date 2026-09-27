@@ -115,20 +115,27 @@ fn main() {
                 }
                 {
                     // is our hull merely sparser, or does it cut through the mesh? the farthest any mesh
-                    // vertex lies outside our hull's faces answers that in metres. ⛔ The face planes are
-                    // oriented against the hull's own centroid rather than trusted from the winding: a
-                    // normal taken the wrong way round measures the mesh's DIAMETER and reads as a hull
-                    // that misses by centimetres, which is exactly what this instrument first reported.
+                    // vertex lies outside our hull's faces answers that, in the units of the frame the hull
+                    // was BUILT in. ⛔ The face planes are oriented against the hull's own centroid rather
+                    // than trusted from the winding: a normal taken the wrong way round measures the mesh's
+                    // DIAMETER and reads as a hull that misses by centimetres, which is exactly what this
+                    // instrument first reported.
+                    //
+                    // ⛔⛔ And in the FILE's frame, where the hull is built (as MuJoCo builds it), not the
+                    // stored one. The stored vertices are an affine image rounded to `f32`, and rounding
+                    // tilts a SLIVER triangle's plane enough that a vertex far along it reads as 3.5e-5 m
+                    // outside — the polytope is exact, the measurement of it in another frame is not.
+                    let file: Vec<Vector3<f64>> = t.mesh_file[name].verts.iter().map(|v| v.map(|x| x as f32 as f64)).collect();
                     let mut centre = Vector3::zeros();
                     for &i in &hull.hull_verts {
-                        centre += hull.verts[i];
+                        centre += file[i];
                     }
                     centre /= hull.hull_verts.len() as f64;
                     let planes: Vec<(Vector3<f64>, f64)> = hull
                         .hull_faces
                         .iter()
                         .filter_map(|f| {
-                            let (a, b, c) = (hull.verts[f[0]], hull.verts[f[1]], hull.verts[f[2]]);
+                            let (a, b, c) = (file[f[0]], file[f[1]], file[f[2]]);
                             let nrm = (b - a).cross(&(c - a));
                             let l = nrm.norm();
                             (l > 1e-14).then(|| {
@@ -139,7 +146,7 @@ fn main() {
                         })
                         .collect();
                     let mut out: f64 = 0.0;
-                    for v in &hull.verts {
+                    for v in &file {
                         let mut h = f64::NEG_INFINITY;
                         for (n, d) in &planes {
                             h = h.max(n.dot(v) - d);
@@ -164,14 +171,14 @@ fn main() {
     let unsound: Vec<_> = soundness.iter().filter(|&(k, &o)| o > 1e-9 && !capped.contains(k)).collect();
     let worst_out = soundness.iter().filter(|(k, _)| !capped.contains(*k)).map(|(_, &v)| v).fold(0.0, nan_max);
     println!(
-        "  SOUND (no mesh vertex outside our own hull): {} of {} uncapped; {} meshes are capped by maxhullvert; worst excursion {:.2e} m",
+        "  SOUND (no mesh vertex outside our own hull): {} of {} uncapped; {} meshes are capped by maxhullvert; worst excursion {:.2e} in the file's units",
         meshes - capped.len() - unsound.len(),
         meshes - capped.len(),
         capped.len(),
         worst_out
     );
     for ((d, n), o) in unsound.iter().take(10) {
-        println!("    UNSOUND {d}/{n}: {o:.2e} m outside");
+        println!("    UNSOUND {d}/{n}: {o:.2e} outside, in the file's units");
     }
     worst.sort_by_key(|w| std::cmp::Reverse(w.5));
     println!("largest polygon-count differences (soundness = how far any mesh vertex lies OUTSIDE our hull):");

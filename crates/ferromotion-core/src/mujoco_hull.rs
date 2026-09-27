@@ -10,10 +10,16 @@
 //! four contact points from a face–face collision, and what `mjc_PlaneConvex` reads to add a face's other
 //! corners to the plane's first contact.
 //!
-//! The hull itself is computed here by [`crate::try_convex_hull_3d`]; a convex hull's vertex set and its
-//! face set are unique up to coplanar-face triangulation, and the polygon merge removes exactly that
-//! ambiguity, so the polygons MuJoCo ends up with are reproducible without qhull. Vertex coordinates are
-//! rounded to `f32` as MuJoCo stores them.
+//! ⭐ THREE frames, as `mjCMesh::Process` has them. The hull and the polygon merge run on the vertices AS
+//! THE FILE STATES THEM (`f32`, before `refpos`, `refquat` and `scale`: `MakeGraph` and `MakePolygons` come
+//! first), the polygon normals are recomputed from the FINAL `f64` vertices, CoM-centred in the principal
+//! frame (`MakePolygonNormals`, from each polygon's first three vertices, never reoriented), and the
+//! collider reads the final vertices rounded to `f32`. On a MIRRORED mesh (negative scale product) a
+//! polygon wound outward in the file is wound inward once mirrored, and MuJoCo keeps it that way.
+//!
+//! The hull itself is computed here by [`crate::try_convex_hull_3d`], not qhull. The vertex set and the
+//! polytope agree with MuJoCo's; which of several coplanar vertices qhull keeps, the order it emits faces
+//! in, and so the ORDER and STARTING vertex of each polygon, are qhull's and are not reproduced.
 
 use crate::TriMesh3;
 use nalgebra::Vector3;
@@ -34,7 +40,8 @@ pub struct MeshHull {
     pub verts: Vec<Vector3<f64>>,
     /// Indices of the mesh vertices that lie on the hull.
     pub hull_verts: Vec<usize>,
-    /// Hull triangles as mesh-vertex indices, outward wound.
+    /// Hull triangles as mesh-vertex indices, wound outward in the FILE's frame — which is inward in the
+    /// stored one on a mirrored mesh.
     pub hull_faces: Vec<[usize; 3]>,
     /// `<mesh maxhullvert>` if the model set one. A capped hull does NOT contain every mesh vertex — that is
     /// what the cap buys — so anything checking containment has to know.
@@ -57,13 +64,26 @@ impl MeshHull {
     }
 
     /// The same, with MJCF's `<mesh maxhullvert>` — the hull qhull would build under `Q9 TA<n−4>`. A capped
-    /// hull is an under-approximation of the mesh and MuJoCo collides against it anyway.
+    /// hull is an under-approximation of the mesh and MuJoCo collides against it anyway. The mesh is taken
+    /// to be in all three frames at once; see [`MeshHull::from_frames`] for a mesh that is not.
     pub fn with_max_verts(mesh: &TriMesh3, max_verts: Option<usize>) -> Option<Self> {
-        let verts: Vec<Vector3<f64>> = mesh.verts.iter().map(|v| v.map(|x| x as f32 as f64)).collect();
-        let hull = crate::try_convex_hull_3d_capped(&verts, max_verts)?;
-        // the hull mesh's vertices are a subset of `verts` (same coordinates); map each back to its index
+        Self::from_frames(&mesh.verts, mesh, &mesh.verts, max_verts)
+    }
+
+    /// **As `mjCMesh::Process` builds it**, from the vertex list in its three frames (same indices in all
+    /// three): `file`, as the file states it, where the hull is built and the polygons merged; `stored`, the
+    /// processed mesh MuJoCo keeps (rounded to `f32` here), which the collider reads; and `final_f64`, the
+    /// same vertices before that rounding, which the polygon normals are computed from.
+    pub fn from_frames(file: &[Vector3<f64>], stored: &TriMesh3, final_f64: &[Vector3<f64>], max_verts: Option<usize>) -> Option<Self> {
+        let key_verts: Vec<Vector3<f64>> = file.iter().map(|v| v.map(|x| x as f32 as f64)).collect();
+        let verts: Vec<Vector3<f64>> = stored.verts.iter().map(|v| v.map(|x| x as f32 as f64)).collect();
+        if key_verts.len() != verts.len() || final_f64.len() != verts.len() {
+            return None;
+        }
+        let hull = crate::try_convex_hull_3d_capped(&key_verts, max_verts)?;
+        // the hull mesh's vertices are a subset of the file's (same coordinates); map each back to its index
         let mut index_of: HashMap<[u64; 3], usize> = HashMap::new();
-        for (i, v) in verts.iter().enumerate() {
+        for (i, v) in key_verts.iter().enumerate() {
             index_of.entry([v.x.to_bits(), v.y.to_bits(), v.z.to_bits()]).or_insert(i);
         }
         let back: Vec<usize> = hull.verts.iter().map(|v| index_of[&[v.x.to_bits(), v.y.to_bits(), v.z.to_bits()]]).collect();
@@ -71,7 +91,7 @@ impl MeshHull {
         let mut hull_verts: Vec<usize> = back.clone();
         hull_verts.sort_unstable();
         hull_verts.dedup();
-        let polygons = make_polygons(&verts, &hull_faces);
+        let polygons = make_polygons(&key_verts, &hull_faces, final_f64);
         let mut polymap = vec![Vec::new(); verts.len()];
         for (pi, p) in polygons.iter().enumerate() {
             for &v in &p.verts {
@@ -137,16 +157,16 @@ fn polygon_key(v1: &Vector3<f64>, v2: &Vector3<f64>, v3: &Vector3<f64>) -> Optio
 }
 
 /// `MeshPolygon`: directed boundary edges of a growing coplanar polygon, with island bookkeeping.
+/// (The rounded-angle normal MuJoCo's constructor also sets is dropped: `MakePolygonNormals` overwrites it.)
 struct MeshPolygon {
     edges: Vec<(usize, usize)>,
     islands: Vec<usize>,
     nisland: usize,
-    normal: Vector3<f64>,
 }
 
 impl MeshPolygon {
-    fn new(v1: usize, v2: usize, v3: usize, theta: f64, phi: f64) -> Self {
-        Self { edges: vec![(v1, v2), (v2, v3), (v3, v1)], islands: vec![0, 0, 0], nisland: 1, normal: Vector3::new(theta.cos() * phi.sin(), theta.sin() * phi.sin(), phi.cos()) }
+    fn new(v1: usize, v2: usize, v3: usize) -> Self {
+        Self { edges: vec![(v1, v2), (v2, v3), (v3, v1)], islands: vec![0, 0, 0], nisland: 1 }
     }
 
     fn combine_islands(&mut self, a: &mut usize, b: &mut usize) {
@@ -263,9 +283,10 @@ impl MeshPolygon {
     }
 }
 
-/// `mjCMesh::MakePolygons` + `MakePolygonNormals`: merge hull triangles by rounded normal, trace paths, and
-/// take each polygon's normal from its first three vertices.
-fn make_polygons(verts: &[Vector3<f64>], faces: &[[usize; 3]]) -> Vec<HullPolygon> {
+/// `mjCMesh::MakePolygons` + `MakePolygonNormals`: merge hull triangles by rounded normal and trace paths
+/// in the file's frame (`verts`), then take each polygon's normal from its first three vertices in the
+/// final one (`normal_verts`).
+fn make_polygons(verts: &[Vector3<f64>], faces: &[[usize; 3]], normal_verts: &[Vector3<f64>]) -> Vec<HullPolygon> {
     // insertion order matters for the output order; keep it as a Vec keyed by the rounded angles
     let mut keys: Vec<(i64, i64)> = Vec::new();
     let mut polys: Vec<MeshPolygon> = Vec::new();
@@ -276,7 +297,7 @@ fn make_polygons(verts: &[Vector3<f64>], faces: &[[usize; 3]]) -> Vec<HullPolygo
             Some(i) => polys[i].insert_face(v1, v2, v3),
             None => {
                 keys.push(key);
-                polys.push(MeshPolygon::new(v1, v2, v3, ANGLE_TOL * key.0 as f64, ANGLE_TOL * key.1 as f64));
+                polys.push(MeshPolygon::new(v1, v2, v3));
             }
         }
     }
@@ -286,13 +307,22 @@ fn make_polygons(verts: &[Vector3<f64>], faces: &[[usize; 3]]) -> Vec<HullPolygo
             if path.len() < 3 {
                 continue;
             }
-            let n = (verts[path[1]] - verts[path[0]]).cross(&(verts[path[2]] - verts[path[0]]));
-            let l = n.norm();
-            let normal = if l >= MINVAL { n / l } else { p.normal };
-            out.push(HullPolygon { verts: path, normal });
+            out.push(HullPolygon { normal: make_normal(&normal_verts[path[0]], &normal_verts[path[1]], &normal_verts[path[2]]), verts: path });
         }
     }
     out
+}
+
+/// `mjuu_makenormal`: the unit normal of `(b − a) × (c − a)`, or `(1, 0, 0)` below `mjEPS` = 1e-14. The
+/// winding is whatever the three vertices carry; nothing here reorients it.
+fn make_normal(a: &Vector3<f64>, b: &Vector3<f64>, c: &Vector3<f64>) -> Vector3<f64> {
+    let (ab, ac) = (b - a, c - a);
+    let n = Vector3::new(ab.y * ac.z - ab.z * ac.y, ab.z * ac.x - ab.x * ac.z, ab.x * ac.y - ab.y * ac.x);
+    let nrm = (n.x * n.x + n.y * n.y + n.z * n.z).sqrt();
+    if nrm < 1e-14 {
+        return Vector3::x();
+    }
+    n / nrm
 }
 
 #[cfg(test)]

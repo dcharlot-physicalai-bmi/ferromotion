@@ -1787,10 +1787,14 @@ pub struct MjcfTree {
     /// MuJoCo stores the mesh: `f32` vertices centred at the mesh's CoM in its principal frame. A mesh geom's
     /// `geom_xmat` already includes that frame, so these vertices go straight under the geom's world pose.
     pub mesh_hulls: BTreeMap<String, crate::mujoco_hull::MeshHull>,
-    /// The same meshes before centring and rotation: after `scale`/`refpos`/`refquat`, `f32` vertices, in
-    /// the mesh file's own frame — for placing them under a frame chosen elsewhere (MuJoCo's `mesh_pos`,
+    /// The same meshes before centring and rotation: after `scale`/`refpos`/`refquat`, in `f64` as the
+    /// compiler holds them — for placing them under a frame chosen elsewhere (MuJoCo's `mesh_pos`,
     /// `mesh_quat` when comparing against it).
     pub mesh_raw: BTreeMap<String, crate::TriMesh3>,
+    /// ⭐ And as the FILE states them: `f32` vertices before `refpos`, `refquat` and `scale`. This is the frame
+    /// MuJoCo builds the convex hull and merges its polygons in (`MakeGraph` and `MakePolygons` run before
+    /// `ApplyTransformations`), so it decides which vertices are on the hull and how faces group.
+    pub mesh_file: BTreeMap<String, crate::TriMesh3>,
     /// **What MuJoCo's mesh compiler produced for every mesh** — volume, centre of mass and principal
     /// frame, which it publishes as `mesh_pos` and `mesh_quat`. Every body's `ipos` and inertia is built
     /// from these, so this is the level at which a mesh-integral residual can be seen at all.
@@ -3254,6 +3258,9 @@ struct Walk<'a> {
     mesh_stored: HashMap<String, crate::TriMesh3>,
     /// per mesh name: the vertices after `ApplyTransformations`, before centring
     mesh_raw: HashMap<String, crate::TriMesh3>,
+    mesh_file: HashMap<String, crate::TriMesh3>,
+    /// the final vertices in `f64`, CoM-centred in the principal frame: what `MakePolygonNormals` reads
+    mesh_final: HashMap<String, Vec<Vector3<f64>>>,
     /// meshes referenced by a collidable mesh geom; their hulls are built once the walk is done
     collidable_meshes: BTreeSet<String>,
     /// the enclosing bodies, innermost last (empty at the worldbody)
@@ -3911,13 +3918,14 @@ impl Walk<'_> {
         for v in &mut mesh.verts {
             *v = v.map(|x| x as f32 as f64);
         }
+        self.mesh_file.insert(name.to_string(), mesh.clone());
         // mjCMesh::ApplyTransformations — refpos, then the inverse refquat rotation, then scale
         let rq = *asset.refquat.to_rotation_matrix().matrix();
         for v in &mut mesh.verts {
             let p = rq.transpose() * (*v - asset.refpos);
             *v = Vector3::new(p.x * asset.scale.x, p.y * asset.scale.y, p.z * asset.scale.z);
         }
-        self.mesh_raw.insert(name.to_string(), crate::TriMesh3 { verts: mesh.verts.iter().map(|v| v.map(|x| x as f32 as f64)).collect(), tris: mesh.tris.clone() });
+        self.mesh_raw.insert(name.to_string(), mesh.clone());
         let (volume, com, unit) = mesh_inertia_mujoco(&mesh, asset.inertia).map_err(|e| format!("mesh '{name}': {e}"))?;
         let (eigval, quat) = eig3_mujoco(&unit);
         if eigval[2] <= 0.0 {
@@ -3944,8 +3952,10 @@ impl Walk<'_> {
         }
         let d = MeshData { volume, com, quat, boxsz, aamm };
         // what `mjCMesh::Process` stores back into its float vertex array: CoM-centred, in the principal frame
-        let stored = crate::TriMesh3 { verts: mesh.verts.iter().map(|v| (r.transpose() * (*v - com)).map(|x| x as f32 as f64)).collect(), tris: mesh.tris.clone() };
+        let final_f64: Vec<Vector3<f64>> = mesh.verts.iter().map(|v| r.transpose() * (*v - com)).collect();
+        let stored = crate::TriMesh3 { verts: final_f64.iter().map(|v| v.map(|x| x as f32 as f64)).collect(), tris: mesh.tris.clone() };
         self.mesh_stored.insert(name.to_string(), stored);
+        self.mesh_final.insert(name.to_string(), final_f64);
         self.mesh_cache.insert(name.to_string(), d);
         Ok(d)
     }
@@ -3981,11 +3991,10 @@ impl Walk<'_> {
 /// **`<actuator>`**, resolved the way MuJoCo's compiler resolves it: the shortcut tag picks a gain and bias
 /// TYPE, the attributes fill in the parameters, and everything downstream sees only `gain·ctrl + bias`.
 ///
-/// Refuses, rather than approximating, anything this port does not carry: a transmission other than a joint
-/// (tendon, site, body, slider-crank), a target that is not a hinge or a slide, an activation state
-/// (`dyntype`), and the tags whose force law is not affine (`muscle`, `adhesion`, `damper`, `cylinder`,
-/// `pid`, `dcmotor`, `orientation`). A silently dropped actuator is a robot that does not move for reasons
-/// nobody can see.
+/// Refuses, rather than approximating, anything this port does not carry: a slider-crank transmission, a
+/// joint target that is not a hinge or a slide, a `user` or `dcmotor` activation law, and the tags not yet
+/// resolved (`damper`, `cylinder`, `intvelocity`, `pid`, `dcmotor`, `orientation`, a `<position>` with a
+/// `timeconst`). A silently dropped actuator is a robot that does not move for reasons nobody can see.
 /// Why an actuator was not carried: a feature outside this port's subset, or a malformed file. The first is
 /// recorded and the model still loads; the second refuses the model, as any other parse error does.
 enum ActErr {
@@ -4655,6 +4664,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             body_parent: BTreeMap::new(),
             mesh_hulls: BTreeMap::new(),
             mesh_raw: BTreeMap::new(),
+            mesh_file: BTreeMap::new(),
             mesh_props: BTreeMap::new(),
             geoms: Vec::new(),
             actuators: Vec::new(),
@@ -4670,6 +4680,8 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
         mesh_cache: HashMap::new(),
         mesh_stored: HashMap::new(),
         mesh_raw: HashMap::new(),
+        mesh_file: HashMap::new(),
+        mesh_final: HashMap::new(),
         collidable_meshes: BTreeSet::new(),
         body_stack: Vec::new(),
         body_ids: HashMap::new(),
@@ -4698,9 +4710,10 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
     for name in &walk.collidable_meshes {
         let stored = &walk.mesh_stored[name];
         let cap = walk.meshes.get(name).and_then(|a| a.maxhullvert);
-        let hull = crate::mujoco_hull::MeshHull::with_max_verts(stored, cap).ok_or_else(|| format!("mesh '{name}': no 3-D convex hull (MuJoCo refuses such a collision mesh)"))?;
+        let hull = crate::mujoco_hull::MeshHull::from_frames(&walk.mesh_file[name].verts, stored, &walk.mesh_final[name], cap).ok_or_else(|| format!("mesh '{name}': no 3-D convex hull (MuJoCo refuses such a collision mesh)"))?;
         out.mesh_hulls.insert(name.clone(), hull);
         out.mesh_raw.insert(name.clone(), walk.mesh_raw[name].clone());
+        out.mesh_file.insert(name.clone(), walk.mesh_file[name].clone());
     }
     for (name, d) in &walk.mesh_cache {
         out.mesh_props.insert(name.clone(), *d);
@@ -5992,6 +6005,59 @@ mod tests {
         let want = [-3.2148317422921644, -0.08016359738568923, -9.760127323568188, -34.24292916867317, 61.004861351132476, 197.3940511854931, -306.4759751575595, -34.697554052837724, -3514.6476773385607, 515.191190718718, 156.86010838363552];
         for (k, w) in want.iter().enumerate() {
             assert!((f.qacc[k] - w).abs() < 1e-8 * w.abs().max(1.0), "qacc[{k}] {} vs MuJoCo {w}", f.qacc[k]);
+        }
+    }
+
+    /// **A mesh's hull polygons as `mjCMesh::Process` builds them, against MuJoCo.** A prism with an interior
+    /// vertex, compiled three ways: as is, MIRRORED (`scale="-1 1 1"`) and mirrored with a non-uniform scale.
+    /// The polygons merge in the file's frame and take their normals from the final one without being
+    /// reoriented, so on both mirrored meshes MuJoCo's normals point INWARD — and must here too.
+    #[test]
+    fn mesh_polygons_follow_mujocos_frames_including_mirrored_meshes() {
+        const PRISM: &str = "v 0 0 0\nv 0.3 0 0\nv 0.05 0.2 0\nv 0 0 0.12\nv 0.3 0 0.12\nv 0.05 0.2 0.12\nv 0.1 0.05 0.06\nf 1 3 2\nf 4 5 6\nf 1 2 5\nf 1 5 4\nf 2 3 6\nf 2 6 5\nf 3 1 4\nf 3 4 6\n";
+        type Want = [(&'static [usize], [f64; 3]); 5];
+        let cases: [(&str, Want); 3] = [
+            ("1 1 1", [
+                (&[0, 1, 2], [-1.0, -7.777655979001052e-18, 4.704439586427497e-17]),
+                (&[0, 1, 3, 4], [-5.2268167869603613e-17, 0.9175895474279813, 0.3975291466684079]),
+                (&[0, 2, 3, 5], [-2.479304043496177e-18, 0.16311176581727824, -0.9866075977063877]),
+                (&[1, 2, 4, 5], [-3.0752644307847943e-17, -0.9648515504601946, 0.2627955204613625]),
+                (&[3, 4, 5], [1.0, 4.350176607880381e-17, -5.677453113971596e-17]),
+            ]),
+            ("-1 1 1", [
+                (&[0, 1, 2], [1.0, -4.350176607880383e-17, -5.677453113971597e-17]),
+                (&[0, 1, 3, 4], [3.2779995430006977e-17, -0.9175895474279813, 0.3975291466684078]),
+                (&[0, 2, 3, 5], [1.1395669270223995e-17, -0.16311176581727818, -0.9866075977063877]),
+                (&[1, 2, 4, 5], [9.475362177739566e-18, 0.9648515504601946, 0.2627955204613625]),
+                (&[3, 4, 5], [-1.0, 7.777655979001045e-18, 4.7044395864274966e-17]),
+            ]),
+            ("0.5 -2 1.5", [
+                (&[0, 1, 2], [0.0, 1.0, 0.0]),
+                (&[0, 1, 3, 4], [0.13811967072676465, -7.137494834774114e-18, 0.9904155474134734]),
+                (&[0, 2, 3, 5], [0.9798711225213051, -4.02406304746538e-17, -0.19963111793715238]),
+                (&[1, 2, 4, 5], [-0.9865294523907788, 1.538772676468377e-17, -0.1635837386953549]),
+                (&[3, 4, 5], [0.0, -1.0, 0.0]),
+            ]),
+        ];
+        for (scale, want) in cases {
+            let xml = format!(r#"<mujoco><asset><mesh name="p" file="prism.obj" scale="{scale}"/></asset><worldbody><body><freejoint/><geom type="mesh" mesh="p"/></body></worldbody></mujoco>"#);
+            let t = tree_from_mjcf(&xml, &|p: &str| (p == "prism.obj").then(|| PRISM.as_bytes().to_vec())).unwrap();
+            let hull = &t.mesh_hulls["p"];
+            assert_eq!(hull.polygons.len(), 5, "scale {scale}: the interior vertex is on no face and the three quads merge");
+            for (verts, n) in want {
+                let p = hull
+                    .polygons
+                    .iter()
+                    .find(|p| {
+                        let mut v = p.verts.clone();
+                        v.sort_unstable();
+                        v == verts
+                    })
+                    .unwrap_or_else(|| panic!("scale {scale}: no polygon on {verts:?}"));
+                for k in 0..3 {
+                    assert!((p.normal[k] - n[k]).abs() < 1e-9, "scale {scale}, polygon {verts:?}: normal {:?} vs MuJoCo {n:?}", p.normal);
+                }
+            }
         }
     }
 

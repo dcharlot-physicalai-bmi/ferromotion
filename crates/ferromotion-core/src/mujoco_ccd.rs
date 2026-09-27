@@ -1830,7 +1830,7 @@ mod tests {
         let (_, quat) = eig3_mujoco(&unit);
         let r = quat_to_rotation(&quat);
         let stored = crate::TriMesh3 { verts: mesh.verts.iter().map(|v| r.transpose() * (v - com)).collect(), tris: mesh.tris.clone() };
-        (MeshHull::new(&stored).unwrap(), com, r)
+        (MeshHull::from_frames(&mesh.verts, &stored, &stored.verts, None).unwrap(), com, r)
     }
 
     fn rot(q: [f64; 4]) -> Matrix3<f64> {
