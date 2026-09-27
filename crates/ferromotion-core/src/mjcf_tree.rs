@@ -1494,6 +1494,12 @@ impl MjcfTree {
                 out.why.insert(key, f());
             }
         };
+        // ⛔ `mj_collision`'s ORDER, which the solver's arithmetic follows: body pairs by signature (the two
+        // MuJoCo body ids, smaller first); within one, the explicit `<pair>`s first, in their order, then the
+        // pair's contacts by `(geom1, geom2)` as MuJoCo labels them (stable, so a collider's own order stays)
+        let body_of = |g: usize| self.mj_kin.geoms.get(g).map_or(0, |k| k.body);
+        let pair_index: HashMap<(usize, usize), usize> = st.pairs.iter().map(|(&k, &v)| (k, v)).collect();
+        let mut keyed: Vec<((usize, usize, usize, usize, usize), MjcfContact)> = Vec::new();
         for i in 0..self.geoms.len() {
             for j in i + 1..self.geoms.len() {
                 let (gi, gj) = (&self.geoms[i], &self.geoms[j]);
@@ -1556,7 +1562,17 @@ impl MjcfTree {
                         continue;
                     }
                 }
-                let Ok(pre) = collide_pair_with(&opts, margin + gap, ci, cj) else {
+                // ⛔ MuJoCo's LABELS: the lower body's geom first — an explicit `<pair>` too, whichever way it
+                // was written (`mjCPair::ResolveReferences` swaps it) — then the lower geom TYPE first
+                // (`pushGeomGeom`). The normal runs from geom1 to geom2 and the contact frame is built from it,
+                // so the other labelling is a different friction pyramid. (Geoms are body-major: i's body is
+                // the lower.)
+                let (mut g1, mut g2) = (i, j);
+                if self.geoms[g1].kind > self.geoms[g2].kind {
+                    std::mem::swap(&mut g1, &mut g2);
+                }
+                let (c1, c2) = if g1 == i { (ci, cj) } else { (cj, ci) };
+                let Ok(pre) = collide_pair_with(&opts, margin + gap, c1, c2) else {
                     out.refused.push([i, j]);
                     why(&mut out, key, &|| "a pair the collider refuses".into());
                     continue;
@@ -1566,9 +1582,16 @@ impl MjcfTree {
                 } else {
                     why(&mut out, key, &|| format!("the collider found {} witness(es) at dist {:?}, includemargin {margin}", pre.len(), pre.iter().map(|p| p.dist).collect::<Vec<_>>()));
                 }
-                out.contacts.extend(pre.iter().map(|p| MjcfContact { geom: [i, j], record: set_contact(p, &params, margin) }));
+                let (b1, b2) = (body_of(i), body_of(j));
+                let sort = match pair_index.get(&key) {
+                    Some(&k) => (b1.min(b2), b1.max(b2), 0, k, 0),
+                    None => (b1.min(b2), b1.max(b2), 1, g1, g2),
+                };
+                keyed.extend(pre.iter().map(|p| (sort, MjcfContact { geom: [g1, g2], record: set_contact(p, &params, margin) })));
             }
         }
+        keyed.sort_by_key(|(k, _)| *k);
+        out.contacts = keyed.into_iter().map(|(_, c)| c).collect();
         out
     }
 
@@ -7732,6 +7755,61 @@ mod tests {
         for (g, ((p, m), w)) in got.iter().zip(&want).enumerate() {
             let ours = [p[0], p[1], p[2], m[(0, 0)], m[(0, 1)], m[(0, 2)], m[(1, 0)], m[(1, 1)], m[(1, 2)], m[(2, 0)], m[(2, 1)], m[(2, 2)]];
             assert_eq!(ours.map(f64::to_bits), w.map(f64::to_bits), "geom {g}: {ours:?}\n  MuJoCo {w:?}");
+        }
+    }
+
+    /// **`mj_collision`'s labels and order.** Each contact names its two geoms as MuJoCo does — the lower
+    /// body's geom first, even for an explicit `<pair>` written the other way round, then the lower geom
+    /// TYPE first (so a sphere precedes the box it touches whatever their ids) — and the list runs body pair
+    /// by body pair, explicit pairs first within one, the rest by those labels. The normal runs from geom1 to geom2 and the
+    /// friction pyramid is built on it, so the other labelling is a different constraint. Expected: MuJoCo
+    /// 3.13.0's `d.contact` at `qpos0`, distances bit for bit.
+    #[test]
+    fn contacts_are_labelled_and_ordered_as_mj_collision_makes_them() {
+        const MODEL: &str = r#"<mujoco>
+  <worldbody>
+    <geom name="floor" type="plane" size="1 1 0.1"/>
+    <body name="a" pos="0 0 0.05">
+      <freejoint/>
+      <geom name="a_box" type="box" size="0.05 0.05 0.05"/>
+      <geom name="a_ball" type="sphere" size="0.03" pos="0.06 0 0.04"/>
+    </body>
+    <body name="b" pos="0.075 0 0.07">
+      <freejoint/>
+      <geom name="b_ball" type="sphere" size="0.03"/>
+      <geom name="b_box" type="box" size="0.02 0.02 0.02" pos="-0.02 0 -0.035"/>
+    </body>
+    <body name="c" pos="0.0 0.065 0.05">
+      <freejoint/>
+      <geom name="c_capsule" type="capsule" size="0.02 0.05" euler="0 1.5707963 0"/>
+    </body>
+  </worldbody>
+  <contact>
+    <pair geom1="c_capsule" geom2="a_box" friction="0.5 0.5 0.005 0.0001 0.0001"/>
+    <pair geom1="b_box" geom2="a_box"/>
+  </contact>
+</mujoco>"#;
+        let t = tree_from_mjcf_str(MODEL).unwrap();
+        let want: [(&str, &str, f64); 13] = [
+            ("floor", "a_box", 0.0),
+            ("floor", "a_box", 0.0),
+            ("floor", "a_box", 0.0),
+            ("floor", "a_box", 0.0),
+            ("floor", "c_capsule", -0.019981210843615062),
+            ("a_box", "b_box", -0.015000000000000013),
+            ("a_box", "b_box", -0.015000000000000013),
+            ("a_box", "b_box", -0.015000000000000013),
+            ("a_box", "b_box", -0.015000000000000013),
+            ("a_ball", "b_ball", -0.035),
+            ("b_ball", "a_box", -0.0050000000000000044),
+            ("c_capsule", "a_box", -0.005000000000000001),
+            ("c_capsule", "a_box", -0.005000000000000001),
+        ];
+        let c = t.collide_qpos(&t.qpos0());
+        let got: Vec<(&str, &str, f64)> = c.contacts.iter().map(|k| (t.geoms[k.geom[0]].name.as_str(), t.geoms[k.geom[1]].name.as_str(), k.record.dist)).collect();
+        assert_eq!(got.len(), want.len(), "{got:?}");
+        for (g, w) in got.iter().zip(&want) {
+            assert_eq!((g.0, g.1, g.2.to_bits()), (w.0, w.1, w.2.to_bits()), "{got:?}");
         }
     }
 
