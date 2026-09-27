@@ -16,7 +16,21 @@
 //! ⛔ A trajectory with contacts is chaotic: two answers that agree to 1e-12 at step 1 can part by far more
 //! after twenty steps, because a contact that is barely made in one and barely missed in the other changes
 //! everything after it. So step 1 is the claim, and steps 5 and 20 are reported as how far agreement
-//! CARRIES, split by whether a mesh (the one collider still known to differ) is in contact at the start.
+//! CARRIES, split by whether a mesh is in contact at the start.
+//!
+//! ⛔⛔ And the parting is MuJoCo's own. Handed this port's state after step 4 — 1.1e-16 from its own —
+//! MuJoCo steps `rethink_robotics_sawyer` to exactly this port's step 5, and 1.4e-7 (qvel 3.1e-5) from the
+//! step 5 it took itself; `robotiq_2f85` parts by 9e-4 the same way. Its step is not continuous there. The
+//! comparison that does not compound is of the step MAP: `MENAGERIE_STEP_TRACE=1` prints this port's state
+//! after every step, and `scripts/mujoco_step_map.py` has MuJoCo step from each of them —
+//!
+//! ```text
+//! MENAGERIE_STEP_TRACE=1 cargo run --release --example menagerie_step -- <menagerie root> <step oracle txt> > ours.txt
+//! python scripts/mujoco_step_map.py <menagerie root> <step oracle txt> ours.txt
+//! ```
+//!
+//! Measured 2026-09-27: 4,174 of 4,181 steps within 1e-8 and every one within 1e-4, over 210 models × 20
+//! steps; the 19 steps where an auto-reset fired, fired on both sides.
 
 use ferromotion_core::{tree_from_mjcf, GeomType, MjcfJointKind};
 use std::collections::BTreeMap;
@@ -150,6 +164,14 @@ fn main() {
                     if s.reset.is_some() {
                         ours_reset.push(k);
                         ctrl.iter_mut().for_each(|u| *u = 0.0);
+                    }
+                    // MENAGERIE_STEP_TRACE=1: this port's state after every step, in the form
+                    // `trace_steps.py` writes MuJoCo's, so the step where two trajectories part can be found
+                    if std::env::var("MENAGERIE_STEP_TRACE").is_ok() {
+                        let f = &s.forward;
+                        println!("trace\t{}\t{k}\t{}\t{}\t{}", c.rel, f.collision.contacts.len(), f.nefc, s.qpos.iter().map(|x| format!("{x:?}")).collect::<Vec<_>>().join("\t"));
+                        println!("tracev\t{}\t{k}\t{}", c.rel, s.qvel.iter().map(|x| format!("{x:?}")).collect::<Vec<_>>().join("\t"));
+                        println!("traceact\t{}\t{k}\t{:?}\t{}\t{}", c.rel, s.time, s.reset.is_some(), s.act.iter().map(|x| format!("{x:?}")).collect::<Vec<_>>().join("\t"));
                     }
                     (qpos, qvel, act, time) = (s.qpos, s.qvel, s.act, s.time);
                 }
