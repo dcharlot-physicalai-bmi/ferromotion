@@ -606,7 +606,7 @@ fn main() {
             // must be it" from an assertion into a count.
             let mut any_mesh = false;
             // ⭐ the library's own `mj_collision`, so what this sweep verifies is what a caller gets
-            let collision = t.collide(&q);
+            let collision = t.collide_explained(&q);
             let refused = !collision.refused.is_empty();
             // ⭐ why a pair is NOT here: every gate records the pair it dropped, so a missing contact names
             // the rule that removed it instead of leaving a count to be stared at

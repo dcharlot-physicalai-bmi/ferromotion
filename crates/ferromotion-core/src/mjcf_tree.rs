@@ -1235,11 +1235,59 @@ impl MjcfTree {
     ///
     /// This is the pipeline `examples/menagerie_forward` verifies against MuJoCo 3.13.0 on Menagerie.
     pub fn collide(&self, q: &[f64]) -> MjcfCollision {
+        self.collide_impl(q, false)
+    }
+
+    /// [`MjcfTree::collide`] with [`MjcfCollision::why`] filled in: for every pair considered, the gate that
+    /// dropped it or what the collider found. A diagnostic — it costs a string per pair, which on a model
+    /// with a few thousand geom pairs is most of the collision time.
+    pub fn collide_explained(&self, q: &[f64]) -> MjcfCollision {
+        self.collide_impl(q, true)
+    }
+
+    fn collide_static(&self) -> &CollideStatic {
+        use crate::mujoco_collision::GeomType;
+        self.collide_cache.get_or_init(|| {
+            let welds = self.body_welds();
+            let body_id: HashMap<&str, usize> = self.geoms.iter().map(|g| g.body.as_str()).chain(self.contact_excludes.iter().flat_map(|(a, b)| [a.as_str(), b.as_str()])).collect::<BTreeSet<&str>>().into_iter().enumerate().map(|(i, b)| (b, i)).collect();
+            let geom_id: HashMap<&str, usize> = self.geoms.iter().enumerate().map(|(i, g)| (g.name.as_str(), i)).collect();
+            let mut pairs = HashMap::new();
+            for (k, p) in self.contact_pairs.iter().enumerate() {
+                if let (Some(&a), Some(&b)) = (geom_id.get(p.geom1.as_str()), geom_id.get(p.geom2.as_str())) {
+                    pairs.insert((a, b), k);
+                    pairs.insert((b, a), k);
+                }
+            }
+            let rbound = self
+                .geoms
+                .iter()
+                .map(|g| {
+                    let s = g.size;
+                    match g.kind {
+                        GeomType::Sphere => s[0],
+                        GeomType::Capsule => s[0] + s[1],
+                        GeomType::Cylinder => (s[0] * s[0] + s[1] * s[1]).sqrt(),
+                        GeomType::Ellipsoid => s[0].max(s[1]).max(s[2]),
+                        GeomType::Box => (s[0] * s[0] + s[1] * s[1] + s[2] * s[2]).sqrt(),
+                        GeomType::Mesh => g.mesh.as_ref().and_then(|m| self.mesh_hulls.get(m)).map_or(0.0, |h| h.rbound()),
+                        _ => 0.0,
+                    }
+                })
+                .collect();
+            CollideStatic {
+                weld: self.geoms.iter().map(|g| welds.get(&g.body).copied().unwrap_or((0, 0, 0))).collect(),
+                excludes: self.contact_excludes.iter().flat_map(|(a, b)| [(body_id[a.as_str()], body_id[b.as_str()]), (body_id[b.as_str()], body_id[a.as_str()])]).collect(),
+                body: self.geoms.iter().map(|g| body_id[g.body.as_str()]).collect(),
+                pairs,
+                rbound,
+            }
+        })
+    }
+
+    fn collide_impl(&self, q: &[f64], explain: bool) -> MjcfCollision {
         use crate::mujoco_collision::{can_collide, collide_pair_with, contact_param, filter_body_pair, margin_and_gap, set_contact, CollideOptions, CollisionGeom, GeomPose, GeomType, PairParams};
         let frames = crate::tree_frames(&self.tree, q);
-        let welds = self.body_welds();
-        let excludes: std::collections::HashSet<(&str, &str)> = self.contact_excludes.iter().flat_map(|(a, b)| [(a.as_str(), b.as_str()), (b.as_str(), a.as_str())]).collect();
-        let pairs: HashMap<(&str, &str), usize> = self.contact_pairs.iter().enumerate().flat_map(|(i, p)| [((p.geom1.as_str(), p.geom2.as_str()), i), ((p.geom2.as_str(), p.geom1.as_str()), i)]).collect();
+        let st = self.collide_static();
         let opts = CollideOptions::default();
         let geoms: Vec<Option<CollisionGeom>> = self
             .geoms
@@ -1256,25 +1304,12 @@ impl MjcfTree {
                 Some(CollisionGeom { kind: g.kind, pose: GeomPose { pos: world.translation.vector, mat: *world.rotation.to_rotation_matrix().matrix() }, size: g.size, hull })
             })
             .collect();
-        // `geom_rbound` (`mjCGeom::GetRBound`): a sphere about the geom's centre that holds all of it; zero
-        // for a plane, which is tested by its distance instead
-        let rbound: Vec<f64> = geoms
-            .iter()
-            .map(|g| {
-                let Some(g) = g else { return 0.0 };
-                let s = g.size;
-                match g.kind {
-                    GeomType::Sphere => s[0],
-                    GeomType::Capsule => s[0] + s[1],
-                    GeomType::Cylinder => (s[0] * s[0] + s[1] * s[1]).sqrt(),
-                    GeomType::Ellipsoid => s[0].max(s[1]).max(s[2]),
-                    GeomType::Box => (s[0] * s[0] + s[1] * s[1] + s[2] * s[2]).sqrt(),
-                    GeomType::Mesh => g.hull.map_or(0.0, |h| h.rbound()),
-                    _ => 0.0,
-                }
-            })
-            .collect();
         let mut out = MjcfCollision::default();
+        let why = |out: &mut MjcfCollision, key: (usize, usize), f: &dyn Fn() -> String| {
+            if explain {
+                out.why.insert(key, f());
+            }
+        };
         for i in 0..self.geoms.len() {
             for j in i + 1..self.geoms.len() {
                 let (gi, gj) = (&self.geoms[i], &self.geoms[j]);
@@ -1284,22 +1319,21 @@ impl MjcfTree {
                     continue;
                 }
                 let key = (i, j);
-                let pair = pairs.get(&(gi.name.as_str(), gj.name.as_str())).map(|&k| &self.contact_pairs[k]);
+                let pair = st.pairs.get(&key).map(|&k| &self.contact_pairs[k]);
                 let (margin, gap, params) = if let Some(p) = pair {
                     (p.margin, p.gap, PairParams { condim: p.condim, solref: p.solref, solimp: p.solimp, friction: p.friction, adhesion: p.adhesion })
                 } else {
                     if !can_collide(gi.params.contype, gi.params.conaffinity, gj.params.contype, gj.params.conaffinity) {
-                        out.why.insert(key, "contype/conaffinity".into());
+                        why(&mut out, key, &|| "contype/conaffinity".into());
                         continue;
                     }
-                    let (w1, pw1, n1) = welds.get(&gi.body).copied().unwrap_or((0, 0, 0));
-                    let (w2, pw2, n2) = welds.get(&gj.body).copied().unwrap_or((0, 0, 0));
+                    let ((w1, pw1, n1), (w2, pw2, n2)) = (st.weld[i], st.weld[j]);
                     if filter_body_pair(w1, pw1, n1, w2, pw2, n2, true) {
-                        out.why.insert(key, "the body filter (same weld, both static, or parent and child)".into());
+                        why(&mut out, key, &|| "the body filter (same weld, both static, or parent and child)".into());
                         continue;
                     }
-                    if excludes.contains(&(gi.body.as_str(), gj.body.as_str())) {
-                        out.why.insert(key, "<contact><exclude>".into());
+                    if st.excludes.contains(&(st.body[i], st.body[j])) {
+                        why(&mut out, key, &|| "<contact><exclude>".into());
                         continue;
                     }
                     let (m, g) = margin_and_gap(&gi.params, &gj.params);
@@ -1308,29 +1342,30 @@ impl MjcfTree {
                 // `mj_filterSphere`: two bounding spheres further apart than the margin, or a plane further
                 // from a geom's centre than its bound, cannot touch — the pair is never handed to a collider.
                 // A pure saving: the test is conservative, so no contact is lost to it.
-                let far = if rbound[i] > 0.0 && rbound[j] > 0.0 {
-                    let b = rbound[i] + rbound[j] + margin + gap;
+                let rb = &st.rbound;
+                let far = if rb[i] > 0.0 && rb[j] > 0.0 {
+                    let b = rb[i] + rb[j] + margin + gap;
                     (ci.pose.pos - cj.pose.pos).norm_squared() > b * b
-                } else if ci.kind == GeomType::Plane && rbound[j] > 0.0 {
-                    (cj.pose.pos - ci.pose.pos).dot(&ci.pose.mat.column(2)) > margin + gap + rbound[j]
-                } else if cj.kind == GeomType::Plane && rbound[i] > 0.0 {
-                    (ci.pose.pos - cj.pose.pos).dot(&cj.pose.mat.column(2)) > margin + gap + rbound[i]
+                } else if ci.kind == GeomType::Plane && rb[j] > 0.0 {
+                    (cj.pose.pos - ci.pose.pos).dot(&ci.pose.mat.column(2)) > margin + gap + rb[j]
+                } else if cj.kind == GeomType::Plane && rb[i] > 0.0 {
+                    (ci.pose.pos - cj.pose.pos).dot(&cj.pose.mat.column(2)) > margin + gap + rb[i]
                 } else {
                     false
                 };
                 if far {
-                    out.why.insert(key, "the bounding-sphere filter".into());
+                    why(&mut out, key, &|| "the bounding-sphere filter".into());
                     continue;
                 }
                 let Ok(pre) = collide_pair_with(&opts, margin + gap, ci, cj) else {
                     out.refused.push([i, j]);
-                    out.why.insert(key, "a pair the collider refuses".into());
+                    why(&mut out, key, &|| "a pair the collider refuses".into());
                     continue;
                 };
                 if pre.is_empty() {
-                    out.why.insert(key, "no contact: the collider found them apart".into());
+                    why(&mut out, key, &|| "no contact: the collider found them apart".into());
                 } else {
-                    out.why.insert(key, format!("the collider found {} witness(es) at dist {:?}, includemargin {margin}", pre.len(), pre.iter().map(|p| p.dist).collect::<Vec<_>>()));
+                    why(&mut out, key, &|| format!("the collider found {} witness(es) at dist {:?}, includemargin {margin}", pre.len(), pre.iter().map(|p| p.dist).collect::<Vec<_>>()));
                 }
                 out.contacts.extend(pre.iter().map(|p| MjcfContact { geom: [i, j], record: set_contact(p, &params, margin) }));
             }
@@ -1920,6 +1955,8 @@ pub struct MjcfTree {
     /// `dof_invweight0`, `body_invweight0` and `tendon_invweight0`, computed on first use at `qpos0` in the
     /// LOADED chart and kept, as MuJoCo compiles them once
     invweight0_cache: std::sync::OnceLock<Invweight0>,
+    /// what `collide` reads that does not move — the weld filter, excludes, explicit pairs, bounds — by index
+    collide_cache: std::sync::OnceLock<CollideStatic>,
     /// `<option density>`, `<option viscosity>` and `<option wind>` — the ambient medium. With both density
     /// and viscosity zero there is no fluid force at all, which is MuJoCo's default.
     pub density: f64,
@@ -2135,6 +2172,20 @@ pub enum MjcfReset {
 /// `mjMAXVAL`: past it, `mju_isBad` calls a number bad.
 const MJ_MAXVAL: f64 = 1e10;
 
+/// The per-geom facts [`MjcfTree::collide`] filters by, resolved from names to indices once.
+#[derive(Clone, Debug)]
+struct CollideStatic {
+    /// `(weld body, its parent's weld, the weld's dof count)` per geom — `filter_body_pair`'s inputs
+    weld: Vec<(usize, usize, usize)>,
+    /// `<contact><exclude>` as geom-body index pairs, both orders
+    excludes: std::collections::HashSet<(usize, usize)>,
+    body: Vec<usize>,
+    /// explicit `<contact><pair>`s by geom index pair, both orders
+    pairs: HashMap<(usize, usize), usize>,
+    /// `geom_rbound`
+    rbound: Vec<f64>,
+}
+
 /// The three `*_invweight0`, as [`MjcfTree`] keeps them.
 #[derive(Clone, Debug)]
 struct Invweight0 {
@@ -2162,7 +2213,8 @@ pub struct MjcfCollision {
     pub contacts: Vec<MjcfContact>,
     /// geom pairs this port cannot collide (a height field): a state with any is not the whole answer
     pub refused: Vec<[usize; 2]>,
-    /// for each pair considered, what happened to it — the gate that dropped it, or what the collider found
+    /// for each pair considered, what happened to it — the gate that dropped it, or what the collider found;
+    /// filled only by [`MjcfTree::collide_explained`]
     pub why: BTreeMap<(usize, usize), String>,
 }
 
@@ -4947,6 +4999,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             free_base_pose: BTreeMap::new(),
             chart: BTreeMap::new(),
             invweight0_cache: std::sync::OnceLock::new(),
+            collide_cache: std::sync::OnceLock::new(),
             density: 0.0,
             viscosity: 0.0,
             wind: Vector3::zeros(),
@@ -5340,6 +5393,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
     // the loader read inverse weights while the model was still being built; the first caller after it
     // computes them from the finished one
     out.invweight0_cache = std::sync::OnceLock::new();
+    out.collide_cache = std::sync::OnceLock::new();
     Ok(out)
 }
 
