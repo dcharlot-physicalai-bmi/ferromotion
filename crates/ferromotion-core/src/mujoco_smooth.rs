@@ -41,6 +41,26 @@ fn dot_n6(a: &[f64; 6], b: &[f64; 6]) -> f64 {
     ((r0 + r2) + (r1 + r3)) + a[4].mul_add(b[4], a[5] * b[5])
 }
 
+/// `mju_dotSparse`: four running sums over the first `4⌊n/4⌋` entries, then the rest one by one.
+fn dot_sparse(v: &[f64], x: &[f64], ind: &[usize]) -> f64 {
+    let n = v.len();
+    let (mut r0, mut r1, mut r2, mut r3) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    let mut i = 0;
+    while i + 4 <= n {
+        r0 = v[i].mul_add(x[ind[i]], r0);
+        r1 = v[i + 1].mul_add(x[ind[i + 1]], r1);
+        r2 = v[i + 2].mul_add(x[ind[i + 2]], r2);
+        r3 = v[i + 3].mul_add(x[ind[i + 3]], r3);
+        i += 4;
+    }
+    let mut r = (r0 + r2) + (r1 + r3);
+    while i < n {
+        r = v[i].mul_add(x[ind[i]], r);
+        i += 1;
+    }
+    r
+}
+
 /// `mji_cross`, contracted.
 fn cross(a: &[f64; 3], b: &[f64; 3]) -> [f64; 3] {
     [a[1].mul_add(b[2], -(a[2] * b[1])), a[2].mul_add(b[0], -(a[0] * b[2])), a[0].mul_add(b[1], -(a[1] * b[0]))]
@@ -133,6 +153,144 @@ fn mul_dof_vec(dof: &[[f64; 6]], vec: &[f64]) -> [f64; 6] {
     }
 }
 
+/// `mju_clip`
+fn clip(x: f64, lo: f64, hi: f64) -> f64 {
+    if x < lo {
+        lo
+    } else if x > hi {
+        hi
+    } else {
+        x
+    }
+}
+
+/// `mju_sigmoid`, contracted.
+fn sigmoid(x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    if x >= 1.0 {
+        return 1.0;
+    }
+    x * x * x * (3.0 * x).mul_add(2.0f64.mul_add(x, -5.0), 10.0)
+}
+
+/// `mju_muscleGainLength`, contracted.
+fn muscle_gain_length(length: f64, lmin: f64, lmax: f64) -> f64 {
+    if lmin <= length && length <= lmax {
+        let a = 0.5 * (lmin + 1.0);
+        let b = 0.5 * (1.0 + lmax);
+        if length <= a {
+            let x = (length - lmin) / MJ_MINVAL.max(a - lmin);
+            0.5 * x * x
+        } else if length <= 1.0 {
+            let x = (1.0 - length) / MJ_MINVAL.max(1.0 - a);
+            (-(0.5 * x)).mul_add(x, 1.0)
+        } else if length <= b {
+            let x = (length - 1.0) / MJ_MINVAL.max(b - 1.0);
+            (-(0.5 * x)).mul_add(x, 1.0)
+        } else {
+            let x = (lmax - length) / MJ_MINVAL.max(lmax - b);
+            0.5 * x * x
+        }
+    } else {
+        0.0
+    }
+}
+
+/// `mju_muscleGain`.
+fn muscle_gain(len: f64, vel: f64, lr: &[f64; 2], acc0: f64, prm: &[f64; 10]) -> f64 {
+    let (range, mut force, scale, lmin, lmax, vmax, fvmax) = ([prm[0], prm[1]], prm[2], prm[3], prm[4], prm[5], prm[6], prm[8]);
+    if force < 0.0 {
+        force = scale / MJ_MINVAL.max(acc0);
+    }
+    let l0 = (lr[1] - lr[0]) / MJ_MINVAL.max(range[1] - range[0]);
+    let l = range[0] + (len - lr[0]) / MJ_MINVAL.max(l0);
+    let v = vel / MJ_MINVAL.max(l0 * vmax);
+    let fl = muscle_gain_length(l, lmin, lmax);
+    let y = fvmax - 1.0;
+    let fv = if v <= -1.0 {
+        0.0
+    } else if v <= 0.0 {
+        (v + 1.0) * (v + 1.0)
+    } else if v <= y {
+        fvmax - (y - v) * (y - v) / MJ_MINVAL.max(y)
+    } else {
+        fvmax
+    };
+    -force * fl * fv
+}
+
+/// `mju_muscleBias`.
+fn muscle_bias(len: f64, lr: &[f64; 2], acc0: f64, prm: &[f64; 10]) -> f64 {
+    let (range, mut force, scale, lmax, fpmax) = ([prm[0], prm[1]], prm[2], prm[3], prm[5], prm[7]);
+    if force < 0.0 {
+        force = scale / MJ_MINVAL.max(acc0);
+    }
+    let l0 = (lr[1] - lr[0]) / MJ_MINVAL.max(range[1] - range[0]);
+    let l = range[0] + (len - lr[0]) / MJ_MINVAL.max(l0);
+    let b = 0.5 * (1.0 + lmax);
+    if l <= 1.0 {
+        0.0
+    } else if l <= b {
+        let x = (l - 1.0) / MJ_MINVAL.max(b - 1.0);
+        -force * fpmax * 0.5 * x * x
+    } else {
+        let x = (l - b) / MJ_MINVAL.max(b - 1.0);
+        -force * fpmax * (0.5 + x)
+    }
+}
+
+/// `mju_muscleDynamics`, contracted.
+fn muscle_dynamics(ctrl: f64, act: f64, prm: &[f64; 3]) -> f64 {
+    let ctrlclamp = clip(ctrl, 0.0, 1.0);
+    let actclamp = clip(act, 0.0, 1.0);
+    let s = 1.5f64.mul_add(actclamp, 0.5);
+    let tau_act = prm[0] * s;
+    let tau_deact = prm[1] / s;
+    let dctrl = ctrlclamp - act;
+    let tau = if prm[2] < MJ_MINVAL {
+        if dctrl > 0.0 {
+            tau_act
+        } else {
+            tau_deact
+        }
+    } else {
+        (tau_act - tau_deact).mul_add(sigmoid(dctrl / prm[2] + 0.5), tau_deact)
+    };
+    dctrl / MJ_MINVAL.max(tau)
+}
+
+/// One actuator as the native pipeline carries it: a hinge or slide JOINT transmission, which is what
+/// most of Menagerie drives. (Tendon, site and body transmissions are listed as unsupported.)
+#[derive(Clone, Debug)]
+pub(crate) struct NativeActuator {
+    pub(crate) act: crate::mujoco_actuator::Actuator,
+    pub(crate) dofadr: usize,
+    pub(crate) qposadr: usize,
+    /// index of its activation in `act`, when it has one
+    pub(crate) actadr: Option<usize>,
+}
+
+/// What the passive and actuation stages read beyond the kinematic model, joints in MuJoCo's order.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SmoothInputs {
+    pub(crate) body_mass: Vec<f64>,
+    pub(crate) body_inertia: Vec<[f64; 3]>,
+    pub(crate) body_gravcomp: Vec<f64>,
+    pub(crate) jnt_armature: Vec<f64>,
+    pub(crate) jnt_stiffness: Vec<f64>,
+    pub(crate) jnt_springref: Vec<f64>,
+    pub(crate) jnt_damping: Vec<f64>,
+    pub(crate) jnt_actfrcrange: Vec<Option<[f64; 2]>>,
+    pub(crate) qpos0: Vec<f64>,
+    pub(crate) gravity: [f64; 3],
+    pub(crate) timestep: f64,
+    pub(crate) actuators: Vec<crate::mujoco_actuator::Actuator>,
+    /// what this port does not yet compute natively, by name — a model with any is not compared
+    pub(crate) unsupported: Vec<String>,
+}
+
 /// The compiled model's arrays the smooth dynamics read, bodies, joints and dofs in MuJoCo's order.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SmoothModel {
@@ -158,6 +316,16 @@ pub(crate) struct SmoothModel {
     pub(crate) m_rowadr: Vec<usize>,
     pub(crate) m_colind: Vec<usize>,
     pub(crate) gravity: [f64; 3],
+    pub(crate) timestep: f64,
+    pub(crate) jnt_qposadr: Vec<usize>,
+    pub(crate) jnt_stiffness: Vec<f64>,
+    pub(crate) jnt_springref: Vec<f64>,
+    pub(crate) jnt_actfrcrange: Vec<Option<[f64; 2]>>,
+    pub(crate) dof_damping: Vec<f64>,
+    pub(crate) body_gravcomp: Vec<f64>,
+    pub(crate) actuators: Vec<NativeActuator>,
+    pub(crate) na: usize,
+    pub(crate) unsupported: Vec<String>,
 }
 
 /// What the smooth stages leave in `mjData`.
@@ -175,15 +343,39 @@ pub(crate) struct SmoothData {
     pub(crate) cvel: Vec<[f64; 6]>,
     pub(crate) cdof_dot: Vec<[f64; 6]>,
     pub(crate) qfrc_bias: Vec<f64>,
+    pub(crate) qfrc_spring: Vec<f64>,
+    pub(crate) qfrc_damper: Vec<f64>,
+    pub(crate) qfrc_gravcomp: Vec<f64>,
+    pub(crate) qfrc_passive: Vec<f64>,
+    pub(crate) actuator_length: Vec<f64>,
+    pub(crate) actuator_velocity: Vec<f64>,
+    pub(crate) actuator_force: Vec<f64>,
+    pub(crate) act_dot: Vec<f64>,
+    pub(crate) qfrc_actuator: Vec<f64>,
+    pub(crate) qfrc_smooth: Vec<f64>,
+    pub(crate) qacc_smooth: Vec<f64>,
 }
 
 impl SmoothModel {
     /// The compiler's arrays from the kinematic model, each body's `body_mass` and principal `body_inertia`,
     /// each joint's armature (joints in MuJoCo's order), `qpos0` and `<option gravity>`. `dof_M0` is what
     /// `mj_setConst` makes of them: the composite inertia at `qpos0`.
-    pub(crate) fn new(kin: &MjKinematics, body_mass: Vec<f64>, body_inertia: Vec<[f64; 3]>, jnt_armature: &[f64], qpos0: &[f64], gravity: [f64; 3]) -> SmoothModel {
+    pub(crate) fn new(kin: &MjKinematics, inp: SmoothInputs) -> SmoothModel {
         let nbody = kin.bodies.len();
-        let mut m = SmoothModel { kin: kin.clone(), body_mass, body_inertia, gravity, ..Default::default() };
+        let (jnt_armature, qpos0) = (&inp.jnt_armature, &inp.qpos0);
+        let mut m = SmoothModel {
+            kin: kin.clone(),
+            body_mass: inp.body_mass.clone(),
+            body_inertia: inp.body_inertia.clone(),
+            body_gravcomp: inp.body_gravcomp.clone(),
+            gravity: inp.gravity,
+            timestep: inp.timestep,
+            jnt_stiffness: inp.jnt_stiffness.clone(),
+            jnt_springref: inp.jnt_springref.clone(),
+            jnt_actfrcrange: inp.jnt_actfrcrange.clone(),
+            unsupported: inp.unsupported.clone(),
+            ..Default::default()
+        };
         let parent: Vec<usize> = kin.bodies.iter().map(|b| b.parent).collect();
         let width = |k: KinJointKind| match k {
             KinJointKind::Free => 6,
@@ -202,7 +394,9 @@ impl SmoothModel {
                 m.jnt_type.push(j.kind);
                 m.jnt_dofadr.push(m.dof_bodyid.len());
                 m.jnt_bodyid.push(i);
+                m.jnt_qposadr.push(j.qposadr);
                 for _ in 0..width(j.kind) {
+                    m.dof_damping.push(inp.jnt_damping.get(jid).copied().unwrap_or(0.0));
                     m.dof_parentid.push(last);
                     last = m.dof_bodyid.len() as i32;
                     m.dof_bodyid.push(i);
@@ -245,6 +439,11 @@ impl SmoothModel {
         }
         m.body_simple = simple;
         let nv = m.dof_bodyid.len();
+        let njnt = m.jnt_type.len();
+        m.jnt_stiffness.resize(njnt, 0.0);
+        m.jnt_springref.resize(njnt, 0.0);
+        m.jnt_actfrcrange.resize(njnt, None);
+        m.body_gravcomp.resize(nbody, 0.0);
         m.dof_simplenum = vec![0; nv];
         let mut count = 0;
         for i in (0..nv).rev() {
@@ -271,6 +470,31 @@ impl SmoothModel {
         let (cinert, cdof, _) = m.com_pos(&kin0);
         let crb = m.composite(&cinert);
         m.dof_m0 = (0..nv).map(|i| m.dof_armature[i] + dot_n6(&cdof[i], &mul_inert_vec(&crb[m.dof_bodyid[i]], &cdof[i]))).collect();
+        // springs on a ball or free joint are not ported yet
+        for (j, &k) in m.jnt_type.iter().enumerate() {
+            if matches!(k, KinJointKind::Ball | KinJointKind::Free) && m.jnt_stiffness[j] != 0.0 {
+                m.unsupported.push("a spring on a ball or free joint".into());
+            }
+        }
+        // actuators: hinge and slide joint transmissions
+        let mut na = 0;
+        for a in &inp.actuators {
+            let actadr = (a.actnum() > 0).then(|| {
+                na += a.actnum();
+                na - a.actnum()
+            });
+            let joint = match (&a.dynamic, a.moment.as_slice(), &a.pid) {
+                (None, [(dof, _)], None) => m.jnt_dofadr.iter().position(|&d| d == *dof).filter(|&j| matches!(m.jnt_type[j], KinJointKind::Hinge | KinJointKind::Slide)),
+                _ => None,
+            };
+            match joint {
+                Some(j) => m.actuators.push(NativeActuator { act: a.clone(), dofadr: m.jnt_dofadr[j], qposadr: m.jnt_qposadr[j], actadr }),
+                None => m.unsupported.push("an actuator that is not a hinge or slide joint transmission".into()),
+            }
+        }
+        m.na = na;
+        m.unsupported.sort();
+        m.unsupported.dedup();
         m
     }
 
@@ -345,7 +569,7 @@ impl SmoothModel {
 
     /// **`mj_kinematics` → `mj_comPos` → `mj_crb` → `mj_factorM` → `mj_comVel` → `mj_rne`** (without
     /// acceleration) at `qpos`, `qvel`.
-    pub(crate) fn forward(&self, qpos: &[f64], qvel: &[f64]) -> SmoothData {
+    pub(crate) fn forward(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64]) -> SmoothData {
         let nbody = self.kin.bodies.len();
         let nv = self.dof_bodyid.len();
         let kin = self.kin.state(qpos);
@@ -459,8 +683,196 @@ impl SmoothModel {
                 }
             }
         }
-        let qfrc_bias = (0..nv).map(|i| dot6(&cdof[i], &cfrc[self.dof_bodyid[i]])).collect();
-        SmoothData { kin, subtree_com, cinert, cdof, crb, m, qld, qld_diag_inv, cvel, cdof_dot, qfrc_bias }
+        let qfrc_bias: Vec<f64> = (0..nv).map(|i| dot6(&cdof[i], &cfrc[self.dof_bodyid[i]])).collect();
+        // `mj_passive`: joint springs, dof dampers, gravity compensation
+        let mut qfrc_spring = vec![0.0; nv];
+        let mut qfrc_damper = vec![0.0; nv];
+        let mut qfrc_gravcomp = vec![0.0; nv];
+        for (j, &kind) in self.jnt_type.iter().enumerate() {
+            let k = self.jnt_stiffness[j];
+            if k == 0.0 || !matches!(kind, KinJointKind::Hinge | KinJointKind::Slide) {
+                continue;
+            }
+            let x = qpos[self.jnt_qposadr[j]] - self.jnt_springref[j];
+            qfrc_spring[self.jnt_dofadr[j]] = -x * k;
+        }
+        for i in 0..nv {
+            if self.dof_damping[i] != 0.0 {
+                qfrc_damper[i] = -qvel[i] * self.dof_damping[i];
+            }
+        }
+        let has_gravcomp = self.body_gravcomp.iter().any(|&g| g != 0.0) && (self.gravity[0].abs() + self.gravity[1].abs() + self.gravity[2].abs()) != 0.0;
+        if has_gravcomp {
+            for b in 1..nbody {
+                if self.body_gravcomp[b] == 0.0 {
+                    continue;
+                }
+                let s = -(self.body_mass[b] * self.body_gravcomp[b]);
+                let force = self.gravity.map(|g| g * s);
+                self.apply_ft(&cdof, &subtree_com, &force, &kin.xipos[b], b, &mut qfrc_gravcomp);
+            }
+        }
+        let mut qfrc_passive: Vec<f64> = (0..nv).map(|i| qfrc_spring[i] + qfrc_damper[i]).collect();
+        if has_gravcomp {
+            for i in 0..nv {
+                qfrc_passive[i] += qfrc_gravcomp[i];
+            }
+        }
+        // `mj_transmission` and the actuator velocities
+        let nu = self.actuators.len();
+        let mut actuator_length = vec![0.0; nu];
+        let mut actuator_velocity = vec![0.0; nu];
+        for (i, a) in self.actuators.iter().enumerate() {
+            actuator_length[i] = qpos[a.qposadr] * a.act.gear;
+            // `mju_dotSparse` of a one-entry row: its scalar tail, from zero
+            actuator_velocity[i] = a.act.gear.mul_add(qvel[a.dofadr], 0.0);
+        }
+        // `mj_fwdActuation`
+        let ctrl: Vec<f64> = (0..nu).map(|i| {
+            let c = ctrl.get(i).copied().unwrap_or(0.0);
+            match self.actuators[i].act.ctrlrange {
+                Some([lo, hi]) => clip(c, lo, hi),
+                None => c,
+            }
+        }).collect();
+        let mut act_dot = vec![0.0; self.na];
+        for (i, a) in self.actuators.iter().enumerate() {
+            let Some(adr) = a.actadr else { continue };
+            let (x, u) = (act.get(adr).copied().unwrap_or(0.0), ctrl[i]);
+            use crate::mujoco_actuator::ActDyn;
+            act_dot[adr] = match a.act.dynamics {
+                ActDyn::None => 0.0,
+                ActDyn::Integrator => u,
+                ActDyn::Filter | ActDyn::FilterExact => (u - x) / MJ_MINVAL.max(a.act.dynprm[0]),
+                ActDyn::Muscle => muscle_dynamics(u, x, &a.act.dynprm),
+            };
+        }
+        let mut actuator_force = vec![0.0; nu];
+        for (i, a) in self.actuators.iter().enumerate() {
+            use crate::mujoco_actuator::{ActBias, ActDyn, ActGain};
+            let (p, len, vel) = (&a.act.gainprm, actuator_length[i], actuator_velocity[i]);
+            let gain = match a.act.gain {
+                ActGain::Fixed => p[0],
+                ActGain::Affine => p[2].mul_add(vel, p[1].mul_add(len, p[0])),
+                ActGain::Muscle => muscle_gain(len, vel, &a.act.lengthrange, a.act.acc0, p),
+            };
+            let input = match (a.act.dynamics, a.actadr) {
+                (ActDyn::None, _) | (_, None) => ctrl[i],
+                (_, Some(adr)) => {
+                    let x = act.get(adr).copied().unwrap_or(0.0);
+                    if a.act.actearly { self.next_activation(a, x, act_dot[adr]) } else { x }
+                }
+            };
+            let mut f = gain * input;
+            let b = &a.act.biasprm;
+            let bias = match a.act.bias {
+                ActBias::None => 0.0,
+                ActBias::Affine => b[2].mul_add(vel, b[1].mul_add(len, b[0])),
+                ActBias::Muscle => muscle_bias(len, &a.act.lengthrange, a.act.acc0, b),
+            };
+            f += bias;
+            if let Some([lo, hi]) = a.act.forcerange {
+                f = clip(f, lo, hi);
+            }
+            actuator_force[i] = f;
+        }
+        // `mju_mulMatTVecSparse`, then the joints' `actuatorfrcrange`
+        let mut qfrc_actuator = vec![0.0; nv];
+        for (i, a) in self.actuators.iter().enumerate() {
+            let f = actuator_force[i];
+            if f != 0.0 {
+                qfrc_actuator[a.dofadr] = a.act.gear.mul_add(f, qfrc_actuator[a.dofadr]);
+            }
+        }
+        for (j, r) in self.jnt_actfrcrange.iter().enumerate() {
+            if let (Some([lo, hi]), Some(&d)) = (r, self.jnt_dofadr.get(j)) {
+                qfrc_actuator[d] = clip(qfrc_actuator[d], *lo, *hi);
+            }
+        }
+        // `mj_fwdAcceleration`
+        let qfrc_smooth: Vec<f64> = (0..nv).map(|i| (qfrc_passive[i] - qfrc_bias[i]) + 0.0 + qfrc_actuator[i]).collect();
+        let qacc_smooth = self.solve_ld(&qld, &qld_diag_inv, &qfrc_smooth);
+        SmoothData {
+            kin, subtree_com, cinert, cdof, crb, m, qld, qld_diag_inv, cvel, cdof_dot, qfrc_bias,
+            qfrc_spring, qfrc_damper, qfrc_gravcomp, qfrc_passive, actuator_length, actuator_velocity, actuator_force, act_dot, qfrc_actuator, qfrc_smooth, qacc_smooth,
+        }
+    }
+
+    /// `mj_nextActivation` for an actuator with one activation.
+    fn next_activation(&self, a: &NativeActuator, act: f64, act_dot: f64) -> f64 {
+        let h = self.timestep;
+        let next = if a.act.dynamics == crate::mujoco_actuator::ActDyn::FilterExact {
+            let tau = MJ_MINVAL.max(a.act.dynprm[0]);
+            (act_dot * tau).mul_add(1.0 - (-h / tau).exp(), act)
+        } else {
+            act_dot.mul_add(h, act)
+        };
+        match a.act.actrange {
+            Some([lo, hi]) => clip(next, lo, hi),
+            None => next,
+        }
+    }
+
+    /// `mj_applyFT` with a force and a zero torque: `J'·f` at `point` on `body`, into `qfrc`.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_ft(&self, cdof: &[[f64; 6]], subtree_com: &[[f64; 3]], force: &[f64; 3], point: &[f64; 3], body: usize, qfrc: &mut [f64]) {
+        let r = &subtree_com[self.body_rootid[body]];
+        let offset = [point[0] - r[0], point[1] - r[1], point[2] - r[2]];
+        // the weld body's last dof, then its ancestors
+        let mut b = body;
+        while b != 0 && self.body_dofnum[b] == 0 {
+            b = self.kin.bodies[b].parent;
+        }
+        if self.body_dofnum[b] == 0 {
+            return;
+        }
+        let mut i = (self.body_dofadr[b] + self.body_dofnum[b] - 1) as i32;
+        while i >= 0 {
+            let c = &cdof[i as usize];
+            let t = cross(&[c[0], c[1], c[2]], &offset);
+            let jacp = [c[3] + t[0], c[4] + t[1], c[5] + t[2]];
+            // `mju_mulMatTVec` over the three rows, a zero force component skipped, then the (zero) torque
+            let mut q = 0.0;
+            for k in 0..3 {
+                if force[k] != 0.0 {
+                    q = jacp[k].mul_add(force[k], q);
+                }
+            }
+            qfrc[i as usize] += q;
+            qfrc[i as usize] += 0.0;
+            i = self.dof_parentid[i as usize];
+        }
+    }
+
+    /// `mj_solveLD` for one vector.
+    fn solve_ld(&self, qld: &[f64], diag_inv: &[f64], y: &[f64]) -> Vec<f64> {
+        let nv = y.len();
+        let mut x = y.to_vec();
+        for i in (0..nv).rev() {
+            if self.m_rownnz[i] == 1 {
+                continue;
+            }
+            let xi = x[i];
+            if xi != 0.0 {
+                let (start, end) = (self.m_rowadr[i], self.m_rowadr[i] + self.m_rownnz[i] - 1);
+                for adr in start..end {
+                    let c = self.m_colind[adr];
+                    x[c] = (-qld[adr]).mul_add(xi, x[c]);
+                }
+            }
+        }
+        for i in 0..nv {
+            x[i] *= diag_inv[i];
+        }
+        for i in 0..nv {
+            if self.m_rownnz[i] == 1 {
+                continue;
+            }
+            let d = self.m_rownnz[i] - 1;
+            let adr = self.m_rowadr[i];
+            x[i] -= dot_sparse(&qld[adr..adr + d], &x, &self.m_colind[adr..adr + d]);
+        }
+        x
     }
 }
 
@@ -488,6 +900,17 @@ impl SmoothData {
             ("cvel", flat(&self.cvel)),
             ("cdof_dot", flat(&self.cdof_dot)),
             ("qfrc_bias", self.qfrc_bias.clone()),
+            ("qfrc_spring", self.qfrc_spring.clone()),
+            ("qfrc_damper", self.qfrc_damper.clone()),
+            ("qfrc_gravcomp", self.qfrc_gravcomp.clone()),
+            ("qfrc_passive", self.qfrc_passive.clone()),
+            ("actuator_length", self.actuator_length.clone()),
+            ("actuator_velocity", self.actuator_velocity.clone()),
+            ("actuator_force", self.actuator_force.clone()),
+            ("act_dot", self.act_dot.clone()),
+            ("qfrc_actuator", self.qfrc_actuator.clone()),
+            ("qfrc_smooth", self.qfrc_smooth.clone()),
+            ("qacc_smooth", self.qacc_smooth.clone()),
         ]
     }
 }

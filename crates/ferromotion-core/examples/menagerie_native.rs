@@ -42,6 +42,8 @@ fn num(s: &str) -> f64 {
 struct State {
     qpos: Vec<f64>,
     qvel: Vec<f64>,
+    ctrl: Vec<f64>,
+    act: Vec<f64>,
     arrays: Vec<(String, Vec<f64>)>,
 }
 
@@ -72,6 +74,8 @@ fn main() {
             "m" => models.last_mut().unwrap().arrays.push((t[1].to_string(), vals(2))),
             "qpos" => models.last_mut().unwrap().states.push(State { qpos: vals(1), ..Default::default() }),
             "qvel" => models.last_mut().unwrap().states.last_mut().unwrap().qvel = vals(1),
+            "ctrl" => models.last_mut().unwrap().states.last_mut().unwrap().ctrl = vals(1),
+            "act" => models.last_mut().unwrap().states.last_mut().unwrap().act = vals(1),
             "d" => models.last_mut().unwrap().states.last_mut().unwrap().arrays.push((t[1].to_string(), vals(2))),
             _ => {}
         }
@@ -79,6 +83,7 @@ fn main() {
     let mut tally: BTreeMap<String, Tally> = BTreeMap::new();
     let mut notes: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let (mut nmodels, mut refused) = (0usize, 0usize);
+    let mut unsupported: BTreeMap<String, usize> = BTreeMap::new();
     let mut compare = |kind: &str, name: &str, rel: &str, ours: &[f64], want: &[f64]| {
         let key = format!("{kind} {name}");
         let e = tally.entry(key.clone()).or_insert((0, 0, 0.0, String::new()));
@@ -110,6 +115,14 @@ fn main() {
             refused += 1;
             continue;
         };
+        // a model with anything the native pipeline does not compute yet is counted by what, not compared
+        let missing = t.mujoco_native_unsupported();
+        if !missing.is_empty() {
+            for why in missing {
+                *unsupported.entry(why).or_default() += 1;
+            }
+            continue;
+        }
         nmodels += 1;
         let ours: BTreeMap<&str, Vec<f64>> = t.mujoco_native_model().into_iter().collect();
         for (name, want) in &m.arrays {
@@ -118,7 +131,7 @@ fn main() {
             }
         }
         for (s, st) in m.states.iter().enumerate() {
-            let ours: BTreeMap<&str, Vec<f64>> = t.mujoco_native_forward(&st.qpos, &st.qvel).into_iter().collect();
+            let ours: BTreeMap<&str, Vec<f64>> = t.mujoco_native_forward(&st.qpos, &st.qvel, &st.ctrl, &st.act).into_iter().collect();
             for (name, want) in &st.arrays {
                 if let Some(o) = ours.get(name.as_str()) {
                     compare("mjData ", name, &format!("{} state {s}", m.rel), o, want);
@@ -126,7 +139,10 @@ fn main() {
             }
         }
     }
-    println!("MuJoCo 3.13.0's own arrays, BIT FOR BIT: {nmodels} models ({refused} refused)");
+    println!("MuJoCo 3.13.0's own arrays, BIT FOR BIT: {nmodels} models compared ({refused} refused)");
+    for (why, n) in &unsupported {
+        println!("  not compared: {n} models with {why}");
+    }
     for (k, (n, same, worst, at)) in &tally {
         println!("  {k:<26} {same:>5} of {n:<5}{}", if same < n { format!(" worst {worst:.2e} on {at}") } else { String::new() });
     }

@@ -1451,10 +1451,33 @@ impl MjcfTree {
 
     fn smooth_model(&self) -> &crate::mujoco_smooth::SmoothModel {
         self.smooth_cache.get_or_init(|| {
-            let mass = self.mj_body_names.iter().map(|n| self.body_mass.get(n).copied().unwrap_or(0.0)).collect();
-            let inertia = self.mj_body_names.iter().map(|n| self.body_iinertia.get(n).copied().unwrap_or([0.0; 3])).collect();
-            let armature: Vec<f64> = self.joints.iter().map(|j| j.armature).collect();
-            crate::mujoco_smooth::SmoothModel::new(&self.mj_kin, mass, inertia, &armature, &self.qpos0(), [self.gravity.x, self.gravity.y, self.gravity.z])
+            let per_body = |m: &BTreeMap<String, f64>| self.mj_body_names.iter().map(|n| m.get(n).copied().unwrap_or(0.0)).collect();
+            let mut unsupported: Vec<String> = Vec::new();
+            if self.density != 0.0 || self.viscosity != 0.0 {
+                unsupported.push("a fluid (density or viscosity)".into());
+            }
+            if self.tendons.iter().any(|t| t.stiffness != 0.0 || t.damping != 0.0) {
+                unsupported.push("a tendon spring or damper".into());
+            }
+            if !self.actuators_unsupported.is_empty() {
+                unsupported.push("an actuator this loader does not carry".into());
+            }
+            let inp = crate::mujoco_smooth::SmoothInputs {
+                body_mass: per_body(&self.body_mass),
+                body_inertia: self.mj_body_names.iter().map(|n| self.body_iinertia.get(n).copied().unwrap_or([0.0; 3])).collect(),
+                body_gravcomp: per_body(&self.body_gravcomp),
+                jnt_armature: self.joints.iter().map(|j| j.armature).collect(),
+                jnt_stiffness: self.joints.iter().map(|j| j.stiffness).collect(),
+                jnt_springref: self.joints.iter().map(|j| j.springref).collect(),
+                jnt_damping: self.joints.iter().map(|j| j.damping).collect(),
+                jnt_actfrcrange: self.joints.iter().map(|j| j.actuator_force_range.map(|(a, b)| [a, b])).collect(),
+                qpos0: self.qpos0(),
+                gravity: [self.gravity.x, self.gravity.y, self.gravity.z],
+                timestep: self.timestep,
+                actuators: self.actuators.clone(),
+                unsupported,
+            };
+            crate::mujoco_smooth::SmoothModel::new(&self.mj_kin, inp)
         })
     }
 
@@ -1469,9 +1492,19 @@ impl MjcfTree {
     /// **MuJoCo's own smooth dynamics at `qpos`, `qvel`, by their `mjData` names** — `mj_kinematics`,
     /// `mj_comPos`, `mj_crb`, `mj_factorM`, `mj_comVel` and `mj_rne` in MuJoCo's coordinates and arithmetic:
     /// `xpos`…`xaxis`, `subtree_com`, `cinert`, `cdof`, `crb`, `M`, `qLD`, `qLDiagInv`, `cvel`, `cdof_dot`,
-    /// `qfrc_bias`, flattened as MuJoCo stores them.
-    pub fn mujoco_native_forward(&self, qpos: &[f64], qvel: &[f64]) -> Vec<(&'static str, Vec<f64>)> {
-        self.smooth_model().forward(qpos, qvel).arrays()
+    /// `qfrc_bias`, then `mj_passive`, `mj_transmission`, `mj_fwdActuation` and `mj_fwdAcceleration` at the
+    /// control `ctrl` and activations `act` (`qfrc_spring`…`qfrc_passive`, `actuator_length`,
+    /// `actuator_velocity`, `actuator_force`, `act_dot`, `qfrc_actuator`, `qfrc_smooth`, `qacc_smooth`),
+    /// flattened as MuJoCo stores them.
+    pub fn mujoco_native_forward(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64]) -> Vec<(&'static str, Vec<f64>)> {
+        self.smooth_model().forward(qpos, qvel, ctrl, act).arrays()
+    }
+
+    /// What [`MjcfTree::mujoco_native_forward`] does not yet compute in MuJoCo's own arithmetic for this model
+    /// (a fluid, a tendon's spring, an actuator that is not a hinge or slide joint transmission…); empty when
+    /// every array it returns is meant to be MuJoCo's to the bit.
+    pub fn mujoco_native_unsupported(&self) -> Vec<String> {
+        self.smooth_model().unsupported.clone()
     }
 
     /// **Each body's bounding-volume hierarchy as MuJoCo's compiler builds it** (`bvh_aabb`, `bvh_child`,
@@ -6509,10 +6542,17 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
     // transmission reflects, so it needs the mass matrix. MuJoCo does it in `mj_setConst`, at `qpos0` —
     // which is `q = 0` here, because a joint's `ref` is folded into its origin.
     if out.actuators.iter().any(|a| a.biasprm[2] > 0.0) {
-        let nv = out.tree.joints.len();
-        let m0 = out.mass_matrix(&out.reference_q);
-        let diag: Vec<f64> = (0..nv).map(|i| m0[(i, i)]).collect();
-        crate::mujoco_actuator::resolve_dampratio(&mut out.actuators, &diag);
+        // `dof_M0`, as `mj_setM0` computes it in MuJoCo's own arithmetic
+        let names = &out.mj_body_names;
+        let inp = crate::mujoco_smooth::SmoothInputs {
+            body_mass: names.iter().map(|n| out.body_mass.get(n).copied().unwrap_or(0.0)).collect(),
+            body_inertia: names.iter().map(|n| out.body_iinertia.get(n).copied().unwrap_or([0.0; 3])).collect(),
+            jnt_armature: out.joints.iter().map(|j| j.armature).collect(),
+            qpos0: out.qpos0(),
+            ..Default::default()
+        };
+        let dof_m0 = crate::mujoco_smooth::SmoothModel::new(&out.mj_kin, inp).dof_m0;
+        crate::mujoco_actuator::resolve_dampratio(&mut out.actuators, &dof_m0);
     }
     // ⛔ **`actuator_acc0`**, the other thing `mj_setConst` cannot do while reading the file: the
     // acceleration a unit force on each transmission produces at `qpos0`, `‖M⁻¹·moment‖`. A muscle whose
@@ -7156,7 +7196,7 @@ mod tests {
         let t = tree_from_mjcf_str(xml).unwrap();
         let qpos = [0.3, -0.2, 0.9, 0.8, 0.2, -0.3, 0.4, 0.7, 0.05, 0.6, 0.3, -0.5, 0.2];
         let qvel = [0.5, -0.3, 0.2, 1.1, -0.7, 0.4, 2.0, -0.6, 0.9, -1.3, 0.8];
-        let got: BTreeMap<&str, Vec<f64>> = t.mujoco_native_forward(&qpos, &qvel).into_iter().collect();
+        let got: BTreeMap<&str, Vec<f64>> = t.mujoco_native_forward(&qpos, &qvel, &[], &[]).into_iter().collect();
         let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<u64>>();
         let m: [u64; 66] = [
             0x4010000000000000, 0x0000000000000000, 0x4010000000000000, 0x0000000000000000, 0x0000000000000000,

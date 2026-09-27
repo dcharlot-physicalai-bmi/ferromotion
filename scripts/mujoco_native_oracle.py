@@ -4,8 +4,9 @@
 
 Per compilable model, `model <rel>`, then one `m <name> <values>` line per compiled `mjModel` field the
 native pipeline reads, and per state (`qpos0` at rest, then random states that move every joint and every
-dof's velocity) a `qpos` and a `qvel` line followed by one `d <name> <values>` line per `mjData` array
-after `mj_forward`. Integers are written as integers, floats as `float.hex` (exact).
+dof's velocity, every control — a little past each end of its range, so the clamp is exercised — and every
+activation) `qpos`, `qvel`, `ctrl` and `act` lines followed by one `d <name> <values>` line per `mjData`
+array after `mj_forward`. Integers are written as integers, floats as `float.hex` (exact).
 """
 import glob
 import os
@@ -26,7 +27,9 @@ MODEL = ["body_parentid", "body_rootid", "body_weldid", "body_jntnum", "body_jnt
          "dof_bodyid", "dof_jntid", "dof_parentid", "dof_simplenum", "dof_M0", "dof_armature", "dof_damping",
          "M_rownnz", "M_rowadr", "M_colind", "qpos0"]
 DATA = ["xpos", "xquat", "xmat", "xipos", "ximat", "xanchor", "xaxis", "subtree_com", "cinert", "cdof", "crb",
-        "M", "qLD", "qLDiagInv", "cvel", "cdof_dot", "qfrc_bias"]
+        "M", "qLD", "qLDiagInv", "cvel", "cdof_dot", "qfrc_bias",
+        "qfrc_spring", "qfrc_damper", "qfrc_gravcomp", "qfrc_passive", "actuator_length", "actuator_velocity",
+        "actuator_force", "act_dot", "qfrc_actuator", "qfrc_smooth", "qacc_smooth"]
 
 
 def fmt(a):
@@ -66,12 +69,24 @@ for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
                     lo, hi = m.jnt_range[j] if m.jnt_limited[j] else ((-np.pi, np.pi) if t == mujoco.mjtJoint.mjJNT_HINGE else (-0.5, 0.5))
                     q[a] = rng.uniform(lo, hi)
             v = rng.uniform(-1, 1, m.nv)
+        u = np.zeros(m.nu)
+        a = np.zeros(m.na)
+        if s > 0:
+            for i in range(m.nu):
+                lo, hi = m.actuator_ctrlrange[i] if m.actuator_ctrllimited[i] else (-1.0, 1.0)
+                # a little past each end, so the clamp is exercised
+                u[i] = rng.uniform(lo - 0.1 * (hi - lo), hi + 0.1 * (hi - lo))
+            a = rng.uniform(0, 1, m.na)
         mujoco.mj_resetData(m, d)
         d.qpos[:] = q
         d.qvel[:] = v
+        d.ctrl[:] = u
+        d.act[:] = a
         mujoco.mj_forward(m, d)
         lines.append("qpos\t" + fmt(q))
         lines.append("qvel\t" + fmt(v))
+        lines.append("ctrl\t" + fmt(u))
+        lines.append("act\t" + fmt(a))
         for name in DATA:
             lines.append(f"d\t{name}\t{fmt(getattr(d, name))}")
 open(out, "w").write("\n".join(lines) + "\n")

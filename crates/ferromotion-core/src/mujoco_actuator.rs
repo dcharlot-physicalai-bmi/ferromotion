@@ -345,17 +345,27 @@ pub fn qfrc_from_forces(state: &[ActState], forces: &[f64], dof_force_range: &[O
 ///
 /// MuJoCo marks an unresolved `dampratio` by leaving `biasprm[2]` POSITIVE (a real damping is stored
 /// negative), and only for a position-like actuator — one whose gain and bias agree that `gainprm[0] ==
-/// −biasprm[1]`, i.e. the same `kp` on both sides. `m0_diag` is `diag(M)` at `qpos0`.
-pub fn resolve_dampratio(acts: &mut [Actuator], m0_diag: &[f64]) {
+/// −biasprm[1]`, i.e. the same `kp` on both sides. `dof_m0` is MuJoCo's `dof_M0`: each dof's composite
+/// inertia at `qpos0`, armature included.
+///
+/// ⛔ The reflected mass is `Σ dof_M0 / trn²` over the transmission's entries — MuJoCo SUMS the masses.
+/// This used to take `1 / Σ (trn² / M)`, which is the same number for a joint transmission (to the last bit
+/// or two) and a DIFFERENT one for a fixed tendon over several dofs.
+pub fn resolve_dampratio(acts: &mut [Actuator], dof_m0: &[f64]) {
     for a in acts.iter_mut() {
         if a.gainprm[0] != -a.biasprm[1] || a.biasprm[2] <= 0.0 {
             continue;
         }
-        // the inertia the transmission reflects, `1/(m·M⁻¹·mᵀ)` on `diag(M)`: for a joint transmission that
-        // is exactly `diag(M)_j/gear²`, and for a fixed tendon it is the several dofs it pulls on together
-        let acc0: f64 = a.moment.iter().map(|(d, m)| m * m / m0_diag[*d]).sum();
-        let mass = if acc0 > 1e-15 { 1.0 / acc0 } else { 0.0 };
-        a.biasprm[2] = -(a.biasprm[2] * 2.0 * (a.gainprm[0] * mass).sqrt());
+        let mut mass = 0.0;
+        for (d, t) in &a.moment {
+            let trn = t.abs();
+            let trn2 = trn * trn;
+            if trn2 > MINVAL {
+                mass += dof_m0[*d] / trn2;
+            }
+        }
+        let damping = a.biasprm[2] * 2.0 * (a.gainprm[0] * mass).sqrt();
+        a.biasprm[2] = -damping;
     }
 }
 
