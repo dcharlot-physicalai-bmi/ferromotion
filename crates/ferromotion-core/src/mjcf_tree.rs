@@ -1256,6 +1256,24 @@ impl MjcfTree {
                 Some(CollisionGeom { kind: g.kind, pose: GeomPose { pos: world.translation.vector, mat: *world.rotation.to_rotation_matrix().matrix() }, size: g.size, hull })
             })
             .collect();
+        // `geom_rbound` (`mjCGeom::GetRBound`): a sphere about the geom's centre that holds all of it; zero
+        // for a plane, which is tested by its distance instead
+        let rbound: Vec<f64> = geoms
+            .iter()
+            .map(|g| {
+                let Some(g) = g else { return 0.0 };
+                let s = g.size;
+                match g.kind {
+                    GeomType::Sphere => s[0],
+                    GeomType::Capsule => s[0] + s[1],
+                    GeomType::Cylinder => (s[0] * s[0] + s[1] * s[1]).sqrt(),
+                    GeomType::Ellipsoid => s[0].max(s[1]).max(s[2]),
+                    GeomType::Box => (s[0] * s[0] + s[1] * s[1] + s[2] * s[2]).sqrt(),
+                    GeomType::Mesh => g.hull.map_or(0.0, |h| h.rbound()),
+                    _ => 0.0,
+                }
+            })
+            .collect();
         let mut out = MjcfCollision::default();
         for i in 0..self.geoms.len() {
             for j in i + 1..self.geoms.len() {
@@ -1287,6 +1305,23 @@ impl MjcfTree {
                     let (m, g) = margin_and_gap(&gi.params, &gj.params);
                     (m, g, contact_param(&gi.params, &gj.params))
                 };
+                // `mj_filterSphere`: two bounding spheres further apart than the margin, or a plane further
+                // from a geom's centre than its bound, cannot touch — the pair is never handed to a collider.
+                // A pure saving: the test is conservative, so no contact is lost to it.
+                let far = if rbound[i] > 0.0 && rbound[j] > 0.0 {
+                    let b = rbound[i] + rbound[j] + margin + gap;
+                    (ci.pose.pos - cj.pose.pos).norm_squared() > b * b
+                } else if ci.kind == GeomType::Plane && rbound[j] > 0.0 {
+                    (cj.pose.pos - ci.pose.pos).dot(&ci.pose.mat.column(2)) > margin + gap + rbound[j]
+                } else if cj.kind == GeomType::Plane && rbound[i] > 0.0 {
+                    (ci.pose.pos - cj.pose.pos).dot(&cj.pose.mat.column(2)) > margin + gap + rbound[i]
+                } else {
+                    false
+                };
+                if far {
+                    out.why.insert(key, "the bounding-sphere filter".into());
+                    continue;
+                }
                 let Ok(pre) = collide_pair_with(&opts, margin + gap, ci, cj) else {
                     out.refused.push([i, j]);
                     out.why.insert(key, "a pair the collider refuses".into());

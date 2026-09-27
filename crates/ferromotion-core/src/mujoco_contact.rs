@@ -634,7 +634,24 @@ pub fn mujoco_constraint_hessian(contacts: &[ConeContact], d: &[f64], jar: &[f64
 pub fn mujoco_constraint_hessian_blocks(blocks: &[EfcBlock], d: &[f64], jar: &[f64]) -> DMatrix<f64> {
     let n = d.len().min(jar.len());
     let mut h = DMatrix::zeros(n, n);
+    for (i, sub) in hessian_block_list(blocks, d, jar) {
+        let rows = sub.nrows();
+        for k in 0..rows {
+            for j in 0..rows {
+                h[(i + k, i + j)] = sub[(k, j)];
+            }
+        }
+    }
+    h
+}
+
+/// The same Hessian as its diagonal BLOCKS, `(first row, block)` — every row is its own block but a
+/// contact's, and a block that is all zero is left out. The Hessian of the constraint cost is block-diagonal
+/// by construction, so this is all of it.
+fn hessian_block_list(blocks: &[EfcBlock], d: &[f64], jar: &[f64]) -> Vec<(usize, DMatrix<f64>)> {
+    let n = d.len().min(jar.len());
     let u = mujoco_constraint_update_blocks(blocks, d, jar);
+    let mut out = Vec::with_capacity(blocks.len());
     let mut i = 0;
     for b in blocks {
         let rows = b.rows();
@@ -644,27 +661,39 @@ pub fn mujoco_constraint_hessian_blocks(blocks: &[EfcBlock], d: &[f64], jar: &[f
         match b {
             EfcBlock::Equality { .. } => {
                 for k in i..i + rows {
-                    h[(k, k)] = d[k];
+                    out.push((k, DMatrix::from_element(1, 1, d[k])));
                 }
             }
             EfcBlock::Friction { .. } | EfcBlock::Limit => {
                 if u.state[i] == ConstraintState::Quadratic {
-                    h[(i, i)] = d[i];
+                    out.push((i, DMatrix::from_element(1, 1, d[i])));
                 }
             }
             EfcBlock::Contact(c) => {
                 // the contact block on its own rows, by the routine the cone cases already pin
                 let sub = mujoco_constraint_hessian(std::slice::from_ref(c), &d[i..i + rows], &jar[i..i + rows]);
-                for k in 0..rows {
-                    for j in 0..rows {
-                        h[(i + k, i + j)] = sub[(k, j)];
-                    }
+                if sub.iter().any(|x| *x != 0.0) {
+                    out.push((i, sub));
                 }
             }
         }
         i += rows;
     }
-    h
+    out
+}
+
+/// `Jᵀ·H·J` for the block-diagonal constraint Hessian, block by block: `Σ J_bᵀ·H_b·J_b`. The dense
+/// product costs `nv·nefc²`, which on a scene with a few hundred contact rows is the whole of the solve;
+/// this costs `nv²·Σ n_b`.
+fn jt_h_j(blocks: &[EfcBlock], d: &[f64], jar: &[f64], jac: &DMatrix<f64>) -> DMatrix<f64> {
+    let nv = jac.ncols();
+    let mut out = DMatrix::zeros(nv, nv);
+    for (i, h) in hessian_block_list(blocks, d, jar) {
+        let jb = jac.rows(i, h.nrows());
+        let hj = &h * jb;
+        out.gemm_tr(1.0, &jb, &hj, 1.0);
+    }
+    out
 }
 
 /// What [`solve_constraints_newton`] produces.
@@ -995,8 +1024,8 @@ pub fn solve_constraints_newton_blocks(
         if grad_norm <= tol {
             break;
         }
-        let h = mujoco_constraint_hessian_blocks(blocks, d, &jar);
-        let hess = m + jac.transpose() * h * jac;
+        // the dense product while it is the cheaper one (`nv·nefc²` against `nv²·nefc`), block by block after
+        let hess = if nefc <= nv { m + jac.transpose() * mujoco_constraint_hessian_blocks(blocks, d, &jar) * jac } else { m + jt_h_j(blocks, d, &jar, jac) };
         // a strictly convex objective has a positive-definite Hessian; a Cholesky that fails means the
         // active set has left it singular, so fall back to the steepest descent direction rather than stop
         let dir = match hess.cholesky() {
@@ -1010,10 +1039,17 @@ pub fn solve_constraints_newton_blocks(
         }
         let mut step = 1.0;
         let mut improved = false;
+        let mut unchanged = false;
         for _ in 0..60 {
             let trial = &a + &dir * step;
             let (c2, u2, jar2) = objective(&trial);
             if c2 <= cost + 1e-4 * step * slope {
+                // ⛔ the ROUNDING FLOOR. On a cost of 1e7 the Armijo test accepts a step that moves
+                // nothing (`cost + 1e-4·step·slope` rounds back to `cost`, and `a + dir·step` back to `a`),
+                // the gradient settles above the tolerance (aloha: 4e-4), and every later iteration repeats
+                // this one exactly — 190 of aloha's 200. An accepted step that leaves `a` bit for bit
+                // where it was is that fixed point, so stopping there changes no answer.
+                unchanged = trial == a;
                 a = trial;
                 cost = c2;
                 u = u2;
@@ -1024,7 +1060,7 @@ pub fn solve_constraints_newton_blocks(
             step *= 0.5;
         }
         iterations += 1;
-        if !improved {
+        if !improved || unchanged {
             break;
         }
     }
