@@ -1404,6 +1404,10 @@ impl MjcfTree {
                         GeomType::Cylinder => s[0].mul_add(s[0], s[1] * s[1]).sqrt(),
                         GeomType::Ellipsoid => s[0].max(s[1]).max(s[2]),
                         GeomType::Box | GeomType::Mesh => s[2].mul_add(s[2], s[0].mul_add(s[0], s[1] * s[1])).sqrt(),
+                        GeomType::HField => g.hfield.as_ref().and_then(|h| self.hfields.get(h)).map_or(0.0, |h| {
+                            let hs = h.size;
+                            (hs[0].mul_add(hs[0], hs[1] * hs[1]) + (hs[2] * hs[2]).max(hs[3] * hs[3])).sqrt()
+                        }),
                         _ => 0.0,
                     }
                 })
@@ -1485,7 +1489,7 @@ impl MjcfTree {
                     (Some(mn), GeomType::Mesh) => Some(self.mesh_hulls.get(mn)?),
                     _ => None,
                 };
-                Some(CollisionGeom { kind: g.kind, pose: *pose, size: g.size, hull })
+                Some(CollisionGeom { kind: g.kind, pose: *pose, size: g.size, hull, hfield: g.hfield.as_ref().and_then(|h| self.hfields.get(h)) })
             })
             .collect();
         let mut out = MjcfCollision::default();
@@ -1504,8 +1508,8 @@ impl MjcfTree {
             for j in i + 1..self.geoms.len() {
                 let (gi, gj) = (&self.geoms[i], &self.geoms[j]);
                 let (Some(ci), Some(cj)) = (&geoms[i], &geoms[j]) else { continue };
-                if ci.kind == GeomType::HField || cj.kind == GeomType::HField {
-                    out.refused.push([i, j]);
+                // MuJoCo has no plane–height-field or height-field–height-field collider
+                if (ci.kind == GeomType::HField && matches!(cj.kind, GeomType::HField | GeomType::Plane)) || (cj.kind == GeomType::HField && ci.kind == GeomType::Plane) {
                     continue;
                 }
                 let key = (i, j);
@@ -2308,6 +2312,8 @@ pub struct MjcfTree {
     pub body_inertial_runtime: BTreeMap<String, (Vector3<f64>, Matrix3<f64>)>,
     /// MuJoCo's compiled kinematic data, for placing geoms in MuJoCo's own arithmetic
     pub(crate) mj_kin: crate::mujoco_kinematics::MjKinematics,
+    /// Every `<hfield>` asset, compiled (`hfield_nrow`, `hfield_ncol`, `hfield_size`, `hfield_data`).
+    pub hfields: BTreeMap<String, crate::mujoco_collision::HField>,
     /// Each body's mass after MuJoCo's `boundmass` floor, and its `<body gravcomp>` where it is non-zero —
     /// together with [`MjcfTree::body_ipos`] these are what [`MjcfTree::qfrc_gravcomp`] needs.
     pub body_mass: BTreeMap<String, f64>,
@@ -2429,6 +2435,8 @@ pub struct MjcfGeom {
     pub params: crate::mujoco_collision::GeomParams,
     /// `geom_aabb`: the bounding box in the geom's own frame, centre then half-sizes (`mjCGeom::ComputeAABB`)
     pub aabb: [f64; 6],
+    /// The height field a `type="hfield"` geom names, for [`MjcfTree::hfields`].
+    pub hfield: Option<String>,
 }
 
 /// The problem [`MjcfTree::constraint_problem`] poses, in MuJoCo's coordinates.
@@ -4370,6 +4378,7 @@ struct Walk<'a> {
     unnamed_bodies: usize,
     unnamed_joints: usize,
     meshes: &'a HashMap<String, MeshAsset>,
+    hfields: &'a BTreeMap<String, crate::mujoco_collision::HField>,
     /// per mesh name: what `mjCMesh::Process` leaves behind, in the mesh's frame
     mesh_cache: HashMap<String, MeshData>,
     /// per mesh name: the vertices as MuJoCo stores them after processing (CoM-centred, principal frame)
@@ -4544,6 +4553,10 @@ impl Walk<'_> {
             GeomType::Cylinder => [-sz(0), -sz(0), -sz(1), sz(0), sz(0), sz(1)],
             GeomType::Mesh => spec.mesh.as_ref().map(|m| self.mesh_data(m)).transpose()?.map_or([0.0; 6], |md| md.aamm),
             GeomType::Plane => [-1e10, -1e10, -1e10, 1e10, 1e10, 0.0],
+            GeomType::HField => {
+                let hs = get("hfield").and_then(|h| self.hfields.get(&h)).map_or([0.0; 4], |h| h.size);
+                [-hs[0], -hs[1], -hs[3], hs[0], hs[1], hs[2]]
+            }
             _ => [-sz(0), -sz(1), -sz(2), sz(0), sz(1), sz(2)],
         };
         let aabb = [(aamm[3] + aamm[0]) / 2.0, (aamm[4] + aamm[1]) / 2.0, (aamm[5] + aamm[2]) / 2.0, (aamm[3] - aamm[0]) / 2.0, (aamm[4] - aamm[1]) / 2.0, (aamm[5] - aamm[2]) / 2.0];
@@ -4558,6 +4571,7 @@ impl Walk<'_> {
             mesh: spec.mesh,
             params,
             aabb,
+            hfield: if kind == GeomType::HField { get("hfield") } else { None },
         }, kin));
         Ok(())
     }
@@ -4961,6 +4975,12 @@ impl Walk<'_> {
                 other => return Err(format!("body '{body}': fromto requires capsule, cylinder, box or ellipsoid, not {other}")),
             }
         }
+        // `mjCGeom::Compile`: a height-field geom's size is its asset's, the third entry a mean height
+        if ty == "hfield" {
+            let hname = get("hfield").ok_or_else(|| format!("body '{body}': an hfield geom needs an `hfield` attribute"))?;
+            let hf = self.hfields.get(&hname).ok_or_else(|| format!("body '{body}': geom references hfield '{hname}', which no <asset><hfield> declares"))?;
+            size = vec![hf.size[0], hf.size[1], 0.25f64.mul_add(hf.size[2], 0.5 * hf.size[3])];
+        }
         if let Some(mname) = &mesh_name {
             if ty != "mesh" && ty != "sphere" && ty != "capsule" && ty != "cylinder" && ty != "ellipsoid" && ty != "box" {
                 return Err(format!("body '{body}': invalid geom type '{ty}' in fitting mesh '{mname}'"));
@@ -5070,7 +5090,11 @@ impl Walk<'_> {
                 boxsz = md.boxsz;
                 md.volume
             }
-            "plane" | "hfield" | "sdf" => return Ok(None),
+            "hfield" => {
+                need(3)?;
+                size[0] * size[1] * size[2] * 8.0
+            }
+            "plane" | "sdf" => return Ok(None),
             other => return Err(format!("body '{body}': geom type '{other}' is not one this loader can weigh")),
         };
         // an explicit `mass` is taken as is (on a geom with volume); otherwise density × volume, default 1000
@@ -5114,8 +5138,8 @@ impl Walk<'_> {
                 let side = mass * (3.0 * r).mul_add(r, h * h) / 12.0;
                 [side, side, mass * r * r / 2.0]
             }
-            "ellipsoid" | "box" => {
-                let d = if ty == "box" { 3.0 } else { 5.0 };
+            "ellipsoid" | "box" | "hfield" => {
+                let d = if ty == "ellipsoid" { 5.0 } else { 3.0 };
                 let (s00, s11, s22) = (size[0] * size[0], size[1] * size[1], size[2] * size[2]);
                 [mass * (s11 + s22) / d, mass * (s00 + s22) / d, mass * (s00 + s11) / d]
             }
@@ -5963,6 +5987,69 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             meshes.insert(name, MeshAsset { file, include_dir, maxhullvert, scale, refpos, refquat, inertia });
         }
     }
+    // <asset><hfield>: `mjCHField::Compile` — a PNG (grey = the red channel, rows reversed), MuJoCo's own
+    // binary format, or `nrow`/`ncol`/`elevation` stated inline; then normalised to [0, 1] in `float`
+    let mut hfields: BTreeMap<String, crate::mujoco_collision::HField> = BTreeMap::new();
+    for asset in root.children_named("asset") {
+        for h in asset.children_named("hfield") {
+            let get = |k: &str| h.attr(k).map(|s| s.to_string());
+            let file = get("file");
+            let name = get("name").or_else(|| file.as_ref().map(|f| {
+                let stem = f.rsplit('/').next().unwrap_or(f);
+                stem.rsplit_once('.').map(|(s, _)| s).unwrap_or(stem).to_string()
+            })).ok_or("<hfield> needs a name or a file")?;
+            let sz = floats(&get("size").ok_or_else(|| format!("hfield '{name}' needs a size"))?)?;
+            if sz.len() != 4 || sz.iter().any(|&x| x <= 0.0) {
+                return Err(format!("hfield '{name}': size needs 4 positive numbers"));
+            }
+            let (nrow, ncol, mut data): (usize, usize, Vec<f32>) = if let Some(f) = &file {
+                let path = if f.starts_with('/') || c.meshdir.is_empty() || c.meshdir.ends_with('/') { format!("{}{f}", if f.starts_with('/') { "" } else { c.meshdir.as_str() }) } else { format!("{}/{f}", c.meshdir) };
+                let include_dir = h.attr(INCLUDE_DIR).or_else(|| asset.attr(INCLUDE_DIR)).unwrap_or("");
+                let bytes = resolve(&path).or_else(|| resolve(&format!("{include_dir}{f}"))).ok_or_else(|| format!("hfield '{name}': file '{path}' could not be resolved"))?;
+                if f.to_ascii_lowercase().ends_with(".png") || get("content_type").as_deref() == Some("image/png") {
+                    let (w, ht, grey) = crate::png::decode_grey8(&bytes).map_err(|e| format!("hfield '{name}': {e}"))?;
+                    let data = (0..ht).flat_map(|r| (0..w).map(move |cc| (r, cc))).map(|(r, cc)| grey[cc + (ht - 1 - r) * w] as f32).collect();
+                    (ht, w, data)
+                } else {
+                    // `LoadCustom`: int32 nrow, int32 ncol, then nrow·ncol float32
+                    let i32at = |k: usize| bytes.get(k..k + 4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+                    let (nr, nc) = (i32at(0).ok_or("short hfield file")? as usize, i32at(4).ok_or("short hfield file")? as usize);
+                    let data: Vec<f32> = (0..nr * nc).map(|k| bytes.get(8 + 4 * k..12 + 4 * k).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))).collect::<Option<_>>().ok_or("hfield file shorter than nrow·ncol")?;
+                    (nr, nc, data)
+                }
+            } else {
+                let nr = get("nrow").ok_or_else(|| format!("hfield '{name}' needs a file or nrow/ncol"))?.trim().parse::<usize>().map_err(|e| e.to_string())?;
+                let nc = get("ncol").ok_or_else(|| format!("hfield '{name}' needs ncol"))?.trim().parse::<usize>().map_err(|e| e.to_string())?;
+                let data: Vec<f32> = match get("elevation") {
+                    Some(e) => {
+                        let v: Vec<f32> = e.split_whitespace().map(|x| x.parse::<f32>().map_err(|e| format!("hfield '{name}' elevation: {e}"))).collect::<Result<_, _>>()?;
+                        if v.len() != nr * nc {
+                            return Err(format!("hfield '{name}': elevation data length must match nrow*ncol"));
+                        }
+                        // the XML is written top to bottom; MuJoCo stores rows from the bottom (as for a PNG)
+                        (0..nr).flat_map(|r| (0..nc).map(move |cc| (r, cc))).map(|(r, cc)| v[(nr - 1 - r) * nc + cc]).collect()
+                    }
+                    None => vec![0.0; nr * nc],
+                };
+                (nr, nc, data)
+            };
+            if nrow < 1 || ncol < 1 || data.is_empty() {
+                return Err(format!("hfield '{name}' not specified"));
+            }
+            let (mut emin, mut emax) = (1e10f32, -1e10f32);
+            for &x in &data {
+                emin = emin.min(x);
+                emax = emax.max(x);
+            }
+            for x in &mut data {
+                *x -= emin;
+                if (emax - emin) as f64 > 1e-14 {
+                    *x /= emax - emin;
+                }
+            }
+            hfields.insert(name, crate::mujoco_collision::HField { nrow, ncol, size: [sz[0], sz[1], sz[2], sz[3]], data });
+        }
+    }
     // an <include> outside the worldbody splices in a second <worldbody>; MuJoCo merges them in order
     let worlds: Vec<&El> = root.children_named("worldbody").collect();
     if worlds.is_empty() {
@@ -6015,6 +6102,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             body_iquat_wxyz: BTreeMap::new(),
             body_inertial_runtime: BTreeMap::new(),
             mj_kin: Default::default(),
+            hfields: BTreeMap::new(),
             body_mass: BTreeMap::new(),
             body_gravcomp: BTreeMap::new(),
             tendons: Vec::new(),
@@ -6035,6 +6123,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
         unnamed_bodies: 0,
         unnamed_joints: 0,
         meshes: &meshes,
+        hfields: &hfields,
         mesh_cache: HashMap::new(),
         mesh_stored: HashMap::new(),
         mesh_raw: HashMap::new(),
@@ -6052,6 +6141,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
         walk.children(world, -1, Iso::identity(), world.attr("childclass"), None)?;
     }
     let mut out = walk.out;
+    out.hfields = hfields.clone();
     // ⛔ MuJoCo orders geoms BODY-MAJOR — every geom of body 0 (the world), then of body 1, and so on —
     // not in file order. A scene that `<include>`s a robot and then declares its own floor puts that floor
     // LAST in the file and FIRST in `geom_xpos`, because the floor belongs to the world body. Recording in
@@ -7810,6 +7900,53 @@ mod tests {
         assert_eq!(got.len(), want.len(), "{got:?}");
         for (g, w) in got.iter().zip(&want) {
             assert_eq!((g.0, g.1, g.2.to_bits()), (w.0, w.1, w.2.to_bits()), "{got:?}");
+        }
+    }
+
+    /// **Height fields, bit for bit** (`mjc_ConvexHField`): a sphere, a tilted box and a tilted capsule with a
+    /// margin (which raises every prism's top) on an inline 5×6 `elevation` grid (written top to bottom, stored bottom-up, normalised to [0, 1]). Every
+    /// contact's distance, position and normal against MuJoCo 3.13.0's `d.contact` at `qpos0`.
+    #[test]
+    fn height_field_contacts_match_mujoco_bit_for_bit() {
+        const MODEL: &str = r#"<mujoco>
+  <asset>
+    <hfield name="terrain" nrow="5" ncol="6" size="1 0.8 0.3 0.1" elevation="0 1 2 3 2 1  1 2 4 2 1 0  0 3 5 4 2 1  2 1 3 6 3 0  1 0 2 1 0 2"/>
+  </asset>
+  <worldbody>
+    <geom name="ground" type="hfield" hfield="terrain"/>
+    <body name="ball" pos="0.12 -0.1 0.25">
+      <freejoint/>
+      <geom name="ball" type="sphere" size="0.1"/>
+    </body>
+    <body name="crate" pos="-0.45 0.3 0.12" euler="0.2 0.1 0.4">
+      <freejoint/>
+      <geom name="crate" type="box" size="0.12 0.08 0.06"/>
+    </body>
+    <body name="rod" pos="0.5 -0.35 0.2" euler="0.1 1.4 0.3">
+      <freejoint/>
+      <geom name="rod" type="capsule" size="0.04 0.15" margin="0.02"/>
+    </body>
+  </worldbody>
+</mujoco>"#;
+        let t = tree_from_mjcf_str(MODEL).unwrap();
+        type Want = (&'static str, &'static str, f64, [f64; 3], [f64; 3]);
+        let want: [Want; 6] = [
+            ("ground", "ball", -0.03739936084216494, [0.11021259393720868, -0.08042518437416735, 0.1717007328296694], [0.12038582521549321, -0.2407716934843232, 0.9630868313417416]),
+            ("ground", "ball", -0.049857350278048135, [0.14566551444970594, -0.11711034194661472, 0.18155862813411733], [-0.34188173043749703, 0.22792114003983882, 0.9116846144999943]),
+            ("ground", "ball", -0.016404335711274892, [0.20784937154377636, -0.10645951111874133, 0.22416195398496716], [-0.9569874308755267, 0.07036670657519466, 0.2814668430775099]),
+            ("ground", "crate", -0.09683711380446607, [-0.43303709812998203, 0.27349702306506074, 0.1075112252556639], [-0.15339976322133897, 0.08659912537908676, 0.984362282966599]),
+            ("ground", "crate", -0.03505948955851695, [-0.34188545978143037, 0.2333237513847614, 0.09415035024673632], [-0.7071724947086209, 0.7070402702793326, 0.0010577953081877176]),
+            ("ground", "rod", -0.10026170789329644, [0.4963220956822491, -0.3498691460533522, 0.05005574225282834], [3.7765545107399436e-08, -0.9999999999999934, -1.0872401050824245e-07]),
+        ];
+        let c = t.collide_qpos(&t.qpos0());
+        assert_eq!(c.contacts.len(), want.len());
+        for (k, w) in c.contacts.iter().zip(&want) {
+            let (g1, g2) = (t.geoms[k.geom[0]].name.as_str(), t.geoms[k.geom[1]].name.as_str());
+            let r = &k.record;
+            let got = [r.dist, r.pos[0], r.pos[1], r.pos[2], r.frame[0][0], r.frame[0][1], r.frame[0][2]];
+            let exp = [w.2, w.3[0], w.3[1], w.3[2], w.4[0], w.4[1], w.4[2]];
+            assert_eq!((g1, g2), (w.0, w.1));
+            assert_eq!(got.map(f64::to_bits), exp.map(f64::to_bits), "{g1}–{g2}: {got:?}\n  MuJoCo {exp:?}");
         }
     }
 

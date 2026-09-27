@@ -1025,6 +1025,101 @@ pub struct CollisionGeom<'a> {
     /// A mesh geom's hull data (`MeshHull::new` on the mesh as MuJoCo stores it: centred at its CoM in its
     /// principal frame, vertices `f32`).
     pub hull: Option<&'a crate::mujoco_hull::MeshHull>,
+    /// A height-field geom's elevation grid.
+    pub hfield: Option<&'a HField>,
+}
+
+/// A height field as the compiled model holds it (`hfield_nrow`, `hfield_ncol`, `hfield_size`,
+/// `hfield_data`): `size` is `(x half-extent, y half-extent, top, base depth)`, and `data` the elevations
+/// normalised to [0, 1], row-major from the `-y` edge (the image's rows reversed).
+#[derive(Clone, Debug, PartialEq)]
+pub struct HField {
+    pub nrow: usize,
+    pub ncol: usize,
+    pub size: [f64; 4],
+    pub data: Vec<f32>,
+}
+
+/// `mjc_ConvexHField`: a convex geom against a height field, one CCD penetration per triangular prism of
+/// the grid under the geom's box, in the height field's frame. `g2` is the convex geom, `rbound2` its
+/// `geom_rbound`.
+pub fn hfield_convex(opts: &CollideOptions, margin: f64, hf_pose: &GeomPose, hf: &HField, g2: &CollisionGeom, rbound2: f64) -> Vec<PreContact> {
+    use crate::mujoco_ccd::{penetration, CcdConfig, CcdObj};
+    let (pos1, mat1) = (hf_pose.pos, hf_pose.mat);
+    let [size0, size1, size2, size3] = hf.size;
+    let (nrow, ncol) = (hf.nrow as i64, hf.ncol as i64);
+    // the geom's centre in the height field's frame, and the box–sphere early exit
+    let local_pos = mat_t_vec(&mat1, &(g2.pose.pos - pos1));
+    let radius = rbound2 + margin;
+    if size0 < local_pos.x - radius || -size0 > local_pos.x + radius || size1 < local_pos.y - radius || -size1 > local_pos.y + radius || size2 < local_pos.z - radius || -size3 > local_pos.z + radius {
+        return Vec::new();
+    }
+    // the geom as a CCD object in the height field's frame; its box from six support points
+    let local_mat = mat_t_mat(&mat1, &g2.pose.mat);
+    let mut obj2 = CcdObj::new(g2.kind, GeomPose { pos: local_pos, mat: local_mat }, g2.size, g2.hull, 0.0);
+    let mut obj1 = CcdObj::new(GeomType::HField, *hf_pose, [size0, size1, size2], None, 0.0);
+    let mut extent = [0.0f64; 6];
+    for (k, e) in extent.iter_mut().enumerate() {
+        let mut dir = Vector3::zeros();
+        dir[k / 2] = if k % 2 == 0 { 1.0 } else { -1.0 };
+        *e = obj2.support_point(&dir)[k / 2];
+    }
+    let [xmax, xmin, ymax, ymin, zmax, zmin] = extent;
+    if xmin - margin > size0 || xmax + margin < -size0 || ymin - margin > size1 || ymax + margin < -size1 || zmin - margin > size2 || zmax + margin < -size3 {
+        return Vec::new();
+    }
+    // the sub-grid under the box
+    let cmin = (((xmin + size0) / (2.0 * size0) * (ncol - 1) as f64).floor() as i64).max(0);
+    let cmax = (((xmax + size0) / (2.0 * size0) * (ncol - 1) as f64).ceil() as i64).min(ncol - 1);
+    let rmin = (((ymin + size1) / (2.0 * size1) * (nrow - 1) as f64).floor() as i64).max(0);
+    let rmax = (((ymax + size1) / (2.0 * size1) * (nrow - 1) as f64).ceil() as i64).min(nrow - 1);
+    obj2.margin = margin;
+    let dx = (2.0 * size0) / (ncol - 1) as f64;
+    let dy = (2.0 * size1) / (nrow - 1) as f64;
+    for p in obj1.prism.iter_mut().take(3) {
+        p[2] = -size3;
+    }
+    // `addPrismVert`: shift the prism by one vertex along the strip, the new one on row r + (1 − i)
+    let add = |obj: &mut CcdObj, r: i64, c: i64, i: i64| {
+        let pr = &mut obj.prism;
+        pr[0] = pr[1];
+        pr[1] = pr[2];
+        pr[3] = pr[4];
+        pr[4] = pr[5];
+        let dr = 1 - i;
+        let x = dx.mul_add(c as f64, -size0);
+        let y = dy.mul_add((r + dr) as f64, -size1);
+        pr[2][0] = x;
+        pr[5][0] = x;
+        pr[2][1] = y;
+        pr[5][1] = y;
+        pr[5][2] = hf.data[((r + dr) * ncol + c) as usize] as f64 * size2;
+        pr[5][2] += margin;
+    };
+    let config = CcdConfig { max_iterations: opts.ccd_iterations, tolerance: opts.ccd_tolerance, max_contacts: 1, dist_cutoff: 0.0 };
+    let mut out = Vec::new();
+    'grid: for r in rmin..rmax {
+        add(&mut obj1, r, cmin, 0);
+        add(&mut obj1, r, cmin, 1);
+        for c in cmin + 1..=cmax {
+            for i in 0..2 {
+                add(&mut obj1, r, c, i);
+                let pr = obj1.prism;
+                if pr[3][2] < zmin && pr[4][2] < zmin && pr[5][2] < zmin {
+                    continue;
+                }
+                if let Some(mut con) = penetration(&config, &mut obj1, &mut obj2, 0.0).into_iter().next() {
+                    con.normal = mat_vec(&mat1, &con.normal);
+                    con.pos = mat_vec(&mat1, &con.pos) + pos1;
+                    out.push(con);
+                    if out.len() >= 50 {
+                        break 'grid;
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The `<option>` values the convex pairs read: `ccd_tolerance` (1e-6), `ccd_iterations` (35) and the
@@ -1073,7 +1168,12 @@ pub fn collide_pair_with(opts: &CollideOptions, margin: f64, g1: &CollisionGeom,
         (Capsule, Capsule) => capsule_capsule(margin, &a.pose, [a.size[0], a.size[1]], &b.pose, [b.size[0], b.size[1]]),
         (Capsule, Box) => capsule_box(margin, &a.pose, [a.size[0], a.size[1]], &b.pose, b.size),
         (Box, Box) => box_box(margin, &a.pose, a.size, &b.pose, b.size),
-        (HField, _) | (_, HField) => return Err("height fields are not carried by this port".to_string()),
+        (HField, _) => {
+            let hf = a.hfield.ok_or("a height-field geom without its elevation data")?;
+            let rbound = CcdObj::new(b.kind, b.pose, b.size, b.hull, 0.0).rbound();
+            hfield_convex(opts, margin, &a.pose, hf, b, rbound)
+        }
+        (_, HField) => return Err("height fields are not carried by this port".to_string()),
         _ => convex_pair(&mut obj(a)?, &mut obj(b)?, margin, opts.ccd_tolerance, opts.ccd_iterations, opts.multiccd),
     };
     Ok(if swapped {
@@ -1268,8 +1368,8 @@ mod tests {
 
     #[test]
     fn the_dispatcher_orders_types_and_flips_a_swapped_normal() {
-        let floor = CollisionGeom { kind: GeomType::Plane, pose: GeomPose { pos: Vector3::zeros(), mat: Matrix3::identity() }, size: [1.0, 1.0, 0.1], hull: None };
-        let ball = CollisionGeom { kind: GeomType::Sphere, pose: pose([0.2, 0.3, 0.095], ID), size: [0.1, 0.0, 0.0], hull: None };
+        let floor = CollisionGeom { kind: GeomType::Plane, pose: GeomPose { pos: Vector3::zeros(), mat: Matrix3::identity() }, size: [1.0, 1.0, 0.1], hull: None, hfield: None };
+        let ball = CollisionGeom { kind: GeomType::Sphere, pose: pose([0.2, 0.3, 0.095], ID), size: [0.1, 0.0, 0.0], hull: None, hfield: None };
         let a = collide_pair(0.0, &floor, &ball).unwrap();
         let b = collide_pair(0.0, &ball, &floor).unwrap();
         assert_eq!(a.len(), 1);
@@ -1279,7 +1379,7 @@ mod tests {
             tris: vec![[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]],
         };
         let hull = crate::mujoco_hull::MeshHull::new(&mesh).unwrap();
-        let tet = CollisionGeom { kind: GeomType::Mesh, pose: pose([0.0, 0.0, 0.05], ID), size: [0.0; 3], hull: Some(&hull) };
+        let tet = CollisionGeom { kind: GeomType::Mesh, pose: pose([0.0, 0.0, 0.05], ID), size: [0.0; 3], hull: Some(&hull), hfield: None };
         let c = collide_pair(0.0, &floor, &tet).unwrap();
         // the deepest vertex first, then the rest of its bottom face (MuJoCo 3.13's `mjc_PlaneConvex`)
         assert_eq!(c.len(), 3);
@@ -1287,7 +1387,7 @@ mod tests {
         for k in &c {
             assert!((k.dist + 0.05).abs() < 2e-9 && (k.pos.z + 0.025).abs() < 2e-9, "{k:?}");
         }
-        let bare = CollisionGeom { kind: GeomType::Mesh, pose: tet.pose, size: [0.0; 3], hull: None };
+        let bare = CollisionGeom { kind: GeomType::Mesh, pose: tet.pose, size: [0.0; 3], hull: None, hfield: None };
         assert!(collide_pair(0.0, &floor, &bare).is_err(), "a mesh without hull data names itself");
     }
 }

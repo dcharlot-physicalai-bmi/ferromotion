@@ -142,6 +142,9 @@ pub struct CcdObj<'a> {
     meshindex: i64,
     /// Sphere/capsule shortcut: the support is a point or a segment while this is set.
     reduced: Option<Reduced>,
+    /// A height field's current triangular prism (`obj->data.hfield.prism`), bottom three then top three,
+    /// in the frame the other object has been expressed in.
+    pub(crate) prism: [[f64; 3]; 6],
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -152,23 +155,36 @@ enum Reduced {
 
 impl<'a> CcdObj<'a> {
     pub fn new(kind: GeomType, pose: GeomPose, size: [f64; 3], hull: Option<&'a MeshHull>, margin: f64) -> Self {
-        Self { kind, pose, size, hull, margin, vertindex: -1, meshindex: -1, reduced: None }
+        Self { kind, pose, size, hull, margin, vertindex: -1, meshindex: -1, reduced: None, prism: [[0.0; 3]; 6] }
     }
 
+    /// The raw support point along `dir` (`obj->support`), with the object's cached-vertex side effects.
+    pub(crate) fn support_point(&mut self, dir: &V3) -> V3 {
+        self.support(dir)
+    }
+
+    /// `mjc_center`: a geom's position, or a height-field prism's vertex average.
     fn center(&self) -> V3 {
+        if self.kind == GeomType::HField {
+            let mut c = V3::zeros();
+            for p in &self.prism {
+                c += V3::from(*p);
+            }
+            return c * (1.0 / 6.0);
+        }
         self.pose.pos
     }
 
-    /// `mjCGeom::GetRBound`: the bounding-sphere radius MuJoCo stores as `geom_rbound`.
+    /// `mjCGeom::GetRBound`, contracted: the bounding-sphere radius MuJoCo stores as `geom_rbound` (a mesh's
+    /// is the corner of its `geom_size` box).
     pub fn rbound(&self) -> f64 {
         let s = self.size;
         match self.kind {
             GeomType::Sphere => s[0],
             GeomType::Capsule => s[0] + s[1],
-            GeomType::Cylinder => (s[0] * s[0] + s[1] * s[1]).sqrt(),
+            GeomType::Cylinder => s[0].mul_add(s[0], s[1] * s[1]).sqrt(),
             GeomType::Ellipsoid => s[0].max(s[1]).max(s[2]),
-            GeomType::Box => (s[0] * s[0] + s[1] * s[1] + s[2] * s[2]).sqrt(),
-            GeomType::Mesh => self.hull.map(|h| h.rbound()).unwrap_or(0.0),
+            GeomType::Box | GeomType::Mesh => s[2].mul_add(s[2], s[0].mul_add(s[0], s[1] * s[1])).sqrt(),
             GeomType::Plane | GeomType::HField => 0.0,
         }
     }
@@ -192,6 +208,20 @@ impl<'a> CcdObj<'a> {
         if self.kind == GeomType::Sphere {
             let r = self.size[0];
             return V3::new(r.mul_add(dir.x, pos.x), r.mul_add(dir.y, pos.y), r.mul_add(dir.z, pos.z));
+        }
+        if self.kind == GeomType::HField {
+            // `mjc_prism_support`: the best of the three vertices on the side `dir.z` points to
+            let start = if dir.z < 0.0 { 0 } else { 3 };
+            let mut best_i = start;
+            let mut best = dot3(&V3::from(self.prism[start]), dir);
+            for i in 1..3 {
+                let t = dot3(&V3::from(self.prism[start + i]), dir);
+                if t > best {
+                    best_i = start + i;
+                    best = t;
+                }
+            }
+            return V3::from(self.prism[best_i]);
         }
         let local_dir = mat_t_vec(&mat, dir);
         match self.kind {
@@ -1827,7 +1857,7 @@ pub fn max_contacts(k1: GeomType, k2: GeomType, margin: f64, multiccd: bool) -> 
 }
 
 /// `mjc_penetration` with the native CCD: the contacts from one query, margin added back to the distances.
-fn penetration(config: &CcdConfig, o1: &mut CcdObj, o2: &mut CcdObj, margin: f64) -> Vec<PreContact> {
+pub(crate) fn penetration(config: &CcdConfig, o1: &mut CcdObj, o2: &mut CcdObj, margin: f64) -> Vec<PreContact> {
     let st = ccd(config, o1, o2);
     let mut out = Vec::new();
     let min = st.dist.iter().cloned().fold(f64::INFINITY, f64::min);
@@ -1971,11 +2001,11 @@ mod tests {
     /// A mesh geom at a body's pose: the body carries the mesh's CoM offset and principal rotation.
     fn mesh_geom<'a>(hull: &'a MeshHull, com: &V3, r: &Matrix3<f64>, p: [f64; 3], q: [f64; 4]) -> CollisionGeom<'a> {
         let rb = rot(q);
-        CollisionGeom { kind: GeomType::Mesh, pose: GeomPose { pos: Vector3::new(p[0], p[1], p[2]) + rb * com, mat: rb * r }, size: [0.0; 3], hull: Some(hull) }
+        CollisionGeom { kind: GeomType::Mesh, pose: GeomPose { pos: Vector3::new(p[0], p[1], p[2]) + rb * com, mat: rb * r }, size: [0.0; 3], hull: Some(hull), hfield: None }
     }
 
     fn prim(kind: GeomType, size: [f64; 3], p: [f64; 3], q: [f64; 4]) -> CollisionGeom<'static> {
-        CollisionGeom { kind, pose: pose(p, q), size, hull: None }
+        CollisionGeom { kind, pose: pose(p, q), size, hull: None, hfield: None }
     }
 
     fn big_box() -> CollisionGeom<'static> {
@@ -2135,6 +2165,7 @@ mod tests {
             pose: GeomPose { pos: Vector3::new(p[0], p[1], p[2]), mat: Matrix3::new(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]) },
             size,
             hull: None,
+            hfield: None,
         };
         let a = cyl(
             [0.065, 0.0675, 0.0],

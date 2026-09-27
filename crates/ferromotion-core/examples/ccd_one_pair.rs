@@ -48,8 +48,8 @@ fn main() {
     let r2: Vec<f64> = (25..34).map(f).collect();
 
     let hull = |n: &str| if n == "-" { None } else { Some(t.mesh_hulls.get(n).expect("mesh hull")) };
-    let g1 = CollisionGeom { kind: geom_type(&ty1), pose: GeomPose { pos: p1, mat: Matrix3::from_row_slice(&r1) }, size: s1, hull: hull(&m1) };
-    let g2 = CollisionGeom { kind: geom_type(&ty2), pose: GeomPose { pos: p2, mat: Matrix3::from_row_slice(&r2) }, size: s2, hull: hull(&m2) };
+    let g1 = CollisionGeom { kind: geom_type(&ty1), pose: GeomPose { pos: p1, mat: Matrix3::from_row_slice(&r1) }, size: s1, hull: hull(&m1), hfield: None };
+    let g2 = CollisionGeom { kind: geom_type(&ty2), pose: GeomPose { pos: p2, mat: Matrix3::from_row_slice(&r2) }, size: s2, hull: hull(&m2), hfield: None };
     println!("centre 1 -> 2: {:?}", (g2.pose.pos - g1.pose.pos).normalize());
     // MULTICCD=0 takes the single-contact path, which isolates GJK/EPA from the multi-contact clipping
     let opts = CollideOptions { multiccd: std::env::var("MULTICCD").map(|v| v != "0").unwrap_or(true), ..Default::default() };

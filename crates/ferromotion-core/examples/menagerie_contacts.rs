@@ -23,7 +23,7 @@
 //! **near** when the same pair has a contact at the same depth (2e-5) and normal (1e-3) but the witness sits
 //! elsewhere on the face — the same manifold sampled at different corners. Since the hulls are qhull's own
 //! ([`ferromotion_core::qhull`]) and the polygons come in libc++'s order, that is rare. Height-field pairs
-//! are not carried and are counted separately.
+//! go through `mjc_ConvexHField` like any other.
 
 use ferromotion_core::{
     can_collide, collide_pair_with, contact_param, filter_body_pair, set_contact, tree_from_mjcf, CollideOptions, CollisionGeom, ContactRecord, GeomParams, GeomPose, GeomType, MeshHull, MjcfTree, PairParams,
@@ -375,7 +375,7 @@ fn main() {
                         (Some(m), GeomType::Mesh) => Some(hulls.get(m)?),
                         _ => None,
                     };
-                    Some(CollisionGeom { kind, pose: s.poses[i], size: g.size, hull })
+                    Some(CollisionGeom { kind, pose: s.poses[i], size: g.size, hull, hfield: t.geoms.get(i).and_then(|tg| tg.hfield.as_ref()).and_then(|h| t.hfields.get(h)) })
                 })
                 .collect();
             let mut mine: Vec<(usize, usize, ContactRecord)> = Vec::new();
@@ -404,9 +404,6 @@ fn main() {
                     let margin = o.override_margin.unwrap_or(margin);
                     // MuJoCo detects with margin + gap and records includemargin = margin
                     let detect = margin + gap;
-                    if ci.kind == GeomType::HField || cj.kind == GeomType::HField {
-                        continue;
-                    }
                     // midphase leaf: oriented bounding boxes (a plane's is the half-space below it)
                     if !collide_obb(&gi.aabb, &ci.pose, &gj.aabb, &cj.pose, detect) {
                         continue;
@@ -470,9 +467,6 @@ fn main() {
                     }
                 }
                 for (k, (d, n)) in &theirs {
-                    if o.geoms[k.0].ty == "hfield" || o.geoms[k.1].ty == "hfield" {
-                        continue;
-                    }
                     let bt = by_type.entry(pair_key(&o.geoms[k.0].ty, &o.geoms[k.1].ty)).or_default();
                     match ours.get(k) {
                         Some((d2, n2)) => {
@@ -564,11 +558,6 @@ fn main() {
                 let key = pair_key(&o.geoms[oc.g1].ty, &o.geoms[oc.g2].ty);
                 let bt = by_type.entry(key.clone()).or_default();
                 bt.oracle += 1;
-                if o.geoms[oc.g1].ty == "hfield" || o.geoms[oc.g2].ty == "hfield" {
-                    tally.hfield += 1;
-                    bt.hfield += 1;
-                    continue;
-                }
                 let (a, b) = if oc.g1 < oc.g2 { (oc.g1, oc.g2) } else { (oc.g2, oc.g1) };
                 let mut best: Option<(usize, f64)> = None;
                 for (k, (i, j, c)) in mine.iter().enumerate() {
@@ -728,7 +717,7 @@ fn main() {
         println!("  refused {r}: {e}");
     }
     println!(
-        "contacts: oracle {} matched {} near {} missing {} extra {} hfield(not carried) {} param-mismatch {} | worst dist {:.2e} pos {:.2e} normal {:.2e}",
+        "contacts: oracle {} matched {} near {} missing {} extra {} hfield(skipped) {} param-mismatch {} | worst dist {:.2e} pos {:.2e} normal {:.2e}",
         grand.oracle, grand.matched, grand.near, grand.missing, grand.extra, grand.hfield, grand.param_mismatch, grand.worst_dist, grand.worst_pos, grand.worst_normal
     );
     println!(
