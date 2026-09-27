@@ -347,6 +347,7 @@ mod transport;
 pub mod transport_geometry;
 mod mjcf;
 mod mjcf_tree;
+pub mod mjcf_sensor;
 pub mod mujoco_actuator;
 mod mujoco_ccd;
 #[cfg(test)]

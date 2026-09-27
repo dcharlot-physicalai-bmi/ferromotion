@@ -212,7 +212,7 @@ fn main() {
             if std::env::var("DUMP_EQ").is_ok() {
                 let frames = ferromotion_core::tree_frames(&t.tree, &q);
                 for (i, e) in t.equalities.iter().enumerate() {
-                    if let ferromotion_core::EqualityKind::Connect { side1, side2, diag_a } = &e.kind {
+                    if let ferromotion_core::EqualityKind::Connect { side1, side2, diag_a, .. } = &e.kind {
                         let at = |(ride, local): &(Option<usize>, nalgebra::Vector3<f64>)| match ride {
                             Some(r) => (frames[*r] * nalgebra::Point3::from(*local)).coords,
                             None => *local,

@@ -1134,7 +1134,7 @@ impl MjcfTree {
                     let (a, r) = row_reference(&solr(e.solref), &soli(e.solimp), pos, 0.0, diag, jvel, self.timestep);
                     push(jac, a, r, EfcBlock::Equality { rows: 1 });
                 }
-                EqualityKind::Connect { side1, side2, diag_a } => {
+                EqualityKind::Connect { side1, side2, diag_a, .. } => {
                     let frames = frames.as_ref().expect("frames are built whenever a connect is present");
                     let at = |(ride, local): &(Option<usize>, Vector3<f64>)| -> (Vector3<f64>, nalgebra::DMatrix<f64>) {
                         let p = match ride {
@@ -1898,6 +1898,9 @@ pub enum EqualityKind {
         side2: (Option<usize>, Vector3<f64>),
         /// `mj_diagApprox`: the two bodies' translational `body_invweight0`, summed, cached at load.
         diag_a: f64,
+        /// the two BODIES (empty for the world): the constraint's force acts on them, which is where a
+        /// force sensor's subtree sum has to see it
+        bodies: [String; 2],
     },
 }
 
@@ -1920,6 +1923,9 @@ pub struct MjcfTree {
     pub site_frames: BTreeMap<String, (usize, Iso)>,
     /// The body each named site sits on.
     pub site_body: BTreeMap<String, String>,
+    /// Each named site's shape: its `type` and `size` (MuJoCo's `site_type`, `site_size`) — the zone a
+    /// touch sensor counts contacts in.
+    pub site_shapes: BTreeMap<String, (crate::mujoco_collision::GeomType, [f64; 3])>,
     /// Bodies and sites fixed to the world (no jointed ancestor), by world pose. Keys are `body:<name>` and
     /// `site:<name>`.
     pub world_fixed: BTreeMap<String, Iso>,
@@ -1948,6 +1954,10 @@ pub struct MjcfTree {
     /// The pose a free-jointed body's `<body>` element states — the free joint carries it, so it is not in
     /// the tree's own geometry, and [`MjcfTree::reference_q`] is where it goes.
     pub free_base_pose: BTreeMap<String, Iso>,
+    /// `<sensor>`, every child in file order — MuJoCo's sensor ids. See [`crate::mjcf_sensor`].
+    pub sensors: Vec<crate::mjcf_sensor::MjcfSensor>,
+    /// `<option magnetic>`, the field a magnetometer reads; MuJoCo's default `0 -0.5 0`.
+    pub magnetic: Vector3<f64>,
     /// **The chart each free or ball joint's three Euler hinges are measured from**, keyed by index into
     /// [`MjcfTree::joints`]: the joint's rotation is `chart · Rz(yaw)·Ry(pitch)·Rx(roll)`. Empty (every chart
     /// the identity) as loaded; [`MjcfTree::charted`] moves it. See there for why.
@@ -3593,6 +3603,29 @@ impl Walk<'_> {
                         if let Some(b) = self.body_stack.last() {
                             self.out.site_body.insert(name.clone(), b.clone());
                         }
+                        // `mjCSite`: a sphere of 0.005 unless stated; `fromto` sets the half-length
+                        let get = |k: &str| self.defaults.get(ch, "site", k, childclass).map(|s| s.to_string());
+                        let kind = match get("type").as_deref() {
+                            None | Some("sphere") => crate::mujoco_collision::GeomType::Sphere,
+                            Some("capsule") => crate::mujoco_collision::GeomType::Capsule,
+                            Some("ellipsoid") => crate::mujoco_collision::GeomType::Ellipsoid,
+                            Some("cylinder") => crate::mujoco_collision::GeomType::Cylinder,
+                            Some("box") => crate::mujoco_collision::GeomType::Box,
+                            Some(other) => return Err(format!("site '{name}': unknown type '{other}'")),
+                        };
+                        let mut size = [0.005, 0.005, 0.005];
+                        if let Some(v) = get("size") {
+                            for (i, x) in floats(&v)?.iter().take(3).enumerate() {
+                                size[i] = *x;
+                            }
+                        }
+                        if let Some(ft) = get("fromto") {
+                            let v = floats(&ft)?;
+                            if v.len() == 6 {
+                                size[1] = 0.5 * ((v[0] - v[3]).powi(2) + (v[1] - v[4]).powi(2) + (v[2] - v[5]).powi(2)).sqrt();
+                            }
+                        }
+                        self.out.site_shapes.insert(name.clone(), (kind, size));
                         self.place("site", name, parent, carry * sp)?;
                     }
                 }
@@ -4990,6 +5023,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             site_frames: BTreeMap::new(),
             site_body: BTreeMap::new(),
             world_fixed: BTreeMap::new(),
+            site_shapes: BTreeMap::new(),
             no_inertial: Vec::new(),
             inferred_from_geoms: Vec::new(),
             angle_scale: c.deg,
@@ -4998,6 +5032,8 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             reference_q: Vec::new(),
             free_base_pose: BTreeMap::new(),
             chart: BTreeMap::new(),
+            sensors: Vec::new(),
+            magnetic: Vector3::new(0.0, -0.5, 0.0),
             invweight0_cache: std::sync::OnceLock::new(),
             collide_cache: std::sync::OnceLock::new(),
             density: 0.0,
@@ -5079,6 +5115,9 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
         }
         if let Some(v) = el.attr("gravity") {
             out.gravity = vec3(v).map_err(|e| format!("<option gravity>: {e}"))?;
+        }
+        if let Some(v) = el.attr("magnetic") {
+            out.magnetic = vec3(v).map_err(|e| format!("<option magnetic>: {e}"))?;
         }
         if let Some(v) = el.attr("wind") {
             out.wind = vec3(v).map_err(|e| format!("<option wind>: {e}"))?;
@@ -5272,7 +5311,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
                             continue;
                         };
                         let diag_a = biw0(Some(b1.as_str())) + biw0(Some(b2.as_str()));
-                        out.equalities.push(MjcfEquality { name, kind: EqualityKind::Connect { side1: (r1, l1), side2: (r2, l2), diag_a }, solref, solimp });
+                        out.equalities.push(MjcfEquality { name, kind: EqualityKind::Connect { side1: (r1, l1), side2: (r2, l2), diag_a, bodies: [b1, b2] }, solref, solimp });
                         continue;
                     }
                     let Some(anchor) = el.attr("anchor") else {
@@ -5305,7 +5344,9 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
                         }
                     };
                     let diag_a = biw0(el.attr("body1")) + biw0(el.attr("body2"));
-                    out.equalities.push(MjcfEquality { name, kind: EqualityKind::Connect { side1: local(ride1, world1), side2: local(ride2, world2), diag_a }, solref, solimp });
+                    let body = |b: Option<&str>| b.filter(|b| *b != "world").unwrap_or("").to_string();
+                    let bodies = [body(el.attr("body1")), body(el.attr("body2"))];
+                    out.equalities.push(MjcfEquality { name, kind: EqualityKind::Connect { side1: local(ride1, world1), side2: local(ride2, world2), diag_a, bodies }, solref, solimp });
                     continue;
                 }
                 let j1 = el.attr("joint1").ok_or_else(|| format!("equality '{name}': needs joint1"))?;
@@ -5390,6 +5431,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             return Err("internal error: joints are not in topological order".into());
         }
     }
+    out.sensors = crate::mjcf_sensor::parse_sensors(&root, &out)?;
     // the loader read inverse weights while the model was still being built; the first caller after it
     // computes them from the finished one
     out.invweight0_cache = std::sync::OnceLock::new();

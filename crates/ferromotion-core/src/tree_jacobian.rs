@@ -88,6 +88,44 @@ pub fn tree_point_bias_acceleration(joints: &[Joint], parent: &[isize], frames: 
     a + al.cross(&r) + w.cross(&w.cross(&r))
 }
 
+/// [`tree_point_bias_acceleration`] with the ANGULAR half too: `(J̇_ω·q̇, J̇_v·q̇)` at `point` on the body
+/// `joint` drives — the accelerations the body has at zero `q̈`, which a sensor adds to `J·q̈`.
+pub fn tree_spatial_bias_acceleration(joints: &[Joint], parent: &[isize], frames: &[Iso], qd: &[f64], joint: Option<usize>, point: Vector3<f64>) -> (Vector3<f64>, Vector3<f64>) {
+    let mut chain: Vec<usize> = Vec::new();
+    let mut k = joint.map(|b| b as isize).unwrap_or(-1);
+    while k >= 0 {
+        chain.push(k as usize);
+        k = parent[k as usize];
+    }
+    chain.reverse();
+    let (mut w, mut v, mut al, mut a) = (Vector3::zeros(), Vector3::zeros(), Vector3::zeros(), Vector3::zeros());
+    let mut o: Vector3<f64> = Vector3::zeros();
+    for &idx in &chain {
+        let f = frames[idx];
+        let ok = f.translation.vector;
+        let r = ok - o;
+        let axis = f.rotation.to_rotation_matrix() * joints[idx].axis.into_inner();
+        let u = qd[idx];
+        let v_at = v + w.cross(&r);
+        let a_at = a + al.cross(&r) + w.cross(&w.cross(&r));
+        match joints[idx].kind {
+            JointKind::Revolute => {
+                al += w.cross(&axis) * u;
+                w += axis * u;
+                v = v_at;
+                a = a_at;
+            }
+            JointKind::Prismatic => {
+                v = v_at + axis * u;
+                a = a_at + 2.0 * w.cross(&(axis * u));
+            }
+        }
+        o = ok;
+    }
+    let r = point - o;
+    (al, a + al.cross(&r) + w.cross(&w.cross(&r)))
+}
+
 /// **The `3 × nv` Jacobian of a body's angular velocity.** A prismatic joint contributes nothing.
 pub fn tree_angular_jacobian(joints: &[Joint], parent: &[isize], frames: &[Iso], joint: Option<usize>) -> DMatrix<f64> {
     let mut j = DMatrix::zeros(3, joints.len());
