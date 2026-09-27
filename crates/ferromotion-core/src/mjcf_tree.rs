@@ -1262,9 +1262,15 @@ impl MjcfTree {
     /// ⛔⛔ And the `J̇·q̇` a connect row carries has to move with it. This port builds that term in its own
     /// (Euler) basis, `J̇_ours·q̇_ours`. The residual's second derivative is basis-free, but splitting it into
     /// `J·q̈ + J̇·q̇` is not: with `v_mj = T·q̇`, `J̇_mj·v_mj = J̇_ours·q̇ − J_mj·Ṫ·q̇`. So every row whose reference
-    /// was built with `J̇_ours·q̇` needs `+J_mj·Ṫ·q̇` in MuJoCo's basis. The term is exactly zero on any row
-    /// without a free or ball dof in its Jacobian (Ṫ lives only in those blocks), so it is added to every
-    /// joint row. Missing it put cassie's moving constrained acceleration 2.65e-3 off; with it, 6.7e-10.
+    /// was built with `J̇_ours·q̇` needs `+J_mj·Ṫ·q̇` in MuJoCo's basis — and ONLY those: MuJoCo carries `J̇·v`
+    /// on its connect and weld rows alone. Missing it put cassie's moving constrained acceleration 2.65e-3
+    /// off; with it, 6.7e-10.
+    ///
+    /// ⛔⛔ CORRECTED 2026-09-27: this used to add the term to EVERY joint row, on the argument that it "is
+    /// exactly zero on any row without a free or ball dof in its Jacobian". A tendon limit row is not one:
+    /// `robotiq_2f85/scene` ties a site on a FREE body to the world with a limited spatial tendon, and its
+    /// limit row picked up a `J̇·v` MuJoCo never puts there — `aref` 1.9e-4 off while its `J` and `D` matched
+    /// to the last bit.
     pub fn joint_constraint_rows_mujoco(&self, q: &[f64], v_mujoco: &[f64], dof_invweight0: &[f64]) -> Result<crate::mujoco_contact::AssembledRows, String> {
         let tinv = self.free_basis(q).try_inverse().ok_or("gimbal lock: the Euler base's basis map is singular")?;
         let qvel = &tinv * nalgebra::DVector::from_row_slice(v_mujoco);
@@ -1272,8 +1278,12 @@ impl MjcfTree {
         let mut rows = self.joint_constraint_rows(q, &qd, dof_invweight0);
         rows.jac = &rows.jac * &tinv;
         let basis_term = &rows.jac * (self.free_basis_dot(q, &qd) * &qvel);
-        for (a, c) in rows.aref.iter_mut().zip(basis_term.iter()) {
-            *a += c;
+        // the rows that carry `J̇·q̇`: each connect's three, in equality order
+        let carries: Vec<bool> = self.equalities.iter().flat_map(|e| std::iter::repeat_n(matches!(e.kind, EqualityKind::Connect { .. }), if matches!(e.kind, EqualityKind::Connect { .. }) { 3 } else { 1 })).collect();
+        for (i, (a, c)) in rows.aref.iter_mut().zip(basis_term.iter()).enumerate() {
+            if carries.get(i).copied().unwrap_or(false) {
+                *a += c;
+            }
         }
         Ok(rows)
     }
@@ -6165,6 +6175,33 @@ mod tests {
                     assert!((p.normal[k] - n[k]).abs() < 1e-9, "scale {scale}, polygon {verts:?}: normal {:?} vs MuJoCo {n:?}", p.normal);
                 }
             }
+        }
+    }
+
+    /// **A tendon limit on a SPINNING free body, against MuJoCo.** A limited spatial tendon from a site on a
+    /// free body to a world site, stretched past its range with the body turning fast. MuJoCo carries `J̇·v`
+    /// on connect and weld rows only; a limit row's reference must not pick up the Euler basis's `J·Ṫ·q̇`.
+    #[test]
+    fn a_tendon_limit_on_a_spinning_free_body_matches_mujoco() {
+        let t = tree_from_mjcf_str(
+            r#"<mujoco><worldbody>
+  <site name="anchor" pos="0 0 0.2"/>
+  <body name="object" pos="0 0 0.15">
+    <freejoint/>
+    <geom type="box" size="0.015 0.02 0.01" mass="0.1" contype="0" conaffinity="0"/>
+    <site name="hook" pos="0.015 0.015 0.015"/>
+  </body>
+</worldbody>
+<tendon><spatial limited="true" range="0 0.02"><site site="hook"/><site site="anchor"/></spatial></tendon></mujoco>"#,
+        )
+        .unwrap();
+        let qpos = [0.01, -0.02, 0.14, 0.9233805168766386, 0.2051956704170308, -0.3077935056255462, 0.1025978352085154];
+        let qvel = [0.1, -0.2, 0.05, 2.0, -1.5, 3.0];
+        let want = [-9.371005398606533, 12.476824330716129, 26.01401492381582, 2.6999999999983264, -1406.432459922388, 731.7048791596427];
+        let f = t.forward_mujoco(&t.q_from_qpos(&qpos, &t.qposadr()).unwrap(), &qvel, &[], &[]).unwrap();
+        assert_eq!(f.nefc, 1, "the limit is active");
+        for (k, w) in want.iter().enumerate() {
+            assert!((f.qacc[k] - w).abs() < 1e-9 * w.abs().max(1.0), "qacc[{k}] {} vs MuJoCo {w}", f.qacc[k]);
         }
     }
 
