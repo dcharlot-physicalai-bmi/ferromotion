@@ -1956,6 +1956,8 @@ pub struct MjcfTree {
     pub free_base_pose: BTreeMap<String, Iso>,
     /// `<sensor>`, every child in file order — MuJoCo's sensor ids. See [`crate::mjcf_sensor`].
     pub sensors: Vec<crate::mjcf_sensor::MjcfSensor>,
+    /// `<keyframe><key>`, in file order, completed as `mjCKey::Compile` completes them.
+    pub keyframes: Vec<MjcfKeyframe>,
     /// `<option magnetic>`, the field a magnetometer reads; MuJoCo's default `0 -0.5 0`.
     pub magnetic: Vector3<f64>,
     /// **The chart each free or ball joint's three Euler hinges are measured from**, keyed by index into
@@ -2177,6 +2179,50 @@ pub enum MjcfReset {
     BadQpos(usize),
     BadQvel(usize),
     BadQacc(usize),
+}
+
+/// One `<keyframe><key>`: a named state to reset to (`mj_resetDataKeyframe`). What the file leaves out is
+/// what `mjCKey::Compile` fills in — `qpos0`, zero velocity, activation and control, `time` zero — and a
+/// length that does not match the model is refused, as MuJoCo refuses it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MjcfKeyframe {
+    pub name: String,
+    pub time: f64,
+    pub qpos: Vec<f64>,
+    pub qvel: Vec<f64>,
+    pub act: Vec<f64>,
+    pub ctrl: Vec<f64>,
+    /// the mocap bodies' positions and quaternions, as the file states them; empty when it does not, which
+    /// means the mocap bodies' own poses
+    pub mpos: Vec<f64>,
+    pub mquat: Vec<f64>,
+}
+
+/// A keyframe's quaternion as MuJoCo stores it: normalised TWICE — `mjuu_normvec` when the keys are copied
+/// in (by division, and a zero quaternion left as it is), then `mj_normalizeQuat`'s `mju_normalize4` (by
+/// the reciprocal, and a zero quaternion made the identity). A file that writes `0 0 0 0` for a free base
+/// (pal_talos, pal_tiago) gets `1 0 0 0`.
+fn normalize_key_quat(q: &mut [f64]) {
+    normvec(q);
+    let norm = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
+    if norm < 1e-15 {
+        q.copy_from_slice(&[1.0, 0.0, 0.0, 0.0]);
+    } else if (norm - 1.0).abs() > 1e-15 {
+        let inv = 1.0 / norm;
+        q.iter_mut().for_each(|x| *x *= inv);
+    }
+}
+
+/// `mjuu_normvec`: divide by the norm unless it is below `mjEPS` (1e-14) or within `mjEPS` of one.
+fn normvec(v: &mut [f64]) {
+    let nrm = v.iter().map(|x| x * x).sum::<f64>();
+    if nrm < 1e-14 {
+        return;
+    }
+    let nrm = nrm.sqrt();
+    if (nrm - 1.0).abs() > 1e-14 {
+        v.iter_mut().for_each(|x| *x /= nrm);
+    }
 }
 
 /// `mjMAXVAL`: past it, `mju_isBad` calls a number bad.
@@ -5033,6 +5079,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             free_base_pose: BTreeMap::new(),
             chart: BTreeMap::new(),
             sensors: Vec::new(),
+            keyframes: Vec::new(),
             magnetic: Vector3::new(0.0, -0.5, 0.0),
             invweight0_cache: std::sync::OnceLock::new(),
             collide_cache: std::sync::OnceLock::new(),
@@ -5432,6 +5479,61 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
         }
     }
     out.sensors = crate::mjcf_sensor::parse_sensors(&root, &out)?;
+    // `<keyframe>`: sizes against the finished model
+    {
+        let nq: usize = out.joints.iter().map(|j| j.kind.qpos_width()).sum();
+        let (nv, na, nu) = (out.tree.joints.len(), out.na(), out.actuators.len());
+        let qpos0 = out.qpos0();
+        for section in root.children_named("keyframe") {
+            for (k, el) in section.children_named("key").enumerate() {
+                let name = el.attr("name").unwrap_or("").to_string();
+                let vals = |attr: &str, n: usize, dflt: &dyn Fn() -> Vec<f64>, check: bool| -> Result<Vec<f64>, String> {
+                    match el.attr(attr) {
+                        None => Ok(dflt()),
+                        Some(v) => {
+                            let x = floats(v)?;
+                            if check && x.len() != n {
+                                return Err(format!("keyframe '{name}' ({k}): invalid {attr} size, expected {n}, got {}", x.len()));
+                            }
+                            Ok(x)
+                        }
+                    }
+                };
+                let time = el.attr("time").map(|t| t.trim().parse::<f64>().map_err(|e| format!("keyframe '{name}' time: {e}"))).transpose()?.unwrap_or(0.0);
+                // `ctrl` and `act` are only checked when every actuator is carried: a refused one shortens both
+                let actuators_whole = out.actuators_unsupported.is_empty();
+                let mut qpos = vals("qpos", nq, &|| qpos0.clone(), true)?;
+                for (j, adr) in out.joints.iter().zip(out.qposadr()) {
+                    match j.kind {
+                        MjcfJointKind::Ball => normalize_key_quat(&mut qpos[adr..adr + 4]),
+                        MjcfJointKind::Free => normalize_key_quat(&mut qpos[adr + 3..adr + 7]),
+                        _ => {}
+                    }
+                }
+                let mut mquat = vals("mquat", 0, &Vec::new, false)?;
+                for q in mquat.chunks_mut(4) {
+                    if q.len() == 4 {
+                        normvec(q);
+                    }
+                }
+                out.keyframes.push(MjcfKeyframe {
+                    time,
+                    qpos,
+                    qvel: vals("qvel", nv, &|| vec![0.0; nv], true)?,
+                    act: vals("act", na, &|| vec![0.0; na], actuators_whole)?,
+                    ctrl: vals("ctrl", nu, &|| vec![0.0; nu], actuators_whole)?,
+                    mpos: vals("mpos", 0, &Vec::new, false)?,
+                    mquat,
+                    name,
+                });
+            }
+        }
+        // `<size nkey>` allocates keys the file never states: each is the reset state
+        let nkey = root.children_named("size").filter_map(|el| el.attr("nkey")).filter_map(|v| v.trim().parse::<usize>().ok()).max().unwrap_or(0);
+        while out.keyframes.len() < nkey {
+            out.keyframes.push(MjcfKeyframe { name: String::new(), time: 0.0, qpos: qpos0.clone(), qvel: vec![0.0; nv], act: vec![0.0; na], ctrl: vec![0.0; nu], mpos: Vec::new(), mquat: Vec::new() });
+        }
+    }
     // the loader read inverse weights while the model was still being built; the first caller after it
     // computes them from the finished one
     out.invweight0_cache = std::sync::OnceLock::new();
@@ -6520,6 +6622,34 @@ mod tests {
   <plugin name="p1" plugin="mujoco.pid" instance="full" joint="j1" ctrlrange="-1 1" forcerange="-1.5 1.5" actdim="2"/>
   <plugin name="p2" plugin="mujoco.pid" instance="pd" joint="j2" actdim="0"/>
 </actuator></mujoco>"#;
+
+    /// **Keyframes as `mjCKey::Compile` completes them, against MuJoCo.** A zero quaternion on a free base
+    /// becomes the identity and a (0, 0, 3, 4) ball quaternion is normalised; a partial key takes `qpos0`
+    /// (the hinge's `ref` in DEGREES, 0.3° here) and zeros for the rest; `<size nkey="3">` adds an unnamed
+    /// reset key.
+    #[test]
+    fn keyframes_are_completed_the_way_mujoco_completes_them() {
+        let t = tree_from_mjcf_str(r#"<mujoco><size nkey="3"/><worldbody><body name="b" pos="0 0 1"><freejoint/><geom size="0.1"/><body pos="0.2 0 0"><joint name="h" type="hinge" ref="0.3"/><geom size="0.05"/><body pos="0.1 0 0"><joint type="ball"/><geom size="0.02"/></body></body></body></worldbody>
+<actuator><motor joint="h"/></actuator>
+<keyframe><key name="zero_quat" time="1.5" qpos="0 0 1 0 0 0 0 0.7 0 0 3 4" ctrl="0.25"/><key name="partial" qvel="1 2 3 4 5 6 7 8 9 10"/></keyframe></mujoco>"#)
+        .unwrap();
+        let qpos0 = [0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.005235987755982988, 1.0, 0.0, 0.0, 0.0];
+        let want = [
+            ("zero_quat", 1.5, vec![0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.7, 0.0, 0.0, 0.6, 0.8], vec![0.0; 10], vec![0.25]),
+            ("partial", 0.0, qpos0.to_vec(), (1..=10).map(f64::from).collect(), vec![0.0]),
+            ("", 0.0, qpos0.to_vec(), vec![0.0; 10], vec![0.0]),
+        ];
+        assert_eq!(t.keyframes.len(), 3);
+        for (k, (name, time, qpos, qvel, ctrl)) in t.keyframes.iter().zip(want) {
+            assert_eq!((k.name.as_str(), k.time), (name, time));
+            for (a, b) in k.qpos.iter().zip(&qpos) {
+                assert!((a - b).abs() < 1e-15, "'{name}' qpos {:?} vs MuJoCo {qpos:?}", k.qpos);
+            }
+            assert_eq!((&k.qvel, &k.ctrl), (&qvel, &ctrl), "'{name}'");
+        }
+        // and a key whose qpos has the wrong length is refused, as MuJoCo refuses it
+        assert!(tree_from_mjcf_str(r#"<mujoco><worldbody><body><joint type="hinge"/><geom size="0.1"/></body></worldbody><keyframe><key qpos="0 0"/></keyframe></mujoco>"#).is_err());
+    }
 
     /// **A tendon limit on a SPINNING free body, against MuJoCo.** A limited spatial tendon from a site on a
     /// free body to a world site, stretched past its range with the body turning fast. MuJoCo carries `J̇·v`
