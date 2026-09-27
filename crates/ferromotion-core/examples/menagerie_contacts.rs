@@ -21,10 +21,9 @@
 //! and its `dist`, `pos`, normal (sign-corrected for pair order), `dim`, `includemargin`, `friction`,
 //! `solref`, `solimp` and `exclude` agree; the worst residuals among matches are reported. A contact is
 //! **near** when the same pair has a contact at the same depth (2e-5) and normal (1e-3) but the witness sits
-//! elsewhere on the face: MuJoCo picks four corners of a clipped polygon with a greedy that starts from
-//! qhull's vertex order, and a curved mesh's near-coplanar hull vertices differ between hull builders, so
-//! the manifold is the same and the sampled points are not. Height-field pairs are not carried and are
-//! counted separately.
+//! elsewhere on the face — the same manifold sampled at different corners. Since the hulls are qhull's own
+//! ([`ferromotion_core::qhull`]) and the polygons come in libc++'s order, that is rare. Height-field pairs
+//! are not carried and are counted separately.
 
 use ferromotion_core::{
     can_collide, collide_pair_with, contact_param, filter_body_pair, set_contact, tree_from_mjcf, CollideOptions, CollisionGeom, ContactRecord, GeomParams, GeomPose, GeomType, MeshHull, MjcfTree, PairParams,

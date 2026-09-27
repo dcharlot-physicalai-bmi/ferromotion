@@ -68,6 +68,8 @@ fn main() {
     dirs.sort();
     let mut done: BTreeSet<(String, String)> = BTreeSet::new();
     let (mut meshes, mut same_verts, mut same_polys, mut normals_ok, mut normals_total, mut normals_hit) = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+    // polygon ORDER: the collider reads polygons by index (`mesh_polymap` lists them in index order)
+    let mut same_order = 0usize;
     let mut worst: Vec<(String, String, usize, i64, usize, usize)> = Vec::new();
     let mut soundness: BTreeMap<(String, String), f64> = BTreeMap::new();
     let mut capped: BTreeSet<(String, String)> = BTreeSet::new();
@@ -112,6 +114,9 @@ fn main() {
                 normals_hit += hit;
                 if hit == o.polys.len() {
                     normals_ok += 1;
+                }
+                if np == o.polys.len() && hull.polygons.iter().zip(&o.polys).all(|(p, (n, v))| p.verts.len() == *n && (p.normal - v).norm() < 1e-6) {
+                    same_order += 1;
                 }
                 {
                     // is our hull merely sparser, or does it cut through the mesh? the farthest any mesh
@@ -164,6 +169,7 @@ fn main() {
     println!("collision meshes compared: {meshes} of {} in the oracle", oracle.len());
     println!("  hull vertex count identical: {same_verts}");
     println!("  polygon count identical:     {same_polys}");
+    println!("  polygon ORDER identical (index by index: vertex count and normal): {same_order}");
     println!("  every MuJoCo polygon normal reproduced: {normals_ok} meshes; {normals_hit} of {normals_total} polygons");
     // the one property a hull OWES regardless of how it is tessellated: it contains every input vertex
     // a capped hull (`<mesh maxhullvert>`) is a deliberate under-approximation and MuJoCo's is too, so it

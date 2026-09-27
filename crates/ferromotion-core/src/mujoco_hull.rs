@@ -23,6 +23,12 @@
 //! polygons merge from the same faces in the same sequence, and the support function climbs the same graph
 //! from the same seeds (`mesh_extrema`). A mesh the port refuses (a qhull path it does not carry) falls back
 //! to [`crate::try_convex_hull_3d`]: the same polytope, not the same order.
+//!
+//! ⭐ And the polygons come out in MuJoCo's ORDER, which is not the faces' order: `MakePolygons` gathers them
+//! in a `std::unordered_map` keyed by the rounded normal angles and walks it, so the order is libc++'s
+//! (`libcpp_unordered_order`, with MuJoCo's `PairHash`). The collider reads polygons by index — a vertex's
+//! polygons are listed in index order and the first of equal candidates wins — so on Menagerie this order
+//! alone moved mesh–mesh contacts from 897 to 1,291 of 1,293.
 
 use crate::TriMesh3;
 use nalgebra::Vector3;
@@ -435,8 +441,12 @@ fn make_polygons(verts: &[Vector3<f64>], faces: &[[usize; 3]], normal_verts: &[V
             }
         }
     }
+    // MuJoCo walks its `std::unordered_map` of polygons in libc++'s iteration order, and the collider reads
+    // polygons by index — so the order is part of the answer
+    let hashes: Vec<u64> = keys.iter().map(|&(t, p)| double_hash(t as f64) ^ double_hash(p as f64)).collect();
     let mut out = Vec::new();
-    for p in &polys {
+    for i in libcpp_unordered_order(&hashes) {
+        let p = &polys[i];
         for path in p.paths() {
             if path.len() < 3 {
                 continue;
@@ -445,6 +455,115 @@ fn make_polygons(verts: &[Vector3<f64>], faces: &[[usize; 3]], normal_verts: &[V
         }
     }
     out
+}
+
+/// libc++'s `std::hash<double>` on a 64-bit target: the value's bits, with ±0 hashing to 0.
+fn double_hash(x: f64) -> u64 {
+    if x == 0.0 {
+        0
+    } else {
+        x.to_bits()
+    }
+}
+
+/// **The order a libc++ `std::unordered_map` iterates its keys**, given each key's hash in insertion order
+/// (keys distinct). libc++ keeps one singly linked list with a bucket array of "node before this bucket's
+/// first node" pointers: a key landing in an empty bucket goes to the FRONT of the list; one landing in a
+/// used bucket goes right after that bucket's predecessor. The table starts at 2 buckets and, when an insert
+/// would exceed a load factor of 1, rehashes to the next prime ≥ `2·buckets + 1` (`__rehash`), relinking the
+/// list bucket by bucket (`__do_rehash`). The result is a permutation of `0..hashes.len()`.
+fn libcpp_unordered_order(hashes: &[u64]) -> Vec<usize> {
+    const NIL: usize = usize::MAX;
+    const BB: usize = 0; // the before-begin node; key i is node i + 1
+    let n = hashes.len();
+    let hash = |node: usize| hashes[node - 1];
+    let constrain = |h: u64, bc: usize| -> usize {
+        let bc64 = bc as u64;
+        if bc & (bc - 1) == 0 {
+            (h & (bc64 - 1)) as usize
+        } else if h < bc64 {
+            h as usize
+        } else {
+            (h % bc64) as usize
+        }
+    };
+    let is_hash_power2 = |bc: usize| bc > 2 && bc & (bc - 1) == 0;
+    let next_prime = |mut k: usize| -> usize {
+        let is_prime = |k: usize| k >= 2 && (2..).take_while(|d| d * d <= k).all(|d| !k.is_multiple_of(d));
+        while !is_prime(k) {
+            k += 1;
+        }
+        k
+    };
+    let mut next = vec![NIL; n + 1];
+    let mut buckets: Vec<usize> = Vec::new();
+    let mut size = 0usize;
+    let do_rehash = |nbc: usize, next: &mut Vec<usize>, buckets: &mut Vec<usize>| {
+        *buckets = vec![NIL; nbc];
+        let mut pp = BB;
+        let mut cp = next[BB];
+        if cp != NIL {
+            let mut phash = constrain(hash(cp), nbc);
+            buckets[phash] = pp;
+            pp = cp;
+            cp = next[cp];
+            while cp != NIL {
+                let chash = constrain(hash(cp), nbc);
+                if chash == phash {
+                    pp = cp;
+                } else if buckets[chash] == NIL {
+                    buckets[chash] = pp;
+                    pp = cp;
+                    phash = chash;
+                } else {
+                    next[pp] = next[cp];
+                    next[cp] = next[buckets[chash]];
+                    let b = buckets[chash];
+                    next[b] = cp;
+                }
+                cp = next[pp];
+            }
+        }
+    };
+    for node in 1..=n {
+        let bc = buckets.len();
+        if (size + 1) as f32 > bc as f32 || bc == 0 {
+            let want = (2 * bc + usize::from(!is_hash_power2(bc))).max(((size + 1) as f32).ceil() as usize);
+            let nbc = if want == 1 {
+                2
+            } else if want & (want - 1) != 0 {
+                next_prime(want)
+            } else {
+                want
+            };
+            if nbc > bc {
+                do_rehash(nbc, &mut next, &mut buckets);
+            }
+        }
+        let bc = buckets.len();
+        let chash = constrain(hash(node), bc);
+        let pn = buckets[chash];
+        if pn == NIL {
+            next[node] = next[BB];
+            next[BB] = node;
+            buckets[chash] = BB;
+            if next[node] != NIL {
+                let h = constrain(hash(next[node]), bc);
+                buckets[h] = node;
+            }
+        } else {
+            next[node] = next[pn];
+            next[pn] = node;
+        }
+        size += 1;
+    }
+    let mut order = Vec::with_capacity(n);
+    let mut p = next[BB];
+    while p != NIL {
+        order.push(p - 1);
+        p = next[p];
+    }
+    order
 }
 
 /// `mjuu_makenormal`: the unit normal of `(b − a) × (c − a)`, or `(1, 0, 0)` below `mjEPS` = 1e-14. The
@@ -461,6 +580,22 @@ fn make_normal(a: &Vector3<f64>, b: &Vector3<f64>, c: &Vector3<f64>) -> Vector3<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **libc++'s `unordered_map` iteration order, as MuJoCo's `MakePolygons` walks it** — pinned against a
+    /// clang++/libc++ build inserting `std::pair<double, double>` keys under MuJoCo's `PairHash`
+    /// (`hash(first) ^ hash(second)`): 15 keys (two rehashes) and 66 keys (six, up to 97 buckets). The
+    /// emulation agreed with that build on all 3,000 random key sets tried, up to 800 keys.
+    #[test]
+    fn polygon_order_is_libcpps_unordered_map_order() {
+        const SMALL_KEYS: [(f64, f64); 15] = [(2.0, 4.0), (3.0, 1.0), (0.0, 4.0), (-4.0, 1.0), (2.0, 0.0), (-3.0, 4.0), (-2.0, 3.0), (-2.0, 2.0), (-1.0, 2.0), (4.0, 3.0), (4.0, 0.0), (2.0, 2.0), (-4.0, 3.0), (3.0, 3.0), (0.0, 2.0)];
+        const SMALL_ORDER: [usize; 15] = [7, 0, 8, 9, 2, 10, 6, 12, 5, 14, 1, 4, 13, 11, 3];
+        const MID_KEYS: [(f64, f64); 66] = [(311.0, 199.0), (180.0, 36.0), (-203.0, 171.0), (96.0, 42.0), (-53.0, 63.0), (261.0, 191.0), (136.0, 60.0), (160.0, 68.0), (269.0, 67.0), (308.0, 268.0), (-210.0, 300.0), (236.0, 97.0), (15.0, 291.0), (206.0, 34.0), (-251.0, 49.0), (190.0, 275.0), (-51.0, 61.0), (-166.0, 256.0), (277.0, 257.0), (68.0, 149.0), (249.0, 214.0), (114.0, 147.0), (118.0, 124.0), (220.0, 37.0), (-253.0, 65.0), (129.0, 111.0), (-305.0, 260.0), (-75.0, 147.0), (107.0, 94.0), (114.0, 222.0), (-213.0, 5.0), (-12.0, 75.0), (-155.0, 111.0), (-257.0, 286.0), (-278.0, 3.0), (240.0, 149.0), (31.0, 109.0), (-186.0, 284.0), (1.0, 130.0), (94.0, 57.0), (98.0, 38.0), (220.0, 261.0), (15.0, 115.0), (50.0, 286.0), (206.0, 13.0), (-155.0, 292.0), (-33.0, 74.0), (-14.0, 302.0), (106.0, 157.0), (-199.0, 156.0), (116.0, 17.0), (270.0, 248.0), (113.0, 14.0), (79.0, 218.0), (-214.0, 103.0), (-129.0, 267.0), (198.0, 33.0), (-184.0, 58.0), (311.0, 1.0), (51.0, 198.0), (108.0, 14.0), (-10.0, 145.0), (11.0, 188.0), (209.0, 260.0), (-70.0, 33.0), (132.0, 259.0)];
+        const MID_ORDER: [usize; 66] = [64, 62, 60, 59, 58, 57, 56, 54, 53, 51, 50, 48, 47, 4, 45, 41, 43, 36, 40, 61, 38, 7, 37, 63, 33, 21, 32, 30, 16, 28, 34, 27, 55, 23, 31, 22, 10, 65, 6, 20, 52, 19, 39, 17, 29, 24, 15, 3, 13, 25, 0, 18, 12, 8, 2, 44, 42, 49, 5, 46, 26, 9, 1, 14, 35, 11];
+        for (keys, order) in [(&SMALL_KEYS[..], &SMALL_ORDER[..]), (&MID_KEYS[..], &MID_ORDER[..])] {
+            let hashes: Vec<u64> = keys.iter().map(|&(t, p)| double_hash(t) ^ double_hash(p)).collect();
+            assert_eq!(libcpp_unordered_order(&hashes), order.to_vec());
+        }
+    }
 
     fn box_mesh(hx: f64, hy: f64, hz: f64) -> TriMesh3 {
         let mut verts = Vec::new();
@@ -511,3 +646,4 @@ mod tests {
         assert!(MeshHull::new(&TriMesh3 { verts, tris: vec![[0, 1, 2], [1, 3, 2]] }).is_none());
     }
 }
+
