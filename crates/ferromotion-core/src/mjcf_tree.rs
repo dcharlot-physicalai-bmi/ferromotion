@@ -1135,6 +1135,8 @@ impl MjcfTree {
         // --- equality first: MuJoCo counts `ne` from the front, and a row's law is its position
         // a `connect` needs the CURRENT frames; a joint coupling does not, so only pay for them when asked
         let frames = self.equalities.iter().any(|e| matches!(e.kind, EqualityKind::Connect { .. } | EqualityKind::Weld { .. })).then(|| crate::tree_frames(&self.tree, q));
+        // the tendon lengths and moments, built once if a tendon equality needs them
+        let mut ten: Option<(Vec<f64>, Vec<Vec<(usize, f64)>>)> = None;
         for e in &self.equalities {
             match &e.kind {
                 EqualityKind::Joint { joint1, joint2, reference, polycoef: c } => {
@@ -1190,6 +1192,29 @@ impl MjcfTree {
                         let (a, rr) = crate::mujoco_contact::row_reference_at(&solr(e.solref), &soli(e.solimp), norm, p1[r] - p2[r], 0.0, *diag_a, jvel, self.timestep);
                         push(jac, a - jdotqd[r], rr, EfcBlock::Equality { rows: 1 });
                     }
+                }
+                EqualityKind::Tendon { tendon1, tendon2, length0, polycoef: c } => {
+                    let (len, mom) = ten.get_or_insert_with(|| (self.ten_length(q), self.ten_moment(q)));
+                    let tiw = self.tendon_invweight0();
+                    let mut jac = vec![0.0; nv];
+                    for (d, cf) in &mom[*tendon1] {
+                        jac[*d] += cf;
+                    }
+                    let (pos, diag) = match *tendon2 {
+                        Some(t2) => {
+                            let y = len[t2] - length0.1;
+                            let poly = c[0] + c[1] * y + c[2] * y * y + c[3] * y * y * y + c[4] * y * y * y * y;
+                            let deriv = c[1] + 2.0 * c[2] * y + 3.0 * c[3] * y * y + 4.0 * c[4] * y * y * y;
+                            for (d, cf) in &mom[t2] {
+                                jac[*d] -= deriv * cf;
+                            }
+                            (len[*tendon1] - length0.0 - poly, tiw[*tendon1] + tiw[t2])
+                        }
+                        None => (len[*tendon1] - length0.0 - c[0], tiw[*tendon1]),
+                    };
+                    let jvel: f64 = (0..nv).map(|k| jac[k] * qd[k]).sum();
+                    let (a, r) = row_reference(&solr(e.solref), &soli(e.solimp), pos, 0.0, diag, jvel, self.timestep);
+                    push(jac, a, r, EfcBlock::Equality { rows: 1 });
                 }
                 EqualityKind::Weld { side1, side2, rot1, rot2, relpose, torquescale: ts, diag, .. } => {
                     let frames = frames.as_ref().expect("frames are built whenever a connect or weld is present");
@@ -1987,7 +2012,7 @@ pub struct MjcfEquality {
     pub solimp: [f64; 5],
 }
 
-/// Which equality, and everything its rows need: `joint`, `connect` and `weld` (`tendon` and the flex
+/// Which equality, and everything its rows need: `joint`, `tendon`, `connect` and `weld` (the flex
 /// equalities are named in [`MjcfTree::equalities_unsupported`] instead).
 #[derive(Clone, Debug)]
 pub enum EqualityKind {
@@ -2018,6 +2043,16 @@ pub enum EqualityKind {
         /// the two BODIES (empty for the world): the constraint's force acts on them, which is where a
         /// force sensor's subtree sum has to see it
         bodies: [String; 2],
+    },
+    /// `<equality tendon>`: a polynomial coupling between two tendon LENGTHS, each measured from its length at
+    /// `qpos0` (`tendon_length0`), or one tendon held at that length. ONE row, Jacobian `J₁ − p′(y)·J₂`.
+    Tendon {
+        /// index into [`MjcfTree::tendons`]
+        tendon1: usize,
+        tendon2: Option<usize>,
+        /// the two `tendon_length0`
+        length0: (f64, f64),
+        polycoef: [f64; 5],
     },
     /// `<equality weld>`: the two bodies (or sites) held at a fixed relative POSE. SIX rows: the three of a
     /// connect between the two anchors, then three for orientation, `torquescale·Im(q̄₂·q₁·relpose)`, with
@@ -5495,7 +5530,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
                 if get("active").as_deref() == Some("false") {
                     continue;
                 }
-                if el.name != "joint" && el.name != "connect" && el.name != "weld" {
+                if el.name != "joint" && el.name != "connect" && el.name != "weld" && el.name != "tendon" {
                     out.equalities_unsupported.push((name, format!("<{}>", el.name)));
                     continue;
                 }
@@ -5647,6 +5682,34 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
                         solref,
                         solimp,
                     });
+                    continue;
+                }
+                if el.name == "tendon" {
+                    let find = |n: &str| out.tendons.iter().position(|t| t.name == n);
+                    let t1 = el.attr("tendon1").ok_or_else(|| format!("equality '{name}': needs tendon1"))?;
+                    let Some(i1) = find(t1) else {
+                        out.equalities_unsupported.push((name, format!("tendon '{t1}' is not one this loader carries")));
+                        continue;
+                    };
+                    let i2 = match el.attr("tendon2") {
+                        Some(t2) => match find(t2) {
+                            Some(i) => Some(i),
+                            None => {
+                                out.equalities_unsupported.push((name, format!("tendon '{t2}' is not one this loader carries")));
+                                continue;
+                            }
+                        },
+                        None => None,
+                    };
+                    let mut polycoef = [0.0, 1.0, 0.0, 0.0, 0.0];
+                    if let Some(v) = get("polycoef") {
+                        for (i, x) in floats(&v)?.iter().take(5).enumerate() {
+                            polycoef[i] = *x;
+                        }
+                    }
+                    // `tendon_length0`: each tendon's length at `qpos0`
+                    let l0 = out.ten_length(&out.reference_q);
+                    out.equalities.push(MjcfEquality { name, kind: EqualityKind::Tendon { tendon1: i1, tendon2: i2, length0: (l0[i1], i2.map_or(0.0, |i| l0[i])), polycoef }, solref, solimp });
                     continue;
                 }
                 let j1 = el.attr("joint1").ok_or_else(|| format!("equality '{name}': needs joint1"))?;
@@ -6925,6 +6988,58 @@ mod tests {
 </worldbody>
 <tendon><fixed name="t" damping="0.2"><joint joint="a" coef="1"/><joint joint="d" coef="0.5"/></fixed></tendon>
 <actuator><position joint="a" kp="20" kv="2"/><velocity joint="b" kv="1.5"/><motor joint="d"/></actuator></mujoco>"#;
+
+    /// **`<equality tendon>`, against MuJoCo.** A fixed tendon coupled by a quadratic to a SPATIAL one (each
+    /// length measured from its `tendon_length0`), with an impedance wide enough to read the residual, and a
+    /// single fixed tendon held at an offset. MuJoCo's `qacc`, then ten `mj_step`s.
+    #[test]
+    fn tendon_equalities_match_mujoco() {
+        let t = tree_from_mjcf_str(
+            r#"<mujoco><worldbody>
+  <site name="s0" pos="0 0.1 1.2"/>
+  <body pos="0 0 1">
+    <joint name="a" type="hinge" axis="0 1 0" damping="0.1"/>
+    <geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.03" mass="0.6"/>
+    <site name="s1" pos="0.2 0 0.05"/>
+    <body pos="0.3 0 0">
+      <joint name="b" type="hinge" axis="0 1 0"/>
+      <geom type="capsule" fromto="0 0 0 0.25 0 0" size="0.025" mass="0.4"/>
+      <body pos="0.25 0 0">
+        <joint name="c" type="hinge" axis="0 0 1"/>
+        <geom type="capsule" fromto="0 0 0 0.15 0 0" size="0.02" mass="0.2"/>
+        <site name="s2" pos="0.15 0 0"/>
+      </body>
+    </body>
+  </body>
+</worldbody>
+<tendon>
+  <fixed name="t1"><joint joint="a" coef="1"/><joint joint="b" coef="-0.5"/></fixed>
+  <spatial name="t2"><site site="s0"/><site site="s1"/><site site="s2"/></spatial>
+  <fixed name="t3"><joint joint="c" coef="2"/></fixed>
+</tendon>
+<equality>
+  <tendon tendon1="t1" tendon2="t2" polycoef="0.01 1.5 0.3 0 0" solimp="0.8 0.95 0.2 0.5 2"/>
+  <tendon tendon1="t3" polycoef="0.05 0 0 0 0"/>
+</equality></mujoco>"#,
+        )
+        .unwrap();
+        assert!(t.equalities_unsupported.is_empty(), "{:?}", t.equalities_unsupported);
+        let (qpos, qvel) = ([0.3, -0.4, 0.2], [0.5, -0.7, 1.1]);
+        let f = t.forward_mujoco(&qpos, &qvel, &[], &[]).unwrap();
+        assert_eq!(f.nefc, 2);
+        for (g, w) in f.qacc.iter().zip([-519.8919287145774, 1317.997475738774, -552.0591726357393]) {
+            assert!((g - w).abs() < 1e-9 * w.abs().max(1.0), "qacc {g} vs MuJoCo {w}");
+        }
+        let (mut qp, mut qv) = (qpos.to_vec(), qvel.to_vec());
+        for _ in 0..10 {
+            let st = t.step_mujoco(&qp, &qv, &[], &[]).unwrap();
+            (qp, qv) = (st.qpos, st.qvel);
+        }
+        let want = [0.2487084794027434, -0.2531629138270305, 0.15446362859124024, -3.3791463501446177, 9.789883711854351, -3.2969856210514323];
+        for (k, (g, w)) in qp.iter().chain(&qv).zip(want).enumerate() {
+            assert!((g - w).abs() < 1e-9 * w.abs().max(1.0), "after 10 steps [{k}] {g} vs MuJoCo {w}");
+        }
+    }
 
     /// **`<weld>` in every form, against MuJoCo.** An arm's forearm welded to a free box at their `qpos0`
     /// pose (the relative pose computed by `mj_setConst`), a free ball welded to the world with a STATED
