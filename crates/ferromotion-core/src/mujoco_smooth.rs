@@ -801,7 +801,7 @@ impl SmoothModel {
     }
 
     /// `mj_nextActivation` for an actuator with one activation.
-    fn next_activation(&self, a: &NativeActuator, act: f64, act_dot: f64) -> f64 {
+    pub(crate) fn next_activation(&self, a: &NativeActuator, act: f64, act_dot: f64) -> f64 {
         let h = self.timestep;
         let next = if a.act.dynamics == crate::mujoco_actuator::ActDyn::FilterExact {
             let tau = MJ_MINVAL.max(a.act.dynprm[0]);
@@ -844,6 +844,40 @@ impl SmoothModel {
             qfrc[i as usize] += 0.0;
             i = self.dof_parentid[i as usize];
         }
+    }
+
+    /// `mj_factorI` on a matrix in `M`'s layout: the factor and its inverse diagonal.
+    pub(crate) fn factor_i(&self, m: &[f64]) -> (Vec<f64>, Vec<f64>) {
+        let nv = self.dof_bodyid.len();
+        let mut qld = m.to_vec();
+        let mut diag_inv = vec![0.0; nv];
+        for k in (0..nv).rev() {
+            let start = self.m_rowadr[k];
+            let diag = self.m_rownnz[k] - 1;
+            let end = start + diag;
+            if qld[end] < MJ_MINVAL {
+                qld[end] = MJ_MINVAL;
+            }
+            let inv_d = 1.0 / qld[end];
+            diag_inv[k] = inv_d;
+            for adr in (start..end).rev() {
+                let i = self.m_colind[adr];
+                let scl = -qld[adr] * inv_d;
+                let (ri, n) = (self.m_rowadr[i], self.m_rownnz[i]);
+                for t in 0..n {
+                    qld[ri + t] = qld[start + t].mul_add(scl, qld[ri + t]);
+                }
+            }
+            for t in 0..diag {
+                qld[start + t] *= inv_d;
+            }
+        }
+        (qld, diag_inv)
+    }
+
+    /// `mj_solveLD` for one vector on a given factor.
+    pub(crate) fn solve_ld_pub(&self, qld: &[f64], diag_inv: &[f64], y: &[f64]) -> Vec<f64> {
+        self.solve_ld(qld, diag_inv, y)
     }
 
     /// `mj_solveM` for one vector, on the factor in `sd`.

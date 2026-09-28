@@ -173,7 +173,7 @@ pub(crate) fn quat2mat(q: &[f64; 4]) -> [f64; 9] {
 }
 
 /// `mji_axisAngle2Quat`.
-fn axis_angle2quat(axis: &[f64; 3], angle: f64) -> [f64; 4] {
+pub(crate) fn axis_angle2quat(axis: &[f64; 3], angle: f64) -> [f64; 4] {
     if angle == 0.0 {
         return [1.0, 0.0, 0.0, 0.0];
     }

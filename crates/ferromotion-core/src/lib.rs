@@ -353,6 +353,8 @@ pub(crate) mod mujoco_midphase;
 pub(crate) mod mujoco_smooth;
 pub(crate) mod mujoco_efc;
 pub(crate) mod mujoco_solver;
+pub(crate) mod mujoco_step;
+pub use mujoco_step::MjNativeState;
 pub(crate) mod png;
 pub mod mjcf_sensor;
 pub mod mujoco_actuator;
