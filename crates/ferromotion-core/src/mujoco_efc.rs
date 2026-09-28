@@ -110,6 +110,64 @@ pub(crate) struct NativeContact {
 pub(crate) enum NativeEq {
     /// `mjEQ_JOINT`: `q1 − ref1 = poly(q2 − ref2)`, each joint as `(dofadr, qposadr, qpos0)`.
     Joint { j1: (usize, usize, f64), j2: Option<(usize, usize, f64)>, poly: [f64; 5] },
+    /// `mjEQ_CONNECT` on bodies: `eq_data[0..3]` in body1's frame, `eq_data[3..6]` in body2's (from `set0`)
+    ConnectBodies { b1: usize, b2: usize, data1: [f64; 3], data2: [f64; 3] },
+    /// `mjEQ_CONNECT` on sites
+    ConnectSites { s1: crate::mujoco_kinematics::KinGeom, s2: crate::mujoco_kinematics::KinGeom },
+}
+
+impl NativeEq {
+    /// the two bodies a connect acts on
+    pub(crate) fn connect_bodies(&self) -> Option<(usize, usize)> {
+        match self {
+            NativeEq::ConnectBodies { b1, b2, .. } => Some((*b1, *b2)),
+            NativeEq::ConnectSites { s1, s2 } => Some((s1.body, s2.body)),
+            NativeEq::Joint { .. } => None,
+        }
+    }
+}
+
+/// `mji_mulMatVec3` / `mju_mulMatVec3`, contracted.
+fn mat_vec3(m: &[f64; 9], v: &[f64; 3]) -> [f64; 3] {
+    [m[2].mul_add(v[2], m[0].mul_add(v[0], m[1] * v[1])), m[5].mul_add(v[2], m[3].mul_add(v[0], m[4] * v[1])), m[8].mul_add(v[2], m[6].mul_add(v[0], m[7] * v[1]))]
+}
+
+/// `mju_mulMatTVec3`, contracted.
+fn mat_t_vec3(m: &[f64; 9], v: &[f64; 3]) -> [f64; 3] {
+    [m[6].mul_add(v[2], m[0].mul_add(v[0], m[3] * v[1])), m[7].mul_add(v[2], m[1].mul_add(v[0], m[4] * v[1])), m[8].mul_add(v[2], m[2].mul_add(v[0], m[5] * v[1]))]
+}
+
+/// `set0`'s `eq_data[3..6]` for a body connect: the anchor as a world point at `qpos0`, in body2's frame.
+pub(crate) fn connect_data2(k: &crate::mujoco_kinematics::KinState, b1: usize, b2: usize, anchor: &[f64; 3]) -> [f64; 3] {
+    let p = mat_vec3(&k.xmat[b1], anchor);
+    let pos = [p[0] + k.xpos[b1][0] - k.xpos[b2][0], p[1] + k.xpos[b1][1] - k.xpos[b2][1], p[2] + k.xpos[b1][2] - k.xpos[b2][2]];
+    mat_t_vec3(&k.xmat[b2], &pos)
+}
+
+/// `mj_equalityAnchors` for a connect: the two world points and the two bodies.
+fn connect_anchors(eq: &NativeEq, k: &crate::mujoco_kinematics::KinState) -> ([f64; 3], [f64; 3], usize, usize) {
+    match eq {
+        NativeEq::ConnectBodies { b1, b2, data1, data2 } => {
+            let p1 = mat_vec3(&k.xmat[*b1], data1);
+            let p2 = mat_vec3(&k.xmat[*b2], data2);
+            ([p1[0] + k.xpos[*b1][0], p1[1] + k.xpos[*b1][1], p1[2] + k.xpos[*b1][2]], [p2[0] + k.xpos[*b2][0], p2[1] + k.xpos[*b2][1], p2[2] + k.xpos[*b2][2]], *b1, *b2)
+        }
+        NativeEq::ConnectSites { s1, s2 } => {
+            let at = |s: &crate::mujoco_kinematics::KinGeom| -> [f64; 3] {
+                use crate::mujoco_kinematics::SameFrame;
+                match s.sameframe {
+                    SameFrame::Body => k.xpos[s.body],
+                    SameFrame::Inertia => k.xipos[s.body],
+                    _ => {
+                        let v = mat_vec3(&k.xmat[s.body], &s.pos);
+                        [v[0] + k.xpos[s.body][0], v[1] + k.xpos[s.body][1], v[2] + k.xpos[s.body][2]]
+                    }
+                }
+            };
+            (at(s1), at(s2), s1.body, s2.body)
+        }
+        NativeEq::Joint { .. } => unreachable!("not a connect"),
+    }
 }
 
 /// What the constraint rows need from the compiled model beyond the smooth dynamics.
@@ -322,6 +380,51 @@ impl SmoothModel {
         (chain, dp, dr)
     }
 
+    /// `mj_jacDifPair` with the common dofs KEPT (`flg_skipcommon = 0`, as the equalities call it), at two
+    /// points: `J(b2 at pos2) − J(b1 at pos1)`.
+    fn jac_dif_pair_common(&self, sd: &SmoothData, b1: usize, b2: usize, pos1: &[f64; 3], pos2: &[f64; 3], sparse: bool) -> (Vec<usize>, [Vec<f64>; 3], [Vec<f64>; 3]) {
+        let nv = self.dof_bodyid.len();
+        assert!(!sparse, "a sparse connect is refused before it gets here");
+        let (p1, _) = self.jac(sd, pos1, b1, false);
+        let (p2, _) = self.jac(sd, pos2, b2, false);
+        let dp: [Vec<f64>; 3] = std::array::from_fn(|k| (0..nv).map(|c| p2[c][k] - p1[c][k]).collect());
+        ((0..nv).collect(), dp, Default::default())
+    }
+
+    /// `mj_jacDot`, translation only, dense: the time derivative of `point`'s Jacobian on `body`.
+    fn jac_dot(&self, sd: &SmoothData, point: &[f64; 3], body: usize) -> [Vec<f64>; 3] {
+        let nv = self.dof_bodyid.len();
+        let mut jp: [Vec<f64>; 3] = std::array::from_fn(|_| vec![0.0; nv]);
+        let com = &sd.subtree_com[self.body_rootid[body]];
+        let offset = [point[0] - com[0], point[1] - com[1], point[2] - com[2]];
+        // `mju_transformSpatial` of the body's cvel to the point (motion)
+        let cv = &sd.cvel[body];
+        let c = cross(&offset, &[cv[0], cv[1], cv[2]]);
+        let plin = [cv[3] - c[0], cv[4] - c[1], cv[5] - c[2]];
+        let b = self.weld(body);
+        if self.body_dofnum[b] == 0 {
+            return jp;
+        }
+        let mut i = (self.body_dofadr[b] + self.body_dofnum[b] - 1) as i32;
+        while i >= 0 {
+            let iu = i as usize;
+            let mut cdd = sd.cdof_dot[iu];
+            let j = self.dof_jntid[iu];
+            let is_quat = self.jnt_type[j] == KinJointKind::Ball || (self.jnt_type[j] == KinJointKind::Free && iu >= self.jnt_dofadr[j] + 3);
+            if is_quat {
+                cdd = cross_motion(&sd.cvel[self.dof_bodyid[iu]], &sd.cdof[iu]);
+            }
+            let cd = &sd.cdof[iu];
+            let t1 = cross(&[cdd[0], cdd[1], cdd[2]], &offset);
+            let t2 = cross(&[cd[0], cd[1], cd[2]], &plin);
+            for k in 0..3 {
+                jp[k][iu] += cdd[3 + k] + t1[k] + t2[k];
+            }
+            i = self.dof_parentid[iu];
+        }
+        jp
+    }
+
     /// **`set0`**'s `body_invweight0` and `dof_invweight0`, at `qpos0`.
     pub(crate) fn invweight0(&self, qpos0: &[f64]) -> (Vec<[f64; 2]>, Vec<f64>) {
         let nv = self.dof_bodyid.len();
@@ -434,6 +537,18 @@ impl SmoothModel {
                     }
                     e.push(cols, vals, cpos, 0.0, 0.0, EQUALITY, k);
                 }
+                NativeEq::ConnectBodies { .. } | NativeEq::ConnectSites { .. } => {
+                    let (p0, p1, b0, b1) = connect_anchors(eq, &sd.kin);
+                    let cpos = [p0[0] - p1[0], p0[1] - p1[1], p0[2] - p1[2]];
+                    // `mj_jacDifPair(body1, body0, p1, p0)`, common dofs kept: J(body0 at p0) − J(body1 at p1)
+                    let (chain, dp, _) = self.jac_dif_pair_common(sd, b1, b0, &p1, &p0, sparse);
+                    if !sparse && dp.iter().all(|r| r.iter().all(|&x| x == 0.0)) {
+                        continue;
+                    }
+                    for r in 0..3 {
+                        e.push(chain.clone(), dp[r].clone(), cpos[r], 0.0, 0.0, EQUALITY, k);
+                    }
+                }
             }
         }
         // dof friction
@@ -533,6 +648,10 @@ impl SmoothModel {
                         }
                         e.diag_a[i] = a;
                     }
+                    eq => {
+                        let (b1, b2) = eq.connect_bodies().expect("a connect");
+                        e.diag_a[i] = em.body_invweight0[b1][0] + em.body_invweight0[b2][0];
+                    }
                 },
                 FRICTION_DOF => e.diag_a[i] = em.dof_invweight0[id],
                 LIMIT_JOINT => e.diag_a[i] = em.dof_invweight0[self.jnt_dofadr[id]],
@@ -595,6 +714,11 @@ impl SmoothModel {
             solimp[3] = min(MJ_MAXIMP, max(MJ_MINIMP, solimp[3]));
             solimp[4] = max(1.0, solimp[4]);
             let (pos, dim) = match e.typ[i] {
+                // a connect's three rows share one impedance, at the residual's length (`mju_norm`)
+                EQUALITY if em.eq[id].0.connect_bodies().is_some() => {
+                    let p = &e.pos[i..i + 3];
+                    ((0.0 + p[2].mul_add(p[2], p[0].mul_add(p[0], p[1] * p[1]))).sqrt(), 3)
+                }
                 CONTACT_ELLIPTIC => (e.pos[i], contacts[id].dim),
                 CONTACT_PYRAMIDAL => (e.pos[i], 2 * (contacts[id].dim - 1)),
                 _ => (e.pos[i], 1),
@@ -669,8 +793,42 @@ impl SmoothModel {
                 (-k[1]).mul_add(e.vel[i], -(k[0] * k[2] * x))
             })
             .collect();
+        // `mj_Jdotv`: a connect's reference loses its J̇·v
+        let mut row = 0;
+        while row < nefc && e.typ[row] == EQUALITY {
+            let eq = &em.eq[e.id[row]].0;
+            if eq.connect_bodies().is_some() {
+                let (p1, p2, b1, b2) = connect_anchors(eq, &sd.kin);
+                let jd1 = self.jac_dot(sd, &p1, b1);
+                let jd2 = self.jac_dot(sd, &p2, b2);
+                for k in 0..3 {
+                    let v1 = dot(&jd1[k], qvel);
+                    let v2 = dot(&jd2[k], qvel);
+                    e.aref[row + k] -= v1 - v2;
+                }
+                row += 3;
+            } else {
+                row += 1;
+            }
+        }
         e
     }
+}
+
+/// `mji_crossMotion`
+fn cross_motion(vel: &[f64; 6], v: &[f64; 6]) -> [f64; 6] {
+    let mut r = [
+        (-vel[2]).mul_add(v[1], vel[1] * v[2]),
+        vel[2].mul_add(v[0], -(vel[0] * v[2])),
+        (-vel[1]).mul_add(v[0], vel[0] * v[1]),
+        (-vel[2]).mul_add(v[4], vel[1] * v[5]),
+        vel[2].mul_add(v[3], -(vel[0] * v[5])),
+        (-vel[1]).mul_add(v[3], vel[0] * v[4]),
+    ];
+    r[3] += (-vel[5]).mul_add(v[1], vel[4] * v[2]);
+    r[4] += vel[5].mul_add(v[0], -(vel[3] * v[2]));
+    r[5] += (-vel[4]).mul_add(v[0], vel[3] * v[1]);
+    r
 }
 
 /// `mju_max` / `mju_min`: the first argument on a tie

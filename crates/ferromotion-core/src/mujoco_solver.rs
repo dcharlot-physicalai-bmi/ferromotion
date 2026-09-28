@@ -624,6 +624,7 @@ impl SmoothModel {
     /// `mj_island`, then the Newton solver island by island. Dense Jacobian and pyramidal cones only; the
     /// caller checks.
     pub(crate) fn fwd_constraint(&self, sd: &SmoothData, e: &Efc, contacts: &[NativeContact], qacc_warmstart: &[f64], opt: &SolverOptions) -> Solution {
+        let em_connect = |id: usize| self.efc.eq.get(id).and_then(|q| q.0.connect_bodies());
         let nv = self.dof_bodyid.len();
         let nefc = e.typ.len();
         let mut out = Solution { qfrc_constraint: vec![0.0; nv], ..Default::default() };
@@ -668,6 +669,11 @@ impl SmoothModel {
                 continue;
             }
             let (t1, t2) = match e.typ[i] {
+                // a connect: the trees of its two bodies
+                EQUALITY if em_connect(e.id[i]).is_some() => {
+                    let (b1, b2) = em_connect(e.id[i]).expect("a connect");
+                    (body_treeid[b1], body_treeid[b2])
+                }
                 // generic scan: the trees of the row's non-zero columns, in dof order, one per tree
                 EQUALITY => {
                     let row = &jd[i * nv..(i + 1) * nv];

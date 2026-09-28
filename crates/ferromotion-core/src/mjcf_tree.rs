@@ -1518,7 +1518,26 @@ impl MjcfTree {
                             _ => sm.unsupported.push("rows: a joint equality on a joint this port cannot place".into()),
                         }
                     }
-                    EqualityKind::Connect { .. } => sm.unsupported.push("rows: a connect equality".into()),
+                    EqualityKind::Connect { .. } => {
+                        let idx = self.equalities.iter().position(|e| std::ptr::eq(e, eq)).unwrap_or(0);
+                        if sm.dof_bodyid.len() >= 60 {
+                            sm.unsupported.push("rows: a connect equality in a sparse model".into());
+                            continue;
+                        }
+                        match self.connect_raw.get(&idx) {
+                            Some(ConnectRaw::Bodies(b1, b2, anchor)) => {
+                                // `set0`: the anchor as a world point at qpos0, then in body2's frame
+                                let k0 = sm.kin.state(&self.qpos0());
+                                let data2 = crate::mujoco_efc::connect_data2(&k0, *b1, *b2, anchor);
+                                em.eq.push((crate::mujoco_efc::NativeEq::ConnectBodies { b1: *b1, b2: *b2, data1: *anchor, data2 }, eq.solref, eq.solimp));
+                            }
+                            Some(ConnectRaw::Sites(s1, s2)) => match (self.mj_sites.get(s1), self.mj_sites.get(s2)) {
+                                (Some(a), Some(b)) => em.eq.push((crate::mujoco_efc::NativeEq::ConnectSites { s1: *a, s2: *b }, eq.solref, eq.solimp)),
+                                _ => sm.unsupported.push("rows: a connect between sites this port did not record".into()),
+                            },
+                            None => sm.unsupported.push("rows: a connect equality this port did not record".into()),
+                        }
+                    }
                     _ => sm.unsupported.push("rows: a weld or tendon equality".into()),
                 }
             }
@@ -2445,6 +2464,13 @@ pub struct MjcfEquality {
     pub solimp: [f64; 5],
 }
 
+/// A `<connect>` as the file states it: two MuJoCo body ids and the anchor in body1's frame, or two sites.
+#[derive(Clone, Debug)]
+pub(crate) enum ConnectRaw {
+    Bodies(usize, usize, [f64; 3]),
+    Sites(String, String),
+}
+
 /// Which equality, and everything its rows need: `joint`, `tendon`, `connect` and `weld` (the flex
 /// equalities are named in [`MjcfTree::equalities_unsupported`] instead).
 #[derive(Clone, Debug)]
@@ -2615,6 +2641,10 @@ pub struct MjcfTree {
     pub(crate) mj_kin: crate::mujoco_kinematics::MjKinematics,
     /// every body's name in MuJoCo's body order, the world first
     pub(crate) mj_body_names: Vec<String>,
+    /// every named site as MuJoCo compiles it (`site_bodyid`, `site_pos`, `site_quat`, `site_sameframe`)
+    pub(crate) mj_sites: BTreeMap<String, crate::mujoco_kinematics::KinGeom>,
+    /// each `<connect>` as the file states it, by index into [`MjcfTree::equalities`]
+    pub(crate) connect_raw: BTreeMap<usize, ConnectRaw>,
     /// Every `<hfield>` asset, compiled (`hfield_nrow`, `hfield_ncol`, `hfield_size`, `hfield_data`).
     pub hfields: BTreeMap<String, crate::mujoco_collision::HField>,
     /// Each body's mass after MuJoCo's `boundmass` floor, and its `<body gravcomp>` where it is non-zero —
@@ -4860,6 +4890,11 @@ impl Walk<'_> {
                     }
                     uu_normvec(&mut sm.quat);
                     let sp = self.snap_in_current_body(sm).iso();
+                    if let Some(name) = &name {
+                        let body_id = self.body_stack.last().and_then(|b| self.body_ids.get(b).copied()).unwrap_or(0);
+                        let (stored, _) = self.body_stack.last().and_then(|b| self.inertial_mj.get(b)).copied().unwrap_or((MjPose { pos: [0.0; 3], quat: UNIT_QUAT }, MjPose { pos: [0.0; 3], quat: UNIT_QUAT }));
+                        self.out.mj_sites.insert(name.clone(), crate::mujoco_kinematics::KinGeom { body: body_id, pos: sm.pos, quat: sm.quat, sameframe: sameframe_of(&sm, &stored) });
+                    }
                     if let Some(name) = name {
                         // which BODY the site sits on — a site-based `connect` needs it for the two
                         // `body_invweight0` values its rows regularise against
@@ -6549,6 +6584,8 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             body_inertial_runtime: BTreeMap::new(),
             mj_kin: Default::default(),
             mj_body_names: Vec::new(),
+            mj_sites: BTreeMap::new(),
+            connect_raw: BTreeMap::new(),
             hfields: BTreeMap::new(),
             body_mass: BTreeMap::new(),
             body_gravcomp: BTreeMap::new(),
@@ -6855,6 +6892,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
                             continue;
                         };
                         let diag_a = biw0(Some(b1.as_str())) + biw0(Some(b2.as_str()));
+                        out.connect_raw.insert(out.equalities.len(), ConnectRaw::Sites(s1.to_string(), s2.to_string()));
                         out.equalities.push(MjcfEquality { name, kind: EqualityKind::Connect { side1: (r1, l1), side2: (r2, l2), diag_a, bodies: [b1, b2] }, solref, solimp });
                         continue;
                     }
@@ -6890,6 +6928,8 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
                     let diag_a = biw0(el.attr("body1")) + biw0(el.attr("body2"));
                     let body = |b: Option<&str>| b.filter(|b| *b != "world").unwrap_or("").to_string();
                     let bodies = [body(el.attr("body1")), body(el.attr("body2"))];
+                    let id = |b: Option<&str>| b.filter(|b| *b != "world").and_then(|b| out.mj_body_names.iter().position(|n| n == b)).unwrap_or(0);
+                    out.connect_raw.insert(out.equalities.len(), ConnectRaw::Bodies(id(el.attr("body1")), id(el.attr("body2")), [anchor.x, anchor.y, anchor.z]));
                     out.equalities.push(MjcfEquality { name, kind: EqualityKind::Connect { side1: local(ride1, world1), side2: local(ride2, world2), diag_a, bodies }, solref, solimp });
                     continue;
                 }
@@ -7499,6 +7539,28 @@ mod tests {
         let qvel: [u64; 8] = [0x3fbb863a852d35db, 0xbfc87197c2a1d7d9, 0xbfe64317f3424a20, 0x4008ad4273779321, 0xbffedbd79d55445d, 0x4010ec182ab736c4, 0xc0156e6b644722dd, 0xbfc681bba43d51a0];
         assert_eq!(st.qvel.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), qvel);
         assert_eq!(st.qpos.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), qpos);
+    }
+
+    /// ⭐⭐ **Connect equalities, both forms, to the bit**: a site-to-site connect (one site rotated, so its
+    /// `site_sameframe` is not the body's) and a body-to-body connect whose second anchor MuJoCo's compiler
+    /// resolves at `qpos0` — six equality rows with their `J̇·v` reference terms, ten free-running steps.
+    #[test]
+    fn connect_equalities_step_as_mujoco_does_bit_for_bit() {
+        let xml = r#"<mujoco><option timestep="0.002"/><worldbody>
+            <body name="a" pos="0 0 1"><joint name="ja" type="hinge" axis="0 1 0" damping="0.2"/><geom type="capsule" fromto="0 0 0 0.4 0 0" size="0.02"/>
+              <site name="sa" pos="0.4 0 0"/>
+              <body name="b" pos="0.4 0 0"><joint name="jb" type="hinge" axis="0 1 0"/><geom type="capsule" fromto="0 0 0 0 0 -0.4" size="0.02"/><site name="sb" pos="0 0 -0.4" quat="0.9 0.1 0 0.2"/></body>
+            </body>
+            <body name="c" pos="0.8 0 1"><joint name="jc" type="hinge" axis="0 1 0"/><geom type="capsule" fromto="0 0 0 0 0 -0.4" size="0.02"/><site name="sc" pos="0 0 -0.4"/></body>
+            </worldbody>
+            <equality><connect site1="sb" site2="sc"/><connect body1="a" body2="c" anchor="0.4 0 0.05" solref="0.01 1"/></equality></mujoco>"#;
+        let t = tree_from_mjcf_str(xml).unwrap();
+        let mut st = crate::MjNativeState { qpos: vec![0.3, -0.5, 0.4], qvel: vec![0.5, -1.2, 0.8], qacc_warmstart: vec![0.0; 3], ..Default::default() };
+        for _ in 0..10 {
+            st = t.mujoco_native_step(&st, &[]).unwrap();
+        }
+        assert_eq!(st.qpos.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), [0x3fc445354e960e7d, 0xbfe60d0de79f4091, 0x3fc0f838bc7d349b]);
+        assert_eq!(st.qvel.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), [0xc008316c5ddba989, 0xc0320dc4e0f887c9, 0xc02bd9e71566b5b7]);
     }
 
     /// ⛔⛔ **MuJoCo's midphase can call touching surfaces apart.** franka's fingertip pads meet at `qpos0`:
