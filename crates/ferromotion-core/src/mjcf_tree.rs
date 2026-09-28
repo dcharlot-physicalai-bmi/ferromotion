@@ -1462,6 +1462,10 @@ impl MjcfTree {
             if !self.actuators_unsupported.is_empty() {
                 unsupported.push("an actuator this loader does not carry".into());
             }
+            // a tendon the loader drops would shift every tendon index after it, and lose its rows
+            if !self.tendons_unsupported.is_empty() {
+                unsupported.push("a tendon this loader does not carry".into());
+            }
             let inp = crate::mujoco_smooth::SmoothInputs {
                 body_mass: per_body(&self.body_mass),
                 body_inertia: self.mj_body_names.iter().map(|n| self.body_iinertia.get(n).copied().unwrap_or([0.0; 3])).collect(),
@@ -1475,6 +1479,10 @@ impl MjcfTree {
                 gravity: [self.gravity.x, self.gravity.y, self.gravity.z],
                 timestep: self.timestep,
                 actuators: self.actuators.clone(),
+                tendons: self.tendons.iter().map(|t| match &t.path {
+                    TendonPath::Fixed(j) => Some(j.clone()),
+                    TendonPath::Spatial(_) => None,
+                }).collect(),
                 unsupported,
             };
             let mut sm = crate::mujoco_smooth::SmoothModel::new(&self.mj_kin, inp);
@@ -1487,6 +1495,13 @@ impl MjcfTree {
                 jnt_solimp: self.joints.iter().map(|j| j.solimp_limit).collect(),
                 elliptic: self.cone == crate::mujoco_contact::Cone::Elliptic,
                 impratio: self.impratio,
+                ten_range: self.tendons.iter().map(|t| t.range.map(|(a, b)| [a, b])).collect(),
+                ten_margin: self.tendons.iter().map(|t| t.margin).collect(),
+                ten_solref_lim: self.tendons.iter().map(|t| t.solref_limit).collect(),
+                ten_solimp_lim: self.tendons.iter().map(|t| t.solimp_limit).collect(),
+                ten_frictionloss: self.tendons.iter().map(|t| t.frictionloss).collect(),
+                ten_solref_fri: self.tendons.iter().map(|t| t.solref_friction).collect(),
+                ten_solimp_fri: self.tendons.iter().map(|t| t.solimp_friction).collect(),
                 ..Default::default()
             };
             for (j, joint) in self.joints.iter().enumerate() {
@@ -1500,6 +1515,7 @@ impl MjcfTree {
             let (bw, dw) = sm.invweight0(&self.qpos0());
             em.body_invweight0 = bw;
             em.dof_invweight0 = dw;
+            em.tendon_invweight0 = sm.tendon_invweight0(&self.qpos0());
             // equalities: `joint` carried natively; the rest named
             if !self.equalities_unsupported.is_empty() {
                 sm.unsupported.push("rows: an equality constraint this loader does not carry".into());
@@ -1541,8 +1557,8 @@ impl MjcfTree {
                     _ => sm.unsupported.push("rows: a weld or tendon equality".into()),
                 }
             }
-            if self.tendons.iter().any(|t| t.range.is_some() || t.frictionloss != 0.0) {
-                sm.unsupported.push("rows: a tendon limit or frictionloss".into());
+            if self.tendons.iter().any(|t| matches!(t.path, TendonPath::Spatial(_)) && (t.range.is_some() || t.frictionloss != 0.0)) {
+                sm.unsupported.push("rows: a spatial tendon's limit or frictionloss".into());
             }
             if self.joints.iter().any(|j| j.range.is_some() && j.kind == MjcfJointKind::Ball) {
                 sm.unsupported.push("rows: a ball-joint limit".into());
@@ -1572,6 +1588,11 @@ impl MjcfTree {
         let mut out = sm.arrays();
         out.push(("body_invweight0", sm.efc.body_invweight0.iter().flatten().copied().collect()));
         out.push(("dof_invweight0", sm.efc.dof_invweight0.clone()));
+        out.push(("tendon_invweight0", sm.efc.tendon_invweight0.clone()));
+        // a spatial tendon's length, velocity and weight are not ported: its arrays are not offered
+        if sm.tendons.iter().any(Option::is_none) {
+            out.retain(|(name, _)| *name != "tendon_invweight0");
+        }
         out
     }
 
@@ -1586,6 +1607,9 @@ impl MjcfTree {
         let nv = self.smooth_model().dof_bodyid.len();
         let (sd, e, sol) = self.native_forward(qpos, qvel, ctrl, act, &vec![0.0; nv]);
         let mut out = sd.arrays();
+        if self.smooth_model().tendons.iter().any(Option::is_none) {
+            out.retain(|(name, _)| !name.starts_with("ten_"));
+        }
         out.extend([
             ("qacc", sol.qacc.clone()),
             ("efc_b", sol.efc_b.clone()),
@@ -6277,6 +6301,7 @@ fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&s
     }
     let (kind, target) = rec.trn.ok_or_else(|| Unsupported("no transmission named".into()))?;
     let mut dynamic = None;
+    let mut tendon = None;
     // ⛔ a TENDON transmission is the same actuator with a different moment: `length = gear·L`, and the
     // force comes back through `gear·coef` on every joint the tendon names, not through one dof. Everything
     // downstream — gain, bias, the clamps — is untouched, which is exactly MuJoCo's factoring.
@@ -6291,7 +6316,10 @@ fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&s
         "tendon" => {
             let (i, t) = ten_by_name.get(target.as_str()).copied().ok_or_else(|| Unsupported(format!("tendon '{target}' is not one this loader carries")))?;
             match &t.path {
-                TendonPath::Fixed(j) => (None, j.iter().map(|(d, c)| (*d, rec.gear * c)).collect()),
+                TendonPath::Fixed(j) => {
+                    tendon = Some(i);
+                    (None, j.iter().map(|(d, c)| (*d, rec.gear * c)).collect())
+                }
                 // a spatial tendon's moment is a path derivative: it belongs to the state, not to the file
                 TendonPath::Spatial(_) => {
                     dynamic = Some(crate::mujoco_actuator::DynTransmission::SpatialTendon { index: i });
@@ -6398,6 +6426,7 @@ fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&s
         actrange,
         actearly: rec.actearly,
         pid,
+        tendon,
     })
 }
 
@@ -7584,6 +7613,34 @@ mod tests {
         let qvel: [u64; 12] = [0xbfc404f86fc11129, 0x3fc69ba991f01b2f, 0x3fd966af9a2eddc0, 0xbffdd2a64f6c8a4b, 0xc000db39f38104f6, 0xbfcb4ad3cfde9cb6, 0xbfe247baf0534a8f, 0x3fc81820c5ada049, 0x3fbfe11e21fcf716, 0xc0058a61036c6148, 0xc0220f9a089d2122, 0x3fe407a2f57cb5cc];
         assert_eq!(st.qvel.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), qvel);
         assert_eq!(st.qpos.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), qpos);
+    }
+
+    /// ⭐⭐ **Fixed tendons, to the bit**: a tendon coupling a hinge to its child, its servo commanded past the
+    /// range so the limit row is QUADRATIC at every step (its `R` from `tendon_invweight0`), and one coupling
+    /// that child to a slide, a frictionloss row, driven by a motor — `ten_length`, `ten_J`, the moment
+    /// `gear·ten_J`, and under `implicitfast` the servo's `moment'·kv·moment` reaching the off-diagonal of `M`.
+    /// Ten free-running steps land on MuJoCo 3.13.0's bits.
+    #[test]
+    fn fixed_tendons_step_as_mujoco_does_bit_for_bit() {
+        let xml = r#"<mujoco><option timestep="0.002" integrator="implicitfast"/><worldbody>
+            <body name="a" pos="0 0 1"><joint name="j1" type="hinge" axis="0 1 0" damping="0.1"/><geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.02"/>
+              <body name="b" pos="0.3 0 0"><joint name="j2" type="hinge" axis="0 1 0"/><geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.02"/>
+                <body name="c" pos="0.3 0 0"><joint name="j3" type="slide" axis="1 0 0"/><geom type="sphere" size="0.04"/></body>
+              </body>
+            </body></worldbody>
+            <tendon>
+              <fixed name="t1" limited="true" range="-0.3 0.4"><joint joint="j1" coef="1"/><joint joint="j2" coef="-0.5"/></fixed>
+              <fixed name="t2" frictionloss="0.2"><joint joint="j2" coef="0.7"/><joint joint="j3" coef="2"/></fixed>
+            </tendon>
+            <actuator><position tendon="t1" kp="30" kv="2"/><motor tendon="t2" gear="1.5"/></actuator></mujoco>"#;
+        let t = tree_from_mjcf_str(xml).unwrap();
+        assert!(t.mujoco_native_unsupported().is_empty(), "{:?}", t.mujoco_native_unsupported());
+        let mut st = crate::MjNativeState { qpos: vec![0.45, 0.05, 0.02], qvel: vec![0.8, -1.1, 0.3], qacc_warmstart: vec![0.0; 3], ..Default::default() };
+        for _ in 0..10 {
+            st = t.mujoco_native_step(&st, &[0.9, 0.05]).unwrap();
+        }
+        assert_eq!(st.qvel.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), [0x3fe29f5595c7a142, 0x3fb650a1c7434a39, 0x3fd87313d012fe7f]);
+        assert_eq!(st.qpos.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), [0x3fdda4703112eafd, 0x3fa59013a4ab6afa, 0x3f9b8db6ce5f60f2]);
     }
 
     /// ⛔⛔ **MuJoCo's midphase can call touching surfaces apart.** franka's fingertip pads meet at `qpos0`:

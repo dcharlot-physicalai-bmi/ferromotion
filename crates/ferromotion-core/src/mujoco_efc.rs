@@ -19,7 +19,9 @@ const MJ_MAXIMP: f64 = 0.9999;
 /// `mjtConstraint`
 pub(crate) const EQUALITY: i32 = 0;
 pub(crate) const FRICTION_DOF: i32 = 1;
+pub(crate) const FRICTION_TENDON: i32 = 2;
 pub(crate) const LIMIT_JOINT: i32 = 3;
+pub(crate) const LIMIT_TENDON: i32 = 4;
 pub(crate) const CONTACT_FRICTIONLESS: i32 = 5;
 pub(crate) const CONTACT_PYRAMIDAL: i32 = 6;
 pub(crate) const CONTACT_ELLIPTIC: i32 = 7;
@@ -188,6 +190,16 @@ pub(crate) struct EfcModel {
     /// `body_invweight0`, `dof_invweight0`
     pub(crate) body_invweight0: Vec<[f64; 2]>,
     pub(crate) dof_invweight0: Vec<f64>,
+    /// per tendon: `tendon_range` when `tendon_limited`, `tendon_margin`, the limit's `solref`/`solimp`,
+    /// `tendon_frictionloss` and the friction's `solref`/`solimp`, and `tendon_invweight0`
+    pub(crate) ten_range: Vec<Option<[f64; 2]>>,
+    pub(crate) ten_margin: Vec<f64>,
+    pub(crate) ten_solref_lim: Vec<[f64; 2]>,
+    pub(crate) ten_solimp_lim: Vec<[f64; 5]>,
+    pub(crate) ten_frictionloss: Vec<f64>,
+    pub(crate) ten_solref_fri: Vec<[f64; 2]>,
+    pub(crate) ten_solimp_fri: Vec<[f64; 5]>,
+    pub(crate) tendon_invweight0: Vec<f64>,
 }
 
 /// The `efc_*` arrays. Each row of `J` is `(columns, values)`: every dof when dense, the chain when sparse.
@@ -479,8 +491,31 @@ impl SmoothModel {
         (body, dof)
     }
 
-    /// **`mj_makeConstraint` → `mj_diagApprox` → `mj_makeImpedance` → `mj_referenceConstraint`**, for dof
-    /// friction, joint limits and contacts (equality and tendon rows are not ported yet).
+    /// **`set0`**'s `tendon_invweight0`: `J·M⁻¹·Jᵀ` of each fixed tendon at `qpos0` (zero for a spatial one,
+    /// which is not ported).
+    pub(crate) fn tendon_invweight0(&self, qpos0: &[f64]) -> Vec<f64> {
+        let nv = self.dof_bodyid.len();
+        if nv == 0 {
+            return vec![0.0; self.tendons.len()];
+        }
+        let sd = self.forward(qpos0, &vec![0.0; nv], &[], &[]);
+        self.tendons
+            .iter()
+            .zip(&sd.ten_j)
+            .map(|(t, j)| {
+                let Some(t) = t else { return 0.0 };
+                let mut tmp = vec![0.0; nv];
+                for (&c, &v) in t.colind.iter().zip(j) {
+                    tmp[c] = v;
+                }
+                let x = self.solve_m(&sd, &tmp);
+                dot(&tmp, &x)
+            })
+            .collect()
+    }
+
+    /// **`mj_makeConstraint` → `mj_diagApprox` → `mj_makeImpedance` → `mj_referenceConstraint`**, for
+    /// equalities (joint, connect), dof and fixed-tendon friction, joint and fixed-tendon limits, and contacts.
     pub(crate) fn constraints(&self, em: &EfcModel, sd: &SmoothData, qpos: &[f64], qvel: &[f64], contacts: &[NativeContact]) -> Efc {
         let nv = self.dof_bodyid.len();
         let sparse = nv >= 60;
@@ -559,6 +594,34 @@ impl SmoothModel {
             let (c, v) = dense_row(i, 1.0);
             e.push(c, v, 0.0, 0.0, em.dof_frictionloss[i], FRICTION_DOF, i);
         }
+        // tendon friction: the row is `ten_J`, made dense when the model is (`mju_sparse2dense`)
+        let ten_row = |t: usize, scl: Option<f64>| -> Option<(Vec<usize>, Vec<f64>)> {
+            let nt = self.tendons.get(t)?.as_ref()?;
+            let j = &sd.ten_j[t];
+            if sparse {
+                Some((nt.colind.clone(), j.iter().map(|v| scl.map_or(*v, |s| v * s)).collect()))
+            } else {
+                let mut row = vec![0.0f64; nv];
+                for (&c, &v) in nt.colind.iter().zip(j) {
+                    row[c] = v;
+                }
+                // `mju_scl` over the whole dense row: a zero times −1 is −0
+                if let Some(s) = scl {
+                    row.iter_mut().for_each(|x| *x *= s);
+                }
+                Some(((0..nv).collect(), row))
+            }
+        };
+        for t in 0..em.ten_frictionloss.len() {
+            if em.ten_frictionloss[t] > 0.0
+                && let Some((c, v)) = ten_row(t, None)
+            {
+                if !sparse && v.iter().all(|&x| x == 0.0) {
+                    continue;
+                }
+                e.push(c, v, 0.0, 0.0, em.ten_frictionloss[t], FRICTION_TENDON, t);
+            }
+        }
         // joint limits
         for (j, &kind) in self.jnt_type.iter().enumerate() {
             if !em.jnt_limited[j] {
@@ -578,6 +641,22 @@ impl SmoothModel {
                 }
                 // ball-joint limits are not ported yet; the caller lists a model with one as unsupported
                 _ => {}
+            }
+        }
+        // tendon limits
+        for (t, range) in em.ten_range.iter().enumerate() {
+            let Some(range) = range else { continue };
+            let (value, margin) = (sd.ten_length[t], em.ten_margin[t]);
+            for side in [-1.0f64, 1.0] {
+                let dist = side * (range[if side < 0.0 { 0 } else { 1 }] - value);
+                if dist < margin
+                    && let Some((c, v)) = ten_row(t, Some(-side))
+                {
+                    if !sparse && v.iter().all(|&x| x == 0.0) {
+                        continue;
+                    }
+                    e.push(c, v, dist, margin, 0.0, LIMIT_TENDON, t);
+                }
             }
         }
         // contacts
@@ -655,6 +734,7 @@ impl SmoothModel {
                 },
                 FRICTION_DOF => e.diag_a[i] = em.dof_invweight0[id],
                 LIMIT_JOINT => e.diag_a[i] = em.dof_invweight0[self.jnt_dofadr[id]],
+                FRICTION_TENDON | LIMIT_TENDON => e.diag_a[i] = em.tendon_invweight0[id],
                 t => {
                     let con = &contacts[id];
                     let (mut tran, mut rot) = (0.0f64, 0.0f64);
@@ -694,6 +774,8 @@ impl SmoothModel {
                 EQUALITY => (em.eq[id].1, [0.0; 2], em.eq[id].2),
                 LIMIT_JOINT => (em.jnt_solref[id], [0.0; 2], em.jnt_solimp[id]),
                 FRICTION_DOF => (em.dof_solref[id], [0.0; 2], em.dof_solimp[id]),
+                LIMIT_TENDON => (em.ten_solref_lim[id], [0.0; 2], em.ten_solimp_lim[id]),
+                FRICTION_TENDON => (em.ten_solref_fri[id], [0.0; 2], em.ten_solimp_fri[id]),
                 _ => (contacts[id].solref, contacts[id].solreffriction, contacts[id].solimp),
             };
             if (solref[0] > 0.0) ^ (solref[1] > 0.0) {
@@ -730,7 +812,7 @@ impl SmoothModel {
                 let elliptic_friction = tp == CONTACT_ELLIPTIC && j > 0;
                 let rf = if elliptic_friction && (solreffriction[0] != 0.0 || solreffriction[1] != 0.0) { solreffriction } else { solref };
                 let k = &mut e.kbip[i + j];
-                k[0] = if tp == FRICTION_DOF || elliptic_friction {
+                k[0] = if tp == FRICTION_DOF || tp == FRICTION_TENDON || elliptic_friction {
                     0.0
                 } else if rf[0] > 0.0 {
                     1.0 / max(MJ_MINVAL, solimp[1] * solimp[1] * rf[0] * rf[0] * rf[1] * rf[1])

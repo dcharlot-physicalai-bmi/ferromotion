@@ -258,8 +258,12 @@ impl SmoothModel {
         let nv = self.dof_bodyid.len();
         let h = self.timestep;
         let qfrc: Vec<f64> = (0..nv).map(|i| sd.qfrc_smooth[i] + sol.qfrc_constraint[i]).collect();
-        // qDeriv: only its diagonal can be non-zero for the transmissions and passive forces carried here
-        let mut qderiv = vec![0.0; nv];
+        // qDeriv on the entries `mapD2M` gathers — M's lower pattern, by M's address (the diagonal is each
+        // row's last). A joint transmission and a damper touch only the diagonal; a fixed tendon's
+        // `moment'·b·moment` reaches every pair of its dofs, and of those only the ones M stores survive.
+        let mut qderiv = vec![0.0; self.m_colind.len()];
+        let diag = |i: usize| self.m_rowadr[i] + self.m_rownnz[i] - 1;
+        let at = |r: usize, c: usize| (self.m_rowadr[r]..self.m_rowadr[r] + self.m_rownnz[r]).find(|&k| self.m_colind[k] == c);
         for (i, a) in self.actuators.iter().enumerate() {
             if let Some([lo, hi]) = a.act.forcerange {
                 let f = sd.actuator_force[i];
@@ -289,22 +293,25 @@ impl SmoothModel {
                 };
                 bias_vel = gain_vel.mul_add(input, bias_vel);
             }
+            // `addJTBJSparse`: row r += moment·(moment_r·b), at the columns row r stores
             if bias_vel != 0.0 {
-                let g = a.act.gear;
-                qderiv[a.dofadr] = (g * bias_vel).mul_add(g, qderiv[a.dofadr]);
+                let (cols, vals) = &sd.moment[i];
+                for (&r, &mr) in cols.iter().zip(vals) {
+                    let scl = mr * bias_vel;
+                    for (&c, &mc) in cols.iter().zip(vals) {
+                        if let Some(k) = at(r, c) {
+                            qderiv[k] = scl.mul_add(mc, qderiv[k]);
+                        }
+                    }
+                }
             }
         }
         for i in 0..nv {
-            qderiv[i] -= self.dof_damping[i];
+            qderiv[diag(i)] -= self.dof_damping[i];
         }
-        // qH = M + qDeriv·(−h) on M's pattern (off the diagonal qDeriv is zero)
-        let mut qh: Vec<f64> = sd.m.clone();
-        for i in 0..nv {
-            for adr in self.m_rowadr[i]..self.m_rowadr[i] + self.m_rownnz[i] {
-                let q = if self.m_colind[adr] == i { qderiv[i] } else { 0.0 };
-                qh[adr] = q.mul_add(-h, sd.m[adr]);
-            }
-        }
+        // qH = M + qDeriv·(−h) on M's pattern
+        let qh: Vec<f64> = qderiv.iter().zip(&sd.m).map(|(q, m)| q.mul_add(-h, *m)).collect();
+        let mut qh = qh;
         // standalone free bodies: their rows back to M
         let free: Vec<usize> = (0..self.jnt_type.len()).filter(|&j| self.jnt_type[j] == KinJointKind::Free && self.is_free_body(self.jnt_bodyid[j])).collect();
         for &j in &free {
@@ -331,7 +338,7 @@ impl SmoothModel {
             // A −= h·qDeriv over the block (only its diagonal is non-zero)
             for r in 0..6 {
                 for c in 0..6 {
-                    let q = if r == c { qderiv[adr + r] } else { 0.0 };
+                    let q = if r == c { qderiv[diag(adr + r)] } else { 0.0 };
                     a[6 * r + c] = (-h).mul_add(q, a[6 * r + c]);
                 }
             }

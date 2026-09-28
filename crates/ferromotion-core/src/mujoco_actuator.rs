@@ -212,6 +212,10 @@ pub struct Actuator {
     pub actearly: bool,
     /// A `mujoco.pid` plugin computes this actuator's force and activations in place of gain and bias.
     pub pid: Option<Pid>,
+    /// The FIXED tendon a tendon transmission drives, by index into [`crate::MjcfTree::tendons`] — what
+    /// MuJoCo's own pipeline reads (`length = gear·ten_length`, `moment = gear·ten_J`); `moment` above is
+    /// the same row folded at load.
+    pub tendon: Option<usize>,
 }
 
 impl Actuator {
@@ -590,7 +594,7 @@ mod tests {
         Actuator {
             name: "a".into(), moment: vec![(0, 1.0)], dynamic: None, gear: 1.0, gain, gainprm, bias, biasprm,
             dynamics: ActDyn::None, dynprm: [0.0; 3], lengthrange: [0.0; 2], acc0: 0.0, ctrlrange: None, forcerange: None,
-            actrange: None, actearly: false, pid: None,
+            actrange: None, actearly: false, pid: None, tendon: None,
         }
     }
 

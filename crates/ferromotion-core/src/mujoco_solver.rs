@@ -11,7 +11,7 @@
 //! ⛔ Contracted as clang contracts MuJoCo's C on arm64 (see [`crate::mujoco_ccd`]); dot products follow
 //! [`crate::mujoco_efc::dot`], whose vectorised block is not fused.
 
-use crate::mujoco_efc::{dot, dot_self, Efc, NativeContact, CONTACT_ELLIPTIC, EQUALITY, FRICTION_DOF, LIMIT_JOINT};
+use crate::mujoco_efc::{dot, dot_self, Efc, NativeContact, CONTACT_ELLIPTIC, EQUALITY, FRICTION_DOF, FRICTION_TENDON, LIMIT_JOINT, LIMIT_TENDON};
 use crate::mujoco_smooth::{SmoothData, SmoothModel};
 
 const MJ_MINVAL: f64 = 1e-15;
@@ -885,7 +885,7 @@ impl SmoothModel {
         let cones: Vec<ConeInfo> = contacts.iter().zip(&e.contact_mu).map(|(c, &mu)| ConeInfo { dim: c.dim, mu, friction: c.friction }).collect();
         let jmul = |v: &[f64]| -> Vec<f64> { (0..nefc).map(|r| dot(&jd[r * nv..(r + 1) * nv], v)).collect() };
         let ne = e.typ.iter().filter(|&&t| t == EQUALITY).count();
-        let nf = e.typ.iter().filter(|&&t| t == FRICTION_DOF).count();
+        let nf = e.typ.iter().filter(|&&t| t == FRICTION_DOF || t == FRICTION_TENDON).count();
         // efc_b = J·qacc_smooth − aref
         out.efc_b = jmul(&sd.qacc_smooth);
         for i in 0..nefc {
@@ -924,8 +924,9 @@ impl SmoothModel {
                     let (b1, b2) = em_connect(e.id[i]).expect("a connect");
                     (body_treeid[b1], body_treeid[b2])
                 }
-                // generic scan: the trees of the row's non-zero columns, in dof order, one per tree
-                EQUALITY => {
+                // generic scan (a joint equality, a tendon's rows): the trees of the row's non-zero columns,
+                // in dof order, one per tree
+                EQUALITY | FRICTION_TENDON | LIMIT_TENDON => {
                     let row = &jd[i * nv..(i + 1) * nv];
                     let mut trees: Vec<i32> = Vec::new();
                     let mut j = 0;
@@ -1019,7 +1020,7 @@ impl SmoothModel {
             let mut ctx = Ctx {
                 nv: inv,
                 ne: efcs.iter().filter(|&&c| e.typ[c] == EQUALITY).count(),
-                nf: efcs.iter().filter(|&&c| e.typ[c] == FRICTION_DOF).count(),
+                nf: efcs.iter().filter(|&&c| e.typ[c] == FRICTION_DOF || e.typ[c] == FRICTION_TENDON).count(),
                 nefc: ie,
                 m_rownnz,
                 m_rowadr,

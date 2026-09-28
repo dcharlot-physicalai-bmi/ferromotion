@@ -25,10 +25,12 @@ MODEL = ["body_parentid", "body_rootid", "body_weldid", "body_jntnum", "body_jnt
          "body_mass", "body_subtreemass", "body_inertia", "body_ipos", "body_iquat", "body_pos", "body_quat",
          "jnt_type", "jnt_qposadr", "jnt_dofadr", "jnt_bodyid", "jnt_pos", "jnt_axis",
          "dof_bodyid", "dof_jntid", "dof_parentid", "dof_simplenum", "dof_M0", "dof_armature", "dof_damping",
-         "M_rownnz", "M_rowadr", "M_colind", "qpos0", "body_invweight0", "dof_invweight0"]
+         "M_rownnz", "M_rowadr", "M_colind", "qpos0", "body_invweight0", "dof_invweight0",
+         "tendon_invweight0"]
 DATA = ["xpos", "xquat", "xmat", "xipos", "ximat", "xanchor", "xaxis", "subtree_com", "cinert", "cdof", "crb",
         "M", "qLD", "qLDiagInv", "cvel", "cdof_dot", "qfrc_bias",
-        "qfrc_spring", "qfrc_damper", "qfrc_gravcomp", "qfrc_passive", "actuator_length", "actuator_velocity",
+        "qfrc_spring", "qfrc_damper", "qfrc_gravcomp", "qfrc_passive", "ten_length", "ten_velocity",
+        "actuator_length", "actuator_velocity",
         "actuator_force", "act_dot", "qfrc_actuator", "qfrc_smooth", "qacc_smooth",
         "efc_type", "efc_id", "efc_pos", "efc_margin", "efc_frictionloss", "efc_diagA", "efc_R", "efc_D", "efc_KBIP",
         "efc_vel", "efc_aref", "efc_b", "efc_force", "efc_state", "qfrc_constraint", "qacc"]
