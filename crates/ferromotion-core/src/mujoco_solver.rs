@@ -52,9 +52,20 @@ fn norm(v: &[f64]) -> f64 {
     dot_self(v).sqrt()
 }
 
-/// `mj_constraintUpdate_impl` without cones: forces, states and (optionally) the constraint cost.
+/// A contact as the cone code reads it: `dim`, the regularised cone's `mu`, and the five frictions.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ConeInfo {
+    pub(crate) dim: usize,
+    pub(crate) mu: f64,
+    pub(crate) friction: [f64; 5],
+}
+
+pub(crate) const CONE: i32 = 4;
+
+/// `mj_constraintUpdate_impl`: forces, states and the constraint cost; with `cone_h`, each cone-state
+/// contact's local Hessian (`contact.H`, `dim×dim`) by contact id.
 #[allow(clippy::too_many_arguments)]
-fn constraint_update(ne: usize, nf: usize, d: &[f64], r: &[f64], floss: &[f64], jar: &[f64], typ: &[i32], state: &mut [i32], force: &mut [f64]) -> f64 {
+fn constraint_update(ne: usize, nf: usize, d: &[f64], r: &[f64], floss: &[f64], jar: &[f64], typ: &[i32], id: &[usize], cones: &[ConeInfo], state: &mut [i32], force: &mut [f64], mut cone_h: Option<&mut [[f64; 36]]>) -> f64 {
     let nefc = jar.len();
     let mut s = 0.0f64;
     if nefc == 0 {
@@ -63,10 +74,12 @@ fn constraint_update(ne: usize, nf: usize, d: &[f64], r: &[f64], floss: &[f64], 
     for i in 0..nefc {
         force[i] = -d[i] * jar[i];
     }
-    for i in 0..nefc {
+    let mut i = 0;
+    while i < nefc {
         if i < ne {
             s = (0.5 * d[i] * jar[i]).mul_add(jar[i], s);
             state[i] = QUADRATIC;
+            i += 1;
             continue;
         }
         if i < ne + nf {
@@ -82,16 +95,83 @@ fn constraint_update(ne: usize, nf: usize, d: &[f64], r: &[f64], floss: &[f64], 
                 s = (0.5 * d[i] * jar[i]).mul_add(jar[i], s);
                 state[i] = QUADRATIC;
             }
+            i += 1;
             continue;
         }
-        debug_assert!(typ[i] != CONTACT_ELLIPTIC);
-        if jar[i] >= 0.0 {
-            force[i] = 0.0;
-            state[i] = SATISFIED;
-        } else {
-            s = (0.5 * d[i] * jar[i]).mul_add(jar[i], s);
-            state[i] = QUADRATIC;
+        if typ[i] != CONTACT_ELLIPTIC {
+            if jar[i] >= 0.0 {
+                force[i] = 0.0;
+                state[i] = SATISFIED;
+            } else {
+                s = (0.5 * d[i] * jar[i]).mul_add(jar[i], s);
+                state[i] = QUADRATIC;
+            }
+            i += 1;
+            continue;
         }
+        // elliptic cone
+        let con = &cones[id[i]];
+        let (mu, fr, dim) = (con.mu, &con.friction, con.dim);
+        let mut u = [0.0f64; 6];
+        u[0] = jar[i] * mu;
+        for j in 1..dim {
+            u[j] = jar[i + j] * fr[j - 1];
+        }
+        let n = u[0];
+        let t = dot_self(&u[1..dim]).sqrt();
+        if n >= mu * t || (t <= 0.0 && n >= 0.0) {
+            for j in 0..dim {
+                force[i + j] = 0.0;
+            }
+            state[i] = SATISFIED;
+        } else if mu.mul_add(n, t) <= 0.0 || (t <= 0.0 && n < 0.0) {
+            for j in 0..dim {
+                s = (0.5 * d[i + j] * jar[i + j]).mul_add(jar[i + j], s);
+            }
+            state[i] = QUADRATIC;
+        } else {
+            let dm = d[i] / (mu * mu * (1.0 + mu * mu));
+            let nmt = (-mu).mul_add(t, n);
+            s = (0.5 * dm * nmt).mul_add(nmt, s);
+            force[i] = -dm * nmt * mu;
+            for j in 1..dim {
+                force[i + j] = -force[i] / t * u[j] * fr[j - 1];
+            }
+            state[i] = CONE;
+            if let Some(hs) = cone_h.as_deref_mut() {
+                let h = &mut hs[id[i]];
+                let scl = -mu / t;
+                h[0] = 1.0;
+                for j in 1..dim {
+                    h[j] = scl * u[j];
+                }
+                let scl = mu * n / (t * t * t);
+                for k in 1..dim {
+                    for j in k..dim {
+                        h[k * dim + j] = scl * u[j] * u[k];
+                    }
+                }
+                let scl = mu.mul_add(mu, -(mu * n / t));
+                for j in 1..dim {
+                    h[j * (dim + 1)] += scl;
+                }
+                for k in 0..dim {
+                    let scl = dm * if k == 0 { mu } else { fr[k - 1] };
+                    for j in k..dim {
+                        h[k * dim + j] *= scl * if j == 0 { mu } else { fr[j - 1] };
+                    }
+                }
+                for k in 0..dim {
+                    for j in k + 1..dim {
+                        h[j * dim + k] = h[k * dim + j];
+                    }
+                }
+            }
+        }
+        for j in 1..dim {
+            state[i + j] = state[i];
+        }
+        i += dim;
     }
     s
 }
@@ -246,7 +326,13 @@ struct Ctx {
     grad: Vec<f64>,
     mgrad: Vec<f64>,
     search: Vec<f64>,
-    quad: Vec<[f64; 3]>,
+    /// `3·nefc` wide: an elliptic contact's first row carries nine entries, over its own rows' slots
+    quad: Vec<f64>,
+    id: Vec<usize>,
+    cones: Vec<ConeInfo>,
+    cone_h: Vec<[f64; 36]>,
+    ncone: usize,
+    lcone: Vec<f64>,
     dvec: Vec<f64>,
     l: Vec<f64>,
     cost: f64,
@@ -263,7 +349,9 @@ impl Ctx {
 
     /// `PrimalUpdateConstraint`
     fn update_constraint(&mut self) {
-        self.cost = constraint_update(self.ne, self.nf, &self.efc_d, &self.efc_r, &self.floss, &self.jaref, &self.typ, &mut self.state, &mut self.force);
+        let elliptic = self.typ.contains(&CONTACT_ELLIPTIC);
+        self.cost = constraint_update(self.ne, self.nf, &self.efc_d, &self.efc_r, &self.floss, &self.jaref, &self.typ, &self.id, &self.cones, &mut self.state, &mut self.force, if elliptic { Some(&mut self.cone_h) } else { None });
+        self.ncone = self.state.iter().filter(|&&x| x == CONE).count();
         self.qfrc_constraint = mul_mat_t_vec(&self.j, &self.force, self.nefc, self.nv);
         let mut gauss = 0.0f64;
         for i in 0..self.nv {
@@ -340,6 +428,44 @@ impl Ctx {
         }
         chol_factor(&mut l, nv, MJ_MINVAL);
         self.l = l;
+        if self.ncone > 0 {
+            self.hessian_cone();
+        }
+    }
+
+    /// `HessianConeUpdate`, dense: `Lcone` = `L` updated by each cone contact's `L'·J` rows.
+    fn hessian_cone(&mut self) {
+        let nv = self.nv;
+        self.lcone = self.l.clone();
+        let mut i = 0;
+        while i < self.nefc {
+            if self.state[i] == CONE {
+                let dim = self.cones[self.id[i]].dim;
+                let mut local = [0.0f64; 36];
+                let h = &self.cone_h[self.id[i]];
+                // `mju_copy(local, con->H, dim*dim)`, then factor on a dim×dim
+                let mut lm = vec![0.0f64; dim * dim];
+                lm.copy_from_slice(&h[..dim * dim]);
+                chol_factor(&mut lm, dim, MJ_MINVAL);
+                local[..dim * dim].copy_from_slice(&lm);
+                let mut ltj = vec![0.0f64; dim * nv];
+                for r in 0..dim {
+                    for c in 0..=r {
+                        let scl = local[r * dim + c];
+                        for k in 0..nv {
+                            ltj[c * nv + k] = self.j[(i + r) * nv + k].mul_add(scl, ltj[c * nv + k]);
+                        }
+                    }
+                }
+                for r in 0..dim {
+                    let mut row = ltj[r * nv..(r + 1) * nv].to_vec();
+                    chol_update(&mut self.lcone, &mut row, nv, true);
+                }
+                i += dim;
+                continue;
+            }
+            i += 1;
+        }
     }
 
     /// `HessianIncremental`
@@ -361,23 +487,59 @@ impl Ctx {
                 return;
             }
         }
+        if self.ncone > 0 {
+            self.hessian_cone();
+        }
     }
 
-    /// `PrimalPrepare` (pyramidal)
+    /// `PrimalPrepare`
     fn prepare(&mut self) {
-        let nv = self.nv;
         let v = &self.search;
         self.quad_gauss[1] = dot(v, &self.ma) - dot(&self.qfrc_smooth, v);
         self.quad_gauss[2] = 0.5 * dot(v, &self.mv);
-        for i in 0..self.nefc {
-            let (jv, jaref, d) = (self.jv[i], self.jaref[i], self.efc_d[i]);
-            let dj0 = d * jaref;
-            let mut q = [jaref * dj0, jv * dj0, jv * d * jv];
+        let mut i = 0;
+        while i < self.nefc {
+            let (jv, jaref, d) = (&self.jv, &self.jaref, &self.efc_d);
+            let dj0 = d[i] * jaref[i];
+            let q = &mut self.quad[3 * i..];
+            q[0] = jaref[i] * dj0;
+            q[1] = jv[i] * dj0;
+            q[2] = jv[i] * d[i] * jv[i];
+            let mut adv = 1;
+            if self.typ[i] == CONTACT_ELLIPTIC {
+                let con = self.cones[self.id[i]];
+                let (dim, mu, fr) = (con.dim, con.mu, con.friction);
+                for j in 1..dim {
+                    let djj = d[i + j] * jaref[i + j];
+                    q[0] = jaref[i + j].mul_add(djj, q[0]);
+                    q[1] = jv[i + j].mul_add(djj, q[1]);
+                    q[2] = (jv[i + j] * d[i + j]).mul_add(jv[i + j], q[2]);
+                }
+                let (mut uu, mut uv, mut vv) = (0.0f64, 0.0f64, 0.0f64);
+                let (mut u, mut vv6) = ([0.0f64; 6], [0.0f64; 6]);
+                u[0] = jaref[i] * mu;
+                vv6[0] = jv[i] * mu;
+                for j in 1..dim {
+                    u[j] = jaref[i + j] * fr[j - 1];
+                    vv6[j] = jv[i + j] * fr[j - 1];
+                }
+                for j in 1..dim {
+                    uu = u[j].mul_add(u[j], uu);
+                    uv = u[j].mul_add(vv6[j], uv);
+                    vv = vv6[j].mul_add(vv6[j], vv);
+                }
+                q[3] = u[0];
+                q[4] = vv6[0];
+                q[5] = uu;
+                q[6] = uv;
+                q[7] = vv;
+                q[8] = d[i] / ((mu * mu) * (1.0 + (mu * mu)));
+                adv = dim;
+            }
             q[0] *= 0.5;
             q[2] *= 0.5;
-            self.quad[i] = q;
+            i += adv;
         }
-        let _ = nv;
     }
 
     /// `PrimalEval`: `cost(alpha) - cost(0)` and its two derivatives.
@@ -386,10 +548,12 @@ impl Ctx {
         let mut cost = 0.0f64;
         let mut deriv = [0.0f64; 2];
         let mut qt = [0.0, self.quad_gauss[1], self.quad_gauss[2]];
-        for i in 0..self.nefc {
+        let mut i = 0;
+        while i < self.nefc {
             if i < ne {
-                qt[1] += self.quad[i][1];
-                qt[2] += self.quad[i][2];
+                qt[1] += self.quad[3 * i + 1];
+                qt[2] += self.quad[3 * i + 2];
+                i += 1;
                 continue;
             }
             if i < ne + nf {
@@ -408,18 +572,52 @@ impl Ctx {
                 } else {
                     deriv[0] = f.mul_add(dir, deriv[0]);
                 }
+                i += 1;
+                continue;
+            }
+            if self.typ[i] == CONTACT_ELLIPTIC {
+                let con = self.cones[self.id[i]];
+                let q = &self.quad[3 * i..3 * i + 9];
+                let mu = con.mu;
+                let (u0, v0, uu, uv, vv, dm) = (q[3], q[4], q[5], q[6], q[7], q[8]);
+                cost += elliptic_cost_dif(q, alpha, mu, dm);
+                let n = alpha.mul_add(v0, u0);
+                let tsqr = alpha.mul_add(2.0f64.mul_add(uv, alpha * vv), uu);
+                if tsqr <= 0.0 {
+                    if n < 0.0 {
+                        deriv[0] += (2.0 * alpha).mul_add(q[2], q[1]);
+                        deriv[1] = 2.0f64.mul_add(q[2], deriv[1]);
+                    }
+                } else {
+                    let t = tsqr.sqrt();
+                    if n >= mu * t {
+                    } else if mu.mul_add(n, t) <= 0.0 {
+                        deriv[0] += (2.0 * alpha).mul_add(q[2], q[1]);
+                        deriv[1] = 2.0f64.mul_add(q[2], deriv[1]);
+                    } else {
+                        let n1 = v0;
+                        let t1 = alpha.mul_add(vv, uv) / t;
+                        let t2 = vv / t - alpha.mul_add(vv, uv) * t1 / (t * t);
+                        let a = (-mu).mul_add(t1, n1);
+                        let b = (-mu).mul_add(t, n);
+                        deriv[0] = (dm * b).mul_add(a, deriv[0]);
+                        deriv[1] = dm.mul_add(a.mul_add(a, b * (-mu * t2)), deriv[1]);
+                    }
+                }
+                i += con.dim;
                 continue;
             }
             let start = self.jaref[i];
             let x = alpha.mul_add(self.jv[i], start);
-            let cost0 = if start < 0.0 { self.quad[i][0] } else { 0.0 };
+            let cost0 = if start < 0.0 { self.quad[3 * i] } else { 0.0 };
             if x < 0.0 {
-                qt[0] += self.quad[i][0] - cost0;
-                qt[1] += self.quad[i][1];
-                qt[2] += self.quad[i][2];
+                qt[0] += self.quad[3 * i] - cost0;
+                qt[1] += self.quad[3 * i + 1];
+                qt[2] += self.quad[3 * i + 2];
             } else {
                 cost -= cost0;
             }
+            i += 1;
         }
         cost += (alpha * alpha).mul_add(qt[2], alpha * qt[1]) + qt[0];
         deriv[0] += (2.0 * alpha).mul_add(qt[2], qt[1]);
@@ -533,7 +731,7 @@ impl Ctx {
         let mut done = flg_gap && flg_gradient;
         if !done {
             self.factorize();
-            self.mgrad = chol_solve(&self.l, &self.grad, nv);
+            self.mgrad = chol_solve(if self.ncone > 0 { &self.lcone } else { &self.l }, &self.grad, nv);
             done = flg_gradient && max(0.0, 0.5 * scale * dot(&self.grad, &self.mgrad)) < opt.tolerance;
         }
         if !done {
@@ -556,7 +754,7 @@ impl Ctx {
             self.update_constraint();
             self.hessian_incremental(&oldstate);
             self.update_grad();
-            self.mgrad = chol_solve(&self.l, &self.grad, nv);
+            self.mgrad = chol_solve(if self.ncone > 0 { &self.lcone } else { &self.l }, &self.grad, nv);
             let improvement = scale * ls_improvement;
             let gradient = scale * norm(&self.grad);
             let decrement = max(0.0, 0.5 * scale * dot(&self.grad, &self.mgrad));
@@ -567,6 +765,57 @@ impl Ctx {
             self.search = self.mgrad.iter().map(|x| x * -1.0).collect();
         }
         iter
+    }
+}
+
+/// `ellipticCostDif`: `cost(alpha) − cost(0)` of one elliptic cone.
+fn elliptic_cost_dif(q: &[f64], alpha: f64, mu: f64, dm: f64) -> f64 {
+    let (u0, v0, uu, uv, vv) = (q[3], q[4], q[5], q[6], q[7]);
+    let (zone0, t0) = if uu <= 0.0 {
+        (if u0 < 0.0 { 2 } else { 1 }, 0.0)
+    } else {
+        let t0 = uu.sqrt();
+        (if u0 >= mu * t0 { 1 } else if mu.mul_add(u0, t0) <= 0.0 { 2 } else { 3 }, t0)
+    };
+    let n = alpha.mul_add(v0, u0);
+    let tsqr = alpha.mul_add(2.0f64.mul_add(uv, alpha * vv), uu);
+    let (zone, t) = if tsqr <= 0.0 {
+        (if n < 0.0 { 2 } else { 1 }, 0.0)
+    } else {
+        let t = tsqr.sqrt();
+        (if n >= mu * t { 1 } else if mu.mul_add(n, t) <= 0.0 { 2 } else { 3 }, t)
+    };
+    match (zone0, zone) {
+        (1, 1) => 0.0,
+        (2, 2) => (alpha * alpha).mul_add(q[2], alpha * q[1]),
+        (3, 3) => {
+            let tsqr_delta = alpha * 2.0f64.mul_add(uv, alpha * vv);
+            let t_delta = tsqr_delta / (t + t0);
+            let r_delta = alpha.mul_add(v0, -(mu * t_delta));
+            let r0 = (-mu).mul_add(t0, u0);
+            0.5 * dm * r_delta * 2.0f64.mul_add(r0, r_delta)
+        }
+        (3, 2) => {
+            let dq = alpha * alpha.mul_add(q[2], q[1]);
+            let b0 = mu.mul_add(u0, t0);
+            dq + 0.5 * dm * b0 * b0
+        }
+        (2, 3) => {
+            let dq = alpha * alpha.mul_add(q[2], q[1]);
+            let b = mu.mul_add(n, t);
+            dq - 0.5 * dm * b * b
+        }
+        (1, 2) => (alpha * alpha).mul_add(q[2], alpha * q[1]) + q[0],
+        (1, 3) => {
+            let r = (-mu).mul_add(t, n);
+            0.5 * dm * r * r
+        }
+        (3, 1) => {
+            let r0 = (-mu).mul_add(t0, u0);
+            -0.5 * dm * r0 * r0
+        }
+        (2, 1) => -q[0],
+        _ => 0.0,
     }
 }
 
@@ -633,6 +882,7 @@ impl SmoothModel {
             return out;
         }
         let jd = e.dense_j(nv);
+        let cones: Vec<ConeInfo> = contacts.iter().zip(&e.contact_mu).map(|(c, &mu)| ConeInfo { dim: c.dim, mu, friction: c.friction }).collect();
         let jmul = |v: &[f64]| -> Vec<f64> { (0..nefc).map(|r| dot(&jd[r * nv..(r + 1) * nv], v)).collect() };
         let ne = e.typ.iter().filter(|&&t| t == EQUALITY).count();
         let nf = e.typ.iter().filter(|&&t| t == FRICTION_DOF).count();
@@ -649,11 +899,11 @@ impl SmoothModel {
         for i in 0..nefc {
             jar[i] -= e.aref[i];
         }
-        let mut cost_ws = constraint_update(ne, nf, &e.d, &e.r, &e.frictionloss, &jar, &e.typ, &mut state, &mut force);
+        let mut cost_ws = constraint_update(ne, nf, &e.d, &e.r, &e.frictionloss, &jar, &e.typ, &e.id, &cones, &mut state, &mut force, None);
         let da: Vec<f64> = (0..nv).map(|i| qacc_warmstart[i] - sd.qacc_smooth[i]).collect();
         let mda = mul_sym_vec(&sd.m, &self.m_rownnz, &self.m_rowadr, &self.m_colind, &da);
         cost_ws = 0.5f64.mul_add(dot(&da, &mda), cost_ws);
-        let cost_smooth = constraint_update(ne, nf, &e.d, &e.r, &e.frictionloss, &out.efc_b, &e.typ, &mut state, &mut force);
+        let cost_smooth = constraint_update(ne, nf, &e.d, &e.r, &e.frictionloss, &out.efc_b, &e.typ, &e.id, &cones, &mut state, &mut force, None);
         out.qfrc_constraint = mul_mat_t_vec(&jd, &force, nefc, nv);
         if cost_ws > cost_smooth {
             qacc = sd.qacc_smooth.clone();
@@ -796,7 +1046,12 @@ impl SmoothModel {
                 grad: vec![0.0; inv],
                 mgrad: vec![0.0; inv],
                 search: vec![0.0; inv],
-                quad: vec![[0.0; 3]; ie],
+                quad: vec![0.0; 3 * ie + 9],
+                id: efcs.iter().map(|&c| e.id[c]).collect(),
+                cones: cones.clone(),
+                cone_h: vec![[0.0; 36]; cones.len()],
+                ncone: 0,
+                lcone: Vec::new(),
                 dvec: vec![0.0; ie],
                 l: Vec::new(),
                 cost: 0.0,

@@ -1550,9 +1550,6 @@ impl MjcfTree {
             if sm.dof_bodyid.len() >= 60 {
                 sm.unsupported.push("solver: 60 or more dofs (MuJoCo's sparse Jacobian)".into());
             }
-            if self.cone == crate::mujoco_contact::Cone::Elliptic {
-                sm.unsupported.push("solver: an elliptic cone".into());
-            }
             if self.solver != "Newton" {
                 sm.unsupported.push(format!("solver: the {} solver", self.solver));
             }
@@ -7561,6 +7558,32 @@ mod tests {
         }
         assert_eq!(st.qpos.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), [0x3fc445354e960e7d, 0xbfe60d0de79f4091, 0x3fc0f838bc7d349b]);
         assert_eq!(st.qvel.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), [0xc008316c5ddba989, 0xc0320dc4e0f887c9, 0xc02bd9e71566b5b7]);
+    }
+
+    /// ⭐⭐ **Elliptic cones, to the bit**: a box (`condim` 4, torsional friction) and a spinning ball
+    /// (`condim` 6, rolling friction) dropped onto a plane with `impratio` 10 — contact rows in the cone's
+    /// middle zone, so every Newton step re-factors the cone Hessian (`mj_HessianCone`) over two islands. Ten
+    /// free-running steps land on MuJoCo 3.13.0's bits.
+    #[test]
+    fn elliptic_cones_step_as_mujoco_does_bit_for_bit() {
+        let xml = r#"<mujoco><option timestep="0.002" cone="elliptic" impratio="10"/><worldbody><geom type="plane" size="2 2 0.1"/>
+            <body name="box" pos="0 0 0.09" quat="0.99 0.05 0.08 0.02"><freejoint/><geom type="box" size="0.1 0.08 0.1" mass="1.3" condim="4" friction="0.8 0.02 0.001"/></body>
+            <body name="ball" pos="0.4 0 0.05"><freejoint/><geom type="sphere" size="0.05" condim="6" friction="0.9 0.05 0.01"/></body>
+            </worldbody></mujoco>"#;
+        let t = tree_from_mjcf_str(xml).unwrap();
+        let mut st = crate::MjNativeState {
+            qpos: vec![0.02, -0.01, 0.085, 0.99, 0.05, 0.08, 0.02, 0.4, 0.0, 0.048, 1.0, 0.0, 0.0, 0.0],
+            qvel: vec![0.6, -0.2, -0.5, 0.3, 0.1, -0.2, -0.8, 0.3, -0.1, 2.0, -1.0, 3.0],
+            qacc_warmstart: vec![0.0; 12],
+            ..Default::default()
+        };
+        for _ in 0..10 {
+            st = t.mujoco_native_step(&st, &[]).unwrap();
+        }
+        let qpos: [u64; 14] = [0x3f958d96bc6b42ca, 0xbf8124c9ad410ead, 0x3fb6b3d635c8d757, 0x3fefe7577abb121f, 0x3fa2f88e400e7e52, 0x3fb0cd17ba230b66, 0x3f92a0a0fc5c18a0, 0x3fd8c83c7ca59041, 0x3f721734d85022cc, 0x3fa9544eac808bbd, 0x3fefeb776364a0b6, 0xbf8ad69501ae5611, 0xbfb182ae69b17902, 0x3f899e7bd59b7252];
+        let qvel: [u64; 12] = [0xbfc404f86fc11129, 0x3fc69ba991f01b2f, 0x3fd966af9a2eddc0, 0xbffdd2a64f6c8a4b, 0xc000db39f38104f6, 0xbfcb4ad3cfde9cb6, 0xbfe247baf0534a8f, 0x3fc81820c5ada049, 0x3fbfe11e21fcf716, 0xc0058a61036c6148, 0xc0220f9a089d2122, 0x3fe407a2f57cb5cc];
+        assert_eq!(st.qvel.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), qvel);
+        assert_eq!(st.qpos.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), qpos);
     }
 
     /// ⛔⛔ **MuJoCo's midphase can call touching surfaces apart.** franka's fingertip pads meet at `qpos0`:
