@@ -529,7 +529,7 @@ impl SmoothModel {
                 na += a.actnum();
                 na - a.actnum()
             });
-            if a.dynamic.is_some() || a.pid.is_some() {
+            if a.dynamic.is_some() {
                 m.unsupported.push("an actuator that is not a hinge or slide joint or fixed tendon transmission".into());
                 continue;
             }
@@ -627,6 +627,12 @@ impl SmoothModel {
     /// **`mj_kinematics` → `mj_comPos` → `mj_crb` → `mj_factorM` → `mj_comVel` → `mj_rne`** (without
     /// acceleration) at `qpos`, `qvel`.
     pub(crate) fn forward(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64]) -> SmoothData {
+        self.forward_at(0.0, qpos, qvel, ctrl, act)
+    }
+
+    /// [`SmoothModel::forward`] at `d->time`, which a `mujoco.pid` slew limiter reads (no previous setpoint
+    /// at `t = 0`).
+    pub(crate) fn forward_at(&self, time: f64, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64]) -> SmoothData {
         let nbody = self.kin.bodies.len();
         let nv = self.dof_bodyid.len();
         let kin = self.kin.state(qpos);
@@ -801,6 +807,7 @@ impl SmoothModel {
             actuator_velocity[i] = dot_sparse(vals, qvel, cols);
         }
         // `mj_fwdActuation`
+        let ctrl_raw = ctrl;
         let ctrl: Vec<f64> = (0..nu).map(|i| {
             let c = ctrl.get(i).copied().unwrap_or(0.0);
             match self.actuators[i].act.ctrlrange {
@@ -811,6 +818,14 @@ impl SmoothModel {
         let mut act_dot = vec![0.0; self.na];
         for (i, a) in self.actuators.iter().enumerate() {
             let Some(adr) = a.actadr else { continue };
+            // a `mujoco.pid` plugin's slots: `Pid::ActDot`, on the control as `d->ctrl` holds it
+            if let Some(p) = &a.act.pid {
+                let n = a.act.actnum();
+                let own: Vec<f64> = (adr..adr + n).map(|j| act.get(j).copied().unwrap_or(0.0)).collect();
+                let v = p.act_dot(&a.act, actuator_length[i], ctrl_raw.get(i).copied().unwrap_or(0.0), &own, time, self.timestep);
+                act_dot[adr..adr + n].copy_from_slice(&v);
+                continue;
+            }
             let (x, u) = (act.get(adr).copied().unwrap_or(0.0), ctrl[i]);
             use crate::mujoco_actuator::ActDyn;
             act_dot[adr] = match a.act.dynamics {
@@ -823,6 +838,18 @@ impl SmoothModel {
         let mut actuator_force = vec![0.0; nu];
         for (i, a) in self.actuators.iter().enumerate() {
             use crate::mujoco_actuator::{ActBias, ActDyn, ActGain};
+            // `Pid::Compute` (MuJoCo runs the plugins after the builtin laws; the outputs are disjoint),
+            // then `forcerange`
+            if let Some(p) = &a.act.pid {
+                let adr = a.actadr.unwrap_or(0);
+                let own: Vec<f64> = (adr..adr + a.act.actnum()).map(|j| act.get(j).copied().unwrap_or(0.0)).collect();
+                let mut f = p.force(&a.act, actuator_length[i], actuator_velocity[i], ctrl_raw.get(i).copied().unwrap_or(0.0), &own, time, self.timestep);
+                if let Some([lo, hi]) = a.act.forcerange {
+                    f = clip(f, lo, hi);
+                }
+                actuator_force[i] = f;
+                continue;
+            }
             let (p, len, vel) = (&a.act.gainprm, actuator_length[i], actuator_velocity[i]);
             let gain = match a.act.gain {
                 ActGain::Fixed => p[0],

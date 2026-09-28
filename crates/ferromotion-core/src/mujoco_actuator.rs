@@ -137,7 +137,9 @@ impl Pid {
         let error = self.setpoint(a, ctrl, act, time, h) - length;
         // `ctrl_dot` is zero for a stateless setpoint, so the error's rate is the transmission's
         let error_dot = 0.0 - velocity;
-        self.ki.mul_add(self.integral(act, error, h), self.kd.mul_add(error_dot, self.kp * error))
+        // `kp·e + kd·ė + ki·∫e`, contracted as `libactuator.dylib` compiles it: the LEFT product of the sum
+        // fused, then the integral term
+        self.ki.mul_add(self.integral(act, error, h), self.kp.mul_add(error, self.kd * error_dot))
     }
 
     /// `Pid::ActDot`: rates that land each activation exactly on its next value after one Euler step —

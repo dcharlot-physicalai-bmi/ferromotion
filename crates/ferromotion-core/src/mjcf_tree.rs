@@ -1603,7 +1603,7 @@ impl MjcfTree {
     /// flattened as MuJoCo stores them.
     pub fn mujoco_native_forward(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64]) -> Vec<(&'static str, Vec<f64>)> {
         let nv = self.smooth_model().dof_bodyid.len();
-        let (sd, e, sol) = self.native_forward(qpos, qvel, ctrl, act, &vec![0.0; nv]);
+        let (sd, e, sol) = self.native_forward(0.0, qpos, qvel, ctrl, act, &vec![0.0; nv]);
         let mut out = sd.arrays();
         if self.smooth_model().tendons.iter().any(Option::is_none) {
             out.retain(|(name, _)| !name.starts_with("ten_"));
@@ -1644,9 +1644,9 @@ impl MjcfTree {
 
     /// The native forward pass: smooth dynamics, the constraint rows on MuJoCo's own contacts, and the solve
     /// from `qacc_warmstart`.
-    fn native_forward(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64], qacc_warmstart: &[f64]) -> (crate::mujoco_smooth::SmoothData, crate::mujoco_efc::Efc, crate::mujoco_solver::Solution) {
+    fn native_forward(&self, time: f64, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64], qacc_warmstart: &[f64]) -> (crate::mujoco_smooth::SmoothData, crate::mujoco_efc::Efc, crate::mujoco_solver::Solution) {
         let sm = self.smooth_model();
-        let sd = sm.forward(qpos, qvel, ctrl, act);
+        let sd = sm.forward_at(time, qpos, qvel, ctrl, act);
         let contacts: Vec<crate::mujoco_efc::NativeContact> = self
             .collide_qpos(qpos)
             .contacts
@@ -1707,11 +1707,11 @@ impl MjcfTree {
             st = reset_state();
             ctrl = &zero_ctrl;
         }
-        let (mut sd, _e, mut sol) = self.native_forward(&st.qpos, &st.qvel, ctrl, &st.act, &st.qacc_warmstart);
+        let (mut sd, _e, mut sol) = self.native_forward(st.time, &st.qpos, &st.qvel, ctrl, &st.act, &st.qacc_warmstart);
         if sol.qacc.iter().any(bad) {
             st = reset_state();
             ctrl = &zero_ctrl;
-            (sd, _, sol) = self.native_forward(&st.qpos, &st.qvel, ctrl, &st.act, &st.qacc_warmstart);
+            (sd, _, sol) = self.native_forward(st.time, &st.qpos, &st.qvel, ctrl, &st.act, &st.qacc_warmstart);
         }
         match self.integrator {
             MjcfIntegrator::ImplicitFast => sm.implicit_fast(&sd, &sol, &st, ctrl),
@@ -7690,6 +7690,30 @@ mod tests {
         let (qpos, qvel) = run("");
         assert_eq!(qvel, [0xbfc274359bf04d6c, 0x3fc244b2539a7a25, 0x3fd9011cb91a2d4e, 0xbfffb18fb9cf498a, 0xc0026fd15ada9ce9, 0xbfa67b5a6090a706, 0xbfda4176551bc666, 0x3fd10b3037358465, 0x3fc0499e03a0970e, 0xbfaedbc390162f70, 0xbfdd6d58fd54e7e1, 0x3ff2be5e5f096794, 0x3fd59bb6184f4e98, 0x3fe71f45739b14b5, 0x3fa71139825116be, 0xc01b1321e8878d94, 0x4001965f1e1b1763, 0x4007899b866cef7f, 0x3ff5f6bd0e037c4c]);
         assert_eq!(qpos, [0x3f95d4878bbec44d, 0xbf825f36dcf5d3d7, 0x3fb6ab61cdd768e2, 0x3fefe85877f1f9e5, 0x3fa2947045911c47, 0x3fb04f1f35a9e432, 0x3f9440b614a71c88, 0x3fdf5f5e9b2d0b0e, 0x3f765a7919baa7da, 0x3faa68bc5833f81c, 0x3fefff47fe129f6f, 0x3f602a8b75360d9d, 0xbf780145d47319b8, 0x3f87fde34d284d23, 0xbfd926e5ec82f274, 0x3f8ef8f455296f31, 0x3fa9f9b4312aaa7b, 0x3feff0b704cb8370, 0xbfaa36f10fe01ae0, 0x3f8ef70bdb99ee09, 0x3f9e583b75596b1c, 0x3fd491f97a82ec34]);
+    }
+
+    /// ⭐⭐ **A `mujoco.pid` plugin actuator, to the bit**: proportional, integral (with `imax`) and derivative
+    /// gains and a slew limiter, next to a position servo under `implicitfast` — the plugin's two activations
+    /// integrated each step, its setpoint rate-limited once `time > 0`, and the control switched halfway so
+    /// the limiter bites. Ten free-running steps land on MuJoCo 3.13.0's bits, activations included.
+    #[test]
+    fn a_pid_plugin_steps_as_mujoco_does_bit_for_bit() {
+        let xml = r#"<mujoco><option timestep="0.002" integrator="implicitfast"/>
+            <extension><plugin plugin="mujoco.pid"><instance name="pid1"><config key="kp" value="7.3"/><config key="ki" value="15"/><config key="kd" value="1.7"/><config key="imax" value="3"/><config key="slewmax" value="4"/></instance></plugin></extension>
+            <worldbody><body name="a" pos="0 0 1"><joint name="h1" type="hinge" axis="0 1 0" damping="0.05"/><geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.03"/>
+              <body name="b" pos="0.3 0 0"><joint name="h2" type="hinge" axis="0 1 0"/><geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.03"/></body></body></worldbody>
+            <actuator><plugin joint="h1" plugin="mujoco.pid" instance="pid1" actdim="2" ctrlrange="-1 1" forcerange="-20 20"/>
+              <position joint="h2" kp="10" kv="0.5"/></actuator></mujoco>"#;
+        let t = tree_from_mjcf_str(xml).unwrap();
+        assert!(t.mujoco_native_unsupported().is_empty(), "{:?}", t.mujoco_native_unsupported());
+        // a start at which `fma(kp, e, kd·ė)` and `fma(kd, ė, kp·e)` round apart
+        let mut st = crate::MjNativeState { qpos: vec![0.14, -0.3], qvel: vec![0.17, -0.4], act: vec![0.1, 0.05], qacc_warmstart: vec![0.0; 2], ..Default::default() };
+        for k in 0..10 {
+            st = t.mujoco_native_step(&st, if k < 5 { &[0.9, 0.4] } else { &[-0.5, 0.4] }).unwrap();
+        }
+        assert_eq!(st.act.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), [0x3fbd71ae90c1ab79, 0x3feb851eb851eb85]);
+        assert_eq!(st.qvel.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), [0xbfdd5ed456588f9d, 0x4014f1cceb4c77f4]);
+        assert_eq!(st.qpos.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), [0x3fc0eb6ec5b1ea25, 0xbfcdc7309e13383c]);
     }
 
     /// ⛔⛔ **MuJoCo's midphase can call touching surfaces apart.** franka's fingertip pads meet at `qpos0`:

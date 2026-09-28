@@ -49,9 +49,12 @@ impl SmoothModel {
     pub(crate) fn advance(&self, sd: &SmoothData, st: &MjNativeState, qacc: &[f64], qacc_solver: &[f64]) -> MjNativeState {
         let h = self.timestep;
         let mut next = st.clone();
+        // every slot of every stateful actuator (a `mujoco.pid` plugin keeps up to two), in order
         for a in &self.actuators {
             if let Some(adr) = a.actadr {
-                next.act[adr] = self.next_activation(a, st.act[adr], sd.act_dot[adr]);
+                for j in adr..adr + a.act.actnum() {
+                    next.act[j] = self.next_activation(a, st.act[j], sd.act_dot[j]);
+                }
             }
         }
         for (v, a) in next.qvel.iter_mut().zip(qacc) {
