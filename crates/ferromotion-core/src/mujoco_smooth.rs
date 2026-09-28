@@ -297,13 +297,38 @@ pub(crate) struct NativeActuator {
     pub(crate) actadr: Option<usize>,
 }
 
-/// A FIXED tendon as `mj_tendon` reads it: its joints in file order and its Jacobian's sparsity.
+/// A tendon as `mj_tendon` reads it: a fixed one's joints in file order, or a spatial one's path, and its
+/// Jacobian's static sparsity; with its spring and damper.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct NativeTendon {
-    /// `(jnt_qposadr, jnt_dofadr, wrap_prm)` per joint, in file order
+    /// `(jnt_qposadr, jnt_dofadr, wrap_prm)` per joint, in file order (a fixed tendon)
     pub(crate) path: Vec<(usize, usize, f64)>,
-    /// `ten_J_colind` (`makeTendonSparse`): the joints' dofs, sorted
+    /// the sites, wrap geoms and pulleys, in order (a spatial tendon)
+    pub(crate) spatial: Option<Vec<crate::mujoco_tendon::TendonObj>>,
+    /// `ten_J_colind` (`makeTendonSparse`), sorted
     pub(crate) colind: Vec<usize>,
+    pub(crate) stiffness: f64,
+    pub(crate) damping: f64,
+    /// `tendon_lengthspring`, resolved (`-1 -1` is the length at `qpos0`, from `mj_setConst`)
+    pub(crate) lengthspring: [f64; 2],
+}
+
+/// A tendon's path as the loader hands it over.
+#[derive(Clone, Debug)]
+pub(crate) enum NativeTendonPath {
+    /// `(dof, coef)` per joint, in file order
+    Fixed(Vec<(usize, f64)>),
+    Spatial(Vec<crate::mujoco_tendon::TendonObj>),
+}
+
+/// One tendon for [`SmoothInputs`]: its path, `stiffness`, `damping` and `springlength` (`None`: the length
+/// at `qpos0`).
+#[derive(Clone, Debug)]
+pub(crate) struct TendonInput {
+    pub(crate) path: NativeTendonPath,
+    pub(crate) stiffness: f64,
+    pub(crate) damping: f64,
+    pub(crate) springlength: Option<[f64; 2]>,
 }
 
 /// What the passive and actuation stages read beyond the kinematic model, joints in MuJoCo's order.
@@ -321,8 +346,8 @@ pub(crate) struct SmoothInputs {
     pub(crate) gravity: [f64; 3],
     pub(crate) timestep: f64,
     pub(crate) actuators: Vec<crate::mujoco_actuator::Actuator>,
-    /// every tendon in MuJoCo's order: a fixed one's `(dof, coef)` in file order, `None` for a spatial one
-    pub(crate) tendons: Vec<Option<Vec<(usize, f64)>>>,
+    /// every tendon in MuJoCo's order; `None` for one this port cannot carry
+    pub(crate) tendons: Vec<Option<TendonInput>>,
     /// per actuator: the site of a site transmission, and its `gear`
     pub(crate) actuator_sites: Vec<Option<(crate::mujoco_kinematics::KinGeom, [f64; 6])>>,
     /// `<option density viscosity wind>`, for the inertia-box fluid model
@@ -366,7 +391,7 @@ pub(crate) struct SmoothModel {
     pub(crate) dof_damping: Vec<f64>,
     pub(crate) body_gravcomp: Vec<f64>,
     pub(crate) actuators: Vec<NativeActuator>,
-    /// every tendon, by MuJoCo's index; `None` for a spatial one, which is not ported
+    /// every tendon, by MuJoCo's index; `None` for one this port cannot carry
     pub(crate) tendons: Vec<Option<NativeTendon>>,
     pub(crate) density: f64,
     pub(crate) viscosity: f64,
@@ -536,25 +561,48 @@ impl SmoothModel {
                 m.unsupported.push("a spring on a ball or free joint".into());
             }
         }
-        // fixed tendons: each joint's `qpos` and dof address, and `makeTendonSparse`'s sorted columns
+        // tendons: a fixed one's joints (`qpos` and dof address), a spatial one's path, and
+        // `makeTendonSparse`'s sorted columns
         for t in &inp.tendons {
-            let Some(path) = t else {
+            let Some(t) = t else {
                 m.tendons.push(None);
                 continue;
             };
-            let mut nt = NativeTendon::default();
-            for &(dof, coef) in path {
-                match m.jnt_dofadr.iter().position(|&d| d == dof).filter(|&j| matches!(m.jnt_type[j], KinJointKind::Hinge | KinJointKind::Slide)) {
-                    Some(j) => nt.path.push((m.jnt_qposadr[j], dof, coef)),
-                    None => m.unsupported.push("a fixed tendon on a joint this port cannot place".into()),
+            let mut nt = NativeTendon { stiffness: t.stiffness, damping: t.damping, lengthspring: t.springlength.unwrap_or([0.0; 2]), ..Default::default() };
+            match &t.path {
+                NativeTendonPath::Fixed(path) => {
+                    for &(dof, coef) in path {
+                        match m.jnt_dofadr.iter().position(|&d| d == dof).filter(|&j| matches!(m.jnt_type[j], KinJointKind::Hinge | KinJointKind::Slide)) {
+                            Some(j) => nt.path.push((m.jnt_qposadr[j], dof, coef)),
+                            None => m.unsupported.push("a fixed tendon on a joint this port cannot place".into()),
+                        }
+                    }
+                    nt.colind = nt.path.iter().map(|p| p.1).collect();
+                    nt.colind.sort_unstable();
+                    if nt.colind.windows(2).any(|w| w[0] == w[1]) {
+                        m.unsupported.push("a fixed tendon that names a joint twice".into());
+                    }
+                }
+                NativeTendonPath::Spatial(objs) => {
+                    nt.colind = m.spatial_colind(objs);
+                    nt.spatial = Some(objs.clone());
                 }
             }
-            nt.colind = nt.path.iter().map(|p| p.1).collect();
-            nt.colind.sort_unstable();
-            if nt.colind.windows(2).any(|w| w[0] == w[1]) {
-                m.unsupported.push("a fixed tendon that names a joint twice".into());
-            }
             m.tendons.push(Some(nt));
+        }
+        // `mj_setConst`: a `-1 -1` spring length is the tendon's length at `qpos0`
+        if inp.tendons.iter().flatten().any(|t| t.springlength.is_none()) {
+            let k0 = m.kin.state(qpos0);
+            let (cinert0, cdof0, com0) = m.com_pos(&k0);
+            let _ = cinert0;
+            let (len0, _) = m.tendon(qpos0, &k0, &cdof0, &com0);
+            for (i, t) in inp.tendons.iter().enumerate() {
+                if let (Some(t), Some(Some(nt))) = (t, m.tendons.get_mut(i))
+                    && t.springlength.is_none()
+                {
+                    nt.lengthspring = [len0[i], len0[i]];
+                }
+            }
         }
         // actuators: hinge and slide joint transmissions, and fixed tendons
         let mut na = 0;
@@ -567,11 +615,15 @@ impl SmoothModel {
                 m.actuators.push(NativeActuator { act: a.clone(), dofadr: 0, qposadr: 0, tendon: None, site: Some(site), actadr });
                 continue;
             }
-            if a.dynamic.is_some() {
-                m.unsupported.push("an actuator that is not a hinge or slide joint or fixed tendon transmission".into());
-                continue;
-            }
-            if let Some(t) = a.tendon {
+            let spatial = match a.dynamic {
+                Some(crate::mujoco_actuator::DynTransmission::SpatialTendon { index }) => Some(index),
+                Some(_) => {
+                    m.unsupported.push("an actuator that is not a joint, tendon or site transmission".into());
+                    continue;
+                }
+                None => None,
+            };
+            if let Some(t) = a.tendon.or(spatial) {
                 match m.tendons.get(t) {
                     Some(Some(_)) => m.actuators.push(NativeActuator { act: a.clone(), dofadr: 0, qposadr: 0, tendon: Some(t), site: None, actadr }),
                     _ => m.unsupported.push("a tendon transmission this port did not record".into()),
@@ -584,7 +636,7 @@ impl SmoothModel {
             };
             match joint {
                 Some(j) => m.actuators.push(NativeActuator { act: a.clone(), dofadr: m.jnt_dofadr[j], qposadr: m.jnt_qposadr[j], tendon: None, site: None, actadr }),
-                None => m.unsupported.push("an actuator that is not a hinge or slide joint or fixed tendon transmission".into()),
+                None => m.unsupported.push("an actuator that is not a joint, tendon or site transmission".into()),
             }
         }
         m.na = na;
@@ -785,6 +837,10 @@ impl SmoothModel {
             }
         }
         let qfrc_bias: Vec<f64> = (0..nv).map(|i| dot6(&cdof[i], &cfrc[self.dof_bodyid[i]])).collect();
+        // `mj_tendon` (fixed tendons: `L += prm·q`, and `mju_combineSparseInc` puts each `prm` in its
+        // column; spatial ones along their path) and `ten_velocity`, `mju_mulMatVecSparse`
+        let (ten_length, ten_j) = self.tendon(qpos, &kin, &cdof, &subtree_com);
+        let ten_velocity: Vec<f64> = self.tendons.iter().zip(&ten_j).map(|(t, j)| t.as_ref().map_or(0.0, |t| dot_sparse(j, qvel, &t.colind))).collect();
         // `mj_passive`: joint springs, dof dampers, gravity compensation
         let mut qfrc_spring = vec![0.0; nv];
         let mut qfrc_damper = vec![0.0; nv];
@@ -800,6 +856,23 @@ impl SmoothModel {
         for i in 0..nv {
             if self.dof_damping[i] != 0.0 {
                 qfrc_damper[i] = -qvel[i] * self.dof_damping[i];
+            }
+        }
+        // tendon springs (a dead band between the two spring lengths) and dampers, through `ten_J`
+        for (i, t) in self.tendons.iter().enumerate() {
+            let Some(t) = t else { continue };
+            if t.stiffness == 0.0 && t.damping == 0.0 {
+                continue;
+            }
+            let (length, [lower, upper]) = (ten_length[i], t.lengthspring);
+            let x = if length > upper { length - upper } else if length < lower { length - lower } else { 0.0 };
+            let frc_spring = -x * t.stiffness;
+            let frc_damper = -ten_velocity[i] * t.damping;
+            if frc_spring != 0.0 || frc_damper != 0.0 {
+                for (&k, &jv) in t.colind.iter().zip(&ten_j[i]) {
+                    qfrc_spring[k] = jv.mul_add(frc_spring, qfrc_spring[k]);
+                    qfrc_damper[k] = jv.mul_add(frc_damper, qfrc_damper[k]);
+                }
             }
         }
         let has_gravcomp = self.body_gravcomp.iter().any(|&g| g != 0.0) && (self.gravity[0].abs() + self.gravity[1].abs() + self.gravity[2].abs()) != 0.0;
@@ -835,10 +908,6 @@ impl SmoothModel {
                 qfrc_passive[i] += qfrc_gravcomp[i];
             }
         }
-        // `mj_tendon` (fixed tendons: `L += prm·q`, and `mju_combineSparseInc` puts each `prm` in its
-        // column) and `ten_velocity`, `mju_mulMatVecSparse`
-        let (ten_length, ten_j) = self.tendon(qpos);
-        let ten_velocity: Vec<f64> = self.tendons.iter().zip(&ten_j).map(|(t, j)| t.as_ref().map_or(0.0, |t| dot_sparse(j, qvel, &t.colind))).collect();
         // `mj_transmission` and the actuator velocities
         let nu = self.actuators.len();
         let mut actuator_length = vec![0.0; nu];
@@ -1044,11 +1113,15 @@ impl SmoothModel {
     }
 
     /// `mj_tendon` for the fixed tendons: `ten_length` and each row of `ten_J` on its `colind`.
-    pub(crate) fn tendon(&self, qpos: &[f64]) -> (Vec<f64>, Vec<Vec<f64>>) {
+    pub(crate) fn tendon(&self, qpos: &[f64], k: &KinState, cdof: &[[f64; 6]], subtree_com: &[[f64; 3]]) -> (Vec<f64>, Vec<Vec<f64>>) {
         let mut len = vec![0.0; self.tendons.len()];
         let mut jac = vec![Vec::new(); self.tendons.len()];
         for (i, t) in self.tendons.iter().enumerate() {
             let Some(t) = t else { continue };
+            if let Some(objs) = &t.spatial {
+                (len[i], jac[i]) = self.spatial_tendon(objs, &t.colind, k, cdof, subtree_com);
+                continue;
+            }
             let mut row = vec![0.0f64; t.colind.len()];
             for &(qadr, dof, prm) in &t.path {
                 len[i] = prm.mul_add(qpos[qadr], len[i]);

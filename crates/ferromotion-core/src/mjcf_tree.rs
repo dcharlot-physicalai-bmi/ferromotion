@@ -1456,9 +1456,6 @@ impl MjcfTree {
             if (self.density != 0.0 || self.viscosity != 0.0) && self.fluid_ellipsoid {
                 unsupported.push("a fluidshape=\"ellipsoid\" geom (the ellipsoid fluid model)".into());
             }
-            if self.tendons.iter().any(|t| t.stiffness != 0.0 || t.damping != 0.0) {
-                unsupported.push("a tendon spring or damper".into());
-            }
             if !self.actuators_unsupported.is_empty() {
                 unsupported.push("an actuator this loader does not carry".into());
             }
@@ -1479,9 +1476,35 @@ impl MjcfTree {
                 gravity: [self.gravity.x, self.gravity.y, self.gravity.z],
                 timestep: self.timestep,
                 actuators: self.actuators.clone(),
-                tendons: self.tendons.iter().map(|t| match &t.path {
-                    TendonPath::Fixed(j) => Some(j.clone()),
-                    TendonPath::Spatial(_) => None,
+                tendons: self.tendons.iter().map(|t| {
+                    let path = match &t.path {
+                        TendonPath::Fixed(j) => crate::mujoco_smooth::NativeTendonPath::Fixed(j.clone()),
+                        TendonPath::Spatial(pts) => {
+                            use crate::mujoco_tendon::TendonObj;
+                            let geom_id: HashMap<&str, usize> = self.geoms.iter().enumerate().map(|(i, g)| (g.name.as_str(), i)).collect();
+                            let mut objs = Vec::with_capacity(pts.len());
+                            for p in pts {
+                                objs.push(match p {
+                                    WrapPoint::Site(s) => TendonObj::Site(*self.mj_sites.get(s)?),
+                                    WrapPoint::Geom { geom, sidesite } => {
+                                        let gi = *geom_id.get(geom.as_str())?;
+                                        let cylinder = match self.geoms[gi].kind {
+                                            crate::mujoco_collision::GeomType::Cylinder => true,
+                                            crate::mujoco_collision::GeomType::Sphere => false,
+                                            _ => return None,
+                                        };
+                                        let side = match sidesite {
+                                            Some(s) => Some(*self.mj_sites.get(s)?),
+                                            None => None,
+                                        };
+                                        TendonObj::Wrap { geom: self.mj_kin.geoms[gi], radius: self.geoms[gi].size[0], cylinder, side }
+                                    }
+                                });
+                            }
+                            crate::mujoco_smooth::NativeTendonPath::Spatial(objs)
+                        }
+                    };
+                    Some(crate::mujoco_smooth::TendonInput { path, stiffness: t.stiffness, damping: t.damping, springlength: (!t.springlength_auto).then_some(t.springlength) })
                 }).collect(),
                 actuator_sites: self.actuators.iter().map(|a| match &a.dynamic {
                     Some(crate::mujoco_actuator::DynTransmission::Site { site, gear }) => self.mj_sites.get(site).map(|s| (*s, *gear)),
@@ -1564,9 +1587,6 @@ impl MjcfTree {
                     }
                     _ => sm.unsupported.push("rows: a weld or tendon equality".into()),
                 }
-            }
-            if self.tendons.iter().any(|t| matches!(t.path, TendonPath::Spatial(_)) && (t.range.is_some() || t.frictionloss != 0.0)) {
-                sm.unsupported.push("rows: a spatial tendon's limit or frictionloss".into());
             }
             if self.joints.iter().any(|j| j.range.is_some() && j.kind == MjcfJointKind::Ball) {
                 sm.unsupported.push("rows: a ball-joint limit".into());
@@ -2836,6 +2856,8 @@ pub struct MjcfTendon {
     pub frictionloss: f64,
     pub solref_friction: [f64; 2],
     pub solimp_friction: [f64; 5],
+    /// `springlength` was the default `-1 -1`, resolved at load to the length at `qpos0`
+    pub springlength_auto: bool,
 }
 
 /// **One geom as the collision pipeline needs it**: where it is, what shape, and the contact parameters
@@ -6252,6 +6274,7 @@ fn parse_tendons(root: &El, defaults: &Defaults, c: &Compiler, joints: &[MjcfJoi
                 frictionloss: num("frictionloss", 0.0)?,
                 solref_friction: pair(get("solreffriction"), [0.02, 1.0])?,
                 solimp_friction: five(get("solimpfriction"), [0.9, 0.95, 0.001, 0.5, 2.0])?,
+                springlength_auto: false,
             };
             out.push(record);
         }
@@ -6868,6 +6891,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
     let l0 = out.ten_length(&out.reference_q);
     for (i, t) in out.tendons.iter_mut().enumerate() {
         if t.springlength[0] < 0.0 {
+            t.springlength_auto = true;
             t.springlength = [l0[i], l0[i]];
         }
     }
@@ -7810,6 +7834,42 @@ mod tests {
         assert_eq!(st.act.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), [0x401bd31b71911bea]);
         assert_eq!(st.qvel.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), [0x3fa2b48b45da2db3, 0xbfc45d8a030f67e2, 0x3f9226c67b7b1b97, 0xc0004200e5e07651, 0xc0158e4d4b9ac5a0, 0x3fd6b4cb80d5ed30, 0x3ffc3e4b9b8407c2]);
         assert_eq!(st.qpos.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), [0x3f9786b91e7e1d11, 0xbf8b5e03429327b6, 0x3fa8ea302e130c3b, 0x3fefeea3f11e32a1, 0x3fa4b481ad880037, 0x3fa5aecd444d1388, 0x3f9d0d13dcb29830, 0x3fd4e51ec3f0692e]);
+    }
+
+    /// ⭐⭐ **Spatial tendons, to the bit**: one from a world site round a cylinder (`mju_wrap`'s circle wrap,
+    /// a site off the plane so the height correction bites), limited and sprung with a damper, driven by a position servo; one round a
+    /// sphere with a side site, damped, driven by a motor — under `implicitfast`, so the dampers'
+    /// `ten_J'·b·ten_J` reaches `M`'s off-diagonal. Both wraps and the limit row are active from the first
+    /// step; ten free-running steps land on MuJoCo 3.13.0's bits.
+    #[test]
+    fn spatial_tendons_step_as_mujoco_does_bit_for_bit() {
+        let xml = r#"<mujoco><option timestep="0.002" integrator="implicitfast"/>
+            <worldbody>
+            <site name="anchor" pos="0 0 1.2"/>
+            <body name="a" pos="0 0 1"><joint name="j1" type="hinge" axis="0 1 0"/><geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.02"/>
+            <geom name="cyl" type="cylinder" pos="0.3 0 0" size="0.12 0.05" quat="0.707107 0.707107 0 0" contype="0" conaffinity="0"/>
+            <site name="s1" pos="0.15 0 0.03"/>
+            <body name="b" pos="0.3 0 0"><joint name="j2" type="hinge" axis="0 1 0"/><geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.02"/>
+            <geom name="ball" type="sphere" pos="0.3 0 0" size="0.05" contype="0" conaffinity="0"/>
+            <site name="s2" pos="0.15 0.03 0.03"/><site name="side" pos="0.3 0 0.1"/>
+            <body name="c" pos="0.3 0 0"><joint name="j3" type="hinge" axis="0 1 0"/><geom type="capsule" fromto="0 0 0 0.25 0 0" size="0.02"/><site name="s3" pos="0.2 0 -0.02"/></body>
+            </body>
+            </body>
+            </worldbody>
+            <tendon>
+            <spatial name="t1" limited="true" range="0 0.52" stiffness="40" damping="2" springlength="0.5"><site site="anchor"/><site site="s1"/><geom geom="cyl"/><site site="s2"/></spatial>
+            <spatial name="t2" damping="1"><site site="s2"/><geom geom="ball" sidesite="side"/><site site="s3"/></spatial>
+            </tendon>
+            <actuator><motor tendon="t2" gear="3"/><position tendon="t1" kp="30" kv="2"/></actuator>
+            </mujoco>"#;
+        let t = tree_from_mjcf_str(xml).unwrap();
+        assert!(t.mujoco_native_unsupported().is_empty(), "{:?}", t.mujoco_native_unsupported());
+        let mut st = crate::MjNativeState { qpos: vec![0.3, -0.6, 0.4], qvel: vec![0.5, -1.0, 0.8], qacc_warmstart: vec![0.0; 3], ..Default::default() };
+        for _ in 0..10 {
+            st = t.mujoco_native_step(&st, &[0.5, 0.55]).unwrap();
+        }
+        assert_eq!(st.qvel.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), [0x3ff910c1b04b0f7a, 0xc01a36e2e56175fe, 0x4026d2702fede5af]);
+        assert_eq!(st.qpos.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), [0x3fd4c2fad388f392, 0xbfe69a752bef4627, 0x3fe2c95c72a2dada]);
     }
 
     /// ⛔⛔ **MuJoCo's midphase can call touching surfaces apart.** franka's fingertip pads meet at `qpos0`:

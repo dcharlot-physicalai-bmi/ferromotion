@@ -320,6 +320,22 @@ impl SmoothModel {
         for i in 0..nv {
             qderiv[diag(i)] -= self.dof_damping[i];
         }
+        // tendon dampers: `addJTBJSparse` of `ten_J` with `B = −damping`
+        for (t, jrow) in self.tendons.iter().zip(&sd.ten_j) {
+            let Some(t) = t else { continue };
+            let b = -t.damping;
+            if b == 0.0 {
+                continue;
+            }
+            for (&r, &jr) in t.colind.iter().zip(jrow) {
+                let scl = jr * b;
+                for (&c, &jc) in t.colind.iter().zip(jrow) {
+                    if let Some(k) = at(r, c) {
+                        qderiv[k] = scl.mul_add(jc, qderiv[k]);
+                    }
+                }
+            }
+        }
         // qH = M + qDeriv·(−h) on M's pattern
         let qh: Vec<f64> = qderiv.iter().zip(&sd.m).map(|(q, m)| q.mul_add(-h, *m)).collect();
         let mut qh = qh;

@@ -400,6 +400,78 @@ impl SmoothModel {
         (chain, dp, dr)
     }
 
+    /// **`mj_jacDifPair`, sparse, common dofs kept, at two points** (as `mj_tendon` calls it): the merged
+    /// chain — `mj_mergeChainSimple` when both bodies are simple — and `J(b2 at pos2) − J(b1 at pos1)` over it.
+    pub(crate) fn jac_dif_pair_points(&self, cdof: &[[f64; 6]], subtree_com: &[[f64; 3]], b1: usize, b2: usize, pos1: &[f64; 3], pos2: &[f64; 3]) -> (Vec<usize>, [Vec<f64>; 3]) {
+        if self.dof_bodyid.is_empty() {
+            return (Vec::new(), Default::default());
+        }
+        let point = |c: &[f64; 6], body: usize, pos: &[f64; 3]| -> [f64; 3] {
+            let r = &subtree_com[self.body_rootid[body]];
+            let t = cross(&[c[0], c[1], c[2]], &[pos[0] - r[0], pos[1] - r[1], pos[2] - r[2]]);
+            [c[3] + t[0], c[4] + t[1], c[5] + t[2]]
+        };
+        if self.body_simple[b1] != 0 && self.body_simple[b2] != 0 {
+            let (lo, hi) = if b1 > b2 { (b2, b1) } else { (b1, b2) };
+            let (n1, n2) = (self.body_dofnum[lo], self.body_dofnum[hi]);
+            if n1 == 0 && n2 == 0 {
+                return (Vec::new(), Default::default());
+            }
+            let chain: Vec<usize> = (0..n1).map(|i| self.body_dofadr[lo] + i).chain((0..n2).map(|i| self.body_dofadr[hi] + i)).collect();
+            let mut dp: [Vec<f64>; 3] = std::array::from_fn(|_| vec![0.0; chain.len()]);
+            // `mj_jacSparseSimple`: the first body negated, the second as is
+            for (body, second, start, pos) in [(b1, false, if b1 < b2 { 0 } else { self.body_dofnum[b2] }, pos1), (b2, true, if b2 < b1 { 0 } else { self.body_dofnum[b1] }, pos2)] {
+                for (ci, da) in (self.body_dofadr[body]..self.body_dofadr[body] + self.body_dofnum[body]).enumerate() {
+                    let v = point(&cdof[da], body, pos);
+                    for k in 0..3 {
+                        dp[k][start + ci] = if second { v[k] } else { -v[k] };
+                    }
+                }
+            }
+            return (chain, dp);
+        }
+        // `mj_mergeChain` keeping the common dofs
+        let (w1, w2) = (self.weld(b1), self.weld(b2));
+        if self.body_dofnum[w1] == 0 && self.body_dofnum[w2] == 0 {
+            return (Vec::new(), Default::default());
+        }
+        let mut da1 = self.body_dofadr[w1] as i32 + self.body_dofnum[w1] as i32 - 1;
+        let mut da2 = self.body_dofadr[w2] as i32 + self.body_dofnum[w2] as i32 - 1;
+        let mut chain = Vec::new();
+        while da1 >= 0 || da2 >= 0 {
+            let da = da1.max(da2);
+            chain.push(da as usize);
+            if da1 == da {
+                da1 = self.dof_parentid[da1 as usize];
+            }
+            if da2 == da {
+                da2 = self.dof_parentid[da2 as usize];
+            }
+        }
+        chain.reverse();
+        // `mj_jacSparse` of each body over the chain, then `jac2 − jac1`
+        let jac = |body: usize, pos: &[f64; 3]| -> Vec<[f64; 3]> {
+            let mut jp = vec![[0.0; 3]; chain.len()];
+            let w = self.weld(body);
+            if self.body_dofnum[w] == 0 {
+                return jp;
+            }
+            let mut da = (self.body_dofadr[w] + self.body_dofnum[w] - 1) as i32;
+            let mut ci = chain.len() as i32 - 1;
+            while da >= 0 {
+                while ci >= 0 && chain[ci as usize] as i32 > da {
+                    ci -= 1;
+                }
+                jp[ci as usize] = point(&cdof[da as usize], body, pos);
+                da = self.dof_parentid[da as usize];
+            }
+            jp
+        };
+        let (j1, j2) = (jac(b1, pos1), jac(b2, pos2));
+        let dp: [Vec<f64>; 3] = std::array::from_fn(|k| (0..chain.len()).map(|c| j2[c][k] - j1[c][k]).collect());
+        (chain, dp)
+    }
+
     /// `mj_jacDifPair` with the common dofs KEPT (`flg_skipcommon = 0`, as the equalities call it), at two
     /// points: `J(b2 at pos2) − J(b1 at pos1)`.
     fn jac_dif_pair_common(&self, sd: &SmoothData, b1: usize, b2: usize, pos1: &[f64; 3], pos2: &[f64; 3], sparse: bool) -> (Vec<usize>, [Vec<f64>; 3], [Vec<f64>; 3]) {
