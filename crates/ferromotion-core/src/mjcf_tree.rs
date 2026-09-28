@@ -1516,6 +1516,7 @@ impl MjcfTree {
             em.body_invweight0 = bw;
             em.dof_invweight0 = dw;
             em.tendon_invweight0 = sm.tendon_invweight0(&self.qpos0());
+            em.meaninertia = sm.meaninertia(&self.qpos0());
             // equalities: `joint` carried natively; the rest named
             if !self.equalities_unsupported.is_empty() {
                 sm.unsupported.push("rows: an equality constraint this loader does not carry".into());
@@ -1568,9 +1569,6 @@ impl MjcfTree {
             }
             if self.solver != "Newton" {
                 sm.unsupported.push(format!("solver: the {} solver", self.solver));
-            }
-            if self.noslip_iterations > 0 {
-                sm.unsupported.push("solver: noslip".into());
             }
             sm.unsupported.sort();
             sm.unsupported.dedup();
@@ -1637,6 +1635,10 @@ impl MjcfTree {
             ("efc_vel", e.vel.clone()),
             ("efc_aref", e.aref.clone()),
         ]);
+        if self.noslip_iterations > 0 {
+            let sm = self.smooth_model();
+            out.push(("efc_AR", sm.efc_ar(&sd, &e.dense_j(nv), &e.r)));
+        }
         out
     }
 
@@ -1668,7 +1670,15 @@ impl MjcfTree {
             })
             .collect();
         let e = sm.constraints(&sm.efc, &sd, qpos, qvel, &contacts);
-        let opt = crate::mujoco_solver::SolverOptions { iterations: self.solver_iterations, tolerance: self.solver_tolerance, ls_iterations: self.ls_iterations, ls_tolerance: self.ls_tolerance };
+        let opt = crate::mujoco_solver::SolverOptions {
+            iterations: self.solver_iterations,
+            tolerance: self.solver_tolerance,
+            ls_iterations: self.ls_iterations,
+            ls_tolerance: self.ls_tolerance,
+            noslip_iterations: self.noslip_iterations,
+            noslip_tolerance: self.noslip_tolerance,
+            meaninertia: sm.efc.meaninertia,
+        };
         let sol = sm.fwd_constraint(&sd, &e, &contacts, qacc_warmstart, &opt);
         (sd, e, sol)
     }
@@ -7641,6 +7651,45 @@ mod tests {
         }
         assert_eq!(st.qvel.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), [0x3fe29f5595c7a142, 0x3fb650a1c7434a39, 0x3fd87313d012fe7f]);
         assert_eq!(st.qpos.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), [0x3fdda4703112eafd, 0x3fa59013a4ab6afa, 0x3f9b8db6ce5f60f2]);
+    }
+
+    /// ⭐⭐ **The noslip post-pass, to the bit**: a box (`condim` 3), a box with torsion (`condim` 4), a ball with
+    /// rolling friction (`condim` 6) and a hinge with dry friction, four islands, with `noslip_iterations` 4
+    /// run to the end (`noslip_tolerance` 0) — under elliptic cones every one of `mju_QCQP2`, `mju_QCQP3` and
+    /// `mju_QCQP` on its tangential block, under pyramidal the edge pairs. Ten free-running steps land on
+    /// MuJoCo 3.13.0's bits both ways.
+    #[test]
+    fn noslip_steps_as_mujoco_does_bit_for_bit() {
+        let model = |cone: &str| {
+            format!(
+                r#"<mujoco><option timestep="0.002" {cone} noslip_iterations="4" noslip_tolerance="0"/><worldbody><geom type="plane" size="2 2 0.1"/>
+                <body name="box" pos="0 0 0.09" quat="0.99 0.05 0.08 0.02"><freejoint/><geom type="box" size="0.1 0.08 0.1" mass="1.3" condim="3" friction="0.6"/></body>
+                <body name="box4" pos="0.5 0 0.05"><freejoint/><geom type="box" size="0.05 0.05 0.05" condim="4" friction="0.8 0.02 0.001"/></body>
+                <body name="ball" pos="-0.4 0 0.05"><freejoint/><geom type="sphere" size="0.05" condim="6" friction="0.9 0.05 0.01"/></body>
+                <body name="arm" pos="0 0.6 0.5"><joint name="h" type="hinge" axis="0 1 0" frictionloss="0.3"/><geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.03"/></body>
+                </worldbody></mujoco>"#
+            )
+        };
+        let run = |cone: &str| {
+            let t = tree_from_mjcf_str(&model(cone)).unwrap();
+            assert!(t.mujoco_native_unsupported().is_empty(), "{:?}", t.mujoco_native_unsupported());
+            let mut st = crate::MjNativeState {
+                qpos: vec![0.02, -0.01, 0.085, 0.99, 0.05, 0.08, 0.02, 0.5, 0.0, 0.049, 1.0, 0.0, 0.0, 0.0, -0.4, 0.0, 0.049, 1.0, 0.0, 0.0, 0.0, 0.3],
+                qvel: vec![0.6, -0.2, -0.5, 0.3, 0.1, -0.2, -0.8, 0.3, -0.1, 0.5, -1.0, 2.0, 0.4, 0.9, 0.0, 2.0, -1.0, 3.0, 0.7],
+                qacc_warmstart: vec![0.0; 19],
+                ..Default::default()
+            };
+            for _ in 0..10 {
+                st = t.mujoco_native_step(&st, &[]).unwrap();
+            }
+            (st.qpos.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), st.qvel.iter().map(|x| x.to_bits()).collect::<Vec<_>>())
+        };
+        let (qpos, qvel) = run(r#"cone="elliptic""#);
+        assert_eq!(qvel, [0xbfc417e5a2a6808b, 0x3fc65ff1eb55f4d0, 0x3fd92313e3ece3ad, 0xbffcc896e37f0d6f, 0xc000ebf4f769b6b7, 0xbfd098f40dfeb1b4, 0xbfd8984e476fe6ce, 0x3fc44a7e380108d7, 0x3fc2f93daca5b768, 0x3f7dfa0555216d7d, 0xbfe3be8ac5b72ea9, 0x3ffc9bcd5929c9b2, 0x3fd3d058756ab54d, 0x3fe65c5121727724, 0x3faf81b1c40092e7, 0xc01b24fc372f8d33, 0x40087dc62777789c, 0x3ff2901656dc1663, 0x3ff5f6bd0e037c4c]);
+        assert_eq!(qpos, [0x3f958ece637bbe0d, 0xbf8155a7bc71b1ab, 0x3fb6acf21eea9085, 0x3fefe7352f99419a, 0x3fa328a10784cac1, 0x3fb0d5570ef24af2, 0x3f924eecd22d3360, 0x3fdf649b522846c1, 0x3f6e22babc4a6e3c, 0x3faa8786754fd874, 0x3feffeb536513b01, 0x3f7049bbb3bb5a89, 0xbf7da9dd736a7688, 0x3f901967138fea3c, 0xbfd92e8943eabbac, 0x3f8e2f3ad7393d68, 0x3faa1c0759c02677, 0x3feff21938f6ef87, 0xbfaa61689b1d96e6, 0x3f971bbbd5565822, 0x3f8edb66b3ff4de6, 0x3fd491f97a82ec34]);
+        let (qpos, qvel) = run("");
+        assert_eq!(qvel, [0xbfc274359bf04d6c, 0x3fc244b2539a7a25, 0x3fd9011cb91a2d4e, 0xbfffb18fb9cf498a, 0xc0026fd15ada9ce9, 0xbfa67b5a6090a706, 0xbfda4176551bc666, 0x3fd10b3037358465, 0x3fc0499e03a0970e, 0xbfaedbc390162f70, 0xbfdd6d58fd54e7e1, 0x3ff2be5e5f096794, 0x3fd59bb6184f4e98, 0x3fe71f45739b14b5, 0x3fa71139825116be, 0xc01b1321e8878d94, 0x4001965f1e1b1763, 0x4007899b866cef7f, 0x3ff5f6bd0e037c4c]);
+        assert_eq!(qpos, [0x3f95d4878bbec44d, 0xbf825f36dcf5d3d7, 0x3fb6ab61cdd768e2, 0x3fefe85877f1f9e5, 0x3fa2947045911c47, 0x3fb04f1f35a9e432, 0x3f9440b614a71c88, 0x3fdf5f5e9b2d0b0e, 0x3f765a7919baa7da, 0x3faa68bc5833f81c, 0x3fefff47fe129f6f, 0x3f602a8b75360d9d, 0xbf780145d47319b8, 0x3f87fde34d284d23, 0xbfd926e5ec82f274, 0x3f8ef8f455296f31, 0x3fa9f9b4312aaa7b, 0x3feff0b704cb8370, 0xbfaa36f10fe01ae0, 0x3f8ef70bdb99ee09, 0x3f9e583b75596b1c, 0x3fd491f97a82ec34]);
     }
 
     /// ⛔⛔ **MuJoCo's midphase can call touching surfaces apart.** franka's fingertip pads meet at `qpos0`:

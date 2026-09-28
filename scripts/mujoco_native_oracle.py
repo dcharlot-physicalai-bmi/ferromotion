@@ -101,6 +101,9 @@ for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
             else:
                 J[:] = d.efc_J[:d.nefc * m.nv].reshape(d.nefc, m.nv)
         lines.append(f"d\tefc_J\t{fmt(J)}")
+        # the dual matrix, where a noslip post-pass (or PGS) makes MuJoCo assemble it, dense models only
+        if m.opt.noslip_iterations > 0 and not mujoco.mj_isSparse(m):
+            lines.append(f"d\tefc_AR\t{fmt(d.efc_AR[:d.nefc * d.nefc])}")
         lines.append(f"d\tnisland\t{d.nisland}")
         lines.append(f"d\tsolver_niter\t{fmt(d.solver_niter[:max(d.nisland, 1)])}")
 open(out, "w").write("\n".join(lines) + "\n")

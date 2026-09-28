@@ -352,6 +352,7 @@ pub(crate) mod mujoco_kinematics;
 pub(crate) mod mujoco_midphase;
 pub(crate) mod mujoco_smooth;
 pub(crate) mod mujoco_efc;
+pub(crate) mod mujoco_noslip;
 pub(crate) mod mujoco_solver;
 pub(crate) mod mujoco_step;
 pub use mujoco_step::MjNativeState;

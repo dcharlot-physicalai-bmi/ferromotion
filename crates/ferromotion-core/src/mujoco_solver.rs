@@ -29,6 +29,11 @@ pub(crate) struct SolverOptions {
     pub(crate) tolerance: f64,
     pub(crate) ls_iterations: usize,
     pub(crate) ls_tolerance: f64,
+    /// `noslip_iterations` (0: no post-pass), `noslip_tolerance`, and `stat.meaninertia`, which scales the
+    /// post-pass's improvement
+    pub(crate) noslip_iterations: usize,
+    pub(crate) noslip_tolerance: f64,
+    pub(crate) meaninertia: f64,
 }
 
 /// What `mj_fwdConstraint` leaves in `mjData`.
@@ -209,7 +214,7 @@ fn mul_mat_t_vec(mat: &[f64], vec: &[f64], nr: usize, nc: usize) -> Vec<f64> {
 }
 
 /// `mju_cholFactor` on the lower triangle of a dense `n×n`; returns the rank.
-fn chol_factor(mat: &mut [f64], n: usize, mindiag: f64) -> usize {
+pub(crate) fn chol_factor(mat: &mut [f64], n: usize, mindiag: f64) -> usize {
     let mut rank = n;
     for j in 0..n {
         let mut tmp = mat[j * (n + 1)];
@@ -238,7 +243,7 @@ fn chol_factor(mat: &mut [f64], n: usize, mindiag: f64) -> usize {
 }
 
 /// `mju_cholSolve`
-fn chol_solve(mat: &[f64], vec: &[f64], n: usize) -> Vec<f64> {
+pub(crate) fn chol_solve(mat: &[f64], vec: &[f64], n: usize) -> Vec<f64> {
     let mut res = vec.to_vec();
     for i in 0..n {
         if i > 0 {
@@ -1071,6 +1076,23 @@ impl SmoothModel {
             }
         }
         out.qacc = qacc;
+        // the noslip post-pass, island by island on the global forces, then `dualFinish`
+        if opt.noslip_iterations > 0 {
+            let ar = self.efc_ar(sd, &jd, &e.r);
+            let dual = crate::mujoco_noslip::Dual { ar: &ar, efc_b: &out.efc_b, e, contacts };
+            let scale = 1.0 / (opt.meaninertia * nv.max(1) as f64);
+            let (mut force, mut state) = (out.efc_force.clone(), out.efc_state.clone());
+            for (isl, efcs) in island_efcs.iter().enumerate() {
+                let ne = efcs.iter().filter(|&&c| e.typ[c] == EQUALITY).count();
+                let nf = efcs.iter().filter(|&&c| e.typ[c] == FRICTION_DOF || e.typ[c] == FRICTION_TENDON).count();
+                out.solver_niter[isl] += crate::mujoco_noslip::sol_noslip(&dual, efcs, ne, nf, &mut force, &mut state, scale, opt.noslip_iterations, opt.noslip_tolerance);
+            }
+            out.qfrc_constraint = mul_mat_t_vec(&jd, &force, nefc, nv);
+            let x = self.solve_ld_pub(&sd.qld, &sd.qld_diag_inv, &out.qfrc_constraint);
+            out.qacc = (0..nv).map(|i| x[i] + sd.qacc_smooth[i]).collect();
+            out.efc_force = force;
+            out.efc_state = state;
+        }
         out
     }
 }

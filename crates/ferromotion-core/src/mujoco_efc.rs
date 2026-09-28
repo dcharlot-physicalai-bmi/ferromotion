@@ -200,6 +200,8 @@ pub(crate) struct EfcModel {
     pub(crate) ten_solref_fri: Vec<[f64; 2]>,
     pub(crate) ten_solimp_fri: Vec<[f64; 5]>,
     pub(crate) tendon_invweight0: Vec<f64>,
+    /// `stat.meaninertia` (`mj_setConst`): the mean of `M`'s diagonal at `qpos0`, summed in dof order
+    pub(crate) meaninertia: f64,
 }
 
 /// The `efc_*` arrays. Each row of `J` is `(columns, values)`: every dof when dense, the chain when sparse.
@@ -489,6 +491,20 @@ impl SmoothModel {
             }
         }
         (body, dof)
+    }
+
+    /// **`mj_setConst`**'s `stat.meaninertia`: `M`'s diagonal at `qpos0`, summed in dof order, over `nv`.
+    pub(crate) fn meaninertia(&self, qpos0: &[f64]) -> f64 {
+        let nv = self.dof_bodyid.len();
+        if nv == 0 {
+            return 1.0;
+        }
+        let sd = self.forward(qpos0, &vec![0.0; nv], &[], &[]);
+        let mut s = 0.0;
+        for i in 0..nv {
+            s += sd.m[self.m_rowadr[i] + self.m_rownnz[i] - 1];
+        }
+        s / nv as f64
     }
 
     /// **`set0`**'s `tendon_invweight0`: `J·M⁻¹·Jᵀ` of each fixed tendon at `qpos0` (zero for a spatial one,
