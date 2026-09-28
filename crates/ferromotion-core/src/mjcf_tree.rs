@@ -1623,7 +1623,7 @@ impl MjcfTree {
         if let Some(why) = sm.unsupported.first() {
             return Err(why.clone());
         }
-        if self.integrator != MjcfIntegrator::Euler {
+        if !matches!(self.integrator, MjcfIntegrator::Euler | MjcfIntegrator::ImplicitFast) {
             return Err(format!("the {:?} integrator is not ported natively", self.integrator));
         }
         // `mj_checkPos`, `mj_checkVel`, then `mj_checkAcc`: a bad value resets the data (`mj_resetData`
@@ -1644,8 +1644,10 @@ impl MjcfTree {
             ctrl = &zero_ctrl;
             (sd, _, sol) = self.native_forward(&st.qpos, &st.qvel, ctrl, &st.act, &st.qacc_warmstart);
         }
-        let _ = ctrl;
-        Ok(sm.euler(&sd, &sol, &st, self.eulerdamp))
+        match self.integrator {
+            MjcfIntegrator::ImplicitFast => sm.implicit_fast(&sd, &sol, &st, ctrl),
+            _ => Ok(sm.euler(&sd, &sol, &st, self.eulerdamp)),
+        }
     }
 
     /// What [`MjcfTree::mujoco_native_forward`] does not yet compute in MuJoCo's own arithmetic for this model
@@ -7448,6 +7450,36 @@ mod tests {
         let qvel: [u64; 8] = [0xbfd2281c2bf64e9d, 0x3fc41a9d65977b2b, 0x3fd419f3203573f3, 0xc000521a9e84222f, 0xc00868898df3c17a, 0x3fa3d4752e08b8fc, 0xc025d77b67a5bc35, 0xbfd6a9902ad9d4a8];
         assert_eq!(st.qpos.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), qpos);
         assert_eq!(st.qvel.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), qvel);
+    }
+
+    /// ⭐⭐ **`implicitfast`, to the bit**: a tumbling free box with an off-centre inertial frame (a
+    /// standalone free body, so its 6×6 block is re-solved with the gyroscopic derivative,
+    /// `mjd_freeMhat` + `mju_factorLU6`), and a damped hinge and slide driven by position and velocity servos
+    /// (the actuators' `kv` and the dampers in `qDeriv`). Ten free-running steps land on MuJoCo 3.13.0's bits.
+    #[test]
+    fn implicitfast_with_a_tumbling_free_body_is_mujocos_to_the_bit() {
+        let xml = r#"<mujoco><option timestep="0.002" integrator="implicitfast"/><worldbody><geom type="plane" size="2 2 0.1"/>
+            <body name="box" pos="0 0 0.3" quat="0.99 0.05 0.08 0.02"><freejoint/><geom type="box" size="0.1 0.08 0.05" pos="0.02 0.01 0" mass="1.3"/>
+              <inertial pos="0.02 0.01 0.005" mass="1.3" diaginertia="0.004 0.006 0.008"/></body>
+            <body name="arm" pos="0.6 0 0.5"><joint name="h" type="hinge" axis="0 1 0" range="-0.5 0.5" damping="0.4"/>
+              <geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.03"/>
+              <body pos="0.3 0 0"><joint name="s" type="slide" axis="1 0 0" range="-0.1 0.1" damping="2"/><geom type="sphere" size="0.05"/></body>
+            </body></worldbody>
+            <actuator><position joint="h" kp="20" kv="1.5"/><velocity joint="s" kv="3"/></actuator></mujoco>"#;
+        let t = tree_from_mjcf_str(xml).unwrap();
+        let mut st = crate::MjNativeState {
+            qpos: vec![0.02, -0.01, 0.2, 0.99, 0.05, 0.08, 0.02, 0.3, 0.05],
+            qvel: vec![0.1, -0.2, -0.5, 3.0, -2.1, 4.2, 0.7, -0.4],
+            qacc_warmstart: vec![0.0; 8],
+            ..Default::default()
+        };
+        for _ in 0..10 {
+            st = t.mujoco_native_step(&st, &[0.2, 0.1]).unwrap();
+        }
+        let qpos: [u64; 9] = [0x3f969d463eb2e7ab, 0xbf8c784c43a8e484, 0x3fc80b559a75dda0, 0x3fefc67700f92d75, 0x3fb5937854b57450, 0x3fae2083b60166cf, 0x3fadfe31d75aae77, 0x3fcc4157527d4c31, 0x3fa69c14075b60ca];
+        let qvel: [u64; 8] = [0x3fbb863a852d35db, 0xbfc87197c2a1d7d9, 0xbfe64317f3424a20, 0x4008ad4273779321, 0xbffedbd79d55445d, 0x4010ec182ab736c4, 0xc0156e6b644722dd, 0xbfc681bba43d51a0];
+        assert_eq!(st.qvel.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), qvel);
+        assert_eq!(st.qpos.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), qpos);
     }
 
     /// ⛔⛔ **MuJoCo's midphase can call touching surfaces apart.** franka's fingertip pads meet at `qpos0`:
