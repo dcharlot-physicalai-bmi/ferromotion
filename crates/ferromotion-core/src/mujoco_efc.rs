@@ -62,6 +62,31 @@ pub(crate) fn dot(a: &[f64], b: &[f64]) -> f64 {
     r
 }
 
+/// `mju_dot` of a vector WITH ITSELF where clang inlined it (`mju_norm`, the Cholesky diagonal): there the
+/// vectoriser keeps every group fused (`fmla.2d` only, no unfused 32-entry block) — read off the inlined
+/// copies in `_mju_cholFactor` and `_mj_solPrimal`.
+pub(crate) fn dot_self(a: &[f64]) -> f64 {
+    let n = a.len();
+    let (mut r0, mut r1, mut r2, mut r3) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    let groups = n / 4;
+    for g in 0..groups {
+        let i = 4 * g;
+        r0 = a[i].mul_add(a[i], r0);
+        r1 = a[i + 1].mul_add(a[i + 1], r1);
+        r2 = a[i + 2].mul_add(a[i + 2], r2);
+        r3 = a[i + 3].mul_add(a[i + 3], r3);
+    }
+    let i = 4 * groups;
+    let mut r = (r0 + r2) + (r1 + r3);
+    match n - i {
+        3 => r += a[i + 2].mul_add(a[i + 2], a[i].mul_add(a[i], a[i + 1] * a[i + 1])),
+        2 => r += a[i].mul_add(a[i], a[i + 1] * a[i + 1]),
+        1 => r = a[i].mul_add(a[i], r),
+        _ => {}
+    }
+    r
+}
+
 /// One contact as `mjContact` holds it after `mj_setContact`.
 #[derive(Clone, Debug)]
 pub(crate) struct NativeContact {

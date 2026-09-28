@@ -31,7 +31,7 @@ DATA = ["xpos", "xquat", "xmat", "xipos", "ximat", "xanchor", "xaxis", "subtree_
         "qfrc_spring", "qfrc_damper", "qfrc_gravcomp", "qfrc_passive", "actuator_length", "actuator_velocity",
         "actuator_force", "act_dot", "qfrc_actuator", "qfrc_smooth", "qacc_smooth",
         "efc_type", "efc_id", "efc_pos", "efc_margin", "efc_frictionloss", "efc_diagA", "efc_R", "efc_D", "efc_KBIP",
-        "efc_vel", "efc_aref"]
+        "efc_vel", "efc_aref", "efc_b", "efc_force", "efc_state", "qfrc_constraint", "qacc"]
 
 
 def fmt(a):
@@ -99,5 +99,7 @@ for f in sorted(glob.glob(os.path.join(root, "*", "*.xml"))):
             else:
                 J[:] = d.efc_J[:d.nefc * m.nv].reshape(d.nefc, m.nv)
         lines.append(f"d\tefc_J\t{fmt(J)}")
+        lines.append(f"d\tnisland\t{d.nisland}")
+        lines.append(f"d\tsolver_niter\t{fmt(d.solver_niter[:max(d.nisland, 1)])}")
 open(out, "w").write("\n".join(lines) + "\n")
 print(models, "models,", k, "states each ->", out)

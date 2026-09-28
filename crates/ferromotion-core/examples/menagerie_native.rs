@@ -120,11 +120,13 @@ fn main() {
         for why in &missing {
             *unsupported.entry(why.clone()).or_default() += 1;
         }
-        // a `rows:` reason leaves everything but the constraint rows comparable
-        if missing.iter().any(|w| !w.starts_with("rows:")) {
+        // a `rows:` reason leaves everything but the constraint rows (and the solve) comparable, a
+        // `solver:` reason everything but the solve
+        if missing.iter().any(|w| !w.starts_with("rows:") && !w.starts_with("solver:")) {
             continue;
         }
-        let rows_ok = missing.is_empty();
+        let rows_ok = !missing.iter().any(|w| w.starts_with("rows:"));
+        let solve_ok = missing.is_empty();
         nmodels += 1;
         let ours: BTreeMap<&str, Vec<f64>> = t.mujoco_native_model().into_iter().collect();
         for (name, want) in &m.arrays {
@@ -135,7 +137,8 @@ fn main() {
         for (s, st) in m.states.iter().enumerate() {
             let ours: BTreeMap<&str, Vec<f64>> = t.mujoco_native_forward(&st.qpos, &st.qvel, &st.ctrl, &st.act).into_iter().collect();
             for (name, want) in &st.arrays {
-                if name.starts_with("efc_") && !rows_ok {
+                let solve_array = matches!(name.as_str(), "qacc" | "efc_b" | "efc_force" | "efc_state" | "qfrc_constraint" | "nisland" | "solver_niter");
+                if (name.starts_with("efc_") && !rows_ok) || (solve_array && !solve_ok) {
                     continue;
                 }
                 if let Some(o) = ours.get(name.as_str()) {

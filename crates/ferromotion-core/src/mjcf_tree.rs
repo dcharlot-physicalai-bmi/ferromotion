@@ -1509,6 +1509,18 @@ impl MjcfTree {
             if self.joints.iter().any(|j| j.range.is_some() && j.kind == MjcfJointKind::Ball) {
                 sm.unsupported.push("rows: a ball-joint limit".into());
             }
+            if sm.dof_bodyid.len() >= 60 {
+                sm.unsupported.push("solver: 60 or more dofs (MuJoCo's sparse Jacobian)".into());
+            }
+            if self.cone == crate::mujoco_contact::Cone::Elliptic {
+                sm.unsupported.push("solver: an elliptic cone".into());
+            }
+            if self.solver != "Newton" {
+                sm.unsupported.push(format!("solver: the {} solver", self.solver));
+            }
+            if self.noslip_iterations > 0 {
+                sm.unsupported.push("solver: noslip".into());
+            }
             sm.unsupported.sort();
             sm.unsupported.dedup();
             sm.efc = em;
@@ -1564,6 +1576,21 @@ impl MjcfTree {
             .collect();
         let e = sm.constraints(&sm.efc, &sd, qpos, qvel, &contacts);
         let nv = sm.dof_bodyid.len();
+        let opt = crate::mujoco_solver::SolverOptions { iterations: self.solver_iterations, tolerance: self.solver_tolerance, ls_iterations: self.ls_iterations, ls_tolerance: self.ls_tolerance };
+        let sol = sm.fwd_constraint(&sd, &e, &contacts, &vec![0.0; nv], &opt);
+        out.extend([
+            ("qacc", sol.qacc.clone()),
+            ("efc_b", sol.efc_b.clone()),
+            ("efc_force", sol.efc_force.clone()),
+            ("efc_state", sol.efc_state.iter().map(|&x| x as f64).collect()),
+            ("qfrc_constraint", sol.qfrc_constraint.clone()),
+            ("nisland", vec![sol.nisland as f64]),
+            ("solver_niter", {
+                let mut v: Vec<f64> = sol.solver_niter.iter().map(|&x| x as f64).collect();
+                v.resize(sol.nisland.max(1), 0.0);
+                v
+            }),
+        ]);
         out.extend([
             ("efc_type", e.typ.iter().map(|&t| t as f64).collect()),
             ("efc_id", e.id.iter().map(|&t| t as f64).collect()),
@@ -2500,6 +2527,13 @@ pub struct MjcfTree {
     /// forward pass re-solves the friction forces after the main solve ([`crate::mujoco_noslip`]).
     pub noslip_iterations: usize,
     pub noslip_tolerance: f64,
+    /// `<option solver iterations tolerance ls_iterations ls_tolerance>`: MuJoCo's defaults are `Newton`,
+    /// 100, 1e-8, 50 and 0.01. [`MjcfTree::mujoco_native_forward`] runs MuJoCo's own solver with them.
+    pub solver: String,
+    pub solver_iterations: usize,
+    pub solver_tolerance: f64,
+    pub ls_iterations: usize,
+    pub ls_tolerance: f64,
     /// MuJoCo's `stat.meaninertia`: the mean diagonal of the mass matrix at `qpos0`, in MuJoCo's basis.
     pub meaninertia: f64,
     /// `<option><flag eulerdamp>`, default enabled: whether the `Euler` integrator treats dof damping
@@ -6442,6 +6476,11 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             eulerdamp: true,
             noslip_iterations: 0,
             noslip_tolerance: 1e-6,
+            solver: "Newton".into(),
+            solver_iterations: 100,
+            solver_tolerance: 1e-8,
+            ls_iterations: 50,
+            ls_tolerance: 0.01,
             meaninertia: 1.0,
             body_iinertia: BTreeMap::new(),
             body_iquat: BTreeMap::new(),
@@ -6556,6 +6595,21 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
         }
         if let Some(v) = el.attr("noslip_iterations") {
             out.noslip_iterations = v.trim().parse::<usize>().map_err(|e| format!("<option noslip_iterations>: {e}"))?;
+        }
+        if let Some(v) = el.attr("solver") {
+            out.solver = v.trim().to_string();
+        }
+        if let Some(v) = el.attr("iterations") {
+            out.solver_iterations = v.trim().parse::<usize>().map_err(|e| format!("<option iterations>: {e}"))?;
+        }
+        if let Some(v) = el.attr("tolerance") {
+            out.solver_tolerance = v.trim().parse::<f64>().map_err(|e| format!("<option tolerance>: {e}"))?;
+        }
+        if let Some(v) = el.attr("ls_iterations") {
+            out.ls_iterations = v.trim().parse::<usize>().map_err(|e| format!("<option ls_iterations>: {e}"))?;
+        }
+        if let Some(v) = el.attr("ls_tolerance") {
+            out.ls_tolerance = v.trim().parse::<f64>().map_err(|e| format!("<option ls_tolerance>: {e}"))?;
         }
         if let Some(v) = el.attr("noslip_tolerance") {
             out.noslip_tolerance = v.trim().parse::<f64>().map_err(|e| format!("<option noslip_tolerance>: {e}"))?;
@@ -7303,6 +7357,29 @@ mod tests {
         ];
         assert_eq!(bits(&got["M"]), m);
         assert_eq!(bits(&got["qfrc_bias"]), bias);
+    }
+
+    /// ⭐⭐ **MuJoCo's whole `mj_forward`, to the bit**: a box penetrating the floor (three contacts, a
+    /// pyramidal cone each), a hinge and a slide past their limits with friction loss, a position servo —
+    /// two constraint islands, each solved by MuJoCo's Newton solver in two iterations. `qacc` is MuJoCo
+    /// 3.13.0's to the last bit.
+    #[test]
+    fn the_native_solver_lands_on_mujocos_qacc_bit_for_bit() {
+        let xml = r#"<mujoco><option timestep="0.002"/><worldbody><geom type="plane" size="2 2 0.1"/>
+            <body name="box" pos="0 0 0.09" quat="0.99 0.05 0.08 0.02"><freejoint/><geom type="box" size="0.1 0.08 0.1" mass="1.3"/></body>
+            <body name="arm" pos="0.6 0 0.5"><joint name="h" type="hinge" axis="0 1 0" range="-0.5 0.5" frictionloss="0.3" damping="0.1"/>
+              <geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.03"/>
+              <body pos="0.3 0 0"><joint name="s" type="slide" axis="1 0 0" range="-0.1 0.1" frictionloss="0.2"/><geom type="sphere" size="0.05"/></body>
+            </body></worldbody>
+            <actuator><position joint="h" kp="20" kv="1"/></actuator></mujoco>"#;
+        let t = tree_from_mjcf_str(xml).unwrap();
+        let qpos = [0.02, -0.01, 0.085, 0.99, 0.05, 0.08, 0.02, 0.6, 0.12];
+        let qvel = [0.1, -0.2, -0.5, 0.3, 0.1, -0.2, 0.7, -0.4];
+        let got: BTreeMap<&str, Vec<f64>> = t.mujoco_native_forward(&qpos, &qvel, &[0.9], &[]).into_iter().collect();
+        assert_eq!(got["nisland"], [2.0]);
+        assert_eq!(got["solver_niter"], [2.0, 2.0]);
+        let want: [u64; 8] = [0xc047f00feb22d145, 0x40447d6527a7224b, 0x40582039ce256795, 0xc0717ba9ccac820b, 0xc079787450b1e847, 0x403ecf07fd6435d5, 0xc0976eb41e92c2a5, 0xc0236326a727ee7e];
+        assert_eq!(got["qacc"].iter().map(|x| x.to_bits()).collect::<Vec<_>>(), want);
     }
 
     /// ⛔⛔ **MuJoCo's midphase can call touching surfaces apart.** franka's fingertip pads meet at `qpos0`:
