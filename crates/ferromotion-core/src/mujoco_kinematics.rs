@@ -182,7 +182,7 @@ pub(crate) fn axis_angle2quat(axis: &[f64; 3], angle: f64) -> [f64; 4] {
 }
 
 /// `mj_local2Global`: an element's world frame from its body's, as its `sameframe` tag says.
-fn mj_local2global(body: (&[f64; 3], &[f64; 4], &[f64; 9]), inertial: &XFrame, pos: &[f64; 3], quat: &[f64; 4], sf: SameFrame) -> XFrame {
+pub(crate) fn mj_local2global(body: (&[f64; 3], &[f64; 4], &[f64; 9]), inertial: &XFrame, pos: &[f64; 3], quat: &[f64; 4], sf: SameFrame) -> XFrame {
     let (xpos, xquat, xmat) = body;
     let p = match sf {
         SameFrame::None | SameFrame::BodyRot | SameFrame::InertiaRot => {

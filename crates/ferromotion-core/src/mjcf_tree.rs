@@ -1453,8 +1453,8 @@ impl MjcfTree {
         self.smooth_cache.get_or_init(|| {
             let per_body = |m: &BTreeMap<String, f64>| self.mj_body_names.iter().map(|n| m.get(n).copied().unwrap_or(0.0)).collect();
             let mut unsupported: Vec<String> = Vec::new();
-            if self.density != 0.0 || self.viscosity != 0.0 {
-                unsupported.push("a fluid (density or viscosity)".into());
+            if (self.density != 0.0 || self.viscosity != 0.0) && self.fluid_ellipsoid {
+                unsupported.push("a fluidshape=\"ellipsoid\" geom (the ellipsoid fluid model)".into());
             }
             if self.tendons.iter().any(|t| t.stiffness != 0.0 || t.damping != 0.0) {
                 unsupported.push("a tendon spring or damper".into());
@@ -1483,6 +1483,13 @@ impl MjcfTree {
                     TendonPath::Fixed(j) => Some(j.clone()),
                     TendonPath::Spatial(_) => None,
                 }).collect(),
+                actuator_sites: self.actuators.iter().map(|a| match &a.dynamic {
+                    Some(crate::mujoco_actuator::DynTransmission::Site { site, gear }) => self.mj_sites.get(site).map(|s| (*s, *gear)),
+                    _ => None,
+                }).collect(),
+                density: self.density,
+                viscosity: self.viscosity,
+                wind: [self.wind.x, self.wind.y, self.wind.z],
                 unsupported,
             };
             let mut sm = crate::mujoco_smooth::SmoothModel::new(&self.mj_kin, inp);
@@ -1692,8 +1699,11 @@ impl MjcfTree {
         if let Some(why) = sm.unsupported.first() {
             return Err(why.clone());
         }
-        if !matches!(self.integrator, MjcfIntegrator::Euler | MjcfIntegrator::ImplicitFast) {
+        if !matches!(self.integrator, MjcfIntegrator::Euler | MjcfIntegrator::ImplicitFast | MjcfIntegrator::Rk4) {
             return Err(format!("the {:?} integrator is not ported natively", self.integrator));
+        }
+        if self.integrator == MjcfIntegrator::ImplicitFast && (self.density != 0.0 || self.viscosity != 0.0) {
+            return Err("implicitfast with a fluid (the fluid's velocity derivative is not ported)".into());
         }
         // `mj_checkPos`, `mj_checkVel`, then `mj_checkAcc`: a bad value resets the data (`mj_resetData`
         // zeroes the control with everything else) and the step goes on from the reset state
@@ -1715,12 +1725,60 @@ impl MjcfTree {
         }
         match self.integrator {
             MjcfIntegrator::ImplicitFast => sm.implicit_fast(&sd, &sol, &st, ctrl),
+            MjcfIntegrator::Rk4 => Ok(self.native_rk4(&st, ctrl, &sd, &sol)),
             _ => Ok(sm.euler(&sd, &sol, &st, self.eulerdamp)),
         }
     }
 
+    /// **`mj_RungeKutta(m, d, 4)`**: three more forward passes at the tableau's stages, each from `X[0]`
+    /// advanced by the stage's weighted rates (`mj_integratePos` for the positions), with the step's own
+    /// warmstart; then `mj_advance` from `X[0]` with the `B`-weighted rates, positions by the weighted
+    /// velocity. Every weighted sum is `mju_addToScl` — fused, a zero weight included.
+    fn native_rk4(&self, st: &crate::MjNativeState, ctrl: &[f64], sd: &crate::mujoco_smooth::SmoothData, sol: &crate::mujoco_solver::Solution) -> crate::MjNativeState {
+        const A: [f64; 9] = [0.5, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 1.0];
+        const B: [f64; 4] = [1.0 / 6.0, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 6.0];
+        let sm = self.smooth_model();
+        let (nv, na, h) = (st.qvel.len(), st.act.len(), sm.timestep);
+        let mut x = vec![(st.qpos.clone(), st.qvel.clone(), st.act.clone())];
+        let mut f = vec![(sol.qacc.clone(), sd.act_dot.clone())];
+        // the weighted rates: `dX = Σ w_j·[qvel_j, qacc_j, act_dot_j]`
+        let weigh = |x: &[(Vec<f64>, Vec<f64>, Vec<f64>)], f: &[(Vec<f64>, Vec<f64>)], w: &[f64]| -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+            let (mut dv, mut da, mut dact) = (vec![0.0f64; nv], vec![0.0f64; nv], vec![0.0f64; na]);
+            for (j, &wj) in w.iter().enumerate() {
+                for k in 0..nv {
+                    dv[k] = x[j].1[k].mul_add(wj, dv[k]);
+                }
+                for k in 0..nv {
+                    da[k] = f[j].0[k].mul_add(wj, da[k]);
+                }
+                for k in 0..na {
+                    dact[k] = f[j].1[k].mul_add(wj, dact[k]);
+                }
+            }
+            (dv, da, dact)
+        };
+        for i in 1..4 {
+            let row = &A[(i - 1) * 3..(i - 1) * 3 + i];
+            let mut c = 0.0;
+            for a in row {
+                c += a;
+            }
+            let t = c.mul_add(h, st.time);
+            let (dv, da, dact) = weigh(&x, &f, row);
+            let mut qpos = x[0].0.clone();
+            sm.integrate_pos(&mut qpos, &dv, h);
+            let qvel: Vec<f64> = (0..nv).map(|k| da[k].mul_add(h, x[0].1[k])).collect();
+            let act: Vec<f64> = (0..na).map(|k| dact[k].mul_add(h, x[0].2[k])).collect();
+            let (sdi, _, soli) = self.native_forward(t, &qpos, &qvel, ctrl, &act, &st.qacc_warmstart);
+            x.push((qpos, qvel, act));
+            f.push((soli.qacc, sdi.act_dot));
+        }
+        let (dv, da, dact) = weigh(&x, &f, &B);
+        sm.advance_with(st, &dact, &da, Some(&dv), &f[3].0)
+    }
+
     /// What [`MjcfTree::mujoco_native_forward`] does not yet compute in MuJoCo's own arithmetic for this model
-    /// (a fluid, a tendon's spring, an actuator that is not a hinge or slide joint transmission…); empty when
+    /// (a tendon's spring, a spatial-tendon or body transmission, 60 or more dofs…); empty when
     /// every array it returns is meant to be MuJoCo's to the bit. A reason starting `rows:` leaves everything
     /// but the constraint rows (`efc_*`) meant to be MuJoCo's.
     pub fn mujoco_native_unsupported(&self) -> Vec<String> {
@@ -2645,6 +2703,8 @@ pub struct MjcfTree {
     /// forward pass re-solves the friction forces after the main solve ([`crate::mujoco_noslip`]).
     pub noslip_iterations: usize,
     pub noslip_tolerance: f64,
+    /// Some geom asks for `fluidshape="ellipsoid"`, the per-geom fluid model this loader does not carry.
+    pub(crate) fluid_ellipsoid: bool,
     /// `<option solver iterations tolerance ls_iterations ls_tolerance>`: MuJoCo's defaults are `Newton`,
     /// 100, 1e-8, 50 and 0.01. [`MjcfTree::mujoco_native_forward`] runs MuJoCo's own solver with them.
     pub solver: String,
@@ -4980,6 +5040,8 @@ impl Walk<'_> {
         }
         let index = self.geom_records.len();
         let get = |k: &str| self.defaults.get(g, "geom", k, childclass).map(|s| s.to_string());
+        // the per-geom ellipsoid fluid model is not carried: record that a geom asks for it
+        let ellipsoid_fluid = get("fluidshape").is_some_and(|s| s.trim() == "ellipsoid");
         let num = |k: &str, dflt: f64| -> Result<f64, String> { get(k).map(|s| s.trim().parse::<f64>().map_err(|e| format!("geom {k}: {e}"))).transpose().map(|v| v.unwrap_or(dflt)) };
         let int = |k: &str, dflt: i64| -> Result<i64, String> { get(k).map(|s| s.trim().parse::<f64>().map(|x| x as i64).map_err(|e| format!("geom {k}: {e}"))).transpose().map(|v| v.unwrap_or(dflt)) };
         // each layer of the default chain overwrites only the entries it states, as `ReadAttr` does
@@ -5021,6 +5083,9 @@ impl Walk<'_> {
             conaffinity: int("conaffinity", 1)? as u32,
             adhesion: num("adhesion", 0.0)?,
         };
+        if ellipsoid_fluid {
+            self.out.fluid_ellipsoid = true;
+        }
         if let Some(mname) = spec.mesh.as_ref().filter(|_| kind == GeomType::Mesh && (params.contype != 0 || params.conaffinity != 0)) {
             self.mesh_data(mname)?;
             self.collidable_meshes.insert(mname.clone());
@@ -6608,6 +6673,7 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             eulerdamp: true,
             noslip_iterations: 0,
             noslip_tolerance: 1e-6,
+            fluid_ellipsoid: false,
             solver: "Newton".into(),
             solver_iterations: 100,
             solver_tolerance: 1e-8,
@@ -7714,6 +7780,36 @@ mod tests {
         assert_eq!(st.act.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), [0x3fbd71ae90c1ab79, 0x3feb851eb851eb85]);
         assert_eq!(st.qvel.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), [0xbfdd5ed456588f9d, 0x4014f1cceb4c77f4]);
         assert_eq!(st.qpos.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), [0x3fc0eb6ec5b1ea25, 0xbfcdc7309e13383c]);
+    }
+
+    /// ⭐⭐ **RK4, a fluid and a site thruster, to the bit**: a free box in contact with the floor under
+    /// `density` and `viscosity` (the inertia-box fluid model), pushed by a filtered `general` actuator on a
+    /// rotated site (its six-component gear turned into the world each stage), next to a damped servo arm —
+    /// `mj_RungeKutta`'s four forward passes and its weighted `mj_advance`. Ten free-running steps land on
+    /// MuJoCo 3.13.0's bits, the activation included.
+    #[test]
+    fn rk4_with_a_fluid_and_a_site_thruster_is_mujocos_to_the_bit() {
+        let xml = r#"<mujoco><option timestep="0.002" integrator="RK4" density="1.2" viscosity="0.02"/>
+            <worldbody><geom type="plane" size="2 2 0.1"/>
+              <body name="box" pos="0 0 0.06" quat="0.99 0.05 0.08 0.02"><freejoint/><geom type="box" size="0.1 0.08 0.05" mass="1.3"/><site name="thrust" pos="0.05 0 0.05" quat="0.95 0.1 0.2 0"/></body>
+              <body name="arm" pos="0.6 0 0.5"><joint name="h" type="hinge" axis="0 1 0" damping="0.1"/><geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.03"/></body>
+            </worldbody>
+            <actuator><general site="thrust" gear="0 0.3 1 0.02 0 -0.01" dyntype="filter" dynprm="0.05" ctrlrange="0 20"/><position joint="h" kp="20" kv="1"/></actuator></mujoco>"#;
+        let t = tree_from_mjcf_str(xml).unwrap();
+        assert!(t.mujoco_native_unsupported().is_empty(), "{:?}", t.mujoco_native_unsupported());
+        let mut st = crate::MjNativeState {
+            qpos: vec![0.02, -0.01, 0.05, 0.99, 0.05, 0.08, 0.02, 0.3],
+            qvel: vec![0.4, -0.2, -0.3, 1.0, -0.6, 2.0, 0.7],
+            act: vec![3.0],
+            qacc_warmstart: vec![0.0; 7],
+            ..Default::default()
+        };
+        for _ in 0..10 {
+            st = t.mujoco_native_step(&st, &[15.0, 0.4]).unwrap();
+        }
+        assert_eq!(st.act.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), [0x401bd31b71911bea]);
+        assert_eq!(st.qvel.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), [0x3fa2b48b45da2db3, 0xbfc45d8a030f67e2, 0x3f9226c67b7b1b97, 0xc0004200e5e07651, 0xc0158e4d4b9ac5a0, 0x3fd6b4cb80d5ed30, 0x3ffc3e4b9b8407c2]);
+        assert_eq!(st.qpos.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), [0x3f9786b91e7e1d11, 0xbf8b5e03429327b6, 0x3fa8ea302e130c3b, 0x3fefeea3f11e32a1, 0x3fa4b481ad880037, 0x3fa5aecd444d1388, 0x3f9d0d13dcb29830, 0x3fd4e51ec3f0692e]);
     }
 
     /// ⛔⛔ **MuJoCo's midphase can call touching surfaces apart.** franka's fingertip pads meet at `qpos0`:

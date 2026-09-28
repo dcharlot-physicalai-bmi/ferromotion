@@ -61,6 +61,25 @@ pub(crate) fn dot_sparse(v: &[f64], x: &[f64], ind: &[usize]) -> f64 {
     r
 }
 
+/// `mju_mulMatTVec` of a `3×nv` Jacobian (per dof, the three rows) and a 3-vector: the rows in order, a
+/// zero coefficient skipped, each fused into the running column.
+fn mul_mat_t_vec3(j: &[[f64; 3]], v: &[f64; 3]) -> Vec<f64> {
+    let mut res = vec![0.0f64; j.len()];
+    for r in 0..3 {
+        if v[r] != 0.0 {
+            for (x, row) in res.iter_mut().zip(j) {
+                *x = row[r].mul_add(v[r], *x);
+            }
+        }
+    }
+    res
+}
+
+/// `mju_max`
+fn fmax(a: f64, b: f64) -> f64 {
+    if a >= b { a } else { b }
+}
+
 /// `mji_cross`, contracted.
 fn cross(a: &[f64; 3], b: &[f64; 3]) -> [f64; 3] {
     [a[1].mul_add(b[2], -(a[2] * b[1])), a[2].mul_add(b[0], -(a[0] * b[2])), a[0].mul_add(b[1], -(a[1] * b[0]))]
@@ -272,6 +291,8 @@ pub(crate) struct NativeActuator {
     pub(crate) qposadr: usize,
     /// the fixed tendon, for a tendon transmission
     pub(crate) tendon: Option<usize>,
+    /// the site and its six-component `gear` (a wrench in the site's frame), for a site transmission
+    pub(crate) site: Option<(crate::mujoco_kinematics::KinGeom, [f64; 6])>,
     /// index of its activation in `act`, when it has one
     pub(crate) actadr: Option<usize>,
 }
@@ -302,6 +323,12 @@ pub(crate) struct SmoothInputs {
     pub(crate) actuators: Vec<crate::mujoco_actuator::Actuator>,
     /// every tendon in MuJoCo's order: a fixed one's `(dof, coef)` in file order, `None` for a spatial one
     pub(crate) tendons: Vec<Option<Vec<(usize, f64)>>>,
+    /// per actuator: the site of a site transmission, and its `gear`
+    pub(crate) actuator_sites: Vec<Option<(crate::mujoco_kinematics::KinGeom, [f64; 6])>>,
+    /// `<option density viscosity wind>`, for the inertia-box fluid model
+    pub(crate) density: f64,
+    pub(crate) viscosity: f64,
+    pub(crate) wind: [f64; 3],
     /// what this port does not yet compute natively, by name — a model with any is not compared
     pub(crate) unsupported: Vec<String>,
 }
@@ -341,6 +368,9 @@ pub(crate) struct SmoothModel {
     pub(crate) actuators: Vec<NativeActuator>,
     /// every tendon, by MuJoCo's index; `None` for a spatial one, which is not ported
     pub(crate) tendons: Vec<Option<NativeTendon>>,
+    pub(crate) density: f64,
+    pub(crate) viscosity: f64,
+    pub(crate) wind: [f64; 3],
     pub(crate) na: usize,
     pub(crate) unsupported: Vec<String>,
     /// what the constraint rows read ([`crate::mujoco_efc`]), filled in by the tree
@@ -365,6 +395,7 @@ pub(crate) struct SmoothData {
     pub(crate) qfrc_spring: Vec<f64>,
     pub(crate) qfrc_damper: Vec<f64>,
     pub(crate) qfrc_gravcomp: Vec<f64>,
+    pub(crate) qfrc_fluid: Vec<f64>,
     pub(crate) qfrc_passive: Vec<f64>,
     /// `ten_length`, `ten_J` (each row's values on its tendon's `colind`) and `ten_velocity`; zero for a
     /// spatial tendon
@@ -400,6 +431,9 @@ impl SmoothModel {
             jnt_springref: inp.jnt_springref.clone(),
             jnt_actfrcrange: inp.jnt_actfrcrange.clone(),
             unsupported: inp.unsupported.clone(),
+            density: inp.density,
+            viscosity: inp.viscosity,
+            wind: inp.wind,
             ..Default::default()
         };
         let parent: Vec<usize> = kin.bodies.iter().map(|b| b.parent).collect();
@@ -524,18 +558,22 @@ impl SmoothModel {
         }
         // actuators: hinge and slide joint transmissions, and fixed tendons
         let mut na = 0;
-        for a in &inp.actuators {
+        for (ai, a) in inp.actuators.iter().enumerate() {
             let actadr = (a.actnum() > 0).then(|| {
                 na += a.actnum();
                 na - a.actnum()
             });
+            if let Some(site) = inp.actuator_sites.get(ai).cloned().flatten() {
+                m.actuators.push(NativeActuator { act: a.clone(), dofadr: 0, qposadr: 0, tendon: None, site: Some(site), actadr });
+                continue;
+            }
             if a.dynamic.is_some() {
                 m.unsupported.push("an actuator that is not a hinge or slide joint or fixed tendon transmission".into());
                 continue;
             }
             if let Some(t) = a.tendon {
                 match m.tendons.get(t) {
-                    Some(Some(_)) => m.actuators.push(NativeActuator { act: a.clone(), dofadr: 0, qposadr: 0, tendon: Some(t), actadr }),
+                    Some(Some(_)) => m.actuators.push(NativeActuator { act: a.clone(), dofadr: 0, qposadr: 0, tendon: Some(t), site: None, actadr }),
                     _ => m.unsupported.push("a tendon transmission this port did not record".into()),
                 }
                 continue;
@@ -545,7 +583,7 @@ impl SmoothModel {
                 _ => None,
             };
             match joint {
-                Some(j) => m.actuators.push(NativeActuator { act: a.clone(), dofadr: m.jnt_dofadr[j], qposadr: m.jnt_qposadr[j], tendon: None, actadr }),
+                Some(j) => m.actuators.push(NativeActuator { act: a.clone(), dofadr: m.jnt_dofadr[j], qposadr: m.jnt_qposadr[j], tendon: None, site: None, actadr }),
                 None => m.unsupported.push("an actuator that is not a hinge or slide joint or fixed tendon transmission".into()),
             }
         }
@@ -775,7 +813,23 @@ impl SmoothModel {
                 self.apply_ft(&cdof, &subtree_com, &force, &kin.xipos[b], b, &mut qfrc_gravcomp);
             }
         }
+        // `mj_fluid`: the inertia-box model on every body with mass
+        let mut qfrc_fluid = vec![0.0; nv];
+        let has_fluid = self.density != 0.0 || self.viscosity != 0.0;
+        if has_fluid {
+            for b in 0..nbody {
+                if self.body_mass[b] < MJ_MINVAL {
+                    continue;
+                }
+                self.inertia_box_fluid(b, &kin, &cvel, &cdof, &subtree_com, &mut qfrc_fluid);
+            }
+        }
         let mut qfrc_passive: Vec<f64> = (0..nv).map(|i| qfrc_spring[i] + qfrc_damper[i]).collect();
+        if has_fluid {
+            for i in 0..nv {
+                qfrc_passive[i] += qfrc_fluid[i];
+            }
+        }
         if has_gravcomp {
             for i in 0..nv {
                 qfrc_passive[i] += qfrc_gravcomp[i];
@@ -792,6 +846,29 @@ impl SmoothModel {
         let mut moment = Vec::with_capacity(nu);
         for (i, a) in self.actuators.iter().enumerate() {
             let g = a.act.gear;
+            if let Some((site, gear)) = &a.site {
+                // a site: no length; the moment is `J'·wrench`, the gear turned into the world by the site
+                let b = site.body;
+                let (sp, sm) = crate::mujoco_kinematics::mj_local2global((&kin.xpos[b], &kin.xquat[b], &kin.xmat[b]), &(kin.xipos[b], kin.ximat[b]), &site.pos, &site.quat, site.sameframe);
+                let (jp, jr) = self.jac_at(&cdof, &subtree_com, &sp, b, true);
+                let wf = crate::mujoco_efc::mat_vec3(&sm, &[gear[0], gear[1], gear[2]]);
+                let wt = crate::mujoco_efc::mat_vec3(&sm, &[gear[3], gear[4], gear[5]]);
+                let row = mul_mat_t_vec3(&jp, &wf);
+                let tmp = mul_mat_t_vec3(&jr, &wt);
+                let (mut cols, mut vals) = (Vec::new(), Vec::new());
+                for c in 0..nv {
+                    let v = row[c] + tmp[c];
+                    if v != 0.0 {
+                        cols.push(c);
+                        vals.push(v);
+                    }
+                }
+                actuator_length[i] = 0.0;
+                moment.push((cols, vals));
+                let (cols, vals) = &moment[i];
+                actuator_velocity[i] = dot_sparse(vals, qvel, cols);
+                continue;
+            }
             match a.tendon {
                 Some(t) => {
                     actuator_length[i] = ten_length[t] * g;
@@ -896,7 +973,73 @@ impl SmoothModel {
         let qacc_smooth = self.solve_ld(&qld, &qld_diag_inv, &qfrc_smooth);
         SmoothData {
             kin, subtree_com, cinert, cdof, crb, m, qld, qld_diag_inv, cvel, cdof_dot, qfrc_bias,
-            qfrc_spring, qfrc_damper, qfrc_gravcomp, qfrc_passive, ten_length, ten_j, ten_velocity, moment, actuator_length, actuator_velocity, actuator_force, act_dot, qfrc_actuator, qfrc_smooth, qacc_smooth,
+            qfrc_spring, qfrc_damper, qfrc_gravcomp, qfrc_fluid, qfrc_passive, ten_length, ten_j, ten_velocity, moment, actuator_length, actuator_velocity, actuator_force, act_dot, qfrc_actuator, qfrc_smooth, qacc_smooth,
+        }
+    }
+
+    /// **`mj_inertiaBoxFluidModel`** for body `b`: the body's velocity at its centre of mass in its inertial
+    /// frame (`mj_objectVelocity`, less the wind), the viscous and blunt-body drag of the box with the body's
+    /// inertia, turned back into the world and applied at `xipos` (`mj_applyFT`, force then torque).
+    #[allow(clippy::too_many_arguments)]
+    fn inertia_box_fluid(&self, b: usize, kin: &KinState, cvel: &[[f64; 6]], cdof: &[[f64; 6]], subtree_com: &[[f64; 3]], qfrc: &mut [f64]) {
+        use crate::mujoco_efc::{mat_t_vec3, mat_vec3};
+        let inertia = &self.body_inertia[b];
+        let mass = self.body_mass[b];
+        let bx = |a: f64, c: f64, d: f64| (fmax(MJ_MINVAL, a + c - d) / mass * 6.0).sqrt();
+        let bb = [bx(inertia[1], inertia[2], inertia[0]), bx(inertia[0], inertia[2], inertia[1]), bx(inertia[0], inertia[1], inertia[2])];
+        // `mju_transformSpatial` of a motion vector to `xipos`, in the inertial frame
+        let (pos, com, rot) = (&kin.xipos[b], &subtree_com[self.body_rootid[b]], &kin.ximat[b]);
+        let transform = |v: &[f64; 6]| -> [f64; 6] {
+            let dif = [pos[0] - com[0], pos[1] - com[1], pos[2] - com[2]];
+            let c = cross(&dif, &[v[0], v[1], v[2]]);
+            let lin = [v[3] - c[0], v[4] - c[1], v[5] - c[2]];
+            let a = mat_t_vec3(rot, &[v[0], v[1], v[2]]);
+            let l = mat_t_vec3(rot, &lin);
+            [a[0], a[1], a[2], l[0], l[1], l[2]]
+        };
+        // `mj_objectVelocity`: zero on a body welded to the world
+        let mut w = b;
+        while w != 0 && self.body_dofnum[w] == 0 {
+            w = self.kin.bodies[w].parent;
+        }
+        let mut lvel = if self.body_dofnum[w] == 0 { [0.0; 6] } else { transform(&cvel[b]) };
+        let lwind = transform(&[0.0, 0.0, 0.0, self.wind[0], self.wind[1], self.wind[2]]);
+        for k in 3..6 {
+            lvel[k] -= lwind[k];
+        }
+        let mut lfrc = [0.0f64; 6];
+        if self.viscosity > 0.0 {
+            let diam = (bb[0] + bb[1] + bb[2]) / 3.0;
+            let ca = -std::f64::consts::PI * diam * diam * diam * self.viscosity;
+            let cl = -3.0 * std::f64::consts::PI * diam * self.viscosity;
+            for k in 0..3 {
+                lfrc[k] = lvel[k] * ca;
+                lfrc[3 + k] = lvel[3 + k] * cl;
+            }
+        }
+        if self.density > 0.0 {
+            let rho = self.density;
+            for (k, (p, q)) in [(1, 2), (0, 2), (0, 1)].into_iter().enumerate() {
+                let v = lvel[3 + k];
+                lfrc[3 + k] = (-(0.5 * rho * bb[p] * bb[q] * v.abs())).mul_add(v, lfrc[3 + k]);
+            }
+            for (k, (p, q)) in [(1, 2), (0, 2), (0, 1)].into_iter().enumerate() {
+                let s = (bb[p] * bb[p] * bb[p]).mul_add(bb[p], bb[q] * bb[q] * bb[q] * bb[q]);
+                let v = lvel[k];
+                lfrc[k] -= rho * bb[k] * s * v.abs() * v / 64.0;
+            }
+        }
+        let torque = mat_vec3(rot, &[lfrc[0], lfrc[1], lfrc[2]]);
+        let force = mat_vec3(rot, &[lfrc[3], lfrc[4], lfrc[5]]);
+        // `mj_applyFT`, dense: `J_p'·f` added, then `J_r'·τ`
+        let (jp, jr) = self.jac_at(cdof, subtree_com, pos, b, true);
+        let qf = mul_mat_t_vec3(&jp, &force);
+        for (q, f) in qfrc.iter_mut().zip(&qf) {
+            *q += f;
+        }
+        let qt = mul_mat_t_vec3(&jr, &torque);
+        for (q, t) in qfrc.iter_mut().zip(&qt) {
+            *q += t;
         }
     }
 
@@ -1062,6 +1205,7 @@ impl SmoothData {
             ("qfrc_spring", self.qfrc_spring.clone()),
             ("qfrc_damper", self.qfrc_damper.clone()),
             ("qfrc_gravcomp", self.qfrc_gravcomp.clone()),
+            ("qfrc_fluid", self.qfrc_fluid.clone()),
             ("qfrc_passive", self.qfrc_passive.clone()),
             ("ten_length", self.ten_length.clone()),
             ("ten_velocity", self.ten_velocity.clone()),

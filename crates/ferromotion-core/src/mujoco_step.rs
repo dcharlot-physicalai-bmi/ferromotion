@@ -47,20 +47,28 @@ impl SmoothModel {
     /// `mj_advance`: activations, then `qvel += h·qacc`, then `mj_integratePos`, then time; `qacc_solver`
     /// becomes the next warmstart.
     pub(crate) fn advance(&self, sd: &SmoothData, st: &MjNativeState, qacc: &[f64], qacc_solver: &[f64]) -> MjNativeState {
+        self.advance_with(st, &sd.act_dot, qacc, None, qacc_solver)
+    }
+
+    /// `mj_advance` with the rates given: `act_dot` for the activations, `qacc` for the velocities, and — when
+    /// given, as `mj_RungeKutta` gives it — the velocity the positions are integrated with in place of the
+    /// new `qvel`.
+    pub(crate) fn advance_with(&self, st: &MjNativeState, act_dot: &[f64], qacc: &[f64], qvel_pos: Option<&[f64]>, qacc_solver: &[f64]) -> MjNativeState {
         let h = self.timestep;
         let mut next = st.clone();
         // every slot of every stateful actuator (a `mujoco.pid` plugin keeps up to two), in order
         for a in &self.actuators {
             if let Some(adr) = a.actadr {
                 for j in adr..adr + a.act.actnum() {
-                    next.act[j] = self.next_activation(a, st.act[j], sd.act_dot[j]);
+                    next.act[j] = self.next_activation(a, st.act[j], act_dot[j]);
                 }
             }
         }
         for (v, a) in next.qvel.iter_mut().zip(qacc) {
             *v = a.mul_add(h, *v);
         }
-        self.integrate_pos(&mut next.qpos, &next.qvel, h);
+        let v = qvel_pos.map_or_else(|| next.qvel.clone(), <[f64]>::to_vec);
+        self.integrate_pos(&mut next.qpos, &v, h);
         next.time += h;
         next.qacc_warmstart = qacc_solver.to_vec();
         next

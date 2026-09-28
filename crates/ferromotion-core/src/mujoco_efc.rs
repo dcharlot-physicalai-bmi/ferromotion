@@ -130,12 +130,12 @@ impl NativeEq {
 }
 
 /// `mji_mulMatVec3` / `mju_mulMatVec3`, contracted.
-fn mat_vec3(m: &[f64; 9], v: &[f64; 3]) -> [f64; 3] {
+pub(crate) fn mat_vec3(m: &[f64; 9], v: &[f64; 3]) -> [f64; 3] {
     [m[2].mul_add(v[2], m[0].mul_add(v[0], m[1] * v[1])), m[5].mul_add(v[2], m[3].mul_add(v[0], m[4] * v[1])), m[8].mul_add(v[2], m[6].mul_add(v[0], m[7] * v[1]))]
 }
 
 /// `mju_mulMatTVec3`, contracted.
-fn mat_t_vec3(m: &[f64; 9], v: &[f64; 3]) -> [f64; 3] {
+pub(crate) fn mat_t_vec3(m: &[f64; 9], v: &[f64; 3]) -> [f64; 3] {
     [m[6].mul_add(v[2], m[0].mul_add(v[0], m[3] * v[1])), m[7].mul_add(v[2], m[1].mul_add(v[0], m[4] * v[1])), m[8].mul_add(v[2], m[2].mul_add(v[0], m[5] * v[1]))]
 }
 
@@ -258,8 +258,14 @@ impl SmoothModel {
 
     /// `mj_jac`, dense: the translation (and, asked for, rotation) Jacobian of `point` on `body`.
     pub(crate) fn jac(&self, sd: &SmoothData, point: &[f64; 3], body: usize, rot: bool) -> (Vec<[f64; 3]>, Vec<[f64; 3]>) {
+        self.jac_at(&sd.cdof, &sd.subtree_com, point, body, rot)
+    }
+
+    /// [`SmoothModel::jac`] from `cdof` and `subtree_com` directly, for the stages that run before the
+    /// smooth data is assembled (`mj_transmission`, `mj_passive`).
+    pub(crate) fn jac_at(&self, cdof: &[[f64; 6]], subtree_com: &[[f64; 3]], point: &[f64; 3], body: usize, rot: bool) -> (Vec<[f64; 3]>, Vec<[f64; 3]>) {
         let nv = self.dof_bodyid.len();
-        let r = &sd.subtree_com[self.body_rootid[body]];
+        let r = &subtree_com[self.body_rootid[body]];
         let offset = [point[0] - r[0], point[1] - r[1], point[2] - r[2]];
         let mut jp = vec![[0.0; 3]; nv];
         let mut jr = if rot { vec![[0.0; 3]; nv] } else { Vec::new() };
@@ -269,7 +275,7 @@ impl SmoothModel {
         }
         let mut i = (self.body_dofadr[b] + self.body_dofnum[b] - 1) as i32;
         while i >= 0 {
-            let c = &sd.cdof[i as usize];
+            let c = &cdof[i as usize];
             if rot {
                 jr[i as usize] = [c[0], c[1], c[2]];
             }
