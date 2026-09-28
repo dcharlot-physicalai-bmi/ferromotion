@@ -409,7 +409,7 @@ impl SmoothModel {
                             let deriv = (4.0 * d[4] * dif * dif).mul_add(dif, deriv);
                             if sparse {
                                 // `mju_combineSparse`: the two sorted chains merged
-                                let mut entries = vec![(dof1, 1.0f64), (*dof2, -deriv)];
+                                let mut entries = [(dof1, 1.0f64), (*dof2, -deriv)];
                                 entries.sort_by_key(|e| e.0);
                                 (entries.iter().map(|e| e.0).collect(), entries.iter().map(|e| e.1).collect(), cpos)
                             } else {
