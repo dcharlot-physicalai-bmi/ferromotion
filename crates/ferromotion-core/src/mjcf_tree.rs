@@ -1500,8 +1500,27 @@ impl MjcfTree {
             let (bw, dw) = sm.invweight0(&self.qpos0());
             em.body_invweight0 = bw;
             em.dof_invweight0 = dw;
-            if !self.equalities.is_empty() || !self.equalities_unsupported.is_empty() {
-                sm.unsupported.push("rows: an equality constraint".into());
+            // equalities: `joint` carried natively; the rest named
+            if !self.equalities_unsupported.is_empty() {
+                sm.unsupported.push("rows: an equality constraint this loader does not carry".into());
+            }
+            for eq in &self.equalities {
+                match &eq.kind {
+                    EqualityKind::Joint { joint1, joint2, polycoef, .. } => {
+                        let side = |dof: usize| -> Option<(usize, usize, f64)> {
+                            let j = sm.jnt_dofadr.iter().position(|&d| d == dof)?;
+                            let qadr = sm.jnt_qposadr[j];
+                            Some((dof, qadr, self.qpos0()[qadr]))
+                        };
+                        match (side(*joint1), joint2.map(side)) {
+                            (Some(j1), None) => em.eq.push((crate::mujoco_efc::NativeEq::Joint { j1, j2: None, poly: *polycoef }, eq.solref, eq.solimp)),
+                            (Some(j1), Some(Some(j2))) => em.eq.push((crate::mujoco_efc::NativeEq::Joint { j1, j2: Some(j2), poly: *polycoef }, eq.solref, eq.solimp)),
+                            _ => sm.unsupported.push("rows: a joint equality on a joint this port cannot place".into()),
+                        }
+                    }
+                    EqualityKind::Connect { .. } => sm.unsupported.push("rows: a connect equality".into()),
+                    _ => sm.unsupported.push("rows: a weld or tendon equality".into()),
+                }
             }
             if self.tendons.iter().any(|t| t.range.is_some() || t.frictionloss != 0.0) {
                 sm.unsupported.push("rows: a tendon limit or frictionloss".into());

@@ -17,6 +17,7 @@ const MJ_MINIMP: f64 = 0.0001;
 const MJ_MAXIMP: f64 = 0.9999;
 
 /// `mjtConstraint`
+pub(crate) const EQUALITY: i32 = 0;
 pub(crate) const FRICTION_DOF: i32 = 1;
 pub(crate) const LIMIT_JOINT: i32 = 3;
 pub(crate) const CONTACT_FRICTIONLESS: i32 = 5;
@@ -104,9 +105,18 @@ pub(crate) struct NativeContact {
     pub(crate) exclude: bool,
 }
 
+/// One active equality constraint as the rows read it.
+#[derive(Clone, Debug)]
+pub(crate) enum NativeEq {
+    /// `mjEQ_JOINT`: `q1 − ref1 = poly(q2 − ref2)`, each joint as `(dofadr, qposadr, qpos0)`.
+    Joint { j1: (usize, usize, f64), j2: Option<(usize, usize, f64)>, poly: [f64; 5] },
+}
+
 /// What the constraint rows need from the compiled model beyond the smooth dynamics.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct EfcModel {
+    /// the active equalities, in order, with their `eq_solref`/`eq_solimp`
+    pub(crate) eq: Vec<(NativeEq, [f64; 2], [f64; 5])>,
     pub(crate) jnt_limited: Vec<bool>,
     pub(crate) jnt_range: Vec<[f64; 2]>,
     pub(crate) jnt_margin: Vec<f64>,
@@ -381,6 +391,51 @@ impl SmoothModel {
                 ((0..nv).collect(), row)
             }
         };
+        // equalities
+        for (k, (eq, _, _)) in em.eq.iter().enumerate() {
+            match eq {
+                NativeEq::Joint { j1, j2, poly: d } => {
+                    let (dof1, qadr1, ref1) = *j1;
+                    let pos0 = qpos[qadr1];
+                    let (cols, vals, cpos) = match j2 {
+                        Some((dof2, qadr2, ref2)) => {
+                            let dif = qpos[*qadr2] - ref2;
+                            let p = d[1].mul_add(dif, d[2] * dif * dif);
+                            let p = (d[3] * dif * dif).mul_add(dif, p);
+                            let p = (d[4] * dif * dif * dif).mul_add(dif, p);
+                            let cpos = pos0 - ref1 - d[0] - p;
+                            let deriv = (2.0 * d[2]).mul_add(dif, d[1]);
+                            let deriv = (3.0 * d[3] * dif).mul_add(dif, deriv);
+                            let deriv = (4.0 * d[4] * dif * dif).mul_add(dif, deriv);
+                            if sparse {
+                                // `mju_combineSparse`: the two sorted chains merged
+                                let mut entries = vec![(dof1, 1.0f64), (*dof2, -deriv)];
+                                entries.sort_by_key(|e| e.0);
+                                (entries.iter().map(|e| e.0).collect(), entries.iter().map(|e| e.1).collect(), cpos)
+                            } else {
+                                let mut row = vec![0.0f64; nv];
+                                row[dof1] = 1.0;
+                                let mut j2row = vec![0.0f64; nv];
+                                j2row[*dof2] = 1.0;
+                                for c in 0..nv {
+                                    row[c] = j2row[c].mul_add(-deriv, row[c]);
+                                }
+                                ((0..nv).collect(), row, cpos)
+                            }
+                        }
+                        None => {
+                            let (c, v) = dense_row(dof1, 1.0);
+                            (c, v, pos0 - ref1 - d[0])
+                        }
+                    };
+                    // a dense row that is all zeros adds nothing
+                    if !sparse && vals.iter().all(|&x| x == 0.0) {
+                        continue;
+                    }
+                    e.push(cols, vals, cpos, 0.0, 0.0, EQUALITY, k);
+                }
+            }
+        }
         // dof friction
         for i in 0..nv {
             if em.dof_frictionloss[i] == 0.0 {
@@ -470,6 +525,15 @@ impl SmoothModel {
         while i < nefc {
             let id = e.id[i];
             match e.typ[i] {
+                EQUALITY => match &em.eq[id].0 {
+                    NativeEq::Joint { j1, j2, .. } => {
+                        let mut a = em.dof_invweight0[j1.0];
+                        if let Some(j2) = j2 {
+                            a += em.dof_invweight0[j2.0];
+                        }
+                        e.diag_a[i] = a;
+                    }
+                },
                 FRICTION_DOF => e.diag_a[i] = em.dof_invweight0[id],
                 LIMIT_JOINT => e.diag_a[i] = em.dof_invweight0[self.jnt_dofadr[id]],
                 t => {
@@ -508,6 +572,7 @@ impl SmoothModel {
         while i < nefc {
             let id = e.id[i];
             let (mut solref, mut solreffriction, mut solimp) = match e.typ[i] {
+                EQUALITY => (em.eq[id].1, [0.0; 2], em.eq[id].2),
                 LIMIT_JOINT => (em.jnt_solref[id], [0.0; 2], em.jnt_solimp[id]),
                 FRICTION_DOF => (em.dof_solref[id], [0.0; 2], em.dof_solimp[id]),
                 _ => (contacts[id].solref, contacts[id].solreffriction, contacts[id].solimp),

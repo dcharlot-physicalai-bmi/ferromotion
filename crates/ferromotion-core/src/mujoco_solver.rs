@@ -11,7 +11,7 @@
 //! ⛔ Contracted as clang contracts MuJoCo's C on arm64 (see [`crate::mujoco_ccd`]); dot products follow
 //! [`crate::mujoco_efc::dot`], whose vectorised block is not fused.
 
-use crate::mujoco_efc::{dot, dot_self, Efc, NativeContact, CONTACT_ELLIPTIC, FRICTION_DOF, LIMIT_JOINT};
+use crate::mujoco_efc::{dot, dot_self, Efc, NativeContact, CONTACT_ELLIPTIC, EQUALITY, FRICTION_DOF, LIMIT_JOINT};
 use crate::mujoco_smooth::{SmoothData, SmoothModel};
 
 const MJ_MINVAL: f64 = 1e-15;
@@ -633,7 +633,7 @@ impl SmoothModel {
         }
         let jd = e.dense_j(nv);
         let jmul = |v: &[f64]| -> Vec<f64> { (0..nefc).map(|r| dot(&jd[r * nv..(r + 1) * nv], v)).collect() };
-        let ne = 0usize;
+        let ne = e.typ.iter().filter(|&&t| t == EQUALITY).count();
         let nf = e.typ.iter().filter(|&&t| t == FRICTION_DOF).count();
         // efc_b = J·qacc_smooth − aref
         out.efc_b = jmul(&sd.qacc_smooth);
@@ -668,6 +668,32 @@ impl SmoothModel {
                 continue;
             }
             let (t1, t2) = match e.typ[i] {
+                // generic scan: the trees of the row's non-zero columns, in dof order, one per tree
+                EQUALITY => {
+                    let row = &jd[i * nv..(i + 1) * nv];
+                    let mut trees: Vec<i32> = Vec::new();
+                    let mut j = 0;
+                    while j < nv {
+                        if row[j] != 0.0 {
+                            let t = dof_treeid[j] as i32;
+                            if trees.last() != Some(&t) {
+                                trees.push(t);
+                            }
+                            j = _tree_dofadr[t as usize] + tree_dofnum[t as usize];
+                            continue;
+                        }
+                        j += 1;
+                    }
+                    efc_tree[i] = trees[0] as usize;
+                    if trees.len() == 1 {
+                        dsu_merge(&mut parent, trees[0], -1);
+                    } else {
+                        for w in trees.windows(2) {
+                            dsu_merge(&mut parent, w[0], w[1]);
+                        }
+                    }
+                    continue;
+                }
                 FRICTION_DOF => (dof_treeid[e.id[i]] as i32, -2),
                 LIMIT_JOINT => (dof_treeid[self.jnt_dofadr[e.id[i]]] as i32, -2),
                 _ => {
@@ -736,7 +762,7 @@ impl SmoothModel {
             let gather_e = |v: &[f64]| efcs.iter().map(|&c| v[c]).collect::<Vec<f64>>();
             let mut ctx = Ctx {
                 nv: inv,
-                ne: 0,
+                ne: efcs.iter().filter(|&&c| e.typ[c] == EQUALITY).count(),
                 nf: efcs.iter().filter(|&&c| e.typ[c] == FRICTION_DOF).count(),
                 nefc: ie,
                 m_rownnz,
