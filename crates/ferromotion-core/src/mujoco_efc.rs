@@ -430,25 +430,10 @@ impl SmoothModel {
             }
             return (chain, dp);
         }
-        // `mj_mergeChain` keeping the common dofs
-        let (w1, w2) = (self.weld(b1), self.weld(b2));
-        if self.body_dofnum[w1] == 0 && self.body_dofnum[w2] == 0 {
+        let chain = self.merge_chain_all(b1, b2);
+        if chain.is_empty() {
             return (Vec::new(), Default::default());
         }
-        let mut da1 = self.body_dofadr[w1] as i32 + self.body_dofnum[w1] as i32 - 1;
-        let mut da2 = self.body_dofadr[w2] as i32 + self.body_dofnum[w2] as i32 - 1;
-        let mut chain = Vec::new();
-        while da1 >= 0 || da2 >= 0 {
-            let da = da1.max(da2);
-            chain.push(da as usize);
-            if da1 == da {
-                da1 = self.dof_parentid[da1 as usize];
-            }
-            if da2 == da {
-                da2 = self.dof_parentid[da2 as usize];
-            }
-        }
-        chain.reverse();
         // `mj_jacSparse` of each body over the chain, then `jac2 − jac1`
         let jac = |body: usize, pos: &[f64; 3]| -> Vec<[f64; 3]> {
             let mut jp = vec![[0.0; 3]; chain.len()];
@@ -472,11 +457,37 @@ impl SmoothModel {
         (chain, dp)
     }
 
+    /// `mj_mergeChain` keeping the common dofs: every dof either body hangs from, ascending.
+    fn merge_chain_all(&self, b1: usize, b2: usize) -> Vec<usize> {
+        let (w1, w2) = (self.weld(b1), self.weld(b2));
+        if self.body_dofnum[w1] == 0 && self.body_dofnum[w2] == 0 {
+            return Vec::new();
+        }
+        let mut da1 = self.body_dofadr[w1] as i32 + self.body_dofnum[w1] as i32 - 1;
+        let mut da2 = self.body_dofadr[w2] as i32 + self.body_dofnum[w2] as i32 - 1;
+        let mut chain = Vec::new();
+        while da1 >= 0 || da2 >= 0 {
+            let da = da1.max(da2);
+            chain.push(da as usize);
+            if da1 == da {
+                da1 = self.dof_parentid[da1 as usize];
+            }
+            if da2 == da {
+                da2 = self.dof_parentid[da2 as usize];
+            }
+        }
+        chain.reverse();
+        chain
+    }
+
     /// `mj_jacDifPair` with the common dofs KEPT (`flg_skipcommon = 0`, as the equalities call it), at two
-    /// points: `J(b2 at pos2) − J(b1 at pos1)`.
+    /// points: `J(b2 at pos2) − J(b1 at pos1)` — dense over every dof, or sparse over the merged chain.
     fn jac_dif_pair_common(&self, sd: &SmoothData, b1: usize, b2: usize, pos1: &[f64; 3], pos2: &[f64; 3], sparse: bool) -> (Vec<usize>, [Vec<f64>; 3], [Vec<f64>; 3]) {
         let nv = self.dof_bodyid.len();
-        assert!(!sparse, "a sparse connect is refused before it gets here");
+        if sparse {
+            let (chain, dp) = self.jac_dif_pair_points(&sd.cdof, &sd.subtree_com, b1, b2, pos1, pos2);
+            return (chain, dp, Default::default());
+        }
         let (p1, _) = self.jac(sd, pos1, b1, false);
         let (p2, _) = self.jac(sd, pos2, b2, false);
         let dp: [Vec<f64>; 3] = std::array::from_fn(|k| (0..nv).map(|c| p2[c][k] - p1[c][k]).collect());
@@ -671,7 +682,7 @@ impl SmoothModel {
                     let cpos = [p0[0] - p1[0], p0[1] - p1[1], p0[2] - p1[2]];
                     // `mj_jacDifPair(body1, body0, p1, p0)`, common dofs kept: J(body0 at p0) − J(body1 at p1)
                     let (chain, dp, _) = self.jac_dif_pair_common(sd, b1, b0, &p1, &p0, sparse);
-                    if !sparse && dp.iter().all(|r| r.iter().all(|&x| x == 0.0)) {
+                    if (!sparse && dp.iter().all(|r| r.iter().all(|&x| x == 0.0))) || chain.is_empty() {
                         continue;
                     }
                     for r in 0..3 {
@@ -977,9 +988,19 @@ impl SmoothModel {
                 let (p1, p2, b1, b2) = connect_anchors(eq, &sd.kin);
                 let jd1 = self.jac_dot(sd, &p1, b1);
                 let jd2 = self.jac_dot(sd, &p2, b2);
+                // sparse: `mj_jacDotSparse` on the merged chain, `mju_dotSparseX3` (one running sum each)
+                let chain = if sparse { self.merge_chain_all(b1, b2) } else { Vec::new() };
                 for k in 0..3 {
-                    let v1 = dot(&jd1[k], qvel);
-                    let v2 = dot(&jd2[k], qvel);
+                    let (v1, v2) = if sparse {
+                        let mut s = (0.0f64, 0.0f64);
+                        for &c in &chain {
+                            s.0 = jd1[k][c].mul_add(qvel[c], s.0);
+                            s.1 = jd2[k][c].mul_add(qvel[c], s.1);
+                        }
+                        s
+                    } else {
+                        (dot(&jd1[k], qvel), dot(&jd2[k], qvel))
+                    };
                     e.aref[row + k] -= v1 - v2;
                 }
                 row += 3;

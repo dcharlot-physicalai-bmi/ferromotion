@@ -71,9 +71,49 @@ impl SmoothModel {
 /// What `solNoSlip` reads besides the forces it writes.
 pub(crate) struct Dual<'a> {
     pub(crate) ar: &'a [f64],
+    /// with 60 or more dofs, each row of `AR` as MuJoCo stores it sparse — the columns of every constraint
+    /// sharing a dof with this one, ascending — which is what the residual's `mju_dotSparse` runs over
+    pub(crate) ar_cols: Option<Vec<Vec<usize>>>,
     pub(crate) efc_b: &'a [f64],
     pub(crate) e: &'a Efc,
     pub(crate) contacts: &'a [NativeContact],
+}
+
+impl SmoothModel {
+    /// The sparsity of `AR = Y·Y'` (`mj_makeARSymbolic`): `Y`'s rows are the Jacobian's chains closed under
+    /// `dof_parentid` (`computeY_fill`), and row `r` of `AR` holds every constraint sharing a dof with `r`.
+    pub(crate) fn ar_pattern(&self, e: &Efc) -> Vec<Vec<usize>> {
+        let nv = self.dof_bodyid.len();
+        let ypat: Vec<Vec<usize>> = e
+            .j
+            .iter()
+            .map(|(cols, _)| {
+                let mut seen = vec![false; nv];
+                for &c in cols {
+                    let mut d = c as i32;
+                    while d >= 0 && !seen[d as usize] {
+                        seen[d as usize] = true;
+                        d = self.dof_parentid[d as usize];
+                    }
+                }
+                (0..nv).filter(|&d| seen[d]).collect()
+            })
+            .collect();
+        let mut yt: Vec<Vec<usize>> = vec![Vec::new(); nv];
+        for (r, p) in ypat.iter().enumerate() {
+            for &d in p {
+                yt[d].push(r);
+            }
+        }
+        ypat.iter()
+            .map(|p| {
+                let mut cols: Vec<usize> = p.iter().flat_map(|&d| yt[d].iter().copied()).collect();
+                cols.sort_unstable();
+                cols.dedup();
+                cols
+            })
+            .collect()
+    }
 }
 
 impl Dual<'_> {
@@ -86,7 +126,16 @@ impl Dual<'_> {
         let n = self.nefc();
         let mut res = [0.0; 5];
         for j in 0..dim {
-            res[j] = self.efc_b[i + j] + dot(&self.ar[(i + j) * n..(i + j + 1) * n], force);
+            let row = &self.ar[(i + j) * n..(i + j + 1) * n];
+            res[j] = self.efc_b[i + j]
+                + match &self.ar_cols {
+                    Some(cols) => {
+                        let c = &cols[i + j];
+                        let vals: Vec<f64> = c.iter().map(|&k| row[k]).collect();
+                        crate::mujoco_smooth::dot_sparse(&vals, force, c)
+                    }
+                    None => dot(row, force),
+                };
         }
         for j in 0..dim {
             res[j] = (-self.e.r[i + j]).mul_add(force[i + j], res[j]);

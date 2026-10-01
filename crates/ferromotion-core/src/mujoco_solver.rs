@@ -340,6 +340,13 @@ struct Ctx {
     lcone: Vec<f64>,
     dvec: Vec<f64>,
     l: Vec<f64>,
+    /// 60 or more dofs: the island Jacobian row by row (island-local columns), its transpose, `M`'s lower
+    /// rows, and the sparse reverse Cholesky factor of `H`, its pattern fixed at the first factorization
+    sparse: bool,
+    jrows: crate::mujoco_sparse::Rows,
+    jt: crate::mujoco_sparse::Rows,
+    m_rows: crate::mujoco_sparse::Rows,
+    chol: Option<crate::mujoco_sparse::Chol>,
     cost: f64,
     quad_gauss: [f64; 3],
     scale: f64,
@@ -349,7 +356,18 @@ struct Ctx {
 impl Ctx {
     /// `mju_mulMatVec` on the island Jacobian.
     fn j_mul(&self, v: &[f64]) -> Vec<f64> {
+        if self.sparse {
+            return self.jrows.iter().map(|(c, x)| crate::mujoco_smooth::dot_sparse(x, v, c)).collect();
+        }
         (0..self.nefc).map(|r| dot(&self.j[r * self.nv..(r + 1) * self.nv], v)).collect()
+    }
+
+    /// `Mgrad = H \ grad` on whichever factor is current.
+    fn h_solve(&self, v: &[f64]) -> Vec<f64> {
+        match &self.chol {
+            Some(c) if self.sparse => c.solve(v),
+            _ => chol_solve(if self.ncone > 0 { &self.lcone } else { &self.l }, v, self.nv),
+        }
     }
 
     /// `PrimalUpdateConstraint`
@@ -357,7 +375,12 @@ impl Ctx {
         let elliptic = self.typ.contains(&CONTACT_ELLIPTIC);
         self.cost = constraint_update(self.ne, self.nf, &self.efc_d, &self.efc_r, &self.floss, &self.jaref, &self.typ, &self.id, &self.cones, &mut self.state, &mut self.force, if elliptic { Some(&mut self.cone_h) } else { None });
         self.ncone = self.state.iter().filter(|&&x| x == CONE).count();
-        self.qfrc_constraint = mul_mat_t_vec(&self.j, &self.force, self.nefc, self.nv);
+        self.qfrc_constraint = if self.sparse {
+            // `mju_mulMatVecSparse(JT, force)`
+            self.jt.iter().map(|(c, x)| crate::mujoco_smooth::dot_sparse(x, &self.force, c)).collect()
+        } else {
+            mul_mat_t_vec(&self.j, &self.force, self.nefc, self.nv)
+        };
         let mut gauss = 0.0f64;
         for i in 0..self.nv {
             gauss = (0.5 * (self.ma[i] - self.qfrc_smooth[i])).mul_add(self.qacc[i] - self.qacc_smooth[i], gauss);
@@ -409,6 +432,13 @@ impl Ctx {
         let (nv, nefc) = (self.nv, self.nefc);
         for i in 0..nefc {
             self.dvec[i] = if self.state[i] == QUADRATIC { self.efc_d[i] } else { 0.0 };
+        }
+        if self.sparse {
+            let h = crate::mujoco_sparse::hessian(&self.jrows, &self.jt, &self.dvec, &self.m_rows);
+            let mut chol = self.chol.take().unwrap_or_else(|| crate::mujoco_sparse::Chol::symbolic(&h));
+            chol.numeric(&h, MJ_MINVAL);
+            self.chol = Some(chol);
+            return;
         }
         // `mju_sqrMatTD_impl`, lower triangle
         let mut l = vec![0.0; nv * nv];
@@ -485,8 +515,14 @@ impl Ctx {
                 continue;
             };
             let sq = self.efc_d[i].sqrt();
-            let mut upd: Vec<f64> = self.j[i * nv..(i + 1) * nv].iter().map(|x| x * sq).collect();
-            let rank = chol_update(&mut self.l, &mut upd, nv, plus);
+            let rank = if self.sparse {
+                let (cols, vals) = &self.jrows[i];
+                let upd: Vec<f64> = vals.iter().map(|x| x * sq).collect();
+                self.chol.as_mut().map_or(nv, |c| c.update(&upd, cols, plus))
+            } else {
+                let mut upd: Vec<f64> = self.j[i * nv..(i + 1) * nv].iter().map(|x| x * sq).collect();
+                chol_update(&mut self.l, &mut upd, nv, plus)
+            };
             if rank < nv {
                 self.factorize();
                 return;
@@ -736,7 +772,7 @@ impl Ctx {
         let mut done = flg_gap && flg_gradient;
         if !done {
             self.factorize();
-            self.mgrad = chol_solve(if self.ncone > 0 { &self.lcone } else { &self.l }, &self.grad, nv);
+            self.mgrad = self.h_solve(&self.grad);
             done = flg_gradient && max(0.0, 0.5 * scale * dot(&self.grad, &self.mgrad)) < opt.tolerance;
         }
         if !done {
@@ -759,7 +795,7 @@ impl Ctx {
             self.update_constraint();
             self.hessian_incremental(&oldstate);
             self.update_grad();
-            self.mgrad = chol_solve(if self.ncone > 0 { &self.lcone } else { &self.l }, &self.grad, nv);
+            self.mgrad = self.h_solve(&self.grad);
             let improvement = scale * ls_improvement;
             let gradient = scale * norm(&self.grad);
             let decrement = max(0.0, 0.5 * scale * dot(&self.grad, &self.mgrad));
@@ -886,9 +922,17 @@ impl SmoothModel {
             out.qacc = sd.qacc_smooth.clone();
             return out;
         }
+        let sparse = nv >= 60;
         let jd = e.dense_j(nv);
         let cones: Vec<ConeInfo> = contacts.iter().zip(&e.contact_mu).map(|(c, &mu)| ConeInfo { dim: c.dim, mu, friction: c.friction }).collect();
-        let jmul = |v: &[f64]| -> Vec<f64> { (0..nefc).map(|r| dot(&jd[r * nv..(r + 1) * nv], v)).collect() };
+        // `mj_mulJacVec`: a dense row's `mju_dot`, or a sparse row's `mju_dotSparse` over its chain
+        let jmul = |v: &[f64]| -> Vec<f64> {
+            if sparse {
+                e.j.iter().map(|(c, x)| crate::mujoco_smooth::dot_sparse(x, v, c)).collect()
+            } else {
+                (0..nefc).map(|r| dot(&jd[r * nv..(r + 1) * nv], v)).collect()
+            }
+        };
         let ne = e.typ.iter().filter(|&&t| t == EQUALITY).count();
         let nf = e.typ.iter().filter(|&&t| t == FRICTION_DOF || t == FRICTION_TENDON).count();
         // efc_b = J·qacc_smooth − aref
@@ -909,7 +953,20 @@ impl SmoothModel {
         let mda = mul_sym_vec(&sd.m, &self.m_rownnz, &self.m_rowadr, &self.m_colind, &da);
         cost_ws = 0.5f64.mul_add(dot(&da, &mda), cost_ws);
         let cost_smooth = constraint_update(ne, nf, &e.d, &e.r, &e.frictionloss, &out.efc_b, &e.typ, &e.id, &cones, &mut state, &mut force, None);
-        out.qfrc_constraint = mul_mat_t_vec(&jd, &force, nefc, nv);
+        out.qfrc_constraint = if sparse {
+            // `mju_mulMatTVecSparse`
+            let mut q = vec![0.0f64; nv];
+            for ((cols, vals), &f) in e.j.iter().zip(&force) {
+                if f != 0.0 {
+                    for (&c, &v) in cols.iter().zip(vals) {
+                        q[c] = v.mul_add(f, q[c]);
+                    }
+                }
+            }
+            q
+        } else {
+            mul_mat_t_vec(&jd, &force, nefc, nv)
+        };
         if cost_ws > cost_smooth {
             qacc = sd.qacc_smooth.clone();
         }
@@ -932,19 +989,29 @@ impl SmoothModel {
                 // generic scan (a joint equality, a tendon's rows): the trees of the row's non-zero columns,
                 // in dof order, one per tree
                 EQUALITY | FRICTION_TENDON | LIMIT_TENDON => {
-                    let row = &jd[i * nv..(i + 1) * nv];
                     let mut trees: Vec<i32> = Vec::new();
-                    let mut j = 0;
-                    while j < nv {
-                        if row[j] != 0.0 {
-                            let t = dof_treeid[j] as i32;
+                    if sparse {
+                        // every structural entry of the chain, zero or not
+                        for &c in &e.j[i].0 {
+                            let t = dof_treeid[c] as i32;
                             if trees.last() != Some(&t) {
                                 trees.push(t);
                             }
-                            j = _tree_dofadr[t as usize] + tree_dofnum[t as usize];
-                            continue;
                         }
-                        j += 1;
+                    } else {
+                        let row = &jd[i * nv..(i + 1) * nv];
+                        let mut j = 0;
+                        while j < nv {
+                            if row[j] != 0.0 {
+                                let t = dof_treeid[j] as i32;
+                                if trees.last() != Some(&t) {
+                                    trees.push(t);
+                                }
+                                j = _tree_dofadr[t as usize] + tree_dofnum[t as usize];
+                                continue;
+                            }
+                            j += 1;
+                        }
                     }
                     efc_tree[i] = trees[0] as usize;
                     if trees.len() == 1 {
@@ -1014,12 +1081,28 @@ impl SmoothModel {
                     qld.push(sd.qld[k]);
                 }
             }
-            let mut j = vec![0.0; ie * inv];
-            for (r, &c) in efcs.iter().enumerate() {
-                for (k, &d) in dofs.iter().enumerate() {
-                    j[r * inv + k] = jd[c * nv + d];
+            let mut j = Vec::new();
+            let mut jrows: crate::mujoco_sparse::Rows = Vec::new();
+            if sparse {
+                // `mju_blockSparse`: the rows' chains in island-local columns
+                jrows = efcs.iter().map(|&c| (e.j[c].0.iter().map(|d| local[d]).collect(), e.j[c].1.clone())).collect();
+            } else {
+                j = vec![0.0; ie * inv];
+                for (r, &c) in efcs.iter().enumerate() {
+                    for (k, &d) in dofs.iter().enumerate() {
+                        j[r * inv + k] = jd[c * nv + d];
+                    }
                 }
             }
+            let jt = if sparse { crate::mujoco_sparse::transpose(&jrows, inv) } else { Vec::new() };
+            let m_rows: crate::mujoco_sparse::Rows = if sparse {
+                (0..inv).map(|k| {
+                    let (a, n) = (m_rowadr[k], m_rownnz[k]);
+                    (m_colind[a..a + n].to_vec(), m[a..a + n].to_vec())
+                }).collect()
+            } else {
+                Vec::new()
+            };
             let gather = |v: &[f64]| dofs.iter().map(|&d| v[d]).collect::<Vec<f64>>();
             let gather_e = |v: &[f64]| efcs.iter().map(|&c| v[c]).collect::<Vec<f64>>();
             let mut ctx = Ctx {
@@ -1060,6 +1143,11 @@ impl SmoothModel {
                 lcone: Vec::new(),
                 dvec: vec![0.0; ie],
                 l: Vec::new(),
+                sparse,
+                jrows,
+                jt,
+                m_rows,
+                chol: None,
                 cost: 0.0,
                 quad_gauss: [0.0; 3],
                 scale: 0.0,
@@ -1079,7 +1167,8 @@ impl SmoothModel {
         // the noslip post-pass, island by island on the global forces, then `dualFinish`
         if opt.noslip_iterations > 0 {
             let ar = self.efc_ar(sd, &jd, &e.r);
-            let dual = crate::mujoco_noslip::Dual { ar: &ar, efc_b: &out.efc_b, e, contacts };
+            let ar_cols = sparse.then(|| self.ar_pattern(e));
+            let dual = crate::mujoco_noslip::Dual { ar: &ar, ar_cols, efc_b: &out.efc_b, e, contacts };
             let scale = 1.0 / (opt.meaninertia * nv.max(1) as f64);
             let (mut force, mut state) = (out.efc_force.clone(), out.efc_state.clone());
             for (isl, efcs) in island_efcs.iter().enumerate() {
@@ -1087,7 +1176,19 @@ impl SmoothModel {
                 let nf = efcs.iter().filter(|&&c| e.typ[c] == FRICTION_DOF || e.typ[c] == FRICTION_TENDON).count();
                 out.solver_niter[isl] += crate::mujoco_noslip::sol_noslip(&dual, efcs, ne, nf, &mut force, &mut state, scale, opt.noslip_iterations, opt.noslip_tolerance);
             }
-            out.qfrc_constraint = mul_mat_t_vec(&jd, &force, nefc, nv);
+            out.qfrc_constraint = if sparse {
+                let mut q = vec![0.0f64; nv];
+                for ((cols, vals), &f) in e.j.iter().zip(&force) {
+                    if f != 0.0 {
+                        for (&c, &v) in cols.iter().zip(vals) {
+                            q[c] = v.mul_add(f, q[c]);
+                        }
+                    }
+                }
+                q
+            } else {
+                mul_mat_t_vec(&jd, &force, nefc, nv)
+            };
             let x = self.solve_ld_pub(&sd.qld, &sd.qld_diag_inv, &out.qfrc_constraint);
             out.qacc = (0..nv).map(|i| x[i] + sd.qacc_smooth[i]).collect();
             out.efc_force = force;

@@ -353,6 +353,7 @@ pub(crate) mod mujoco_midphase;
 pub(crate) mod mujoco_smooth;
 pub(crate) mod mujoco_efc;
 pub(crate) mod mujoco_noslip;
+pub(crate) mod mujoco_sparse;
 pub(crate) mod mujoco_tendon;
 pub(crate) mod mujoco_solver;
 pub(crate) mod mujoco_step;

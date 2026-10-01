@@ -1567,10 +1567,6 @@ impl MjcfTree {
                     }
                     EqualityKind::Connect { .. } => {
                         let idx = self.equalities.iter().position(|e| std::ptr::eq(e, eq)).unwrap_or(0);
-                        if sm.dof_bodyid.len() >= 60 {
-                            sm.unsupported.push("rows: a connect equality in a sparse model".into());
-                            continue;
-                        }
                         match self.connect_raw.get(&idx) {
                             Some(ConnectRaw::Bodies(b1, b2, anchor)) => {
                                 // `set0`: the anchor as a world point at qpos0, then in body2's frame
@@ -1591,9 +1587,12 @@ impl MjcfTree {
             if self.joints.iter().any(|j| j.range.is_some() && j.kind == MjcfJointKind::Ball) {
                 sm.unsupported.push("rows: a ball-joint limit".into());
             }
-            if sm.dof_bodyid.len() >= 60 {
-                sm.unsupported.push("solver: 60 or more dofs (MuJoCo's sparse Jacobian)".into());
+            // 60 or more dofs: MuJoCo's sparse Jacobian and Hessian. Its cone Hessian (`HessianConeFolded`) is
+            // not ported yet.
+            if sm.dof_bodyid.len() >= 60 && self.cone == crate::mujoco_contact::Cone::Elliptic {
+                sm.unsupported.push("solver: an elliptic cone with 60 or more dofs".into());
             }
+
             if self.solver != "Newton" {
                 sm.unsupported.push(format!("solver: the {} solver", self.solver));
             }
@@ -7870,6 +7869,39 @@ mod tests {
         }
         assert_eq!(st.qvel.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), [0x3ff910c1b04b0f7a, 0xc01a36e2e56175fe, 0x4026d2702fede5af]);
         assert_eq!(st.qpos.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), [0x3fd4c2fad388f392, 0xbfe69a752bef4627, 0x3fe2c95c72a2dada]);
+    }
+
+    /// ⭐⭐ **Sixty dofs: MuJoCo's sparse Newton, to the bit**: nine free boxes on a floor and a six-joint arm
+    /// with dry friction, joint and fixed-tendon limits and a connect to the world — 60 dofs, so the Jacobian
+    /// rows are chains, `H = M + J'·D·J` is assembled sparse and factored by the reverse sparse Cholesky, and
+    /// every state change is a sparse rank-one update. Up to ten islands; ten free-running steps land on
+    /// MuJoCo 3.13.0's bits.
+    #[test]
+    fn sixty_dofs_step_through_the_sparse_newton_as_mujoco_does_bit_for_bit() {
+        let xml = r#"<mujoco><option timestep="0.002"/><worldbody><geom type="plane" size="3 3 0.1"/><body name="b0" pos="-0.3 -0.3 0.049"><freejoint/><geom type="box" size="0.05 0.04 0.05" mass="0.5"/></body><body name="b1" pos="0.0 -0.3 0.049"><freejoint/><geom type="box" size="0.05 0.04 0.05" mass="0.6"/></body><body name="b2" pos="0.3 -0.3 0.049"><freejoint/><geom type="box" size="0.05 0.04 0.05" mass="0.7"/></body><body name="b3" pos="-0.3 0.0 0.049"><freejoint/><geom type="box" size="0.05 0.04 0.05" mass="0.8"/></body><body name="b4" pos="0.0 0.0 0.049"><freejoint/><geom type="box" size="0.05 0.04 0.05" mass="0.9"/></body><body name="b5" pos="0.3 0.0 0.049"><freejoint/><geom type="box" size="0.05 0.04 0.05" mass="1.0"/></body><body name="b6" pos="-0.3 0.3 0.049"><freejoint/><geom type="box" size="0.05 0.04 0.05" mass="1.1"/></body><body name="b7" pos="0.0 0.3 0.049"><freejoint/><geom type="box" size="0.05 0.04 0.05" mass="1.2000000000000002"/></body><body name="b8" pos="0.3 0.3 0.049"><freejoint/><geom type="box" size="0.05 0.04 0.05" mass="1.3"/></body><body name="l1" pos="0 1 0.6"><joint name="a1" type="hinge" axis="0 1 0" range="-0.4 0.4" frictionloss="0.2"/><geom type="capsule" fromto="0 0 0 0.15 0 0" size="0.02"/>
+<body name="l2" pos="0.15 0 0"><joint name="a2" type="hinge" axis="0 1 0" range="-0.3 0.3"/><geom type="capsule" fromto="0 0 0 0.15 0 0" size="0.02"/>
+<body name="l3" pos="0.15 0 0"><joint name="a3" type="hinge" axis="1 0 0" frictionloss="0.1"/><geom type="capsule" fromto="0 0 0 0.15 0 0" size="0.02"/>
+<body name="l4" pos="0.15 0 0"><joint name="a4" type="hinge" axis="0 1 0"/><geom type="capsule" fromto="0 0 0 0.15 0 0" size="0.02"/>
+<body name="l5" pos="0.15 0 0"><joint name="a5" type="hinge" axis="0 0 1" damping="0.1"/><geom type="capsule" fromto="0 0 0 0.15 0 0" size="0.02"/>
+<body name="l6" pos="0.15 0 0"><joint name="a6" type="slide" axis="1 0 0" range="-0.05 0.05"/><geom type="sphere" size="0.03"/></body></body></body></body></body></body></worldbody>
+<tendon><fixed name="t" limited="true" range="-0.2 0.2"><joint joint="a3" coef="1"/><joint joint="a4" coef="-1"/></fixed></tendon>
+<equality><connect body1="l6" body2="world" anchor="0 0 0" solref="0.02 1"/></equality>
+<actuator><position joint="a2" kp="20" kv="1"/></actuator></mujoco>"#;
+        let t = tree_from_mjcf_str(xml).unwrap();
+        assert!(t.mujoco_native_unsupported().is_empty(), "{:?}", t.mujoco_native_unsupported());
+        let mut st = crate::MjNativeState {
+            qpos: vec![-0.2938999415250924, -0.2938411842052701, 0.047, 1.0, 0.0, 0.0, 0.0, -0.0042839723982371685, -0.30892138595236684, 0.047, 1.0, 0.0, 0.0, 0.0, 0.29816946410839995, -0.3090944961219511, 0.047, 1.0, 0.0, 0.0, 0.0, -0.29001647769869854, 0.0030473822317597546, 0.047, 1.0, 0.0, 0.0, 0.0, -0.0013010489554971594, 0.009483723865185107, 0.047, 1.0, 0.0, 0.0, 0.0, 0.3068846207521748, -0.0021519067133044367, 0.047, 1.0, 0.0, 0.0, 0.0, -0.29646621296337866, 0.2912160542591611, 0.047, 1.0, 0.0, 0.0, 0.0, -0.00457096790939797, 0.3075930234666984, 0.047, 1.0, 0.0, 0.0, 0.0, 0.30358363066042726, 0.30740177004655006, 0.047, 1.0, 0.0, 0.0, 0.0, 0.42, -0.2, 0.3, 0.5, 0.1, 0.06],
+            qvel: vec![0.395448239414126, 0.372195468024335, -0.48148278232978925, 0.20749556733717733, -0.49880031641317135, 0.003363965553664472, -0.06333294782434729, -0.2967471638854352, -0.17505735542439393, 0.30621533102704357, -0.18354791259550984, -0.3509614164664442, 0.1985119903183108, -0.05145589923962379, 0.298939490963134, -0.26448354269382857, -0.1802153456817137, 0.2998795260549534, 0.0070681389233913094, 0.006385001421570946, -0.2638058716041365, -0.48546371963618673, 0.43322390022543367, -0.41417420891317, 0.34492680147361, -0.13211926108848326, 0.4510229811957994, -0.10057473842119358, 0.43644206184200307, 0.05615977553389706, -0.25986467169722416, 0.24142167002781278, 0.1743897148867628, 0.1842052123845983, -0.03617563991663275, -0.2781114408355453, 0.14094014148131095, -0.39291050386271353, 0.19222227464482988, 0.13538679989071079, -0.12348747441230778, 0.2985233458061055, -0.30597452399295544, -0.10954108620227843, 0.297933886097021, -0.1195246293566764, 0.21325786412445213, 0.11251780416531187, 0.44100097524260184, 0.4916767169901963, 0.22367625465079632, 0.3088438090346699, -0.34713497685432715, 0.2128902625665684, 0.3476243802545339, -0.09877425200736856, 0.053250039793540926, -0.020512248239137887, 0.4585229997993715, -0.18272215972328432],
+            qacc_warmstart: vec![0.0; 60],
+            ..Default::default()
+        };
+        for _ in 0..10 {
+            st = t.mujoco_native_step(&st, &[0.2]).unwrap();
+        }
+        let qvel: [u64; 60] = [0x3fa7b05cb65305ce, 0x3fa604a14cc4e1b5, 0x3fb0395e59c91519, 0xbfa6064b2cfac8ac, 0x3fa0ac2066cad90c, 0x3f5e57a71ae2138b, 0xbf7893e75a6854c8, 0xbfa0456be921f4a7, 0x3fae013c76ebb008, 0x3f9cdcae60212cc3, 0xbf53deade1436e4d, 0xbf9fe3c2c0c931e4, 0x3fc50c8a91d49a16, 0xbfaa586d78d745f0, 0x3fc182de04283e90, 0xbfc999eb98363f02, 0x3f36772eeb2e477d, 0x3fd74f6ab2272012, 0xbf58e92097a48f4c, 0xbf5defac146989c3, 0x3fae6291a5f2a046, 0x3f7a7ff27f7d66fc, 0xbf7912413e5a0115, 0xbfa46b70785f0d0f, 0x3fd4ec884a12b48a, 0xbfc0e948b0c5faf4, 0x3fd175c49f8394b4, 0xbfb5b5668b317947, 0x3fdb4de60a1529fc, 0x3fb26f5092fa9b86, 0xbfc5d9375f6f7a05, 0x3fc596dca8e56c11, 0x3fc1ef64a6d987ab, 0xbf91ab3e873b855f, 0xbf9942c8a99906e3, 0xbfa564316d06c818, 0x3fc11d17990d13b9, 0xbfccd6c00f9c2fce, 0x3fc5df088e886b82, 0x3ff11bd2fa1efd54, 0x3fbdf8cfef5d6ae1, 0xbfb78afc8dc8cc4a, 0xbfce221c48444d95, 0xbfbc0ae276ce9e48, 0x3fc60dadbf8db1c4, 0xbf9d2fd3fd5aff49, 0xbf6b1166871e46cf, 0x3f95fd3c8890efc8, 0x3fd6fd9af824b83d, 0x3fd7fcdaffdb4b5e, 0x3fccf167247ebce2, 0xbfb2613b67c20bce, 0x3fc64285698b0ff6, 0x3fcb73b35019100d, 0xc01859c0d826dbce, 0x4022e097d216da6e, 0x401d44ceabe0ea16, 0xc0359c94337bfd1d, 0x403428df51da9366, 0xbff2d78a2b3e4df4];
+        let qpos: [u64; 69] = [0xbfd29ee8b6e03253, 0xbfd2a082253a4ddb, 0x3fa7286ba1fda9b7, 0x3fefffff1e3e9b9f, 0xbf2d00dfa2548974, 0xbf4d25fd6dfb7788, 0x3efcef299154bbf8, 0xbf7366fd70243a21, 0xbfd3e9798edfb176, 0x3fa8083da1892879, 0x3feffffb42d1bb27, 0x3f5b9b6dfc049fd5, 0xbf43ae06622c5282, 0xbf52d1fb0cbed159, 0x3fd34dd995308bb8, 0xbfd3d910b713920b, 0x3faa4869833b3a5c, 0x3fefffeec2dc4369, 0xbf63ad1b1b1ff69f, 0xbf3a8a289b18b371, 0x3f6a8ddbe7c6e91a, 0xbfd28f2dac6343af, 0x3f69229bb238d22a, 0x3fa7be8e8724473c, 0x3feffffa3747ac3d, 0xbf56ec95f8899368, 0x3f545bb72cb19798, 0xbf5740fcb3df88cd, 0x3f75a154f11aa795, 0x3f7c05a9dbbfd128, 0x3fabbd5768da8fd1, 0x3fefffeb8f99ca9c, 0xbf4c850e826b1014, 0x3f717f4d8af5cf6b, 0x3f46da22598ad79b, 0x3fd36430e9f8f65f, 0x3f5a8aea2e8cb56e, 0x3fa9f3e6807aabc3, 0x3feffffed0df62e2, 0x3f33c48b50810fea, 0xbf33f49751b151a9, 0xbf4fdcfa93b707f8, 0xbfd2cc4cd82f30e6, 0x3fd24a93c01912e4, 0x3faa373080c2ae71, 0x3fefffb48cb26022, 0x3f8145abd492b544, 0x3ee01e961a7f10fc, 0x3f4dcc87b0429e7b, 0xbf83945107aedd41, 0x3fd38bb5ad271c0f, 0x3faa96a92d467832, 0x3fefffff79febfb2, 0xbf3e115a89ef568c, 0x3f384da1e88448d9, 0x3f397b85659e0c99, 0x3fd3e80d5d11af14, 0x3fd42de699b057a0, 0x3faaf0457f0aee29, 0x3feffffce7425ec3, 0x3f230fa8cd4ccb3a, 0x3f11b09ab2166468, 0x3f5c0868f59ee8f4, 0x3fd300261fc007be, 0x3fa762e9b9fb3701, 0x3fe20cbedbdee88c, 0x3fb54dbe1b023531, 0x3fd0b1ea1585289c, 0x3f89dd7f2de3d807];
+        assert_eq!(st.qvel.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), qvel);
+        assert_eq!(st.qpos.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), qpos);
     }
 
     /// ⛔⛔ **MuJoCo's midphase can call touching surfaces apart.** franka's fingertip pads meet at `qpos0`:
