@@ -104,6 +104,10 @@ pub(crate) struct Chol {
     pub(crate) l_colind: Vec<Vec<usize>>,
     pub(crate) l: Vec<Vec<f64>>,
     lt: Vec<Vec<(usize, usize)>>,
+    /// the cone-fold gate's inputs: each row's nonzeros summed along its reverse elimination-tree path, and
+    /// the factor's squared row counts summed
+    pub(crate) pathcost: Vec<u64>,
+    pub(crate) lflops: u64,
 }
 
 impl Chol {
@@ -161,7 +165,15 @@ impl Chol {
             })
             .collect();
         let l = l_colind.iter().map(|c| vec![0.0; c.len()]).collect();
-        Chol { l_colind, l, lt }
+        let mut pathcost = vec![0u64; n];
+        let mut lflops = 0u64;
+        for r in 0..n {
+            let nnz = l_colind[r].len();
+            let parent = if nnz >= 2 { Some(l_colind[r][nnz - 2]) } else { None };
+            pathcost[r] = nnz as u64 + parent.map_or(0, |p| pathcost[p]);
+            lflops += (nnz * nnz) as u64;
+        }
+        Chol { l_colind, l, lt, pathcost, lflops }
     }
 
     /// `mju_cholFactorNumeric`: rows from the last back, each one's `H` row less `L[c][r]·L[c][..=r]` for the

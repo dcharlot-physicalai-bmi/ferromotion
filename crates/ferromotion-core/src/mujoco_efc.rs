@@ -457,6 +457,73 @@ impl SmoothModel {
         (chain, dp)
     }
 
+    /// **`mj_transmission`'s `mjTRN_BODY`**: the adhesion moment of `body` — minus the average, over every
+    /// contact touching it, of the contact normal's Jacobian: an active contact's normal row (its pyramid
+    /// edges, each `0.5/(dim−1)`, under pyramidal cones) through `mj_mulJacTVec`, plus an in-gap contact's
+    /// normal projected from `mj_jacDifPair` — then compressed to its non-zeros.
+    pub(crate) fn body_moment(&self, sd: &SmoothData, e: &Efc, contacts: &[NativeContact], body: usize, elliptic: bool) -> (Vec<usize>, Vec<f64>) {
+        let nv = self.dof_bodyid.len();
+        let sparse = nv >= 60;
+        let mut ef = vec![0.0f64; e.j.len()];
+        let mut exclude = vec![0.0f64; nv];
+        let mut counter = 0usize;
+        for (ci, con) in contacts.iter().enumerate() {
+            let (b1, b2) = (self.kin.geoms[con.geom[0]].body, self.kin.geoms[con.geom[1]].body);
+            if b1 != body && b2 != body {
+                continue;
+            }
+            if !con.exclude {
+                counter += 1;
+                let Some(adr) = e.contact_address[ci] else { continue };
+                if con.dim == 1 || elliptic {
+                    ef[adr] = 1.0;
+                } else {
+                    let np = con.dim - 1;
+                    for k in 0..2 * np {
+                        ef[adr + k] = 0.5 / np as f64;
+                    }
+                }
+            } else {
+                counter += 1;
+                let (chain, dp, _) = self.jac_dif_pair_common(sd, b1, b2, &con.pos, &con.pos, sparse);
+                // `mju_mulMatMat(jac, frame, jacdif, 1, 3, NV)`: the normal row, a zero component skipped
+                let mut jac = vec![0.0f64; chain.len()];
+                for k in 0..3 {
+                    let f = con.frame[k];
+                    if f != 0.0 {
+                        for (x, d) in jac.iter_mut().zip(&dp[k]) {
+                            *x = d.mul_add(f, *x);
+                        }
+                    }
+                }
+                for (&c, &v) in chain.iter().zip(&jac) {
+                    exclude[c] += v;
+                }
+            }
+        }
+        let mut row = vec![0.0f64; nv];
+        if counter > 0 {
+            // `mj_mulJacTVec`: rows with a zero coefficient skipped
+            for ((cols, vals), &f) in e.j.iter().zip(&ef) {
+                if f != 0.0 {
+                    for (&c, &v) in cols.iter().zip(vals) {
+                        row[c] = v.mul_add(f, row[c]);
+                    }
+                }
+            }
+            for (r, x) in row.iter_mut().zip(&exclude) {
+                *r += x;
+            }
+            let scl = -1.0 / counter as f64;
+            for r in row.iter_mut() {
+                *r *= scl;
+            }
+        }
+        let cols: Vec<usize> = (0..nv).filter(|&c| row[c] != 0.0).collect();
+        let vals = cols.iter().map(|&c| row[c]).collect();
+        (cols, vals)
+    }
+
     /// `mj_mergeChain` keeping the common dofs: every dof either body hangs from, ascending.
     fn merge_chain_all(&self, b1: usize, b2: usize) -> Vec<usize> {
         let (w1, w2) = (self.weld(b1), self.weld(b2));

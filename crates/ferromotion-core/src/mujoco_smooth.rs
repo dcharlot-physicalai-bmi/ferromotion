@@ -293,6 +293,8 @@ pub(crate) struct NativeActuator {
     pub(crate) tendon: Option<usize>,
     /// the site and its six-component `gear` (a wrench in the site's frame), for a site transmission
     pub(crate) site: Option<(crate::mujoco_kinematics::KinGeom, [f64; 6])>,
+    /// the body, for an adhesion (`mjTRN_BODY`) transmission, whose moment comes from the contact rows
+    pub(crate) body: Option<usize>,
     /// index of its activation in `act`, when it has one
     pub(crate) actadr: Option<usize>,
 }
@@ -350,6 +352,8 @@ pub(crate) struct SmoothInputs {
     pub(crate) tendons: Vec<Option<TendonInput>>,
     /// per actuator: the site of a site transmission, and its `gear`
     pub(crate) actuator_sites: Vec<Option<(crate::mujoco_kinematics::KinGeom, [f64; 6])>>,
+    /// per actuator: the body of an adhesion transmission
+    pub(crate) actuator_bodies: Vec<Option<usize>>,
     /// `<option density viscosity wind>`, for the inertia-box fluid model
     pub(crate) density: f64,
     pub(crate) viscosity: f64,
@@ -612,7 +616,11 @@ impl SmoothModel {
                 na - a.actnum()
             });
             if let Some(site) = inp.actuator_sites.get(ai).cloned().flatten() {
-                m.actuators.push(NativeActuator { act: a.clone(), dofadr: 0, qposadr: 0, tendon: None, site: Some(site), actadr });
+                m.actuators.push(NativeActuator { act: a.clone(), dofadr: 0, qposadr: 0, tendon: None, site: Some(site), body: None, actadr });
+                continue;
+            }
+            if let Some(body) = inp.actuator_bodies.get(ai).copied().flatten() {
+                m.actuators.push(NativeActuator { act: a.clone(), dofadr: 0, qposadr: 0, tendon: None, site: None, body: Some(body), actadr });
                 continue;
             }
             let spatial = match a.dynamic {
@@ -625,7 +633,7 @@ impl SmoothModel {
             };
             if let Some(t) = a.tendon.or(spatial) {
                 match m.tendons.get(t) {
-                    Some(Some(_)) => m.actuators.push(NativeActuator { act: a.clone(), dofadr: 0, qposadr: 0, tendon: Some(t), site: None, actadr }),
+                    Some(Some(_)) => m.actuators.push(NativeActuator { act: a.clone(), dofadr: 0, qposadr: 0, tendon: Some(t), site: None, body: None, actadr }),
                     _ => m.unsupported.push("a tendon transmission this port did not record".into()),
                 }
                 continue;
@@ -635,7 +643,7 @@ impl SmoothModel {
                 _ => None,
             };
             match joint {
-                Some(j) => m.actuators.push(NativeActuator { act: a.clone(), dofadr: m.jnt_dofadr[j], qposadr: m.jnt_qposadr[j], tendon: None, site: None, actadr }),
+                Some(j) => m.actuators.push(NativeActuator { act: a.clone(), dofadr: m.jnt_dofadr[j], qposadr: m.jnt_qposadr[j], tendon: None, site: None, body: None, actadr }),
                 None => m.unsupported.push("an actuator that is not a joint, tendon or site transmission".into()),
             }
         }
@@ -723,6 +731,13 @@ impl SmoothModel {
     /// [`SmoothModel::forward`] at `d->time`, which a `mujoco.pid` slew limiter reads (no previous setpoint
     /// at `t = 0`).
     pub(crate) fn forward_at(&self, time: f64, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64]) -> SmoothData {
+        self.forward_with(time, qpos, qvel, ctrl, act, &std::collections::BTreeMap::new())
+    }
+
+    /// [`SmoothModel::forward_at`] with the adhesion actuators' moments, by actuator index — which MuJoCo
+    /// builds from the constraint rows (`mj_transmission` runs after `mj_makeConstraint`), so the caller
+    /// passes them in from a first pass; an adhesion actuator without one has no moment.
+    pub(crate) fn forward_with(&self, time: f64, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64], body_moments: &std::collections::BTreeMap<usize, (Vec<usize>, Vec<f64>)>) -> SmoothData {
         let nbody = self.kin.bodies.len();
         let nv = self.dof_bodyid.len();
         let kin = self.kin.state(qpos);
@@ -915,6 +930,13 @@ impl SmoothModel {
         let mut moment = Vec::with_capacity(nu);
         for (i, a) in self.actuators.iter().enumerate() {
             let g = a.act.gear;
+            if a.body.is_some() {
+                actuator_length[i] = 0.0;
+                moment.push(body_moments.get(&i).cloned().unwrap_or_default());
+                let (cols, vals) = &moment[i];
+                actuator_velocity[i] = dot_sparse(vals, qvel, cols);
+                continue;
+            }
             if let Some((site, gear)) = &a.site {
                 // a site: no length; the moment is `J'·wrench`, the gear turned into the world by the site
                 let b = site.body;

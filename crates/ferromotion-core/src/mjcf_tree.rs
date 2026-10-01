@@ -1506,6 +1506,10 @@ impl MjcfTree {
                     };
                     Some(crate::mujoco_smooth::TendonInput { path, stiffness: t.stiffness, damping: t.damping, springlength: (!t.springlength_auto).then_some(t.springlength) })
                 }).collect(),
+                actuator_bodies: self.actuators.iter().map(|a| match &a.dynamic {
+                    Some(crate::mujoco_actuator::DynTransmission::Body { body }) => self.mj_body_names.iter().position(|n| n == body),
+                    _ => None,
+                }).collect(),
                 actuator_sites: self.actuators.iter().map(|a| match &a.dynamic {
                     Some(crate::mujoco_actuator::DynTransmission::Site { site, gear }) => self.mj_sites.get(site).map(|s| (*s, *gear)),
                     _ => None,
@@ -1543,6 +1547,27 @@ impl MjcfTree {
                 }
             }
             let (bw, dw) = sm.invweight0(&self.qpos0());
+            // `mjCModel::AutoSpringDamper`, after `mj_setConst`: a joint's `springdamper` becomes its
+            // stiffness and damping through its average `dof_invweight0` — the native one, to the bit
+            for (j, joint) in self.joints.iter().enumerate() {
+                let Some([timeconst, dampratio]) = joint.springdamper else { continue };
+                if timeconst <= 0.0 || dampratio <= 0.0 {
+                    continue;
+                }
+                let adr = sm.jnt_dofadr[j];
+                let ndim = joint.kind.dofs();
+                let mut inertia = 0.0f64;
+                for i in 0..ndim {
+                    inertia += dw[adr + i];
+                }
+                let floor = |x: f64| if 1e-15 >= x { 1e-15 } else { x };
+                inertia = ndim as f64 / floor(inertia);
+                sm.jnt_stiffness[j] = inertia / floor(timeconst * timeconst * dampratio * dampratio);
+                let damping = 2.0 * inertia / floor(timeconst);
+                for i in 0..ndim {
+                    sm.dof_damping[adr + i] = damping;
+                }
+            }
             em.body_invweight0 = bw;
             em.dof_invweight0 = dw;
             em.tendon_invweight0 = sm.tendon_invweight0(&self.qpos0());
@@ -1586,11 +1611,6 @@ impl MjcfTree {
             }
             if self.joints.iter().any(|j| j.range.is_some() && j.kind == MjcfJointKind::Ball) {
                 sm.unsupported.push("rows: a ball-joint limit".into());
-            }
-            // 60 or more dofs: MuJoCo's sparse Jacobian and Hessian. Its cone Hessian (`HessianConeFolded`) is
-            // not ported yet.
-            if sm.dof_bodyid.len() >= 60 && self.cone == crate::mujoco_contact::Cone::Elliptic {
-                sm.unsupported.push("solver: an elliptic cone with 60 or more dofs".into());
             }
 
             if self.solver != "Newton" {
@@ -1672,7 +1692,7 @@ impl MjcfTree {
     /// from `qacc_warmstart`.
     fn native_forward(&self, time: f64, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64], qacc_warmstart: &[f64]) -> (crate::mujoco_smooth::SmoothData, crate::mujoco_efc::Efc, crate::mujoco_solver::Solution) {
         let sm = self.smooth_model();
-        let sd = sm.forward_at(time, qpos, qvel, ctrl, act);
+        let mut sd = sm.forward_at(time, qpos, qvel, ctrl, act);
         let contacts: Vec<crate::mujoco_efc::NativeContact> = self
             .collide_qpos(qpos)
             .contacts
@@ -1696,6 +1716,16 @@ impl MjcfTree {
             })
             .collect();
         let e = sm.constraints(&sm.efc, &sd, qpos, qvel, &contacts);
+        // adhesion actuators: their moments come from the rows just built, so the actuation runs again
+        let bodies: std::collections::BTreeMap<usize, (Vec<usize>, Vec<f64>)> = sm
+            .actuators
+            .iter()
+            .enumerate()
+            .filter_map(|(i, a)| a.body.map(|b| (i, sm.body_moment(&sd, &e, &contacts, b, sm.efc.elliptic))))
+            .collect();
+        if !bodies.is_empty() {
+            sd = sm.forward_with(time, qpos, qvel, ctrl, act, &bodies);
+        }
         let opt = crate::mujoco_solver::SolverOptions {
             iterations: self.solver_iterations,
             tolerance: self.solver_tolerance,
@@ -7900,6 +7930,54 @@ mod tests {
         }
         let qvel: [u64; 60] = [0x3fa7b05cb65305ce, 0x3fa604a14cc4e1b5, 0x3fb0395e59c91519, 0xbfa6064b2cfac8ac, 0x3fa0ac2066cad90c, 0x3f5e57a71ae2138b, 0xbf7893e75a6854c8, 0xbfa0456be921f4a7, 0x3fae013c76ebb008, 0x3f9cdcae60212cc3, 0xbf53deade1436e4d, 0xbf9fe3c2c0c931e4, 0x3fc50c8a91d49a16, 0xbfaa586d78d745f0, 0x3fc182de04283e90, 0xbfc999eb98363f02, 0x3f36772eeb2e477d, 0x3fd74f6ab2272012, 0xbf58e92097a48f4c, 0xbf5defac146989c3, 0x3fae6291a5f2a046, 0x3f7a7ff27f7d66fc, 0xbf7912413e5a0115, 0xbfa46b70785f0d0f, 0x3fd4ec884a12b48a, 0xbfc0e948b0c5faf4, 0x3fd175c49f8394b4, 0xbfb5b5668b317947, 0x3fdb4de60a1529fc, 0x3fb26f5092fa9b86, 0xbfc5d9375f6f7a05, 0x3fc596dca8e56c11, 0x3fc1ef64a6d987ab, 0xbf91ab3e873b855f, 0xbf9942c8a99906e3, 0xbfa564316d06c818, 0x3fc11d17990d13b9, 0xbfccd6c00f9c2fce, 0x3fc5df088e886b82, 0x3ff11bd2fa1efd54, 0x3fbdf8cfef5d6ae1, 0xbfb78afc8dc8cc4a, 0xbfce221c48444d95, 0xbfbc0ae276ce9e48, 0x3fc60dadbf8db1c4, 0xbf9d2fd3fd5aff49, 0xbf6b1166871e46cf, 0x3f95fd3c8890efc8, 0x3fd6fd9af824b83d, 0x3fd7fcdaffdb4b5e, 0x3fccf167247ebce2, 0xbfb2613b67c20bce, 0x3fc64285698b0ff6, 0x3fcb73b35019100d, 0xc01859c0d826dbce, 0x4022e097d216da6e, 0x401d44ceabe0ea16, 0xc0359c94337bfd1d, 0x403428df51da9366, 0xbff2d78a2b3e4df4];
         let qpos: [u64; 69] = [0xbfd29ee8b6e03253, 0xbfd2a082253a4ddb, 0x3fa7286ba1fda9b7, 0x3fefffff1e3e9b9f, 0xbf2d00dfa2548974, 0xbf4d25fd6dfb7788, 0x3efcef299154bbf8, 0xbf7366fd70243a21, 0xbfd3e9798edfb176, 0x3fa8083da1892879, 0x3feffffb42d1bb27, 0x3f5b9b6dfc049fd5, 0xbf43ae06622c5282, 0xbf52d1fb0cbed159, 0x3fd34dd995308bb8, 0xbfd3d910b713920b, 0x3faa4869833b3a5c, 0x3fefffeec2dc4369, 0xbf63ad1b1b1ff69f, 0xbf3a8a289b18b371, 0x3f6a8ddbe7c6e91a, 0xbfd28f2dac6343af, 0x3f69229bb238d22a, 0x3fa7be8e8724473c, 0x3feffffa3747ac3d, 0xbf56ec95f8899368, 0x3f545bb72cb19798, 0xbf5740fcb3df88cd, 0x3f75a154f11aa795, 0x3f7c05a9dbbfd128, 0x3fabbd5768da8fd1, 0x3fefffeb8f99ca9c, 0xbf4c850e826b1014, 0x3f717f4d8af5cf6b, 0x3f46da22598ad79b, 0x3fd36430e9f8f65f, 0x3f5a8aea2e8cb56e, 0x3fa9f3e6807aabc3, 0x3feffffed0df62e2, 0x3f33c48b50810fea, 0xbf33f49751b151a9, 0xbf4fdcfa93b707f8, 0xbfd2cc4cd82f30e6, 0x3fd24a93c01912e4, 0x3faa373080c2ae71, 0x3fefffb48cb26022, 0x3f8145abd492b544, 0x3ee01e961a7f10fc, 0x3f4dcc87b0429e7b, 0xbf83945107aedd41, 0x3fd38bb5ad271c0f, 0x3faa96a92d467832, 0x3fefffff79febfb2, 0xbf3e115a89ef568c, 0x3f384da1e88448d9, 0x3f397b85659e0c99, 0x3fd3e80d5d11af14, 0x3fd42de699b057a0, 0x3faaf0457f0aee29, 0x3feffffce7425ec3, 0x3f230fa8cd4ccb3a, 0x3f11b09ab2166468, 0x3f5c0868f59ee8f4, 0x3fd300261fc007be, 0x3fa762e9b9fb3701, 0x3fe20cbedbdee88c, 0x3fb54dbe1b023531, 0x3fd0b1ea1585289c, 0x3f89dd7f2de3d807];
+        assert_eq!(st.qvel.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), qvel);
+        assert_eq!(st.qpos.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), qpos);
+    }
+
+    /// ⭐⭐ **Elliptic cones in the sparse Hessian, to the bit**: ten free bodies sliding and spinning on a
+    /// floor (`condim` 3, 4 and 6, `impratio` 5) — 60 dofs, so each island's cone contacts enter the sparse
+    /// factor either by one refactorization of `M + Jmod'·Dmod·Jmod` or by sparse rank-one updates, as
+    /// `HessianConeFoldFaster` decides. Ten free-running steps land on MuJoCo 3.13.0's bits.
+    #[test]
+    fn elliptic_cones_in_the_sparse_hessian_are_mujocos_to_the_bit() {
+        let xml = r#"<mujoco><option timestep="0.002" cone="elliptic" impratio="5"/><worldbody><geom type="plane" size="3 3 0.1"/><body name="b0" pos="-0.4 -0.25 0.0395"><freejoint/><geom type="box" size="0.06 0.05 0.04" condim="3" friction="0.9" mass="0.6"/></body><body name="b1" pos="-0.15000000000000002 -0.25 0.0495"><freejoint/><geom type="box" size="0.05 0.04 0.05" condim="4" friction="0.7 0.01 0.001" mass="0.45"/></body><body name="b2" pos="0.09999999999999998 -0.25 0.0495"><freejoint/><geom type="sphere" size="0.05" condim="6" friction="0.8 0.02 0.002"/></body><body name="b3" pos="0.35 -0.25 0.0395"><freejoint/><geom type="box" size="0.06 0.05 0.04" condim="3" friction="0.9" mass="0.75"/></body><body name="b4" pos="-0.4 0.0 0.0495"><freejoint/><geom type="box" size="0.05 0.04 0.05" condim="4" friction="0.7 0.01 0.001" mass="0.6000000000000001"/></body><body name="b5" pos="-0.15000000000000002 0.0 0.0495"><freejoint/><geom type="sphere" size="0.05" condim="6" friction="0.8 0.02 0.002"/></body><body name="b6" pos="0.09999999999999998 0.0 0.0395"><freejoint/><geom type="box" size="0.06 0.05 0.04" condim="3" friction="0.9" mass="0.9"/></body><body name="b7" pos="0.35 0.0 0.0495"><freejoint/><geom type="box" size="0.05 0.04 0.05" condim="4" friction="0.7 0.01 0.001" mass="0.75"/></body><body name="b8" pos="-0.4 0.25 0.0495"><freejoint/><geom type="sphere" size="0.05" condim="6" friction="0.8 0.02 0.002"/></body><body name="b9" pos="-0.15000000000000002 0.25 0.0395"><freejoint/><geom type="box" size="0.06 0.05 0.04" condim="3" friction="0.9" mass="1.05"/></body></worldbody></mujoco>"#;
+        let t = tree_from_mjcf_str(xml).unwrap();
+        assert!(t.mujoco_native_unsupported().is_empty(), "{:?}", t.mujoco_native_unsupported());
+        let mut st = crate::MjNativeState {
+            qpos: vec![-0.4, -0.25, 0.0395, 1.0, 0.0, 0.0, 0.0, -0.15000000000000002, -0.25, 0.0495, 1.0, 0.0, 0.0, 0.0, 0.09999999999999998, -0.25, 0.0495, 1.0, 0.0, 0.0, 0.0, 0.35, -0.25, 0.0395, 1.0, 0.0, 0.0, 0.0, -0.4, 0.0, 0.0495, 1.0, 0.0, 0.0, 0.0, -0.15000000000000002, 0.0, 0.0495, 1.0, 0.0, 0.0, 0.0, 0.09999999999999998, 0.0, 0.0395, 1.0, 0.0, 0.0, 0.0, 0.35, 0.0, 0.0495, 1.0, 0.0, 0.0, 0.0, -0.4, 0.25, 0.0495, 1.0, 0.0, 0.0, 0.0, -0.15000000000000002, 0.25, 0.0395, 1.0, 0.0, 0.0, 0.0],
+            qvel: vec![-1.114289391692401, -0.0021664126796551164, -0.2, 0.6089901457401448, -2.8278659497683325, -2.1124434925352644, 1.2846330688811085, -1.2887382715374094, -0.2, -2.221356303604212, 2.6899707197506504, 0.731301556778297, -0.39302062881062705, 0.03417006540978795, -0.2, 0.9770577151007955, -1.3481471054332241, -2.172191562798268, 0.8641187835119756, 0.5110817523074513, -0.2, 0.0742938808989626, 1.9004186158179484, 0.294451613220158, 1.4427409178919164, -0.8864716160098653, -0.2, 0.32238217719136686, -0.09825181845967368, -0.8803508696373115, 0.2747859118471304, -0.7940963049972584, -0.2, 1.8132161026709008, 2.204001311054488, -2.227441972632894, -0.09878037978518661, -0.668565322398887, -0.2, -2.5012980135885456, 2.375665849502205, -0.4203078477129878, -1.0569261001137178, 0.5200870718277323, -0.2, -1.786703833271771, 2.4085864721290617, -1.697110455488831, -1.400775937867714, -0.897693137516342, -0.2, -0.9255127574661628, -0.18655101946509212, 2.4368060333733634, 0.5920832662088933, -0.4820380177726642, -0.2, -2.898736709415013, -2.041057835370114, 2.978615253238023],
+            qacc_warmstart: vec![0.0; 60],
+            ..Default::default()
+        };
+        for _ in 0..10 {
+            st = t.mujoco_native_step(&st, &[]).unwrap();
+        }
+        let qvel: [u64; 60] = [0xbfe22f40ec7c03d8, 0xbf76bf934dc54b54, 0x3fc3401402eb431a, 0xbfd9e20c596f0326, 0x3fe36c7d57e61807, 0xbff0cc59376176b7, 0x3feb4307cde5c44f, 0xbfecef7e51f69825, 0x3fc7ee8091327934, 0x3ff09fbece9cd977, 0x3ff42664cabf5637, 0x400e9fc0806731aa, 0xbfd2f9ade600a7ca, 0x3f890eb7e09aa4ca, 0x3f8e0d3438c4f7b8, 0xbf92dc797f68870c, 0xc0156c6a096dbeb5, 0xbfd12a3a5ab4dd03, 0x3fda73d8e3733509, 0x3fd0dc3023e0f77c, 0x3fbe8f44347bd75c, 0xbfcb3f033cefa39a, 0xbfe3bdfb51222fed, 0xbfe47fd05eee4670, 0x3ff03a1ad737a7b6, 0xbfe408ed32fa9ed7, 0x3fbaf65e7e262926, 0x3fe259a7b592f18a, 0x3fbb9d8842eb9791, 0xbfe419ab5463ce16, 0x3fcd3049e6113ad5, 0xbfe340c84ded7823, 0x3f9a7b5f8b28f3d9, 0x40253ede5eeadf7d, 0x40119b2eef39618a, 0xbfd5f229f0d1718b, 0xbfb569f4068ec910, 0xbfcdf1f9bdb50ad4, 0x3fab753601539499, 0x3ff1e1cdcc038965, 0xbff259f2dddc8c3d, 0x3fe9d4d4d2af7841, 0xbfe3dcef24a0eebf, 0x3fd3539584386276, 0x3fb8b543db8d3cc4, 0xbfeeb59830a98010, 0xbff84c7e95c0b95a, 0xc003bc4c5c8325bf, 0xbff0cea53efb3782, 0xbfe52162cce0ad74, 0x3fb1a06bcb066c41, 0x4024d1183df3e130, 0xc03176b0b7555eb2, 0x3fec91d16672107e, 0x3fcbaf11586976d9, 0xbfc93ef402f6327c, 0x3fb6d61b5bd443fe, 0x3fe70afa4fe38150, 0x3fe7da4ebdf1a20c, 0x3ff73602fbdee53a];
+        let qpos: [u64; 70] = [0xbfda751ee27f50d5, 0xbfd001737d1b0fb3, 0x3fa5a06865649fef, 0x3fefff5526765842, 0xbf5f4ffb5b5a6e6e, 0xbf68497017204092, 0xbf891f97aaf252a3, 0xbfc0e3ed1135636c, 0xbfd134a6053a399c, 0x3fab82ed3e24a6de, 0x3feffb89fe819698, 0x3f5729e4f4b64b94, 0x3f8f58e1cb3aed5d, 0x3f9de616bda5223e, 0x3fb7f0906a683adf, 0xbfcff403f4018d5d, 0x3fa8d46717c205df, 0x3feff8335ff22e03, 0x3f621fb8bd3666cb, 0xbfa5e7471884aec2, 0xbf80e9668b3cec7a, 0x3fd70b1fd60e4e18, 0xbfcf365f1e836efb, 0x3fa553149b9309ad, 0x3feffff573548a29, 0xbf1e9768252baa30, 0x3f5bf332964c1e32, 0xbf65e28c8c5b7353, 0xbfd841479d0a092a, 0xbf8a8eeb255d8466, 0x3faae33d60680609, 0x3fefffb2813f8f47, 0x3f76ca5e35f449ab, 0x3f4eb67919532f92, 0xbf7a90e6cb88ae7c, 0xbfc294f2104f6790, 0xbf8ae0d27d840ec8, 0x3fa8eee30cca2fbc, 0x3fefde2fb05e8868, 0x3fb50c1cb245fadb, 0x3fa314a79e5ac91f, 0xbf836ca063380fad, 0x3fb93b8427f4ec81, 0xbf7ca62ae3ab5487, 0x3fa46b4d3cf10791, 0x3fefffee5dd196c8, 0x3f4e3d829b8ff5e4, 0x3f6835c41d6590c4, 0x3f660754864b7a4e, 0x3fd5856faa29fc0a, 0x3f7b5c3f342d33a3, 0x3faa79c70079e322, 0x3feffdbc49080bce, 0xbf899a7c530e2a76, 0xbf617ca5ecf67f90, 0xbf9445bf6ae68b4e, 0xbfdb12e03222517f, 0x3fce227392e08601, 0x3fa97f1caa898b3b, 0x3fefaa2196be55f8, 0x3fb29d380e253a3b, 0xbfbfb9df5af87963, 0x3f8d944a4a2e32c4, 0xbfc25a51ac4e45af, 0x3fcf4ce1595ed8b2, 0x3fa490900fd18180, 0x3feffea1413acfe1, 0xbf638ec0d8a586e8, 0x3f7046ebd80bea1b, 0x3f921da1d4db649c];
+        assert_eq!(st.qvel.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), qvel);
+        assert_eq!(st.qpos.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), qpos);
+    }
+
+    /// ⭐⭐ **The folded cone Hessian, to the bit**: a stack of ten boxes, every layer sliding and spinning
+    /// against the next under elliptic cones — one 60-dof island whose 40 contacts are all in the cone, so
+    /// `HessianConeFoldFaster` folds them into one refactorization of `M + Jmod'·Dmod·Jmod`. Ten
+    /// free-running steps land on MuJoCo 3.13.0's bits.
+    #[test]
+    fn a_sliding_stack_folds_its_cones_as_mujoco_does_bit_for_bit() {
+        let xml = r#"<mujoco><option timestep="0.002" cone="elliptic"/><worldbody><geom type="plane" size="3 3 0.1"/><body name="b0" pos="0 0 0.0495"><freejoint/><geom type="box" size="0.05 0.05 0.05" condim="3" friction="0.4"/></body><body name="b1" pos="0 0 0.1494"><freejoint/><geom type="box" size="0.05 0.05 0.05" condim="3" friction="0.4"/></body><body name="b2" pos="0 0 0.24930000000000002"><freejoint/><geom type="box" size="0.05 0.05 0.05" condim="3" friction="0.4"/></body><body name="b3" pos="0 0 0.3492"><freejoint/><geom type="box" size="0.05 0.05 0.05" condim="3" friction="0.4"/></body><body name="b4" pos="0 0 0.4491"><freejoint/><geom type="box" size="0.05 0.05 0.05" condim="3" friction="0.4"/></body><body name="b5" pos="0 0 0.549"><freejoint/><geom type="box" size="0.05 0.05 0.05" condim="3" friction="0.4"/></body><body name="b6" pos="0 0 0.6489"><freejoint/><geom type="box" size="0.05 0.05 0.05" condim="3" friction="0.4"/></body><body name="b7" pos="0 0 0.7488"><freejoint/><geom type="box" size="0.05 0.05 0.05" condim="3" friction="0.4"/></body><body name="b8" pos="0 0 0.8487"><freejoint/><geom type="box" size="0.05 0.05 0.05" condim="3" friction="0.4"/></body><body name="b9" pos="0 0 0.9486"><freejoint/><geom type="box" size="0.05 0.05 0.05" condim="3" friction="0.4"/></body></worldbody></mujoco>"#;
+        let t = tree_from_mjcf_str(xml).unwrap();
+        assert!(t.mujoco_native_unsupported().is_empty(), "{:?}", t.mujoco_native_unsupported());
+        let mut st = crate::MjNativeState {
+            qpos: vec![0.0, 0.0, 0.0495, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1494, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.24930000000000002, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3492, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.4491, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.549, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.6489, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.7488, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.8487, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.9486, 1.0, 0.0, 0.0, 0.0],
+            qvel: vec![0.4, 0.3, 0.0, 0.0, 0.0, 1.5, -0.4, 0.3, 0.0, 0.0, 0.0, -1.5, 0.4, -0.3, 0.0, 0.0, 0.0, 1.5, -0.4, -0.3, 0.0, 0.0, 0.0, -1.5, 0.4, 0.3, 0.0, 0.0, 0.0, 1.5, -0.4, 0.3, 0.0, 0.0, 0.0, -1.5, 0.4, -0.3, 0.0, 0.0, 0.0, 1.5, -0.4, -0.3, 0.0, 0.0, 0.0, -1.5, 0.4, 0.3, 0.0, 0.0, 0.0, 1.5, -0.4, 0.3, 0.0, 0.0, 0.0, -1.5],
+            qacc_warmstart: vec![0.0; 60],
+            ..Default::default()
+        };
+        for _ in 0..10 {
+            st = t.mujoco_native_step(&st, &[]).unwrap();
+        }
+        let qvel: [u64; 60] = [0x3fa376230d651e00, 0x3f9dda52ae698bac, 0xbf432fe6ea52808c, 0x3f842fa37da8b083, 0xbf8f3f9d6e6c77e5, 0x3fc20d2b21913039, 0xbfa5838c7918fb7f, 0x3f9b29ddd8103613, 0xbf8b181f8780dbdc, 0x3fa505f2532e1c36, 0xbfa8dceea6292db4, 0xbfc2cfd2d32f919d, 0x3fa05b89885930b0, 0xbfa51dfeff81037d, 0xbf9d83183329bcfa, 0x3f9b243df448b066, 0xbfb7dc1a992c29d5, 0x3fba98abc2112f19, 0xbfb036f7d6e4aa70, 0xbfa64ac4dc7adf0e, 0xbfa1aadc461cf608, 0xbfab95d24bfa79f2, 0xbfc63a2a8fb9c274, 0xbfd1e8bc2aeebfc0, 0x3fa5be44f3a6b93b, 0x3fb3f46d9b94f0f7, 0xbfa7c31ce0173c89, 0x3f92289a6bae681d, 0xbfc57bacfadb2a45, 0x3fe4bd78ca70c2d8, 0xbfb76e6c9126642e, 0x3fbc828a8495d798, 0xbfb394be7b1d123d, 0xbfd714b7eb90788a, 0x3fbf2d5071d3f61d, 0x3fe43ffa77d5eea4, 0x3fc4317fa74273f2, 0xbfc3c967b3a30915, 0xbfa4de685a0dd9b5, 0x3fcfdf617b0a30bd, 0x3fb52de291af7697, 0x3fd5ae279bd42c31, 0xbfcae6f20745ea4c, 0xbfcba177c6fca111, 0xbfb2ff581cbcfd97, 0xbfaec38efe380875, 0x3f921e40a143d6a4, 0xbff88d57a7c85ca2, 0x3fd263a12fe2f477, 0x3fcecf41ee6c12a7, 0xbfb49b9b471c071e, 0x3fb6088756d3d9f9, 0x3fd19fe2006dae17, 0x3ff87d163d7230b8, 0xbfd699b0e00aa075, 0x3fd2cc29e49f5ea4, 0xbfb3650e23e71645, 0xbfd3d502881bb7f8, 0xbfd818c4fbd1bff0, 0xbff274ba3fe8119f];
+        let qpos: [u64; 70] = [0x3f666c07a9728295, 0x3f610cb36983b2db, 0x3fa9549ccfd44f53, 0x3fefffe4dba3ed3a, 0xbee7fb13318b2eec, 0xbf1c44d2d5aacb10, 0x3f74d59b7a3d53c4, 0xbf66f9dfde0b26b8, 0x3f60920ed78ea572, 0x3fc3160a7dfec2bd, 0x3fefffe2ec49751a, 0x3f454d1853ae18dc, 0xbf3e22256b635b4b, 0xbf7552381366e228, 0x3f6601d066b6070b, 0xbf644201a5db7046, 0x3fcfd784a88c977c, 0x3fefffe8e3dafc7a, 0x3f47e629091beb89, 0xbf5261aa3df6e26e, 0x3f726e6da9beda37, 0xbf6a5de03b9b45b5, 0xbf6514dbb678558c, 0x3fd64e40999af385, 0x3fefffcc37979fb6, 0xbf3adddbde6e4165, 0xbf612a98a7e8ffbf, 0xbf7b6c4de243723d, 0x3f68c5caf8775223, 0x3f69a449db0d62a6, 0x3fdcb241a7fa57cc, 0x3fefffa0ed0058e7, 0xbf31e3d117a55e51, 0xbf59f51a8f5c94e4, 0x3f833894fd323426, 0xbf6d4a4a1fed8d08, 0x3f6bc007bc86972a, 0x3fe18bbb0cbba232, 0x3feffffd253be561, 0xbf3abdba179c47c7, 0xbf579fff4dc8eabe, 0xbf469f16fee7322f, 0x3f71ae28ac230bf1, 0xbf7094e62d67a652, 0x3fe4bedd214e4d4b, 0x3fefffd5034940bd, 0x3f399301a748e85f, 0xbf5426efdbddf6a4, 0x3f79b0044c6c4f23, 0xbf741be5df46497c, 0xbf72b872327b23be, 0x3fe7f192e05409e8, 0x3fefff4e20e44edd, 0xbf4d16199cf47229, 0xbf60becdca2df469, 0xbf8a479e561ebeb2, 0x3f786b41356a3fd6, 0x3f74805e9adb43d3, 0x3feb254c74ad3803, 0x3fefff30fe27146b, 0xbf26b333486ed466, 0xbf67df41924c929c, 0x3f8c2597a4084289, 0xbf7d1f2772c935d3, 0x3f78178747aa93d2, 0x3fee5bfcb55f8f05, 0x3fefff598344a1d0, 0xbf698c815afb63b0, 0xbf6e694d28fe456a, 0xbf87d18bf9341987];
         assert_eq!(st.qvel.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), qvel);
         assert_eq!(st.qpos.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), qpos);
     }

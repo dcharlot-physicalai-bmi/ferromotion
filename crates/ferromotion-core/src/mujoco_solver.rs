@@ -135,7 +135,8 @@ fn constraint_update(ne: usize, nf: usize, d: &[f64], r: &[f64], floss: &[f64], 
             }
             state[i] = QUADRATIC;
         } else {
-            let dm = d[i] / (mu * mu * (1.0 + mu * mu));
+            // `D/(mu*mu*(1+mu*mu))`: the `1+mu*mu` is one fused multiply-add (`_mj_constraintUpdate_impl`)
+            let dm = d[i] / (mu * mu * mu.mul_add(mu, 1.0));
             let nmt = (-mu).mul_add(t, n);
             s = (0.5 * dm * nmt).mul_add(nmt, s);
             force[i] = -dm * nmt * mu;
@@ -347,6 +348,8 @@ struct Ctx {
     jt: crate::mujoco_sparse::Rows,
     m_rows: crate::mujoco_sparse::Rows,
     chol: Option<crate::mujoco_sparse::Chol>,
+    /// the sparse cone factor `Lcone`, on `L`'s pattern
+    chol_cone: Option<crate::mujoco_sparse::Chol>,
     cost: f64,
     quad_gauss: [f64; 3],
     scale: f64,
@@ -364,8 +367,9 @@ impl Ctx {
 
     /// `Mgrad = H \ grad` on whichever factor is current.
     fn h_solve(&self, v: &[f64]) -> Vec<f64> {
-        match &self.chol {
-            Some(c) if self.sparse => c.solve(v),
+        match (&self.chol, &self.chol_cone) {
+            (_, Some(c)) if self.sparse && self.ncone > 0 => c.solve(v),
+            (Some(c), _) if self.sparse => c.solve(v),
             _ => chol_solve(if self.ncone > 0 { &self.lcone } else { &self.l }, v, self.nv),
         }
     }
@@ -438,6 +442,9 @@ impl Ctx {
             let mut chol = self.chol.take().unwrap_or_else(|| crate::mujoco_sparse::Chol::symbolic(&h));
             chol.numeric(&h, MJ_MINVAL);
             self.chol = Some(chol);
+            if self.ncone > 0 {
+                self.hessian_cone();
+            }
             return;
         }
         // `mju_sqrMatTD_impl`, lower triangle
@@ -470,6 +477,10 @@ impl Ctx {
 
     /// `HessianConeUpdate`, dense: `Lcone` = `L` updated by each cone contact's `L'·J` rows.
     fn hessian_cone(&mut self) {
+        if self.sparse {
+            self.hessian_cone_sparse();
+            return;
+        }
         let nv = self.nv;
         self.lcone = self.l.clone();
         let mut i = 0;
@@ -501,6 +512,91 @@ impl Ctx {
             }
             i += 1;
         }
+    }
+
+    /// The cone contacts' factored local Hessians `Lc` (`mju_cholFactor` of `contact.H`), by first row.
+    fn cone_factors(&self) -> Vec<(usize, usize, Vec<f64>)> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < self.nefc {
+            if self.state[i] == CONE {
+                let dim = self.cones[self.id[i]].dim;
+                let mut lm = self.cone_h[self.id[i]][..dim * dim].to_vec();
+                chol_factor(&mut lm, dim, MJ_MINVAL);
+                out.push((i, dim, lm));
+                i += dim;
+                continue;
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// `HessianCone`, sparse: `HessianConeFoldFaster` decides between one refactorization of
+    /// `M + Jmod'·Dmod·Jmod` — each cone contact's rows replaced by `Lc'·Jc` with unit `D`
+    /// (`HessianConeFolded`) — and `dim` sparse rank-one updates of `L` per cone contact
+    /// (`HessianConeUpdate`). The two round differently, so the gate is MuJoCo's to the integer.
+    fn hessian_cone_sparse(&mut self) {
+        let Some(chol) = self.chol.as_ref() else { return };
+        // `HessianConeFoldFaster`
+        let (mut u, mut s) = (0u64, 0u64);
+        let mut i = 0;
+        while i < self.nefc {
+            let nnz = self.jrows[i].0.len() as u64;
+            if self.state[i] == QUADRATIC {
+                s += nnz * nnz;
+            } else if self.state[i] == CONE {
+                let dim = self.cones[self.id[i]].dim as u64;
+                let lastcol = *self.jrows[i].0.last().expect("a cone row has a chain");
+                u += dim * chol.pathcost[lastcol];
+                s += dim * nnz * nnz;
+                i += dim as usize;
+                continue;
+            }
+            i += 1;
+        }
+        let fold = 10 * u > 3 * (chol.lflops + 2 * s);
+        let factors = self.cone_factors();
+        let mut lc = chol.clone();
+        if fold {
+            let mut jmod = self.jrows.clone();
+            let mut dmod: Vec<f64> = (0..self.nefc).map(|k| if self.state[k] == QUADRATIC { self.efc_d[k] } else { 0.0 }).collect();
+            for (i, dim, local) in &factors {
+                let nnz = self.jrows[*i].0.len();
+                for c in 0..*dim {
+                    let mut dst = vec![0.0f64; nnz];
+                    for r in c..*dim {
+                        let scl = local[r * dim + c];
+                        for (x, j) in dst.iter_mut().zip(&self.jrows[i + r].1) {
+                            *x = j.mul_add(scl, *x);
+                        }
+                    }
+                    jmod[i + c].1 = dst;
+                    dmod[i + c] = 1.0;
+                }
+            }
+            let jtmod = crate::mujoco_sparse::transpose(&jmod, self.nv);
+            let h = crate::mujoco_sparse::hessian(&jmod, &jtmod, &dmod, &self.m_rows);
+            lc.numeric(&h, MJ_MINVAL);
+        } else {
+            for (i, dim, local) in &factors {
+                let (cols, _) = &self.jrows[*i];
+                let nnz = cols.len();
+                let mut ltj = vec![vec![0.0f64; nnz]; *dim];
+                for r in 0..*dim {
+                    for c in 0..=r {
+                        let scl = local[r * dim + c];
+                        for (x, j) in ltj[c].iter_mut().zip(&self.jrows[i + r].1) {
+                            *x = j.mul_add(scl, *x);
+                        }
+                    }
+                }
+                for row in &ltj {
+                    lc.update(row, cols, true);
+                }
+            }
+        }
+        self.chol_cone = Some(lc);
     }
 
     /// `HessianIncremental`
@@ -574,7 +670,8 @@ impl Ctx {
                 q[5] = uu;
                 q[6] = uv;
                 q[7] = vv;
-                q[8] = d[i] / ((mu * mu) * (1.0 + (mu * mu)));
+                // `1 + (mu*mu)` fused, the parentheses notwithstanding (`_mj_solPrimal`)
+                q[8] = d[i] / ((mu * mu) * mu.mul_add(mu, 1.0));
                 adv = dim;
             }
             q[0] *= 0.5;
@@ -1148,6 +1245,7 @@ impl SmoothModel {
                 jt,
                 m_rows,
                 chol: None,
+                chol_cone: None,
                 cost: 0.0,
                 quad_gauss: [0.0; 3],
                 scale: 0.0,

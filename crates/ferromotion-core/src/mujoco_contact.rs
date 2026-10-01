@@ -518,7 +518,7 @@ fn contact_zone(c: &ConeContact, d: &[f64], jar: &[f64], i: usize, force: &mut [
         }
         ConstraintState::Quadratic
     } else {
-        let dm = d[i] / (mu * mu * (1.0 + mu * mu));
+        let dm = d[i] / (mu * mu * mu.mul_add(mu, 1.0));
         let nmt = nn - mu * t;
         *cost += 0.5 * dm * nmt * nmt;
         force[i] = -dm * nmt * mu;
@@ -583,7 +583,7 @@ pub fn mujoco_constraint_hessian(contacts: &[ConeContact], d: &[f64], jar: &[f64
                     uu[j] = jar[i + j] * c.friction[j - 1];
                 }
                 let (nn, t) = (uu[0], uu[1..dim].iter().map(|x| x * x).sum::<f64>().sqrt());
-                let dm = d[i] / (mu * mu * (1.0 + mu * mu));
+                let dm = d[i] / (mu * mu * mu.mul_add(mu, 1.0));
                 let mut b = vec![0.0f64; dim * dim];
                 // first row: (1, −mu/T · U)
                 b[0] = 1.0;
