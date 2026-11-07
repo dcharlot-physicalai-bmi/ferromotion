@@ -422,14 +422,16 @@ mod tests {
         let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(hex, canonical);
         assert_eq!(digest_sha256(&bytes), GOLDEN_DIGEST);
+        let mut clock = crate::ferromorphic_clock::BoundaryClock::new(4, 1.0).unwrap();
+        clock.episode_start(1_000_000_000, 0.1, 20_000_000).unwrap();
         let envelope = crate::ferromorphic_clock::EpisodeEnvelope {
             version: crate::ferromorphic_clock::EPISODE_ENVELOPE_VERSION,
-            epoch_tick0: 0,
+            dt_bits: 0.1f64.to_bits(),
+            period_ns: 20_000_000,
             origin_ns: 1_000_000_000,
-            dt_ns: 20_000_000,
         };
         assert_eq!(
-            crate::ferromorphic_clock::bind_v2_timestamps(1_000_000_000, 20_000_000, 2, Some(envelope), Some(0)),
+            crate::ferromorphic_clock::bind_v2_timestamps(1_000_000_000, 20_000_000, 2, Some(envelope), &clock),
             Ok(())
         );
         assert_eq!(encode(&protocol_fixture()).unwrap(), bytes);
@@ -524,12 +526,18 @@ mod tests {
 
     #[test]
     fn chunk_index_does_not_become_a_ferromorphic_tick_without_an_epoch() {
-        assert_eq!(crate::ferromorphic_clock::map_chunk_index_to_tick(1, None, 0), Ok(crate::ferromorphic_clock::ChunkTickMap::EpochUnresolved));
         assert_eq!(
-            crate::ferromorphic_clock::map_chunk_index_to_tick(1, Some(4), 0),
-            Ok(crate::ferromorphic_clock::ChunkTickMap::Mapped { tick: 5, spikes_visible_at: 6 })
+            crate::ferromorphic_clock::map_chunk_index_to_tick(1, false, 0),
+            Ok(crate::ferromorphic_clock::ChunkTickMap::EpochUnresolved)
         );
-        assert_eq!(crate::ferromorphic_clock::map_chunk_index_to_tick(1, Some(u64::MAX), 0), Err(crate::ferromorphic_clock::TimebaseError::Overflow));
+        assert_eq!(
+            crate::ferromorphic_clock::map_chunk_index_to_tick(1, true, 0),
+            Ok(crate::ferromorphic_clock::ChunkTickMap::Mapped { tick: 1, spikes_visible_at: 2 })
+        );
+        assert_eq!(
+            crate::ferromorphic_clock::map_chunk_index_to_tick(u64::MAX, true, 0),
+            Err(crate::ferromorphic_clock::TimebaseError::Overflow)
+        );
         const { assert!(!crate::ferromorphic_clock::JOINT_LOOP_EXECUTED); }
         assert!(crate::ferromorphic_clock::UNRESOLVED.contains(&crate::ferromorphic_clock::UnresolvedPolicy::AccumulatorRemainsInsideDynamicsLab));
         assert_eq!(crate::ferromorphic_clock::TICK_ARITHMETIC, "checked_u64_fail_closed");

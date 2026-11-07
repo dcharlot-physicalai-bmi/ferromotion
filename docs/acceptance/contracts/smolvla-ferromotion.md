@@ -50,12 +50,13 @@ are refused before the `pixel * 2 - 1` map. Aloha joint deltas are refused.
 ## Clock envelope
 
 Version 2 timestamps stay `t0_ns` and `step_duration_ns` inside the v2 body.
-The episode epoch is an outer version-1 envelope (`epoch_tick0`, `origin_ns`,
-`dt_ns`), described in `ferromotion-clock.md`. It is a proposal to Ferric and
-ferromorphic. It is not interoperable yet, and it does not change the golden
-v2 digest. A missing epoch, an epoch that disagrees with the clock, or a
-timestamp off the nanosecond grid is refused. `EntryProposed` and physical
-actuation stay refused. No inference receipt exists. `DynamicsLab::step` is unchanged.
+The episode epoch is an outer version-1 envelope (`dt_bits`, `period_ns`,
+`origin_ns`) with tick 0 fixed, described in `ferromotion-clock.md`. It is a
+proposal to Ferric and ferromorphic. It is not interoperable until both confirm
+it, and it does not change the golden v2 digest. A missing or disagreeing
+epoch, a `dt` bit mismatch, or a timestamp off the nanosecond grid is refused.
+A 1000 ns period is valid. `EntryProposed` and physical actuation stay refused.
+No inference receipt exists. `DynamicsLab::step` is unchanged.
 
 Real weight, stats, and noise sha256 values for `lerobot/smolvla_base` are not
 in the fixture. The hashes there are synthetic.

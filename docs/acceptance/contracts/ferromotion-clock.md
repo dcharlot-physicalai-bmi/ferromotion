@@ -31,15 +31,15 @@ Tick phases recorded, and not simulated, are deliveries, neuron updates, enqueue
 
 ## Foreman decision, not yet a peer interoperability claim
 
-`episode_start(tick0, origin_ns, dt_ns)` is the only call that writes the shared epoch. It sets `tick` to `tick0`. `reset_state` still only clears neuron and ring flags. It leaves `tick`, `epoch_tick0`, `dt_ns`, `origin_ns`, and the ledger unchanged. Those two calls are not aliases.
+`episode_start(origin_ns, dt, period_ns)` is the only call that resets the epoch. It sets `tick` to 0. There is no `tick0` argument. `reset_state` only clears neuron and ring flags. It leaves `tick`, the epoch, `period_ns`, `origin_ns`, `dt` bits, and the ledger unchanged.
+
+`dt` is the canonical dynamics step and is stored as `f64` bits. Two engines match only when those bits are equal and both values are finite and positive. `period_ns` is the integer scheduling period and must be nonzero. The conversion to a nominal duration is `period_ns as f64 * 1e-9`. That value is deterministic. It is not required to round-trip to `period_ns`, so a 1000 ns period is accepted. It is also not required to equal `dt`.
 
 Tick arithmetic on this adapter is checked `u64`. `advance` and `delivery_step` return `Overflow` and do not wrap. Peer `Sim::step` is untouched, so a peer build that still wraps in release is not this adapter.
 
-The shared duration is integer nanoseconds. `f64_seconds_per_tick` computes `dt_ns as f64 * 1e-9` and accepts it only when `seconds * 1e9` equals `dt_ns as f64` with no rounding. Otherwise the bind is `InexactDt`.
-
 ## Outer envelope, codec v2 unchanged
 
-`EpisodeEnvelope` version 1 carries `epoch_tick0`, `origin_ns`, and `dt_ns` beside a codec v2 chunk. It is not written into the v2 canonical bytes and it is not part of the v2 digest. `EPISODE_ENVELOPE_INTEROPERABLE` is false until Ferric and ferromorphic accept this envelope. `bind_v2_timestamps` refuses a missing epoch, an epoch that disagrees with the clock, a `step_duration_ns` that is not `dt_ns`, and a `t0_ns` that is not `origin_ns + n * dt_ns`.
+`EpisodeEnvelope` version 1 carries `dt_bits`, `period_ns`, and `origin_ns` beside a codec v2 chunk. The episode tick is 0 and is not a field of the chunk. The envelope is not written into the v2 canonical bytes and it is not part of the v2 digest. `EPISODE_ENVELOPE_INTEROPERABLE` stays false until both Ferric and ferromorphic confirm this spec. `bind_v2_timestamps` refuses a missing epoch, an origin or period that disagrees with the clock, `dt` bits that disagree, a `step_duration_ns` that is not `period_ns`, and a `t0_ns` that is not `origin_ns + n * period_ns`. A matching digest still does not authorize inference or physical actuation.
 
 ## Still open
 
