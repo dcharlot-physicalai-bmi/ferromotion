@@ -116,9 +116,10 @@ pub(crate) struct MjKinematics {
 /// A frame in the world as `mjData` holds it: position and row-major rotation matrix.
 pub(crate) type XFrame = ([f64; 3], [f64; 9]);
 
-/// `mji_mulMatVec3`, contracted.
+/// `mji_mulMatVec3`. Always the contracted product. The unfused form was selectable and
+/// dropped one `qacc` match (24/636 to 23/636); that selection was reverted.
 fn mul_mat_vec3(m: &[f64; 9], v: &[f64; 3]) -> [f64; 3] {
-    let out = crate::fp_contract::mul_mat_vec3_with(crate::fp_contract::active_policy().mul_mat_vec3, m, v);
+    let out = crate::fp_contract::mul_mat_vec3_with(crate::fp_contract::Contraction::Contracted, m, v);
     let mut inputs = [0.0; 12];
     inputs[..9].copy_from_slice(m);
     inputs[9..].copy_from_slice(v);

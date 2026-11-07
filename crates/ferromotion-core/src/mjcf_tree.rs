@@ -3965,9 +3965,14 @@ pub(crate) fn quat_to_rotation(q: &[f64; 4]) -> Matrix3<f64> {
 
 /// A mesh as MuJoCo's OBJ reader (tinyobjloader with `real_t = float`) delivers it: coordinates rounded to
 /// `f32`, quads split along their **shorter diagonal** (measured in `f32`).
-/// **tinyobjloader's built-in ear clipping, ported branch for branch** — how a face with more than four
-/// vertices becomes triangles. MuJoCo 3.13.0 builds tinyobj without `TINYOBJLOADER_USE_MAPBOX_EARCUT`, and
-/// `obj_decoder.cc` keeps a face only when the triangulated `num_face_vertices` is 3 or 4. Three Menagerie
+///
+/// Polygons with five or more vertices are triangulated by a Rust rewrite of tinyobjloader's builtin ear
+/// clip (the path compiled when `TINYOBJLOADER_USE_MAPBOX_EARCUT` is unset). That algorithm, including the
+/// crossing-number test it carries from W. Randolph Franklin's `pnpoly`, is adapted from tinyobjloader,
+/// MIT License, copyright 2012-Present Syoyo Fujita and contributors
+/// (<https://github.com/tinyobjloader/tinyobjloader>, commit `2945a967` as pinned by MuJoCo 3.13.0). It is
+/// not an independent geometric invention and it is not a verbatim copy of the C++ header. MuJoCo's
+/// `obj_decoder.cc` keeps a face only when the triangulated vertex count is 3 or 4. Three Menagerie
 /// families (`arx_l5`, `hello_robot_stretch_3`, `trossen_wxai`) have such faces.
 ///
 /// The PyPI wheel's tinyobj (no `tryParseDouble`, libc++) does not triangulate a regular polygon of more

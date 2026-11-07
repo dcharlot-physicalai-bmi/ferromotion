@@ -1,6 +1,6 @@
 # Compiled body mass and inertia, contract-off oracle
 
-The published default stays contracted. Baseline ledger and golden arrays are unchanged. The three kinematics sites are unchanged. The measured `qacc` regression, 24/636 with `mul_quat`+`rot_vec_quat` unfused and 23/636 after `mul_mat_vec3` is also unfused, was not re-measured. Mass and contact do not yet both have a verdict against that regression.
+The published default stays contracted. Baseline ledger and golden arrays are unchanged. `mul_mat_vec3` is no longer a selectable policy site. The remeasure below is why.
 
 ## Two artifacts, two hashes
 
@@ -64,10 +64,26 @@ Native (`menagerie_native` against `/tmp/oracle-x86-native.txt`), before this fi
 | `qacc_smooth` | 23/636, worst `3.42e0` on stretch state 2 | 23/636, worst `1.33e-6` on stretch state 2 |
 | `body_invweight0` | 19/212, worst `5.28e-1` on stretch | 19/212, worst `7.50e-8` on stretch |
 
-Stretch is still a `body_inertia` first-stage miss. The residual is the few ulps above, so the match count did not move. The `3.53e-7` error is gone. `qacc` on the published default is still 20/636. The opt-in matvec regression, 24/636 with `mul_quat`+`rot_vec_quat` unfused versus 23/636 after `mul_mat_vec3`, was not re-run.
+Stretch is still a `body_inertia` first-stage miss. The residual is the few ulps above, so the match count did not move. The `3.53e-7` error is gone. `qacc` on the published default is still 20/636. `normalize4` was not changed.
 
-## Contact rows
+## Piper rows are policy-specific
 
-Not changed. On the published default, `agilex_piper/piper.xml` state 0 is `efc_J` **80 vs 80** both before and after this fix. The first mismatch is a value at index 70 (`-7.393718467647721e-7` versus `-7.393718468757946e-7`), not a missing row. The 56-versus-80 length (three rows, one condim-3 contact) is in the `mul_quat` and `mul_quat`+`rot_vec_quat` unfused sweeps. The all-three unfused sweep is 80 vs 80 again. That length gap is not a detection-margin change to make on the published default, and it was not touched here.
+Same model `agilex_piper/piper.xml`, same state `qpos0` (native state 0: zero `qvel`, zero `ctrl`, zero `act`), same contract-off compiler and the PyPI wheel. Both C libraries report `ncon 1`, `nefc 10`, `nv 8`, elliptic cone. The contact is unnamed geoms 83 and 86, the `link7` and `link8` boxes (`size` 0.012, 0.015, 0.0025), `dist` `-3.062706528329652e-19`, `includemargin` 0, `dim` 3, `exclude` 0. `efc_type` is `0 1 1 1 1 1 1 7 7 7`. The three `7`s are that contact.
 
-`normalize4` is still later.
+Published-default Rust also has `efc_J` length 80 and one witness, `dist` bits `bc27c6fffffffff7`. Its geom positions differ from the oracle in the last bits and the witness is still present.
+
+Unfused `mul_quat`, and unfused `mul_quat`+`rot_vec_quat`, have `efc_J` length 56 and `efc_type` `0,1,1,1,1,1,1`. No witness. The collider's line for pair 83/86 is "no contact: the collider found them apart". The first pose difference against the oracle is geom 83 `y`: oracle `bf51c223e47ff2b4`, unfused quat `bf51c223e47ff2b6`. Geom 86 matches the oracle. `rot_vec_quat` does not move those two positions any further.
+
+Adding unfused `mul_mat_vec3` puts geom 83 `y` back on `bf51c223e47ff2b4`. The witness returns (`dist` bits `bc169849c1242eb9`) and `efc_J` is 80 vs 80 again, first value mismatch at index 70. That is the same length recovery seen in the pre-mesh all-three sweep. It is not a constraint-allocation bug and it was not forced with a distance snap.
+
+## `mul_mat_vec3` remeasure, then revert
+
+After the ear clip, against the same contract-off dumps:
+
+| sites unfused | trajectory | `qacc` | `efc_J` | `body_inertia` |
+| --- | --- | --- | --- | --- |
+| none | 1/212 | 20/636 | 359/636 | 115/212, worst `2.27e-13` |
+| `mul_quat`, `rot_vec_quat` | 1/212 | 24/636 | 367/636 | 115/212, worst `2.27e-13` |
+| those plus `mul_mat_vec3` | 1/212 | 23/636 | 369/636 | 115/212, worst `2.27e-13` |
+
+The one-match `qacc` loss is still there. `mul_mat_vec3` is refused by `install_policy` and the kinematics call stays contracted. `mul_mat_vec3_with` and the vector file keep the unfused formula as research evidence. The pre-earclip table in `oracle-policy.md` is unchanged.
