@@ -10,33 +10,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include "pyhex.h"
 
 static void pyhex(FILE* o, double x) {
-  uint64_t u;
-  memcpy(&u, &x, 8);
-  if (u >> 63) fputc('-', o);
-  int be = (int)((u >> 52) & 0x7ff);
-  uint64_t frac = u & 0xfffffffffffffULL;
-  if (be == 0 && frac == 0) {
-    fputs("0x0.0p+0", o);
-    return;
+  if (pyhex_write(o, x) != 0) {
+    fprintf(stderr, "refusing: NaN or Inf in an oracle field\n");
+    exit(3);
   }
-  if (be == 0x7ff) {
-    fputs(frac ? "nan" : "inf", o);
-    return;
-  }
-  if (be == 0) {
-    int shift = 0;
-    uint64_t v = frac;
-    while ((v & (1ULL << 51)) == 0) {
-      v <<= 1;
-      shift++;
-    }
-    uint64_t mant = (v << 1) & 0xfffffffffffffULL;
-    fprintf(o, "0x1.%013llxp%+d", (unsigned long long)mant, -1022 - shift);
-    return;
-  }
-  fprintf(o, "0x1.%013llxp%+d", (unsigned long long)frac, be - 1023);
 }
 
 static void space_d(FILE* o, const double* p, int n) {

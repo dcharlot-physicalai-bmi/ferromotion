@@ -1,32 +1,38 @@
 #!/usr/bin/env bash
-# Compare ferromotion to the ARM oracle dumps. Completing with mismatches is not a bit-exact pass.
+# Compare ferromotion to the dumps in a run-212 directory.
+# The example programs return 0 when they finish printing mismatches.
+# This wrapper does not. See scripts/accept-rust-212.sh.
+# Exit 2: refused before cargo.
+# Exit 3: cargo/timeout failed, or the summary is not 212 models and 20 steps.
+# Exit 1: all 212 models and all 20 steps were compared, and something mismatched.
+# Exit 0: every tally matched. That is the only acceptance.
 set -euo pipefail
 export LC_ALL=C
-if [[ "$(uname -s)" != "Linux" || "$(uname -m)" != "aarch64" ]]; then
-  echo "refusing: Linux aarch64 only" >&2
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=limits.sh
+source "$SCRIPT_DIR/limits.sh"
+arm_oracle_require_thor2 "rust comparison is thor2 first"
+arm_oracle_apply_limits
+if ! ROOT="$(arm_oracle_root "$0")"; then
   exit 2
 fi
-if [[ "$(hostname -s)" != "thor2" ]]; then
-  echo "refusing: rust comparison is thor2 first" >&2
-  exit 2
-fi
-ulimit -t 14400
-export OMP_NUM_THREADS=1
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REV="123347c0eeab7e13c8da0828ab593bbd95bcf335"
 RUN="${1:?run directory from run-212.sh}"
 if [[ ! -f "$RUN/native.txt" || ! -f "$RUN/step.txt" ]]; then
   echo "refusing: $RUN is missing native.txt or step.txt" >&2
   exit 2
 fi
-if [[ -x "${CARGO_HOME:-}/bin/cargo" ]]; then
-  export PATH="$CARGO_HOME/bin:$PATH"
-elif [[ -x "$HOME/.cargo/bin/cargo" ]]; then
-  export PATH="$HOME/.cargo/bin:$PATH"
-elif ! command -v cargo >/dev/null; then
-  echo "refusing: cargo is not available. See rust/OPTIONAL-RUSTUP.md. This script does not install it." >&2
+if [[ ! -f "$RUN/libdir.txt" ]]; then
+  echo "refusing: $RUN/libdir.txt is missing, so the receipt cannot bind the five libraries" >&2
   exit 2
 fi
+LIBDIR="$(tr -d '[:space:]' <"$RUN/libdir.txt")"
+if [[ ! -d "$LIBDIR" ]]; then
+  echo "refusing: library directory $LIBDIR does not exist" >&2
+  exit 2
+fi
+arm_oracle_select_cargo
+arm_oracle_require_vendor "$ROOT/ferromotion"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="$HOME/ferromotion-oracle/$REV/rust212-$STAMP"
 if [[ -e "$OUT" ]]; then
@@ -34,24 +40,37 @@ if [[ -e "$OUT" ]]; then
   exit 2
 fi
 mkdir "$OUT"
+arm_oracle_cargo_target "$OUT"
 cd "$ROOT/ferromotion"
 set +e
-cargo run --release -p ferromotion-core --example menagerie_native -- \
-  "$ROOT/menagerie" "$RUN/native.txt" > "$OUT/native.txt" 2>&1
+arm_oracle_timeout "$ARM_ORACLE_WALL_TIMEOUT" \
+  "${ARM_ORACLE_CARGO[@]}" run --locked --jobs 2 --release -p ferromotion-core --example menagerie_native -- \
+  "$ROOT/menagerie" "$RUN/native.txt" >"$OUT/native.txt" 2>&1
 native_rc=$?
-cargo run --release -p ferromotion-core --example menagerie_native_step -- \
-  "$ROOT/menagerie" "$RUN/step.txt" > "$OUT/step.txt" 2>&1
+arm_oracle_timeout "$ARM_ORACLE_WALL_TIMEOUT" \
+  "${ARM_ORACLE_CARGO[@]}" run --locked --jobs 2 --release -p ferromotion-core --example menagerie_native_step -- \
+  "$ROOT/menagerie" "$RUN/step.txt" >"$OUT/step.txt" 2>&1
 step_rc=$?
 set -e
-echo "menagerie_native_exit $native_rc" | tee "$OUT/result.txt"
-echo "menagerie_native_step_exit $step_rc" | tee -a "$OUT/result.txt"
+{
+  echo "menagerie_native_exit $native_rc"
+  echo "menagerie_native_step_exit $step_rc"
+  echo "cargo_target_dir $CARGO_TARGET_DIR"
+} >"$OUT/result.txt"
+if [[ -e "$ROOT/ferromotion/target" ]]; then
+  echo "execution: cargo wrote $ROOT/ferromotion/target inside the source tree" >&2
+  exit 3
+fi
+export ARM_ORACLE_ROOT="$ROOT"
 if [[ "$native_rc" -ne 0 || "$step_rc" -ne 0 ]]; then
-  echo "rust comparison failed to run" >&2
-  exit 1
+  echo "not_run cargo_failed native=$native_rc step=$step_rc" | tee "$OUT/accept.txt" | tee -a "$OUT/result.txt" >&2
+  "$SCRIPT_DIR/write-receipt.sh" "$OUT" "$LIBDIR" rust
+  exit 3
 fi
-if ! grep -q "BIT FOR BIT" "$OUT/native.txt" || ! grep -q "of 212 models stepped" "$OUT/step.txt"; then
-  echo "refusing: comparison summary is missing" >&2
-  exit 1
-fi
-echo "comparison finished. Exit 0 means the runners completed, not that every array matched." | tee -a "$OUT/result.txt"
-grep -E "body_inertia|body_mass|efc_J| qacc |of 212 models stepped" "$OUT/native.txt" "$OUT/step.txt" | tee -a "$OUT/result.txt" || true
+set +e
+"$SCRIPT_DIR/accept-rust-212.sh" "$OUT/native.txt" "$OUT/step.txt" >"$OUT/accept.txt"
+accept_rc=$?
+set -e
+cat "$OUT/accept.txt" | tee -a "$OUT/result.txt"
+"$SCRIPT_DIR/write-receipt.sh" "$OUT" "$LIBDIR" rust
+exit "$accept_rc"
