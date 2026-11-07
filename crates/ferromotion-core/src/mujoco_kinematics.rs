@@ -35,23 +35,14 @@ pub(crate) fn sincos(x: f64) -> (f64, f64) {
 
 /// `sin` and `cos` of one argument, off Apple platforms.
 ///
-/// Clang on arm64 lowers every `sin`/`cos` pair in MuJoCo to one `__sincos_stret`. The sine agrees
-/// with the host `sin` at every argument this port has been pinned against. The cosine does not: the
-/// pair that build returns is the one whose squares sum to 1 exactly. The host `cos` already does so
-/// for most arguments (a degree Euler, a hinge); a `fromto` whose `atan2` lands where `sin² + cos²`
-/// rounds a ulp under 1 does not, and `copysign(sqrt(1 − sin²), cos)` is the bit that does. Taking
-/// that reconstruction whenever the host pair is not already Pythagorean — and only then — is what
-/// `__sincos_stret` does on those arguments. Always reconstructing breaks the pairs the host already
-/// got exact.
+/// This is the host libm pair (`sin` then `cos`). It is not Apple `__sincos_stret`, and matching
+/// host libm is not the arm64 reference the unit-test oracles were captured from. Replacing `cos`
+/// with `copysign(sqrt(1 − sin²), cos)` whenever `sin² + cos²` is not already 1 hits one arm64
+/// `fromto` cosine and moves a small Euler half-angle whose host pair is already Pythagorean.
+/// That is a fixture adjustment, not a port of the arm64 function, so it is not used.
 #[cfg(not(target_vendor = "apple"))]
 pub(crate) fn sincos(x: f64) -> (f64, f64) {
-    let s = x.sin();
-    let c = x.cos();
-    if s * s + c * c == 1.0 {
-        return (s, c);
-    }
-    let r = (1.0 - s * s).max(0.0).sqrt().copysign(c);
-    if s * s + r * r == 1.0 { (s, r) } else { (s, c) }
+    (x.sin(), x.cos())
 }
 
 /// `mjtSameFrame`: where [`mj_local2global`] takes an element's frame from instead of composing it.
@@ -326,20 +317,22 @@ pub(crate) struct KinState {
 mod tests {
     use super::*;
 
-    /// Off Apple, `__sincos_stret` is not in libm. The pair it returns is the host sine with the cosine
-    /// whose square sums with it to 1: a `fromto` half-angle where the host cosine falls a ulp short, and
-    /// a small Euler half-angle where the host cosine is already exact and the reconstruction is not.
+    /// Host `sincos` stays on libm. The Pythagorean reconstruction matches one arm64 fromto cosine
+    /// (`0x3fe833ad8be0fb0b`) and disagrees with a small Euler half-angle whose host pair already
+    /// sums to 1. Neither fact is a general `__sincos_stret`.
     #[test]
     #[cfg(not(target_vendor = "apple"))]
-    fn sincos_picks_the_pythagorean_pair_mujoco_arm64_returns() {
+    fn host_sincos_is_libm_not_a_pythagorean_repair() {
         let half = f64::from_bits(0x3fe6d214bbbba928);
         let (s, c) = sincos(half);
-        assert_eq!(s.to_bits(), half.sin().to_bits());
-        assert_eq!(c.to_bits(), 0x3fe833ad8be0fb0b, "the fromto cosine is the reconstruction, not host cos {:x}", half.cos().to_bits());
-        assert_eq!(s * s + c * c, 1.0);
+        assert_eq!((s.to_bits(), c.to_bits()), (half.sin().to_bits(), half.cos().to_bits()));
+        assert_eq!(half.cos().to_bits(), 0x3fe833ad8be0fb0a);
+        let rebuilt = (1.0 - s * s).max(0.0).sqrt().copysign(c);
+        assert_eq!(rebuilt.to_bits(), 0x3fe833ad8be0fb0b);
+        assert_ne!(c.to_bits(), rebuilt.to_bits());
         let small = 0.3f64.to_radians() / 2.0;
         let (s, c) = sincos(small);
-        assert_eq!(c.to_bits(), small.cos().to_bits(), "a host pair that is already Pythagorean stays");
+        assert_eq!(s * s + c * c, 1.0);
         assert_ne!(c.to_bits(), (1.0 - s * s).sqrt().copysign(c).to_bits());
     }
 

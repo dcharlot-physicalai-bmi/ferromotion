@@ -181,6 +181,13 @@ def provenance(pin: dict, menagerie: Path) -> dict:
         "platform": platform.platform(),
         "machine": platform.machine(),
         "os_release": os_release,
+        "platform_contract": (
+            "Oracle: Linux x86_64 MuJoCo 3.13.0 wheel, glibc libm, that wheel's "
+            "floating-point contraction. Unit-test goldens are MuJoCo 3.13.0 arm64 "
+            "dylib bits (Apple clang contraction and __sincos_stret). Non-Apple "
+            "sincos in ferromotion is host libm, not __sincos_stret. A match to "
+            "host libm is not a match to the arm64 reference."
+        ),
     }
 
 
@@ -252,9 +259,87 @@ def main() -> int:
             return native_cmp.returncode
         native = parse_native_summary(native_stdout)
 
+    gpu = shutil.which("nvidia-smi") is not None
+    def importable(mod: str) -> bool:
+        try:
+            __import__(mod)
+            return True
+        except Exception:
+            return False
+
+    warp_ok, newton_ok = importable("warp"), importable("newton")
     errors = validate(pin, xmls, loads, step_rows, native if not args.skip_native else None)
     if args.skip_native:
         errors.append("native efc_J/qacc phase was not executed")
+    exact = sum(1 for r in step_rows if r.get("status") == "bit_exact")
+    tally = native or {}
+
+    def cell(feature: str, key: str) -> dict:
+        same, n = tally.get(key, (None, None))
+        return {
+            "feature": feature,
+            "solver": "mujoco_3.13.0_cpu",
+            "backend": "cpu",
+            "status": "executed" if key in tally else "not_run",
+            "matched": same == n and n not in (None, 0),
+            "same": same,
+            "n": n,
+        }
+
+    blocked_reason = "no NVIDIA device and the package is not installed; not a pass"
+    feature_matrix = [
+        {
+            "feature": "trajectory_qpos_qvel_act_warmstart",
+            "solver": "mujoco_3.13.0_cpu",
+            "backend": "cpu",
+            "status": "executed",
+            "matched": exact == pin["expected_mujoco_loadable"] and bool(step_rows),
+            "same": exact,
+            "n": pin["expected_mujoco_loadable"],
+        },
+        cell("mass_matrix", "M"),
+        cell("constraint_jacobian", "efc_J"),
+        cell("constraint_force", "qfrc_constraint"),
+        cell("actuator_force", "actuator_force"),
+        cell("solver_acceleration", "qacc"),
+        cell("solver_iterations", "solver_niter"),
+        {
+            "feature": "matched_fidelity_rollout",
+            "solver": "mujoco_warp",
+            "backend": "gpu",
+            "revision": "4d1c64bc077d725247e9bf5e2ac3f357749ff804",
+            "status": "blocked" if not (gpu and warp_ok) else "not_measured",
+            "matched": False,
+            "reason": blocked_reason if not (gpu and warp_ok) else "import succeeded; no rollout was run",
+        },
+        {
+            "feature": "gradient",
+            "solver": "mujoco_warp",
+            "backend": "gpu",
+            "revision": "4d1c64bc077d725247e9bf5e2ac3f357749ff804",
+            "status": "blocked",
+            "matched": False,
+            "reason": "no gradient was evaluated; Warp's README at this revision says differentiability is not yet available",
+        },
+        {
+            "feature": "matched_fidelity_rollout",
+            "solver": "newton",
+            "backend": "gpu",
+            "revision": "1a497c00ed255db343e39eec4d614864c9aa9b95",
+            "status": "blocked" if not (gpu and newton_ok) else "not_measured",
+            "matched": False,
+            "reason": blocked_reason if not (gpu and newton_ok) else "import succeeded; no rollout was run",
+        },
+        {
+            "feature": "gradient",
+            "solver": "newton",
+            "backend": "gpu",
+            "revision": "1a497c00ed255db343e39eec4d614864c9aa9b95",
+            "status": "blocked",
+            "matched": False,
+            "reason": "no gradient was evaluated on this host",
+        },
+    ]
     record = {
         **provenance(pin, menagerie),
         "step_oracle_sha256": sha256_file(step_oracle),
@@ -267,6 +352,21 @@ def main() -> int:
         "native_stdout_sha256": hashlib.sha256(native_stdout.encode()).hexdigest() if native_stdout else None,
         "errors": errors,
         "passed": not errors,
+        "step_bit_exact": exact,
+        "step_mismatch": sum(1 for r in step_rows if r.get("status") == "mismatch"),
+        "feature_matrix": feature_matrix,
+        "warp_newton": {
+            "gpu_device": gpu,
+            "warp_importable": warp_ok,
+            "newton_importable": newton_ok,
+            "executed": False,
+        },
+        "smolvla": {
+            "checkpoint": "5e8d12a6e2975b0e5e5fce7c8caf47c371d257b6",
+            "weights_downloaded": False,
+            "integrated": False,
+            "physical_actuation": False,
+        },
     }
     load_by = {r["model"]: r for r in loads}
     step_by = {r["model"]: r for r in step_rows}

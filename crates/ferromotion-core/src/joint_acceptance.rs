@@ -87,7 +87,8 @@ pub struct JointReceipt {
     pub ferric_tier: Option<ResourceBound>,
     /// `ferric-joule`. Empty and [`EvidenceKind::NotMeasured`] until a run records it.
     pub ferric_joule: EnergyTrace,
-    /// ferrotherm `.ftp` program digest (`spec/ftp-v1.md` at [`FERROTHERM_REVISION`]).
+    /// ferrotherm `.ftp` program digest (`spec/ftp-v1.md` at ferrotherm revision
+    /// `3c474719e193d4f441201975b16419223e83d160`).
     pub ferrotherm_ftp_sha256: Option<String>,
     pub ferrotherm_revision: String,
     /// Calibrated sampler/fabric energy. Not inferred from `.ftp` operation costs.

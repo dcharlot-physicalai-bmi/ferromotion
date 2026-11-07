@@ -1,6 +1,6 @@
 {
   "evidence_kind": "independently_executed",
-  "passed": false,
+  "note": "Rerun after non-Apple sincos was returned to host libm (sin, cos). The Pythagorean reconstruction is not in this tree. ferromotion_sha is git HEAD at the moment of the run, parent of the commit that adds this file. Oracle is the Linux x86_64 MuJoCo 3.13.0 wheel, not the arm64 dylib.",
   "prior_claim": "Unverified author claim at ferromotion 5daca8aac1b513a18c54792383d021cf1d27af56: 212 of 212 models bit-exact on every one of 20 mj_step steps, and efc_J/qacc bit-exact on 636 of 636 states. This pin is the Menagerie commit contemporaneous with that claim. 212 is the number of */*.xml files MuJoCo 3.13.0 loads there, counted by this script, not a subset chosen to fit the claim. Five further XML files in the same tree do not load and stay in the ledger as load errors.",
   "menagerie_repo": "https://github.com/google-deepmind/mujoco_menagerie",
   "menagerie_sha": "4d038b3feae26ec82b46a4d586379114012a8ac7",
@@ -25,8 +25,7 @@
     "efc_J",
     "qacc"
   ],
-  "ferromotion_base_sha": "5daca8aac1b513a18c54792383d021cf1d27af56",
-  "note": "Executed on the workspace before this change was committed. ferromotion sources are that base plus the sincos pair fix, which does not change models whose host sin/cos pair is already Pythagorean. The Linux wheel is not the arm64 dylib the unit-test oracles were captured from.",
+  "ferromotion_sha": "ce1c1f8d0c36107f704bf3326f0d2116827c5ae5",
   "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
   "python": "3.12.3",
   "platform": "Linux-6.12.113+-x86_64-with-glibc2.39",
@@ -46,316 +45,12 @@
     "UBUNTU_CODENAME": "noble",
     "LOGO": "ubuntu-logo"
   },
+  "platform_contract": "Oracle: Linux x86_64 MuJoCo 3.13.0 wheel, glibc libm, that wheel's floating-point contraction. Unit-test goldens are MuJoCo 3.13.0 arm64 dylib bits (Apple clang contraction and __sincos_stret). Non-Apple sincos in ferromotion is host libm, not __sincos_stret. A match to host libm is not a match to the arm64 reference.",
   "step_oracle_sha256": "6acb55b5ca91040397afb4c29733571a21323876a140aff8731fb8cee49428a4",
   "native_oracle_sha256": "b1126e028df2bd4d0690f43fd67c5ced9147f8179f4b6ab70c5ba81a5cf04b11",
   "xml_count": 217,
   "mujoco_loadable": 212,
   "mujoco_load_errors": 5,
-  "step_bit_exact": 1,
-  "step_mismatch": 211,
-  "native_tally": {
-    "mjData M": {
-      "same": 18,
-      "n": 636
-    },
-    "mjData act_dot": {
-      "same": 636,
-      "n": 636
-    },
-    "mjData actuator_force": {
-      "same": 564,
-      "n": 636
-    },
-    "mjData actuator_length": {
-      "same": 609,
-      "n": 636
-    },
-    "mjData actuator_velocity": {
-      "same": 608,
-      "n": 636
-    },
-    "mjData cdof": {
-      "same": 75,
-      "n": 636
-    },
-    "mjData cdof_dot": {
-      "same": 146,
-      "n": 636
-    },
-    "mjData cinert": {
-      "same": 3,
-      "n": 636
-    },
-    "mjData crb": {
-      "same": 3,
-      "n": 636
-    },
-    "mjData cvel": {
-      "same": 225,
-      "n": 636
-    },
-    "mjData efc_AR": {
-      "same": 0,
-      "n": 30
-    },
-    "mjData efc_D": {
-      "same": 182,
-      "n": 636
-    },
-    "mjData efc_J": {
-      "same": 359,
-      "n": 636
-    },
-    "mjData efc_KBIP": {
-      "same": 567,
-      "n": 636
-    },
-    "mjData efc_R": {
-      "same": 176,
-      "n": 636
-    },
-    "mjData efc_aref": {
-      "same": 353,
-      "n": 636
-    },
-    "mjData efc_b": {
-      "same": 114,
-      "n": 636
-    },
-    "mjData efc_diagA": {
-      "same": 176,
-      "n": 636
-    },
-    "mjData efc_force": {
-      "same": 186,
-      "n": 636
-    },
-    "mjData efc_frictionloss": {
-      "same": 634,
-      "n": 636
-    },
-    "mjData efc_id": {
-      "same": 634,
-      "n": 636
-    },
-    "mjData efc_margin": {
-      "same": 634,
-      "n": 636
-    },
-    "mjData efc_pos": {
-      "same": 376,
-      "n": 636
-    },
-    "mjData efc_state": {
-      "same": 622,
-      "n": 636
-    },
-    "mjData efc_type": {
-      "same": 634,
-      "n": 636
-    },
-    "mjData efc_vel": {
-      "same": 422,
-      "n": 636
-    },
-    "mjData nisland": {
-      "same": 636,
-      "n": 636
-    },
-    "mjData qLD": {
-      "same": 18,
-      "n": 636
-    },
-    "mjData qLDiagInv": {
-      "same": 58,
-      "n": 636
-    },
-    "mjData qacc": {
-      "same": 20,
-      "n": 636
-    },
-    "mjData qacc_smooth": {
-      "same": 23,
-      "n": 636
-    },
-    "mjData qfrc_actuator": {
-      "same": 564,
-      "n": 636
-    },
-    "mjData qfrc_bias": {
-      "same": 88,
-      "n": 636
-    },
-    "mjData qfrc_constraint": {
-      "same": 186,
-      "n": 636
-    },
-    "mjData qfrc_damper": {
-      "same": 633,
-      "n": 636
-    },
-    "mjData qfrc_fluid": {
-      "same": 620,
-      "n": 636
-    },
-    "mjData qfrc_gravcomp": {
-      "same": 592,
-      "n": 636
-    },
-    "mjData qfrc_passive": {
-      "same": 567,
-      "n": 636
-    },
-    "mjData qfrc_smooth": {
-      "same": 133,
-      "n": 636
-    },
-    "mjData qfrc_spring": {
-      "same": 627,
-      "n": 636
-    },
-    "mjData solver_niter": {
-      "same": 634,
-      "n": 636
-    },
-    "mjData subtree_com": {
-      "same": 107,
-      "n": 636
-    },
-    "mjData ten_length": {
-      "same": 597,
-      "n": 636
-    },
-    "mjData ten_velocity": {
-      "same": 601,
-      "n": 636
-    },
-    "mjData xanchor": {
-      "same": 151,
-      "n": 636
-    },
-    "mjData xaxis": {
-      "same": 96,
-      "n": 636
-    },
-    "mjData ximat": {
-      "same": 31,
-      "n": 636
-    },
-    "mjData xipos": {
-      "same": 96,
-      "n": 636
-    },
-    "mjData xmat": {
-      "same": 100,
-      "n": 636
-    },
-    "mjData xpos": {
-      "same": 147,
-      "n": 636
-    },
-    "mjData xquat": {
-      "same": 100,
-      "n": 636
-    },
-    "mjModel M_colind": {
-      "same": 212,
-      "n": 212
-    },
-    "mjModel M_rowadr": {
-      "same": 212,
-      "n": 212
-    },
-    "mjModel M_rownnz": {
-      "same": 212,
-      "n": 212
-    },
-    "mjModel body_dofadr": {
-      "same": 212,
-      "n": 212
-    },
-    "mjModel body_dofnum": {
-      "same": 212,
-      "n": 212
-    },
-    "mjModel body_inertia": {
-      "same": 115,
-      "n": 212
-    },
-    "mjModel body_invweight0": {
-      "same": 17,
-      "n": 212
-    },
-    "mjModel body_jntadr": {
-      "same": 212,
-      "n": 212
-    },
-    "mjModel body_mass": {
-      "same": 192,
-      "n": 212
-    },
-    "mjModel body_parentid": {
-      "same": 212,
-      "n": 212
-    },
-    "mjModel body_rootid": {
-      "same": 212,
-      "n": 212
-    },
-    "mjModel body_simple": {
-      "same": 212,
-      "n": 212
-    },
-    "mjModel body_subtreemass": {
-      "same": 196,
-      "n": 212
-    },
-    "mjModel dof_M0": {
-      "same": 25,
-      "n": 212
-    },
-    "mjModel dof_armature": {
-      "same": 212,
-      "n": 212
-    },
-    "mjModel dof_bodyid": {
-      "same": 212,
-      "n": 212
-    },
-    "mjModel dof_invweight0": {
-      "same": 21,
-      "n": 212
-    },
-    "mjModel dof_jntid": {
-      "same": 212,
-      "n": 212
-    },
-    "mjModel dof_parentid": {
-      "same": 212,
-      "n": 212
-    },
-    "mjModel dof_simplenum": {
-      "same": 212,
-      "n": 212
-    },
-    "mjModel gravity": {
-      "same": 212,
-      "n": 212
-    },
-    "mjModel jnt_bodyid": {
-      "same": 212,
-      "n": 212
-    },
-    "mjModel jnt_dofadr": {
-      "same": 212,
-      "n": 212
-    },
-    "mjModel tendon_invweight0": {
-      "same": 175,
-      "n": 212
-    }
-  },
-  "native_stdout_sha256": "efddf2cac56cd9938a337c11962a74e73819ca51c0be4a91a24d48b001dc9824",
   "models": [
     {
       "model": "agilex_piper/piper.xml",
@@ -379,7 +74,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 2.12e-14, qvel 4.24e-11, qacc_warmstart 6.89e-7"
+      "detail": "qpos off 7.38e-15, qvel 2.21e-11, qacc_warmstart 2.55e-7"
     },
     {
       "model": "agility_cassie/scene.xml",
@@ -427,7 +122,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 2.22e-16, qvel 9.68e-14, qacc_warmstart 1.91e-10"
+      "detail": "qpos off 2.22e-16, qvel 1.43e-13, qacc_warmstart 9.28e-11"
     },
     {
       "model": "anybotics_anymal_b/anymal_b.xml",
@@ -451,7 +146,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 6.94e-18, qvel 2.13e-14, qacc_warmstart 1.36e-11"
+      "detail": "qpos off 1.05e-18, qvel 2.13e-14, qacc_warmstart 1.64e-11"
     },
     {
       "model": "anybotics_anymal_c/anymal_c_mjx.xml",
@@ -459,7 +154,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 2.78e-17, qvel 1.60e-14, qacc_warmstart 9.09e-12"
+      "detail": "qpos off 2.78e-17, qvel 1.42e-14, qacc_warmstart 7.28e-12"
     },
     {
       "model": "anybotics_anymal_c/scene.xml",
@@ -467,7 +162,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 4.44e-16, qvel 3.73e-14, qacc_warmstart 2.64e-11"
+      "detail": "qpos off 4.44e-16, qvel 3.73e-14, qacc_warmstart 2.73e-11"
     },
     {
       "model": "anybotics_anymal_c/scene_mjx.xml",
@@ -491,7 +186,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 5.55e-17, qvel 8.88e-15, qacc_warmstart 1.27e-11"
+      "detail": "qpos off 5.55e-17, qvel 8.88e-15, qacc_warmstart 1.41e-11"
     },
     {
       "model": "arx_l5/arx_l5.xml",
@@ -507,7 +202,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 1.39e-17, qvel 1.24e-14, qacc_warmstart 3.20e-10"
+      "detail": "qpos off 4.25e-17, qvel 3.55e-14, qacc_warmstart 9.90e-10"
     },
     {
       "model": "berkeley_humanoid/berkeley_humanoid.xml",
@@ -523,7 +218,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 1.63e-19, qvel 2.00e-15, qacc_warmstart 1.02e-12"
+      "detail": "qpos off 2.17e-19, qvel 1.55e-15, qacc_warmstart 7.96e-13"
     },
     {
       "model": "bitcraze_crazyflie_2/cf2.xml",
@@ -547,7 +242,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 1.39e-17, qvel 7.11e-15, qacc_warmstart 1.96e-11"
+      "detail": "qpos off 1.39e-17, qvel 7.55e-15, qacc_warmstart 1.91e-11"
     },
     {
       "model": "booster_t1/t1.xml",
@@ -555,7 +250,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 3.25e-19, qvel 2.89e-15, qacc_warmstart 6.82e-12"
+      "detail": "qpos off 3.25e-19, qvel 2.89e-15, qacc_warmstart 5.91e-12"
     },
     {
       "model": "boston_dynamics_spot/scene.xml",
@@ -571,7 +266,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 1.11e-16, qvel 4.62e-14, qacc_warmstart 2.54e-8"
+      "detail": "qpos off 1.11e-16, qvel 6.04e-14, qacc_warmstart 2.61e-8"
     },
     {
       "model": "boston_dynamics_spot/spot.xml",
@@ -579,7 +274,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 2.78e-17, qvel 7.11e-15, qacc_warmstart 2.04e-10"
+      "detail": "qpos off 2.78e-17, qvel 7.11e-15, qacc_warmstart 1.89e-10"
     },
     {
       "model": "boston_dynamics_spot/spot_arm.xml",
@@ -587,7 +282,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 3.66e-15, qvel 1.85e-12, qacc_warmstart 4.66e-8"
+      "detail": "qpos off 6.11e-15, qvel 3.05e-12, qacc_warmstart 4.66e-8"
     },
     {
       "model": "dynamixel_2r/dynamixel_2r.xml",
@@ -619,7 +314,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 0.00e0, qvel 2.64e-16, qacc_warmstart 1.71e-13"
+      "detail": "qpos off 0.00e0, qvel 3.33e-16, qacc_warmstart 2.84e-13"
     },
     {
       "model": "flexiv_rizon4s/flexiv_rizon4s.xml",
@@ -707,7 +402,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 0.00e0, qvel 9.99e-16, qacc_warmstart 3.41e-13"
+      "detail": "qpos off 1.39e-17, qvel 6.45e-16, qacc_warmstart 3.98e-13"
     },
     {
       "model": "franka_emika_panda/mjx_single_cube.xml",
@@ -715,7 +410,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 1.21e-17, qvel 2.33e-15, qacc_warmstart 4.26e-13"
+      "detail": "qpos off 2.52e-17, qvel 4.89e-15, qacc_warmstart 4.05e-13"
     },
     {
       "model": "franka_emika_panda/panda.xml",
@@ -731,7 +426,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 0.00e0, qvel 2.22e-16, qacc_warmstart 8.53e-14"
+      "detail": "qpos off 0.00e0, qvel 2.22e-16, qacc_warmstart 9.24e-14"
     },
     {
       "model": "franka_emika_panda/scene.xml",
@@ -739,7 +434,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 1.39e-17, qvel 6.47e-15, qacc_warmstart 3.30e-12"
+      "detail": "qpos off 1.39e-17, qvel 5.50e-15, qacc_warmstart 9.66e-13"
     },
     {
       "model": "franka_fr3/fr3.xml",
@@ -747,7 +442,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 0.00e0, qvel 5.55e-17, qacc_warmstart 8.53e-14"
+      "detail": "qpos off 0.00e0, qvel 6.94e-17, qacc_warmstart 1.71e-13"
     },
     {
       "model": "franka_fr3/scene.xml",
@@ -755,7 +450,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 0.00e0, qvel 5.55e-17, qacc_warmstart 1.42e-13"
+      "detail": "qpos off 0.00e0, qvel 5.55e-17, qacc_warmstart 1.56e-13"
     },
     {
       "model": "franka_fr3_v2/fr3v2.xml",
@@ -763,7 +458,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 0.00e0, qvel 1.11e-16, qacc_warmstart 4.26e-14"
+      "detail": "qpos off 0.00e0, qvel 1.11e-16, qacc_warmstart 5.68e-14"
     },
     {
       "model": "franka_fr3_v2/scene.xml",
@@ -779,7 +474,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 2.17e-19, qvel 2.66e-15, qacc_warmstart 2.73e-12"
+      "detail": "qpos off 1.08e-19, qvel 1.78e-15, qacc_warmstart 1.82e-12"
     },
     {
       "model": "google_barkour_v0/barkour_v0_mjx.xml",
@@ -795,7 +490,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 1.36e-18, qvel 9.99e-15, qacc_warmstart 5.91e-12"
+      "detail": "qpos off 6.94e-18, qvel 9.01e-15, qacc_warmstart 5.91e-12"
     },
     {
       "model": "google_barkour_v0/scene_barkour.xml",
@@ -819,7 +514,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 1.08e-19, qvel 2.66e-15, qacc_warmstart 7.96e-13"
+      "detail": "qpos off 1.63e-19, qvel 2.66e-15, qacc_warmstart 7.96e-13"
     },
     {
       "model": "google_barkour_vb/barkour_vb_mjx.xml",
@@ -827,7 +522,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 1.11e-16, qvel 2.22e-15, qacc_warmstart 1.14e-12"
+      "detail": "qpos off 7.45e-20, qvel 1.78e-15, qacc_warmstart 9.09e-13"
     },
     {
       "model": "google_barkour_vb/scene.xml",
@@ -851,7 +546,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 2.22e-16, qvel 3.18e-14, qacc_warmstart 1.58e-11"
+      "detail": "qpos off 1.11e-16, qvel 8.89e-14, qacc_warmstart 4.45e-11"
     },
     {
       "model": "google_robot/robot.xml",
@@ -867,7 +562,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 1.11e-16, qvel 3.77e-14, qacc_warmstart 4.59e-12"
+      "detail": "qpos off 1.11e-16, qvel 3.77e-14, qacc_warmstart 4.99e-12"
     },
     {
       "model": "hello_robot_stretch/scene.xml",
@@ -875,7 +570,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 3.83e-15, qvel 1.90e-12, qacc_warmstart 7.60e-9"
+      "detail": "qpos off 3.83e-15, qvel 1.91e-12, qacc_warmstart 7.60e-9"
     },
     {
       "model": "hello_robot_stretch/stretch.xml",
@@ -891,7 +586,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 7.36e-13, qvel 3.68e-10, qacc_warmstart 4.67e-6"
+      "detail": "qpos off 5.16e-15, qvel 2.60e-12, qacc_warmstart 1.74e-7"
     },
     {
       "model": "hello_robot_stretch_3/stretch.xml",
@@ -899,7 +594,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 5.51e-13, qvel 2.76e-10, qacc_warmstart 1.75e-6"
+      "detail": "qpos off 1.19e-15, qvel 6.00e-13, qacc_warmstart 1.30e-7"
     },
     {
       "model": "i2rt_yam/scene.xml",
@@ -907,7 +602,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 2.78e-17, qvel 1.07e-14, qacc_warmstart 5.46e-12"
+      "detail": "qpos off 2.78e-17, qvel 1.95e-14, qacc_warmstart 1.09e-11"
     },
     {
       "model": "i2rt_yam/yam.xml",
@@ -971,7 +666,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 1.09e-14, qvel 5.40e-12, qacc_warmstart 1.09e-9"
+      "detail": "qpos off 1.52e-14, qvel 7.60e-12, qacc_warmstart 9.35e-10"
     },
     {
       "model": "leap_hand/right_hand.xml",
@@ -1003,7 +698,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 9.44e-16, qvel 4.61e-13, qacc_warmstart 1.38e-10"
+      "detail": "qpos off 4.72e-16, qvel 2.42e-13, qacc_warmstart 1.29e-10"
     },
     {
       "model": "low_cost_robot_arm/scene.xml",
@@ -1019,7 +714,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 4.22e-15, qvel 2.08e-12, qacc_warmstart 2.04e-10"
+      "detail": "qpos off 2.00e-15, qvel 1.04e-12, qacc_warmstart 2.06e-10"
     },
     {
       "model": "ms_human_700/MS-Human-700-Manipulation.xml",
@@ -1027,7 +722,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 3.97e-14, qvel 1.99e-11, qacc_warmstart 2.55e-9"
+      "detail": "qpos off 2.54e-14, qvel 1.27e-11, qacc_warmstart 1.85e-9"
     },
     {
       "model": "ms_human_700/MS-Human-700.xml",
@@ -1035,7 +730,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 1.44e-13, qvel 7.18e-11, qacc_warmstart 4.61e-9"
+      "detail": "qpos off 6.79e-14, qvel 3.40e-11, qacc_warmstart 4.22e-9"
     },
     {
       "model": "ms_human_700/scene.xml",
@@ -1043,7 +738,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 1.56e-13, qvel 7.78e-11, qacc_warmstart 1.23e-9"
+      "detail": "qpos off 9.33e-14, qvel 4.67e-11, qacc_warmstart 1.29e-9"
     },
     {
       "model": "ms_human_700/scene_locomotion.xml",
@@ -1067,7 +762,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 3.71e-16, qvel 3.69e-13, qacc_warmstart 1.15e-9"
+      "detail": "qpos off 2.26e-16, qvel 2.24e-13, qacc_warmstart 1.15e-9"
     },
     {
       "model": "pal_talos/scene_position.xml",
@@ -1083,7 +778,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 7.81e-15, qvel 7.82e-12, qacc_warmstart 2.65e-7"
+      "detail": "qpos off 2.11e-15, qvel 2.19e-12, qacc_warmstart 4.57e-8"
     },
     {
       "model": "pal_talos/talos_motor.xml",
@@ -1091,7 +786,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 2.22e-16, qvel 9.10e-14, qacc_warmstart 6.44e-10"
+      "detail": "qpos off 2.22e-16, qvel 5.60e-14, qacc_warmstart 6.38e-10"
     },
     {
       "model": "pal_talos/talos_position.xml",
@@ -1099,7 +794,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 5.55e-16, qvel 5.26e-13, qacc_warmstart 1.89e-8"
+      "detail": "qpos off 3.33e-16, qvel 3.11e-13, qacc_warmstart 1.56e-8"
     },
     {
       "model": "pal_tiago/scene_motor.xml",
@@ -1131,7 +826,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 2.22e-16, qvel 1.09e-14, qacc_warmstart 4.46e-11"
+      "detail": "qpos off 5.55e-17, qvel 1.45e-14, qacc_warmstart 4.37e-11"
     },
     {
       "model": "pal_tiago/tiago_motor.xml",
@@ -1163,7 +858,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 4.44e-16, qvel 8.85e-14, qacc_warmstart 3.96e-9"
+      "detail": "qpos off 4.16e-17, qvel 5.66e-14, qacc_warmstart 3.96e-9"
     },
     {
       "model": "pal_tiago_dual/scene_position.xml",
@@ -1171,7 +866,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 3.64e-17, qvel 1.06e-13, qacc_warmstart 1.05e-8"
+      "detail": "qpos off 5.55e-17, qvel 1.06e-13, qacc_warmstart 1.05e-8"
     },
     {
       "model": "pal_tiago_dual/scene_velocity.xml",
@@ -1187,7 +882,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 2.22e-16, qvel 3.11e-14, qacc_warmstart 2.25e-11"
+      "detail": "qpos off 2.22e-16, qvel 3.06e-14, qacc_warmstart 2.55e-11"
     },
     {
       "model": "pal_tiago_dual/tiago_dual_motor.xml",
@@ -1195,7 +890,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 2.22e-16, qvel 3.65e-14, qacc_warmstart 3.03e-9"
+      "detail": "qpos off 2.22e-16, qvel 2.81e-14, qacc_warmstart 3.03e-9"
     },
     {
       "model": "pal_tiago_dual/tiago_dual_position.xml",
@@ -1203,7 +898,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 2.78e-17, qvel 5.33e-14, qacc_warmstart 1.07e-8"
+      "detail": "qpos off 2.78e-17, qvel 6.13e-14, qacc_warmstart 1.07e-8"
     },
     {
       "model": "pal_tiago_dual/tiago_dual_velocity.xml",
@@ -1219,7 +914,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 2.85e-14, qvel 1.43e-11, qacc_warmstart 7.14e-9"
+      "detail": "qpos off 2.83e-14, qvel 1.42e-11, qacc_warmstart 7.09e-9"
     },
     {
       "model": "pndbotics_adam_lite/scene.xml",
@@ -1243,7 +938,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 4.44e-16, qvel 1.17e-13, qacc_warmstart 4.52e-11"
+      "detail": "qpos off 4.44e-16, qvel 1.48e-13, qacc_warmstart 4.52e-11"
     },
     {
       "model": "rainbow_robotics_rby1/rby1m_1.2.xml",
@@ -1283,7 +978,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 1.11e-16, qvel 7.28e-14, qacc_warmstart 2.33e-10"
+      "detail": "qpos off 5.00e-16, qvel 2.60e-13, qacc_warmstart 3.02e-10"
     },
     {
       "model": "rainbow_robotics_rby1/scene_rby1m_1.2.xml",
@@ -1291,7 +986,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 2.22e-16, qvel 9.24e-14, qacc_warmstart 6.82e-11"
+      "detail": "qpos off 2.22e-16, qvel 7.15e-14, qacc_warmstart 5.82e-11"
     },
     {
       "model": "rainbow_robotics_rby1/scene_rby1m_1.2_no_gripper.xml",
@@ -1299,7 +994,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 3.89e-16, qvel 2.01e-13, qacc_warmstart 1.79e-10"
+      "detail": "qpos off 4.44e-16, qvel 1.41e-13, qacc_warmstart 1.35e-10"
     },
     {
       "model": "rainbow_robotics_rby1/scene_rby1m_1.3.xml",
@@ -1307,7 +1002,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 3.33e-16, qvel 1.89e-13, qacc_warmstart 1.46e-10"
+      "detail": "qpos off 4.44e-16, qvel 1.53e-13, qacc_warmstart 1.46e-10"
     },
     {
       "model": "realsense_d435i/d435i.xml",
@@ -1323,7 +1018,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 0.00e0, qvel 1.39e-17, qacc_warmstart 7.11e-15"
+      "detail": "qpos off 0.00e0, qvel 2.78e-17, qacc_warmstart 7.11e-15"
     },
     {
       "model": "rethink_robotics_sawyer/scene.xml",
@@ -1363,7 +1058,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 1.05e-14, qvel 1.05e-11, qacc_warmstart 2.91e-11"
+      "detail": "qpos off 8.51e-15, qvel 8.51e-12, qacc_warmstart 3.27e-11"
     },
     {
       "model": "robotiq_2f85_v4/2f85.xml",
@@ -1395,7 +1090,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 0.00e0, qvel 4.44e-16, qacc_warmstart 2.27e-13"
+      "detail": "qpos off 0.00e0, qvel 2.78e-16, qacc_warmstart 1.14e-13"
     },
     {
       "model": "robotis_omy_3m/scene.xml",
@@ -1403,7 +1098,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 2.78e-17, qvel 1.79e-14, qacc_warmstart 8.88e-12"
+      "detail": "qpos off 1.39e-17, qvel 8.53e-15, qacc_warmstart 4.12e-12"
     },
     {
       "model": "robotis_op3/op3.xml",
@@ -1451,7 +1146,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 2.74e-16, qvel 1.38e-13, qacc_warmstart 3.99e-11"
+      "detail": "qpos off 2.22e-16, qvel 6.50e-14, qacc_warmstart 3.18e-12"
     },
     {
       "model": "seeed_rebot_devarm/seeed_rebot_devarm.xml",
@@ -1459,7 +1154,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 0.00e0, qvel 4.44e-15, qacc_warmstart 8.64e-12"
+      "detail": "qpos off 0.00e0, qvel 4.00e-15, qacc_warmstart 4.55e-12"
     },
     {
       "model": "shadow_dexee/scene.xml",
@@ -1467,7 +1162,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 1.11e-16, qvel 6.22e-15, qacc_warmstart 4.55e-12"
+      "detail": "qpos off 1.39e-17, qvel 7.11e-15, qacc_warmstart 4.55e-12"
     },
     {
       "model": "shadow_dexee/shadow_dexee.xml",
@@ -1475,7 +1170,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 5.55e-17, qvel 3.38e-14, qacc_warmstart 2.18e-11"
+      "detail": "qpos off 8.33e-17, qvel 4.26e-14, qacc_warmstart 2.91e-11"
     },
     {
       "model": "shadow_hand/keyframes.xml",
@@ -1513,7 +1208,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 2.71e-20, qvel 6.25e-15, qacc_warmstart 4.15e-12"
+      "detail": "qpos off 2.71e-20, qvel 5.27e-15, qacc_warmstart 4.09e-12"
     },
     {
       "model": "sharpa_wave/left_hand.xml",
@@ -1577,7 +1272,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 6.72e-14, qvel 3.36e-11, qacc_warmstart 4.26e-9"
+      "detail": "qpos off 1.52e-14, qvel 7.65e-12, qacc_warmstart 4.26e-9"
     },
     {
       "model": "stanford_tidybot/scene_base.xml",
@@ -1593,7 +1288,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 1.30e-14, qvel 6.47e-12, qacc_warmstart 2.52e-9"
+      "detail": "qpos off 1.08e-14, qvel 5.37e-12, qacc_warmstart 2.32e-9"
     },
     {
       "model": "tetheria_aero_hand_open/left_hand.xml",
@@ -1625,7 +1320,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 2.77e-13, qvel 1.38e-10, qacc_warmstart 2.14e-8"
+      "detail": "qpos off 2.11e-13, qvel 1.05e-10, qacc_warmstart 1.07e-8"
     },
     {
       "model": "toddlerbot_2xc/scene_mjx.xml",
@@ -1633,7 +1328,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 4.44e-15, qvel 2.35e-12, qacc_warmstart 1.18e-9"
+      "detail": "qpos off 4.44e-15, qvel 2.31e-12, qacc_warmstart 1.15e-9"
     },
     {
       "model": "toddlerbot_2xc/scene_pos.xml",
@@ -1641,7 +1336,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 1.69e-13, qvel 8.46e-11, qacc_warmstart 1.51e-9"
+      "detail": "qpos off 3.29e-14, qvel 1.64e-11, qacc_warmstart 1.75e-9"
     },
     {
       "model": "toddlerbot_2xc/toddlerbot_2xc.xml",
@@ -1649,7 +1344,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 8.53e-14, qvel 4.18e-11, qacc_warmstart 2.18e-10"
+      "detail": "qpos off 7.22e-15, qvel 3.61e-12, qacc_warmstart 1.75e-10"
     },
     {
       "model": "toddlerbot_2xc/toddlerbot_2xc_mjx.xml",
@@ -1657,7 +1352,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 8.44e-15, qvel 4.15e-12, qacc_warmstart 2.07e-9"
+      "detail": "qpos off 7.49e-15, qvel 4.09e-12, qacc_warmstart 2.05e-9"
     },
     {
       "model": "toddlerbot_2xc/toddlerbot_2xc_pos.xml",
@@ -1665,7 +1360,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 5.58e-13, qvel 2.79e-10, qacc_warmstart 2.15e-9"
+      "detail": "qpos off 1.91e-13, qvel 9.57e-11, qacc_warmstart 2.21e-9"
     },
     {
       "model": "toddlerbot_2xm/scene.xml",
@@ -1681,7 +1376,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 1.78e-15, qvel 1.11e-12, qacc_warmstart 5.53e-10"
+      "detail": "qpos off 3.55e-15, qvel 1.28e-12, qacc_warmstart 6.40e-10"
     },
     {
       "model": "toddlerbot_2xm/scene_pos.xml",
@@ -1689,7 +1384,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 7.99e-15, qvel 3.97e-12, qacc_warmstart 5.09e-11"
+      "detail": "qpos off 5.33e-15, qvel 2.80e-12, qacc_warmstart 5.09e-11"
     },
     {
       "model": "toddlerbot_2xm/toddlerbot_2xm.xml",
@@ -1697,7 +1392,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 1.51e-14, qvel 7.55e-12, qacc_warmstart 2.91e-10"
+      "detail": "qpos off 1.99e-14, qvel 9.97e-12, qacc_warmstart 2.69e-10"
     },
     {
       "model": "toddlerbot_2xm/toddlerbot_2xm_mjx.xml",
@@ -1705,7 +1400,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 1.28e-14, qvel 6.37e-12, qacc_warmstart 3.20e-9"
+      "detail": "qpos off 1.29e-14, qvel 6.42e-12, qacc_warmstart 3.23e-9"
     },
     {
       "model": "toddlerbot_2xm/toddlerbot_2xm_pos.xml",
@@ -1713,7 +1408,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 7.64e-14, qvel 3.88e-11, qacc_warmstart 8.88e-10"
+      "detail": "qpos off 4.26e-14, qvel 2.19e-11, qacc_warmstart 8.73e-10"
     },
     {
       "model": "trossen_vx300s/scene.xml",
@@ -1729,7 +1424,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 0.00e0, qvel 3.55e-15, qacc_warmstart 3.64e-12"
+      "detail": "qpos off 0.00e0, qvel 1.78e-15, qacc_warmstart 4.55e-12"
     },
     {
       "model": "trossen_wx250s/scene.xml",
@@ -1745,7 +1440,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 0.00e0, qvel 2.22e-16, qacc_warmstart 1.14e-13"
+      "detail": "qpos off 0.00e0, qvel 2.22e-16, qacc_warmstart 5.68e-14"
     },
     {
       "model": "trossen_wxai/scene.xml",
@@ -1761,7 +1456,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 0.00e0, qvel 4.44e-16, qacc_warmstart 1.99e-13"
+      "detail": "qpos off 0.00e0, qvel 1.67e-16, qacc_warmstart 8.53e-14"
     },
     {
       "model": "trossen_wxai/wxai_follower_biarm.xml",
@@ -1769,7 +1464,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 1.11e-16, qvel 3.56e-14, qacc_warmstart 1.48e-11"
+      "detail": "qpos off 1.67e-16, qvel 6.94e-14, qacc_warmstart 1.39e-11"
     },
     {
       "model": "trs_so_arm100/scene.xml",
@@ -1777,7 +1472,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 0.00e0, qvel 5.55e-17, qacc_warmstart 7.11e-15"
+      "detail": "qpos off 0.00e0, qvel 5.55e-17, qacc_warmstart 1.42e-14"
     },
     {
       "model": "trs_so_arm100/so_arm100.xml",
@@ -1785,7 +1480,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 0.00e0, qvel 5.55e-17, qacc_warmstart 7.11e-15"
+      "detail": "qpos off 0.00e0, qvel 5.55e-17, qacc_warmstart 2.66e-15"
     },
     {
       "model": "ufactory_lite6/lite6.xml",
@@ -1801,7 +1496,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 4.44e-16, qvel 6.55e-15, qacc_warmstart 3.27e-12"
+      "detail": "qpos off 8.67e-19, qvel 2.66e-15, qacc_warmstart 1.48e-12"
     },
     {
       "model": "ufactory_lite6/lite6_gripper_wide.xml",
@@ -1809,7 +1504,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 5.42e-20, qvel 1.67e-16, qacc_warmstart 5.68e-14"
+      "detail": "qpos off 5.42e-20, qvel 2.22e-16, qacc_warmstart 5.68e-14"
     },
     {
       "model": "ufactory_lite6/scene.xml",
@@ -1817,7 +1512,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 1.39e-17, qvel 7.77e-16, qacc_warmstart 4.55e-13"
+      "detail": "qpos off 1.39e-17, qvel 7.77e-16, qacc_warmstart 4.26e-13"
     },
     {
       "model": "ufactory_xarm7/hand.xml",
@@ -1825,7 +1520,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 5.55e-17, qvel 3.53e-14, qacc_warmstart 2.03e-12"
+      "detail": "qpos off 5.55e-17, qvel 2.16e-14, qacc_warmstart 9.09e-13"
     },
     {
       "model": "ufactory_xarm7/scene.xml",
@@ -1833,7 +1528,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 1.11e-16, qvel 2.06e-14, qacc_warmstart 1.05e-11"
+      "detail": "qpos off 1.11e-16, qvel 3.02e-14, qacc_warmstart 2.23e-11"
     },
     {
       "model": "ufactory_xarm7/xarm7.xml",
@@ -1849,7 +1544,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 0.00e0, qvel 2.22e-16, qacc_warmstart 2.27e-13"
+      "detail": "qpos off 0.00e0, qvel 2.22e-16, qacc_warmstart 1.14e-13"
     },
     {
       "model": "umi_gripper/scene.xml",
@@ -1857,7 +1552,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 0.00e0, qvel 2.66e-15, qacc_warmstart 4.55e-13"
+      "detail": "qpos off 1.08e-19, qvel 2.66e-15, qacc_warmstart 2.31e-14"
     },
     {
       "model": "umi_gripper/umi_gripper.xml",
@@ -1865,7 +1560,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 0.00e0, qvel 2.27e-16, qacc_warmstart 4.55e-13"
+      "detail": "qpos off 0.00e0, qvel 1.42e-16, qacc_warmstart 4.55e-13"
     },
     {
       "model": "unitree_a1/a1.xml",
@@ -1873,7 +1568,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 6.51e-19, qvel 2.22e-15, qacc_warmstart 9.09e-13"
+      "detail": "qpos off 1.08e-19, qvel 1.78e-15, qacc_warmstart 6.82e-13"
     },
     {
       "model": "unitree_a1/scene.xml",
@@ -1889,7 +1584,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 2.78e-17, qvel 1.04e-14, qacc_warmstart 2.27e-11"
+      "detail": "qpos off 2.78e-17, qvel 6.22e-15, qacc_warmstart 2.25e-11"
     },
     {
       "model": "unitree_g1/g1_mjx.xml",
@@ -1897,7 +1592,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 2.22e-16, qvel 4.97e-14, qacc_warmstart 6.00e-11"
+      "detail": "qpos off 2.22e-16, qvel 4.44e-14, qacc_warmstart 1.68e-11"
     },
     {
       "model": "unitree_g1/g1_with_hands.xml",
@@ -1905,7 +1600,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 8.88e-16, qvel 4.41e-13, qacc_warmstart 6.17e-10"
+      "detail": "qpos off 8.88e-16, qvel 4.39e-13, qacc_warmstart 6.13e-10"
     },
     {
       "model": "unitree_g1/scene.xml",
@@ -1913,7 +1608,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 1.11e-16, qvel 4.35e-14, qacc_warmstart 3.82e-11"
+      "detail": "qpos off 4.44e-16, qvel 3.20e-14, qacc_warmstart 2.64e-11"
     },
     {
       "model": "unitree_g1/scene_mjx.xml",
@@ -1921,7 +1616,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 1.11e-16, qvel 2.04e-14, qacc_warmstart 3.27e-11"
+      "detail": "qpos off 1.11e-16, qvel 2.04e-14, qacc_warmstart 3.32e-11"
     },
     {
       "model": "unitree_g1/scene_with_hands.xml",
@@ -1929,7 +1624,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 2.22e-16, qvel 6.86e-14, qacc_warmstart 7.48e-11"
+      "detail": "qpos off 2.22e-16, qvel 4.95e-14, qacc_warmstart 6.33e-11"
     },
     {
       "model": "unitree_go1/go1.xml",
@@ -1937,7 +1632,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 2.17e-19, qvel 1.33e-15, qacc_warmstart 1.36e-12"
+      "detail": "qpos off 2.17e-19, qvel 8.88e-16, qacc_warmstart 4.55e-13"
     },
     {
       "model": "unitree_go1/scene.xml",
@@ -1953,7 +1648,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 2.78e-17, qvel 5.55e-16, qacc_warmstart 9.09e-13"
+      "detail": "qpos off 2.78e-17, qvel 4.72e-16, qacc_warmstart 4.55e-13"
     },
     {
       "model": "unitree_go2/go2_mjx.xml",
@@ -1961,7 +1656,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 6.94e-18, qvel 1.55e-15, qacc_warmstart 7.96e-13"
+      "detail": "qpos off 6.94e-18, qvel 4.44e-16, qacc_warmstart 2.27e-13"
     },
     {
       "model": "unitree_go2/scene.xml",
@@ -1985,7 +1680,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 5.69e-19, qvel 1.33e-15, qacc_warmstart 5.68e-13"
+      "detail": "qpos off 1.36e-19, qvel 1.33e-15, qacc_warmstart 5.68e-13"
     },
     {
       "model": "unitree_h1/scene.xml",
@@ -1993,7 +1688,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 1.84e-18, qvel 3.11e-15, qacc_warmstart 9.09e-13"
+      "detail": "qpos off 1.41e-18, qvel 3.11e-15, qacc_warmstart 9.09e-13"
     },
     {
       "model": "unitree_z1/scene.xml",
@@ -2009,7 +1704,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 4.44e-16, qvel 8.53e-14, qacc_warmstart 4.95e-9"
+      "detail": "qpos off 4.44e-16, qvel 8.53e-14, qacc_warmstart 4.86e-9"
     },
     {
       "model": "unitree_z1/z1_gripper.xml",
@@ -2041,7 +1736,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 0.00e0, qvel 6.75e-14, qacc_warmstart 1.32e-11"
+      "detail": "qpos off 0.00e0, qvel 1.42e-14, qacc_warmstart 1.36e-12"
     },
     {
       "model": "universal_robots_ur5e/ur5e.xml",
@@ -2073,7 +1768,7 @@
       "status": "mismatch",
       "steps": 20,
       "failed_step": 1,
-      "detail": "qpos off 3.22e-15, qvel 3.21e-12, qacc_warmstart 1.52e-8"
+      "detail": "qpos off 3.61e-15, qvel 3.61e-12, qacc_warmstart 1.53e-8"
     },
     {
       "model": "wonik_allegro/scene_right.xml",
@@ -2084,11 +1779,527 @@
       "detail": "qpos off 4.54e-7, qvel 4.55e-4, qacc_warmstart 2.95e-1"
     }
   ],
+  "native_tally": {
+    "M": {
+      "same": 18,
+      "n": 636
+    },
+    "act_dot": {
+      "same": 636,
+      "n": 636
+    },
+    "actuator_force": {
+      "same": 564,
+      "n": 636
+    },
+    "actuator_length": {
+      "same": 609,
+      "n": 636
+    },
+    "actuator_velocity": {
+      "same": 608,
+      "n": 636
+    },
+    "cdof": {
+      "same": 75,
+      "n": 636
+    },
+    "cdof_dot": {
+      "same": 146,
+      "n": 636
+    },
+    "cinert": {
+      "same": 3,
+      "n": 636
+    },
+    "crb": {
+      "same": 3,
+      "n": 636
+    },
+    "cvel": {
+      "same": 225,
+      "n": 636
+    },
+    "efc_AR": {
+      "same": 0,
+      "n": 30
+    },
+    "efc_D": {
+      "same": 182,
+      "n": 636
+    },
+    "efc_J": {
+      "same": 359,
+      "n": 636
+    },
+    "efc_KBIP": {
+      "same": 566,
+      "n": 636
+    },
+    "efc_R": {
+      "same": 176,
+      "n": 636
+    },
+    "efc_aref": {
+      "same": 353,
+      "n": 636
+    },
+    "efc_b": {
+      "same": 117,
+      "n": 636
+    },
+    "efc_diagA": {
+      "same": 176,
+      "n": 636
+    },
+    "efc_force": {
+      "same": 186,
+      "n": 636
+    },
+    "efc_frictionloss": {
+      "same": 634,
+      "n": 636
+    },
+    "efc_id": {
+      "same": 634,
+      "n": 636
+    },
+    "efc_margin": {
+      "same": 634,
+      "n": 636
+    },
+    "efc_pos": {
+      "same": 376,
+      "n": 636
+    },
+    "efc_state": {
+      "same": 622,
+      "n": 636
+    },
+    "efc_type": {
+      "same": 634,
+      "n": 636
+    },
+    "efc_vel": {
+      "same": 422,
+      "n": 636
+    },
+    "nisland": {
+      "same": 636,
+      "n": 636
+    },
+    "qLD": {
+      "same": 18,
+      "n": 636
+    },
+    "qLDiagInv": {
+      "same": 58,
+      "n": 636
+    },
+    "qacc": {
+      "same": 20,
+      "n": 636
+    },
+    "qacc_smooth": {
+      "same": 23,
+      "n": 636
+    },
+    "qfrc_actuator": {
+      "same": 564,
+      "n": 636
+    },
+    "qfrc_bias": {
+      "same": 88,
+      "n": 636
+    },
+    "qfrc_constraint": {
+      "same": 186,
+      "n": 636
+    },
+    "qfrc_damper": {
+      "same": 633,
+      "n": 636
+    },
+    "qfrc_fluid": {
+      "same": 620,
+      "n": 636
+    },
+    "qfrc_gravcomp": {
+      "same": 592,
+      "n": 636
+    },
+    "qfrc_passive": {
+      "same": 567,
+      "n": 636
+    },
+    "qfrc_smooth": {
+      "same": 141,
+      "n": 636
+    },
+    "qfrc_spring": {
+      "same": 627,
+      "n": 636
+    },
+    "solver_niter": {
+      "same": 636,
+      "n": 636
+    },
+    "subtree_com": {
+      "same": 107,
+      "n": 636
+    },
+    "ten_length": {
+      "same": 597,
+      "n": 636
+    },
+    "ten_velocity": {
+      "same": 601,
+      "n": 636
+    },
+    "xanchor": {
+      "same": 153,
+      "n": 636
+    },
+    "xaxis": {
+      "same": 96,
+      "n": 636
+    },
+    "ximat": {
+      "same": 31,
+      "n": 636
+    },
+    "xipos": {
+      "same": 96,
+      "n": 636
+    },
+    "xmat": {
+      "same": 100,
+      "n": 636
+    },
+    "xpos": {
+      "same": 150,
+      "n": 636
+    },
+    "xquat": {
+      "same": 100,
+      "n": 636
+    },
+    "M_colind": {
+      "same": 212,
+      "n": 212
+    },
+    "M_rowadr": {
+      "same": 212,
+      "n": 212
+    },
+    "M_rownnz": {
+      "same": 212,
+      "n": 212
+    },
+    "body_dofadr": {
+      "same": 212,
+      "n": 212
+    },
+    "body_dofnum": {
+      "same": 212,
+      "n": 212
+    },
+    "body_inertia": {
+      "same": 115,
+      "n": 212
+    },
+    "body_invweight0": {
+      "same": 19,
+      "n": 212
+    },
+    "body_jntadr": {
+      "same": 212,
+      "n": 212
+    },
+    "body_mass": {
+      "same": 192,
+      "n": 212
+    },
+    "body_parentid": {
+      "same": 212,
+      "n": 212
+    },
+    "body_rootid": {
+      "same": 212,
+      "n": 212
+    },
+    "body_simple": {
+      "same": 212,
+      "n": 212
+    },
+    "body_subtreemass": {
+      "same": 196,
+      "n": 212
+    },
+    "dof_M0": {
+      "same": 25,
+      "n": 212
+    },
+    "dof_armature": {
+      "same": 212,
+      "n": 212
+    },
+    "dof_bodyid": {
+      "same": 212,
+      "n": 212
+    },
+    "dof_invweight0": {
+      "same": 21,
+      "n": 212
+    },
+    "dof_jntid": {
+      "same": 212,
+      "n": 212
+    },
+    "dof_parentid": {
+      "same": 212,
+      "n": 212
+    },
+    "dof_simplenum": {
+      "same": 212,
+      "n": 212
+    },
+    "gravity": {
+      "same": 212,
+      "n": 212
+    },
+    "jnt_bodyid": {
+      "same": 212,
+      "n": 212
+    },
+    "jnt_dofadr": {
+      "same": 212,
+      "n": 212
+    },
+    "tendon_invweight0": {
+      "same": 177,
+      "n": 212
+    }
+  },
+  "native_stdout_sha256": "d566258dad9d1be751307effe8d947bce4b472c29bae3efe4f4353c139ea1979",
   "errors": [
-    "step bit-exact 1 of 212",
-    "efc_J {'same': 359, 'n': 636}",
-    "qacc {'same': 20, 'n': 636}"
+    "agilex_piper/piper.xml step status mismatch qpos off 1.73e-18, qvel 1.47e-14, qacc_warmstart 1.09e-11",
+    "agilex_piper/scene.xml step status mismatch qpos off 1.11e-16, qvel 3.38e-14, qacc_warmstart 2.36e-11",
+    "agility_cassie/cassie.xml step status mismatch qpos off 7.38e-15, qvel 2.21e-11, qacc_warmstart 2.55e-7",
+    "agility_cassie/scene.xml step status mismatch qpos off 2.51e-14, qvel 5.03e-11, qacc_warmstart 4.21e-7",
+    "aloha/aloha.xml step status mismatch qpos off 0.00e0, qvel 4.62e-14, qacc_warmstart 8.91e-11",
+    "aloha/scene.xml step status mismatch qpos off 2.22e-16, qvel 1.43e-13, qacc_warmstart 9.28e-11",
+    "anybotics_anymal_b/anymal_b.xml step status mismatch qpos off 3.25e-19, qvel 7.99e-15, qacc_warmstart 4.09e-12",
+    "anybotics_anymal_b/scene.xml step status mismatch qpos off 1.08e-19, qvel 3.55e-15, qacc_warmstart 2.73e-12",
+    "anybotics_anymal_c/anymal_c.xml step status mismatch qpos off 1.05e-18, qvel 2.13e-14, qacc_warmstart 1.64e-11",
+    "anybotics_anymal_c/anymal_c_mjx.xml step status mismatch qpos off 2.78e-17, qvel 1.42e-14, qacc_warmstart 7.28e-12",
+    "anybotics_anymal_c/scene.xml step status mismatch qpos off 4.44e-16, qvel 3.73e-14, qacc_warmstart 2.73e-11",
+    "anybotics_anymal_c/scene_mjx.xml step status mismatch qpos off 5.55e-17, qvel 2.31e-14, qacc_warmstart 1.18e-11",
+    "apptronik_apollo/apptronik_apollo.xml step status mismatch qpos off 1.11e-16, qvel 1.27e-14, qacc_warmstart 1.11e-11",
+    "apptronik_apollo/scene.xml step status mismatch qpos off 5.55e-17, qvel 8.88e-15, qacc_warmstart 1.41e-11",
+    "arx_l5/arx_l5.xml step status mismatch qpos off 5.55e-17, qvel 3.05e-14, qacc_warmstart 2.77e-11",
+    "arx_l5/scene.xml step status mismatch qpos off 4.25e-17, qvel 3.55e-14, qacc_warmstart 9.90e-10",
+    "berkeley_humanoid/berkeley_humanoid.xml step status mismatch qpos off 5.55e-17, qvel 3.66e-15, qacc_warmstart 1.85e-12",
+    "berkeley_humanoid/scene.xml step status mismatch qpos off 2.17e-19, qvel 1.55e-15, qacc_warmstart 7.96e-13",
+    "bitcraze_crazyflie_2/cf2.xml step status mismatch qpos off 5.42e-20, qvel 0.00e0, qacc_warmstart 4.11e-15",
+    "bitcraze_crazyflie_2/scene.xml step status mismatch qpos off 1.08e-19, qvel 0.00e0, qacc_warmstart 6.80e-15",
+    "booster_t1/scene.xml step status mismatch qpos off 1.39e-17, qvel 7.55e-15, qacc_warmstart 1.91e-11",
+    "booster_t1/t1.xml step status mismatch qpos off 3.25e-19, qvel 2.89e-15, qacc_warmstart 5.91e-12",
+    "boston_dynamics_spot/scene.xml step status mismatch qpos off 1.11e-16, qvel 7.11e-15, qacc_warmstart 1.46e-11",
+    "boston_dynamics_spot/scene_arm.xml step status mismatch qpos off 1.11e-16, qvel 6.04e-14, qacc_warmstart 2.61e-8",
+    "boston_dynamics_spot/spot.xml step status mismatch qpos off 2.78e-17, qvel 7.11e-15, qacc_warmstart 1.89e-10",
+    "boston_dynamics_spot/spot_arm.xml step status mismatch qpos off 6.11e-15, qvel 3.05e-12, qacc_warmstart 4.66e-8",
+    "dynamixel_2r/dynamixel_2r.xml step status mismatch qpos off 0.00e0, qvel 1.78e-15, qacc_warmstart 4.55e-13",
+    "dynamixel_2r/scene.xml step status mismatch qpos off 0.00e0, qvel 2.66e-15, qacc_warmstart 9.09e-13",
+    "flexiv_rizon4/flexiv_rizon4.xml step status mismatch qpos off 0.00e0, qvel 1.11e-16, qacc_warmstart 5.68e-14",
+    "flexiv_rizon4/scene.xml step status mismatch qpos off 0.00e0, qvel 3.33e-16, qacc_warmstart 2.84e-13",
+    "flexiv_rizon4s/flexiv_rizon4s.xml step status mismatch qpos off 0.00e0, qvel 6.66e-16, qacc_warmstart 1.35e-10",
+    "flexiv_rizon4s/scene.xml step status mismatch qpos off 0.00e0, qvel 3.11e-15, qacc_warmstart 2.04e-10",
+    "flybody/fruitfly.xml step status mismatch qpos off 1.81e-12, qvel 1.81e-8, qacc_warmstart 1.99e-4",
+    "flybody/scene.xml step status mismatch qpos off 1.45e-6, qvel 1.45e-2, qacc_warmstart 2.78e2",
+    "fourier_n1/n1.xml step status mismatch qpos off 2.22e-16, qvel 1.33e-15, qacc_warmstart 7.96e-13",
+    "fourier_n1/scene.xml step status mismatch qpos off 0.00e0, qvel 1.11e-15, qacc_warmstart 6.82e-13",
+    "franka_emika_panda/hand.xml step status mismatch qpos off 0.00e0, qvel 0.00e0, qacc_warmstart 2.84e-13",
+    "franka_emika_panda/mjx_hand.xml step status mismatch qpos off 6.94e-18, qvel 2.33e-15, qacc_warmstart 2.84e-14",
+    "franka_emika_panda/mjx_panda.xml step status mismatch qpos off 6.94e-18, qvel 2.44e-15, qacc_warmstart 9.95e-14",
+    "franka_emika_panda/mjx_panda_nohand.xml step status mismatch qpos off 0.00e0, qvel 6.66e-16, qacc_warmstart 5.68e-13",
+    "franka_emika_panda/mjx_scene.xml step status mismatch qpos off 1.39e-17, qvel 6.45e-16, qacc_warmstart 3.98e-13",
+    "franka_emika_panda/mjx_single_cube.xml step status mismatch qpos off 2.52e-17, qvel 4.89e-15, qacc_warmstart 4.05e-13",
+    "franka_emika_panda/panda.xml step status mismatch qpos off 6.94e-18, qvel 1.78e-15, qacc_warmstart 1.42e-13",
+    "franka_emika_panda/panda_nohand.xml step status mismatch qpos off 0.00e0, qvel 2.22e-16, qacc_warmstart 9.24e-14",
+    "franka_emika_panda/scene.xml step status mismatch qpos off 1.39e-17, qvel 5.50e-15, qacc_warmstart 9.66e-13",
+    "franka_fr3/fr3.xml step status mismatch qpos off 0.00e0, qvel 6.94e-17, qacc_warmstart 1.71e-13",
+    "franka_fr3/scene.xml step status mismatch qpos off 0.00e0, qvel 5.55e-17, qacc_warmstart 1.56e-13",
+    "franka_fr3_v2/fr3v2.xml step status mismatch qpos off 0.00e0, qvel 1.11e-16, qacc_warmstart 5.68e-14",
+    "franka_fr3_v2/scene.xml step status mismatch qpos off 0.00e0, qvel 1.94e-16, qacc_warmstart 5.68e-14",
+    "google_barkour_v0/barkour_v0.xml step status mismatch qpos off 1.08e-19, qvel 1.78e-15, qacc_warmstart 1.82e-12",
+    "google_barkour_v0/barkour_v0_mjx.xml step status mismatch qpos off 2.44e-19, qvel 2.22e-15, qacc_warmstart 1.14e-12",
+    "google_barkour_v0/scene.xml step status mismatch qpos off 6.94e-18, qvel 9.01e-15, qacc_warmstart 5.91e-12",
+    "google_barkour_v0/scene_barkour.xml step status mismatch qpos off 5.55e-17, qvel 4.19e-14, qacc_warmstart 1.16e-11",
+    "google_barkour_v0/scene_mjx.xml step status mismatch qpos off 1.11e-16, qvel 3.02e-14, qacc_warmstart 1.50e-11",
+    "google_barkour_vb/barkour_vb.xml step status mismatch qpos off 1.63e-19, qvel 2.66e-15, qacc_warmstart 7.96e-13",
+    "google_barkour_vb/barkour_vb_mjx.xml step status mismatch qpos off 7.45e-20, qvel 1.78e-15, qacc_warmstart 9.09e-13",
+    "google_barkour_vb/scene.xml step status mismatch qpos off 3.93e-19, qvel 1.14e-14, qacc_warmstart 5.00e-12",
+    "google_barkour_vb/scene_hfield_mjx.xml step status mismatch qpos off 5.55e-17, qvel 2.49e-14, qacc_warmstart 1.25e-11",
+    "google_barkour_vb/scene_mjx.xml step status mismatch qpos off 1.11e-16, qvel 8.89e-14, qacc_warmstart 4.45e-11",
+    "google_robot/robot.xml step status mismatch qpos off 0.00e0, qvel 5.55e-16, qacc_warmstart 2.56e-13",
+    "google_robot/scene.xml step status mismatch qpos off 1.11e-16, qvel 3.77e-14, qacc_warmstart 4.99e-12",
+    "hello_robot_stretch/scene.xml step status mismatch qpos off 3.83e-15, qvel 1.91e-12, qacc_warmstart 7.60e-9",
+    "hello_robot_stretch/stretch.xml step status mismatch qpos off 6.11e-16, qvel 3.11e-13, qacc_warmstart 9.97e-9",
+    "hello_robot_stretch_3/scene.xml step status mismatch qpos off 5.16e-15, qvel 2.60e-12, qacc_warmstart 1.74e-7",
+    "hello_robot_stretch_3/stretch.xml step status mismatch qpos off 1.19e-15, qvel 6.00e-13, qacc_warmstart 1.30e-7",
+    "i2rt_yam/scene.xml step status mismatch qpos off 2.78e-17, qvel 1.95e-14, qacc_warmstart 1.09e-11",
+    "i2rt_yam/yam.xml step status mismatch qpos off 2.17e-19, qvel 1.78e-15, qacc_warmstart 1.14e-12",
+    "iit_softfoot/scene.xml step status mismatch qpos off 3.66e-15, qvel 1.84e-12, qacc_warmstart 2.46e-10",
+    "iit_softfoot/softfoot.xml step status mismatch qpos off 3.94e-15, qvel 1.97e-12, qacc_warmstart 2.45e-10",
+    "kinova_gen3/gen3.xml step status mismatch qpos off 4.88e-15, qvel 2.44e-12, qacc_warmstart 1.24e-9",
+    "kinova_gen3/scene.xml step status mismatch qpos off 9.99e-16, qvel 4.83e-13, qacc_warmstart 3.06e-10",
+    "kuka_iiwa_14/iiwa14.xml step status mismatch qpos off 0.00e0, qvel 7.11e-15, qacc_warmstart 5.59e-9",
+    "kuka_iiwa_14/scene.xml step status mismatch qpos off 2.22e-16, qvel 1.07e-14, qacc_warmstart 4.10e-8",
+    "leap_hand/left_hand.xml step status mismatch qpos off 1.52e-14, qvel 7.60e-12, qacc_warmstart 9.35e-10",
+    "leap_hand/right_hand.xml step status mismatch qpos off 8.88e-16, qvel 4.43e-13, qacc_warmstart 8.73e-10",
+    "leap_hand/scene_left.xml step status mismatch qpos off 1.85e-14, qvel 9.28e-12, qacc_warmstart 1.03e-9",
+    "leap_hand/scene_right.xml step status mismatch qpos off 3.72e-15, qvel 1.85e-12, qacc_warmstart 6.40e-10",
+    "low_cost_robot_arm/low_cost_robot_arm.xml step status mismatch qpos off 4.72e-16, qvel 2.42e-13, qacc_warmstart 1.29e-10",
+    "low_cost_robot_arm/scene.xml step status mismatch qpos off 4.44e-16, qvel 2.06e-13, qacc_warmstart 1.09e-11",
+    "ms_human_700/MS-Human-700-Locomotion.xml step status mismatch qpos off 2.00e-15, qvel 1.04e-12, qacc_warmstart 2.06e-10",
+    "ms_human_700/MS-Human-700-Manipulation.xml step status mismatch qpos off 2.54e-14, qvel 1.27e-11, qacc_warmstart 1.85e-9",
+    "ms_human_700/MS-Human-700.xml step status mismatch qpos off 6.79e-14, qvel 3.40e-11, qacc_warmstart 4.22e-9",
+    "ms_human_700/scene.xml step status mismatch qpos off 9.33e-14, qvel 4.67e-11, qacc_warmstart 1.29e-9",
+    "ms_human_700/scene_locomotion.xml step status mismatch qpos off 2.43e-14, qvel 1.22e-11, qacc_warmstart 2.35e-10",
+    "ms_human_700/scene_manipulation.xml step status mismatch qpos off 1.22e-15, qvel 5.70e-13, qacc_warmstart 5.60e-10",
+    "pal_talos/scene_motor.xml step status mismatch qpos off 2.26e-16, qvel 2.24e-13, qacc_warmstart 1.15e-9",
+    "pal_talos/scene_position.xml step status mismatch qpos off 1.11e-16, qvel 1.48e-13, qacc_warmstart 1.31e-9",
+    "pal_talos/talos.xml step status mismatch qpos off 2.11e-15, qvel 2.19e-12, qacc_warmstart 4.57e-8",
+    "pal_talos/talos_motor.xml step status mismatch qpos off 2.22e-16, qvel 5.60e-14, qacc_warmstart 6.38e-10",
+    "pal_talos/talos_position.xml step status mismatch qpos off 3.33e-16, qvel 3.11e-13, qacc_warmstart 1.56e-8",
+    "pal_tiago/scene_motor.xml step status mismatch qpos off 2.78e-17, qvel 4.90e-14, qacc_warmstart 7.87e-11",
+    "pal_tiago/scene_position.xml step status mismatch qpos off 2.78e-17, qvel 1.07e-14, qacc_warmstart 4.11e-10",
+    "pal_tiago/scene_velocity.xml step status mismatch qpos off 5.55e-17, qvel 4.00e-14, qacc_warmstart 4.43e-10",
+    "pal_tiago/tiago.xml step status mismatch qpos off 5.55e-17, qvel 1.45e-14, qacc_warmstart 4.37e-11",
+    "pal_tiago/tiago_motor.xml step status mismatch qpos off 5.55e-17, qvel 2.00e-14, qacc_warmstart 2.50e-10",
+    "pal_tiago/tiago_position.xml step status mismatch qpos off 1.11e-16, qvel 4.25e-14, qacc_warmstart 4.33e-9",
+    "pal_tiago/tiago_velocity.xml step status mismatch qpos off 2.78e-17, qvel 1.87e-14, qacc_warmstart 2.38e-10",
+    "pal_tiago_dual/scene_motor.xml step status mismatch qpos off 4.16e-17, qvel 5.66e-14, qacc_warmstart 3.96e-9",
+    "pal_tiago_dual/scene_position.xml step status mismatch qpos off 5.55e-17, qvel 1.06e-13, qacc_warmstart 1.05e-8",
+    "pal_tiago_dual/scene_velocity.xml step status mismatch qpos off 2.71e-20, qvel 1.17e-15, qacc_warmstart 7.16e-9",
+    "pal_tiago_dual/tiago_dual.xml step status mismatch qpos off 2.22e-16, qvel 3.06e-14, qacc_warmstart 2.55e-11",
+    "pal_tiago_dual/tiago_dual_motor.xml step status mismatch qpos off 2.22e-16, qvel 2.81e-14, qacc_warmstart 3.03e-9",
+    "pal_tiago_dual/tiago_dual_position.xml step status mismatch qpos off 2.78e-17, qvel 6.13e-14, qacc_warmstart 1.07e-8",
+    "pal_tiago_dual/tiago_dual_velocity.xml step status mismatch qpos off 5.55e-17, qvel 2.84e-14, qacc_warmstart 3.38e-9",
+    "pndbotics_adam_lite/adam_lite.xml step status mismatch qpos off 2.83e-14, qvel 1.42e-11, qacc_warmstart 7.09e-9",
+    "pndbotics_adam_lite/scene.xml step status mismatch qpos off 4.05e-15, qvel 2.02e-12, qacc_warmstart 1.01e-9",
+    "rainbow_robotics_rby1/rby1a_1.2.xml step status mismatch qpos off 2.22e-16, qvel 8.84e-14, qacc_warmstart 9.14e-11",
+    "rainbow_robotics_rby1/rby1a_1.2_no_gripper.xml step status mismatch qpos off 4.44e-16, qvel 1.48e-13, qacc_warmstart 4.52e-11",
+    "rainbow_robotics_rby1/rby1m_1.2.xml step status mismatch qpos off 4.06e-11, qvel 2.03e-8, qacc_warmstart 1.07e-5",
+    "rainbow_robotics_rby1/rby1m_1.2_no_gripper.xml step status mismatch qpos off 1.78e-15, qvel 9.09e-13, qacc_warmstart 1.14e-9",
+    "rainbow_robotics_rby1/rby1m_1.3.xml step status mismatch qpos off 8.88e-15, qvel 4.32e-12, qacc_warmstart 5.94e-9",
+    "rainbow_robotics_rby1/scene_rby1a_1.2.xml step status mismatch qpos off 2.22e-16, qvel 1.31e-13, qacc_warmstart 2.91e-10",
+    "rainbow_robotics_rby1/scene_rby1a_1.2_no_gripper.xml step status mismatch qpos off 5.00e-16, qvel 2.60e-13, qacc_warmstart 3.02e-10",
+    "rainbow_robotics_rby1/scene_rby1m_1.2.xml step status mismatch qpos off 2.22e-16, qvel 7.15e-14, qacc_warmstart 5.82e-11",
+    "rainbow_robotics_rby1/scene_rby1m_1.2_no_gripper.xml step status mismatch qpos off 4.44e-16, qvel 1.41e-13, qacc_warmstart 1.35e-10",
+    "rainbow_robotics_rby1/scene_rby1m_1.3.xml step status mismatch qpos off 4.44e-16, qvel 1.53e-13, qacc_warmstart 1.46e-10",
+    "rethink_robotics_sawyer/sawyer.xml step status mismatch qpos off 0.00e0, qvel 2.78e-17, qacc_warmstart 7.11e-15",
+    "rethink_robotics_sawyer/scene.xml step status mismatch qpos off 0.00e0, qvel 1.07e-14, qacc_warmstart 2.73e-12",
+    "robot_soccer_kit/robot_soccer_kit.xml step status mismatch qpos off 6.51e-19, qvel 6.66e-16, qacc_warmstart 3.41e-13",
+    "robot_soccer_kit/scene.xml step status mismatch qpos off 4.34e-19, qvel 4.44e-16, qacc_warmstart 2.27e-13",
+    "robotiq_2f85/2f85.xml step status mismatch qpos off 1.94e-15, qvel 9.66e-13, qacc_warmstart 4.55e-10",
+    "robotiq_2f85/scene.xml step status mismatch qpos off 8.51e-15, qvel 8.51e-12, qacc_warmstart 3.27e-11",
+    "robotiq_2f85_v4/2f85.xml step status mismatch qpos off 7.38e-15, qvel 3.69e-12, qacc_warmstart 1.64e-11",
+    "robotiq_2f85_v4/mjx_2f85.xml step status mismatch qpos off 7.33e-15, qvel 3.68e-12, qacc_warmstart 3.82e-11",
+    "robotiq_2f85_v4/scene.xml step status mismatch qpos off 3.33e-15, qvel 1.67e-12, qacc_warmstart 7.09e-10",
+    "robotis_omy_3m/omy_3m.xml step status mismatch qpos off 0.00e0, qvel 2.78e-16, qacc_warmstart 1.14e-13",
+    "robotis_omy_3m/scene.xml step status mismatch qpos off 1.39e-17, qvel 8.53e-15, qacc_warmstart 4.12e-12",
+    "robotis_op3/op3.xml step status mismatch qpos off 5.42e-20, qvel 5.55e-17, qacc_warmstart 4.26e-14",
+    "robotis_op3/scene.xml step status mismatch qpos off 1.36e-20, qvel 5.55e-17, qacc_warmstart 5.68e-14",
+    "robotstudio_so101/scene.xml step status mismatch qpos off 0.00e0, qvel 1.11e-16, qacc_warmstart 2.84e-14",
+    "robotstudio_so101/scene_box.xml step status mismatch qpos off 3.25e-19, qvel 1.39e-16, qacc_warmstart 2.97e-14",
+    "robotstudio_so101/so101.xml step status mismatch qpos off 0.00e0, qvel 1.18e-16, qacc_warmstart 2.84e-14",
+    "seeed_rebot_devarm/scene.xml step status mismatch qpos off 2.22e-16, qvel 6.50e-14, qacc_warmstart 3.18e-12",
+    "seeed_rebot_devarm/seeed_rebot_devarm.xml step status mismatch qpos off 0.00e0, qvel 4.00e-15, qacc_warmstart 4.55e-12",
+    "shadow_dexee/scene.xml step status mismatch qpos off 1.39e-17, qvel 7.11e-15, qacc_warmstart 4.55e-12",
+    "shadow_dexee/shadow_dexee.xml step status mismatch qpos off 8.33e-17, qvel 4.26e-14, qacc_warmstart 2.91e-11",
+    "shadow_hand/left_hand.xml step status mismatch qpos off 6.42e-3, qvel 3.21e0, qacc_warmstart 2.19e3",
+    "shadow_hand/right_hand.xml step status mismatch qpos off 2.06e-8, qvel 1.03e-5, qacc_warmstart 6.93e-3",
+    "shadow_hand/scene_left.xml step status mismatch qpos off 1.37e-11, qvel 1.37e-8, qacc_warmstart 6.84e-6",
+    "shadow_hand/scene_right.xml step status mismatch qpos off 2.71e-20, qvel 5.27e-15, qacc_warmstart 4.09e-12",
+    "sharpa_wave/left_hand.xml step status mismatch qpos off 1.39e-17, qvel 8.88e-15, qacc_warmstart 3.64e-12",
+    "sharpa_wave/right_hand.xml step status mismatch qpos off 5.55e-17, qvel 3.46e-14, qacc_warmstart 2.00e-11",
+    "sharpa_wave/scene_left.xml step status mismatch qpos off 3.47e-18, qvel 1.78e-15, qacc_warmstart 1.82e-12",
+    "sharpa_wave/scene_right.xml step status mismatch qpos off 8.67e-19, qvel 3.55e-15, qacc_warmstart 1.82e-12",
+    "skydio_x2/scene.xml step status mismatch qpos off 4.34e-19, qvel 5.55e-17, qacc_warmstart 7.11e-15",
+    "skydio_x2/x2.xml step status mismatch qpos off 4.34e-19, qvel 1.11e-16, qacc_warmstart 1.42e-14",
+    "stanford_tidybot/base.xml step status mismatch qpos off 0.00e0, qvel 1.78e-15, qacc_warmstart 0.00e0",
+    "stanford_tidybot/scene.xml step status mismatch qpos off 1.52e-14, qvel 7.65e-12, qacc_warmstart 4.26e-9",
+    "stanford_tidybot/scene_base.xml step status mismatch qpos off 0.00e0, qvel 0.00e0, qacc_warmstart 4.55e-13",
+    "stanford_tidybot/tidybot.xml step status mismatch qpos off 1.08e-14, qvel 5.37e-12, qacc_warmstart 2.32e-9",
+    "tetheria_aero_hand_open/left_hand.xml step status mismatch qpos off 2.22e-16, qvel 1.07e-14, qacc_warmstart 1.14e-12",
+    "tetheria_aero_hand_open/right_hand.xml step status mismatch qpos off 2.11e-15, qvel 2.05e-13, qacc_warmstart 2.05e-11",
+    "tetheria_aero_hand_open/scene_right.xml step status mismatch qpos off 9.44e-16, qvel 9.41e-14, qacc_warmstart 9.55e-12",
+    "toddlerbot_2xc/scene.xml step status mismatch qpos off 2.11e-13, qvel 1.05e-10, qacc_warmstart 1.07e-8",
+    "toddlerbot_2xc/scene_mjx.xml step status mismatch qpos off 4.44e-15, qvel 2.31e-12, qacc_warmstart 1.15e-9",
+    "toddlerbot_2xc/scene_pos.xml step status mismatch qpos off 3.29e-14, qvel 1.64e-11, qacc_warmstart 1.75e-9",
+    "toddlerbot_2xc/toddlerbot_2xc.xml step status mismatch qpos off 7.22e-15, qvel 3.61e-12, qacc_warmstart 1.75e-10",
+    "toddlerbot_2xc/toddlerbot_2xc_mjx.xml step status mismatch qpos off 7.49e-15, qvel 4.09e-12, qacc_warmstart 2.05e-9",
+    "toddlerbot_2xc/toddlerbot_2xc_pos.xml step status mismatch qpos off 1.91e-13, qvel 9.57e-11, qacc_warmstart 2.21e-9",
+    "toddlerbot_2xm/scene.xml step status mismatch qpos off 1.53e-13, qvel 7.64e-11, qacc_warmstart 2.15e-9",
+    "toddlerbot_2xm/scene_mjx.xml step status mismatch qpos off 3.55e-15, qvel 1.28e-12, qacc_warmstart 6.40e-10",
+    "toddlerbot_2xm/scene_pos.xml step status mismatch qpos off 5.33e-15, qvel 2.80e-12, qacc_warmstart 5.09e-11",
+    "toddlerbot_2xm/toddlerbot_2xm.xml step status mismatch qpos off 1.99e-14, qvel 9.97e-12, qacc_warmstart 2.69e-10",
+    "toddlerbot_2xm/toddlerbot_2xm_mjx.xml step status mismatch qpos off 1.29e-14, qvel 6.42e-12, qacc_warmstart 3.23e-9",
+    "toddlerbot_2xm/toddlerbot_2xm_pos.xml step status mismatch qpos off 4.26e-14, qvel 2.19e-11, qacc_warmstart 8.73e-10",
+    "trossen_vx300s/scene.xml step status mismatch qpos off 1.11e-16, qvel 2.49e-14, qacc_warmstart 9.09e-11",
+    "trossen_vx300s/vx300s.xml step status mismatch qpos off 0.00e0, qvel 1.78e-15, qacc_warmstart 4.55e-12",
+    "trossen_wx250s/scene.xml step status mismatch qpos off 0.00e0, qvel 2.22e-16, qacc_warmstart 1.14e-13",
+    "trossen_wx250s/wx250s.xml step status mismatch qpos off 0.00e0, qvel 2.22e-16, qacc_warmstart 5.68e-14",
+    "trossen_wxai/scene.xml step status mismatch qpos off 8.88e-16, qvel 4.79e-13, qacc_warmstart 2.39e-12",
+    "trossen_wxai/wxai_follower.xml step status mismatch qpos off 0.00e0, qvel 1.67e-16, qacc_warmstart 8.53e-14",
+    "trossen_wxai/wxai_follower_biarm.xml step status mismatch qpos off 1.67e-16, qvel 6.94e-14, qacc_warmstart 1.39e-11",
+    "trs_so_arm100/scene.xml step status mismatch qpos off 0.00e0, qvel 5.55e-17, qacc_warmstart 1.42e-14",
+    "trs_so_arm100/so_arm100.xml step status mismatch qpos off 0.00e0, qvel 5.55e-17, qacc_warmstart 2.66e-15",
+    "ufactory_lite6/lite6.xml step status mismatch qpos off 0.00e0, qvel 2.22e-16, qacc_warmstart 1.14e-13",
+    "ufactory_lite6/lite6_gripper_narrow.xml step status mismatch qpos off 8.67e-19, qvel 2.66e-15, qacc_warmstart 1.48e-12",
+    "ufactory_lite6/lite6_gripper_wide.xml step status mismatch qpos off 5.42e-20, qvel 2.22e-16, qacc_warmstart 5.68e-14",
+    "ufactory_lite6/scene.xml step status mismatch qpos off 1.39e-17, qvel 7.77e-16, qacc_warmstart 4.26e-13",
+    "ufactory_xarm7/hand.xml step status mismatch qpos off 5.55e-17, qvel 2.16e-14, qacc_warmstart 9.09e-13",
+    "ufactory_xarm7/scene.xml step status mismatch qpos off 1.11e-16, qvel 3.02e-14, qacc_warmstart 2.23e-11",
+    "ufactory_xarm7/xarm7.xml step status mismatch qpos off 2.22e-16, qvel 1.07e-13, qacc_warmstart 5.09e-11",
+    "ufactory_xarm7/xarm7_nohand.xml step status mismatch qpos off 0.00e0, qvel 2.22e-16, qacc_warmstart 1.14e-13",
+    "umi_gripper/scene.xml step status mismatch qpos off 1.08e-19, qvel 2.66e-15, qacc_warmstart 2.31e-14",
+    "umi_gripper/umi_gripper.xml step status mismatch qpos off 0.00e0, qvel 1.42e-16, qacc_warmstart 4.55e-13",
+    "unitree_a1/a1.xml step status mismatch qpos off 1.08e-19, qvel 1.78e-15, qacc_warmstart 6.82e-13",
+    "unitree_a1/scene.xml step status mismatch qpos off 2.78e-17, qvel 2.22e-15, qacc_warmstart 1.59e-12",
+    "unitree_g1/g1.xml step status mismatch qpos off 2.78e-17, qvel 6.22e-15, qacc_warmstart 2.25e-11",
+    "unitree_g1/g1_mjx.xml step status mismatch qpos off 2.22e-16, qvel 4.44e-14, qacc_warmstart 1.68e-11",
+    "unitree_g1/g1_with_hands.xml step status mismatch qpos off 8.88e-16, qvel 4.39e-13, qacc_warmstart 6.13e-10",
+    "unitree_g1/scene.xml step status mismatch qpos off 4.44e-16, qvel 3.20e-14, qacc_warmstart 2.64e-11",
+    "unitree_g1/scene_mjx.xml step status mismatch qpos off 1.11e-16, qvel 2.04e-14, qacc_warmstart 3.32e-11",
+    "unitree_g1/scene_with_hands.xml step status mismatch qpos off 2.22e-16, qvel 4.95e-14, qacc_warmstart 6.33e-11",
+    "unitree_go1/go1.xml step status mismatch qpos off 2.17e-19, qvel 8.88e-16, qacc_warmstart 4.55e-13",
+    "unitree_go1/scene.xml step status mismatch qpos off 3.25e-19, qvel 2.22e-15, qacc_warmstart 1.59e-12",
+    "unitree_go2/go2.xml step status mismatch qpos off 2.78e-17, qvel 4.72e-16, qacc_warmstart 4.55e-13",
+    "unitree_go2/go2_mjx.xml step status mismatch qpos off 6.94e-18, qvel 4.44e-16, qacc_warmstart 2.27e-13",
+    "unitree_go2/scene.xml step status mismatch qpos off 8.67e-19, qvel 1.33e-15, qacc_warmstart 1.36e-12",
+    "unitree_go2/scene_mjx.xml step status mismatch qpos off 1.08e-19, qvel 6.66e-16, qacc_warmstart 3.41e-13",
+    "unitree_h1/h1.xml step status mismatch qpos off 1.36e-19, qvel 1.33e-15, qacc_warmstart 5.68e-13",
+    "unitree_h1/scene.xml step status mismatch qpos off 1.41e-18, qvel 3.11e-15, qacc_warmstart 9.09e-13",
+    "unitree_z1/scene.xml step status mismatch qpos off 4.44e-16, qvel 3.55e-14, qacc_warmstart 8.15e-10",
+    "unitree_z1/z1.xml step status mismatch qpos off 4.44e-16, qvel 8.53e-14, qacc_warmstart 4.86e-9",
+    "unitree_z1/z1_gripper.xml step status mismatch qpos off 1.11e-16, qvel 6.39e-14, qacc_warmstart 2.74e-9",
+    "universal_robots_ur10e/scene.xml step status mismatch qpos off 0.00e0, qvel 1.06e-14, qacc_warmstart 5.42e-12",
+    "universal_robots_ur10e/ur10e.xml step status mismatch qpos off 0.00e0, qvel 1.55e-15, qacc_warmstart 7.96e-13",
+    "universal_robots_ur5e/scene.xml step status mismatch qpos off 0.00e0, qvel 1.42e-14, qacc_warmstart 1.36e-12",
+    "universal_robots_ur5e/ur5e.xml step status mismatch qpos off 0.00e0, qvel 4.44e-16, qacc_warmstart 2.27e-13",
+    "wonik_allegro/left_hand.xml step status mismatch qpos off 1.11e-16, qvel 5.33e-15, qacc_warmstart 1.25e-8",
+    "wonik_allegro/right_hand.xml step status mismatch qpos off 0.00e0, qvel 3.55e-15, qacc_warmstart 5.36e-9",
+    "wonik_allegro/scene_left.xml step status mismatch qpos off 3.61e-15, qvel 3.61e-12, qacc_warmstart 1.53e-8",
+    "wonik_allegro/scene_right.xml step status mismatch qpos off 4.54e-7, qvel 4.55e-4, qacc_warmstart 2.95e-1",
+    "efc_J 359 of 636, required 636 of 636",
+    "qacc 20 of 636, required 636 of 636"
   ],
+  "passed": false,
+  "step_bit_exact": 1,
+  "step_mismatch": 211,
   "feature_matrix": [
     {
       "feature": "trajectory_qpos_qvel_act_warmstart",
@@ -2149,8 +2360,8 @@
       "solver": "mujoco_3.13.0_cpu",
       "backend": "cpu",
       "status": "executed",
-      "matched": false,
-      "same": 634,
+      "matched": true,
+      "same": 636,
       "n": 636
     },
     {
@@ -2160,7 +2371,7 @@
       "revision": "4d1c64bc077d725247e9bf5e2ac3f357749ff804",
       "status": "blocked",
       "matched": false,
-      "reason": "no NVIDIA device; package not installed; not a pass"
+      "reason": "no NVIDIA device and the package is not installed; not a pass"
     },
     {
       "feature": "gradient",
@@ -2169,7 +2380,7 @@
       "revision": "4d1c64bc077d725247e9bf5e2ac3f357749ff804",
       "status": "blocked",
       "matched": false,
-      "reason": "Warp README at this revision says differentiability is not yet available; no gradient was evaluated"
+      "reason": "no gradient was evaluated; Warp's README at this revision says differentiability is not yet available"
     },
     {
       "feature": "matched_fidelity_rollout",
@@ -2178,7 +2389,7 @@
       "revision": "1a497c00ed255db343e39eec4d614864c9aa9b95",
       "status": "blocked",
       "matched": false,
-      "reason": "no NVIDIA device; package not installed; not a pass"
+      "reason": "no NVIDIA device and the package is not installed; not a pass"
     },
     {
       "feature": "gradient",
@@ -2187,11 +2398,11 @@
       "revision": "1a497c00ed255db343e39eec4d614864c9aa9b95",
       "status": "blocked",
       "matched": false,
-      "reason": "Warp README at this revision says differentiability is not yet available; no gradient was evaluated"
+      "reason": "no gradient was evaluated on this host"
     }
   ],
   "warp_newton": {
-    "gpu_device": null,
+    "gpu_device": false,
     "warp_importable": false,
     "newton_importable": false,
     "executed": false

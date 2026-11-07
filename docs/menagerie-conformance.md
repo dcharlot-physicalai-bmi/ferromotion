@@ -39,15 +39,56 @@ files that do not load stay in the ledger as `mujoco_load: error`:
 They are not omitted. A sixth load failure, a missing file, or a bit mismatch
 fails the process.
 
+## Two floating-point contracts
+
+These are not the same arithmetic, and a match to one is not a match to the other.
+
+* **Unit-test goldens** in `ferromotion-core` are bits from the MuJoCo 3.13.0 arm64 dylib (`libmujoco.3.13.0.dylib`): Apple clang contraction and `__sincos_stret`.
+* **This conformance oracle** is the Linux x86_64 wheel `libmujoco.so.3.13.0` linked to glibc 2.39 libm, with that wheel's own contraction. Non-Apple `sincos` in this crate is that host `sin`/`cos` pair. It is not `__sincos_stret`.
+
+`copysign(sqrt(1 − sin²), cos)` when `sin² + cos² ≠ 1` reproduces one arm64 `fromto` cosine (`0x3fe6d214bbbba928` → cosine `0x3fe833ad8be0fb0b`, host cosine `0x3fe833ad8be0fb0a`) and moves `0.3°/2`, whose host pair is already Pythagorean. That is not a general port. It is not used.
+
 ## Independent execution on this host
 
-Ran on Ubuntu 24.04, x86_64, glibc 2.39, MuJoCo 3.13.0 (`libmujoco.so.3.13.0`), rustc 1.99.1, against Menagerie `4d038b3feae26ec82b46a4d586379114012a8ac7`. This is not the prior claim.
+Ran on Ubuntu 24.04, x86_64, glibc 2.39, MuJoCo 3.13.0 (`libmujoco.so.3.13.0`), rustc 1.99.1, against Menagerie `4d038b3feae26ec82b46a4d586379114012a8ac7`, after non-Apple `sincos` was host libm again. This is not the prior claim. The command was:
+
+```
+python3 scripts/menagerie_conformance.py /tmp/mujoco_menagerie --out conformance/menagerie_ledger.json
+```
+
+It exited 1. The ledger records `passed: false`.
 
 * 217 `*/*.xml` files. MuJoCo loaded 212 and rejected 5 (listed above). The rust loader refused none of the 212.
-* 20-step `mj_step`, bit-exact: **1 of 212** (`realsense_d435i/d435i.xml`). The other 211 disagree at step 1. The disagreements are small on many models (warm-start accelerations from about `1e-15` to `1e-7` on the first models inspected) and are still not bit-exact.
-* Native `mj_forward`, 636 states: `efc_J` **359 of 636** (worst non-finite on `franka_emika_panda/scene.xml` state 0), `qacc` **20 of 636** (worst `3.09` on `shadow_dexee/scene.xml` state 2).
+* 20-step `mj_step`, bit-exact: **1 of 212** (`realsense_d435i/d435i.xml`). The other 211 disagree at step 1.
+* Native `mj_forward`, 636 states: `efc_J` **359 of 636** (worst non-finite on `franka_emika_panda/scene.xml` state 0, a length mismatch), `qacc` **20 of 636** (worst `1.08e4` on `hello_robot_stretch_3/stretch.xml` state 1). `M` is 18 of 636. `solver_niter` is 636 of 636 on this run; matching the iteration count does not make `qacc` exact.
+* `mjModel body_invweight0` is 19 of 212, worst absolute `1.31e-7` on `hello_robot_stretch_3/stretch.xml`. That array is compiled from the body's orientation, so the stretch miss starts before `mj_step`.
 
-The arm64 unit-test oracles in this repo and this Linux wheel are different floating-point results. Matching one does not match the other. The conformance job fails closed on these mismatches.
+The conformance job fails closed unless all 212 loadable models are bit-exact for 20 steps and `efc_J` and `qacc` are bit-exact on all 636 states. `git HEAD` stored in the ledger is the parent of the commit that contains this rerun, because the sha cannot name the commit that adds the file.
+
+## First divergent stage
+
+Remeasured after non-Apple `sincos` was returned to host libm. The mass-matrix and tendon angles in these fixtures were already Pythagorean, so these bits are the same as under the adjustment. `geom_frames_match_mujocos_kinematics_bit_for_bit` is the case that adjustment had been covering: geom 0 (the Euler box) still matches the arm64 golden. Geom 1 is the capsule `fromto`. Its position matches. The first mismatch is `geom_xmat[0]` (`m00`): ferromotion `0x3fb10f4d4d24f06a`, golden `0x3fb10f4d4d24f05c`, +14 ulps. The other eight matrix entries differ by −1, −1, −1, +3, −9, −1, −1, and −2 ulps. Commands and raw bits:
+
+Mass-matrix fixture (`the_native_mass_matrix_and_bias_are_mujocos_bit_for_bit`), same `qpos`/`qvel` in both programs. `cargo +stable test -p ferromotion-core --lib the_native_mass_matrix_and_bias` and `mujoco.mj_forward` on the same XML.
+
+* `qfrc_bias` matches the arm64 golden on all 11 entries. The Linux wheel's bias matches that golden on 3 of 11 (first mismatch index 1: wheel `0xbfe3fd29118b3571`, golden and ferromotion `0xbfe3fd29118b356e`).
+* Sparse `M` versus the arm64 golden differs at 6 of 66 entries, ferromotion minus golden: index 9 by +2 ulps, 13 by +8, 14 by +1, 24 by +16, 25 by +1, 26 by +2. Index 9 is ferromotion `0x3f916b4f44bfd583`, golden `0x3f916b4f44bfd581`, Linux wheel `0x3f916b4f44bfd584`.
+* Versus the Linux wheel the first differing stage is body `xpos` index 7 (arm, y) by −1 ulp (`0xbfb771f2b86a019f` vs `0xbfb771f2b86a01a0`). Then `xipos` 5/15, `cinert` 23/50, `cdof` 25/66, `crb` 29/50, `M` 52/66. Fusing `M += mji_dot6` into the last product, which would not touch the bias statement, missed the golden and broke `ten_native_steps_are_mujocos_trajectory_bit_for_bit`. The separate `dot6` then add is the contraction those passing tests use. No permutation of that dot on these `crb`/`cdof` values was found that hits the six golden entries. The arm64 `crb`/`cdof` are not available on this host, so the six ulps are not isolated past "final `M` differs, final bias does not."
+
+Tendon fixture (`spatial_tendons_step_as_mujoco_does_bit_for_bit`), initial state `[0.3, -0.6, 0.4]`, `[0.5, -1, 0.8]`.
+
+* Body `xpos` 0/12 differ from the Linux wheel. Geom `geom_xpos` and row-major `geom_xmat` differ in 0 of 5 geoms, including the sphere and the cylinder.
+* Native site `s2` x is −1 ulp (`0x3fdaf24032cb21e2` vs wheel `0x3fdaf24032cb21e3`). `s1`, `s3`, and the sphere frame match. That site is an endpoint of both wraps.
+* `ten_length[0]` (cylinder) matches the wheel (`0x3fe1ac896f321600`). `ten_length[1]` (sphere) is +2 ulps (`0x3fd8e6e424911d82` vs `0x3fd8e6e424911d80`). `cdof` and `cvel` match; `qfrc_bias[2]` does not (`0xbfdb1be7dd2e22f4` vs `0xbfdb1be7dd2e22f8`).
+* After one `mj_step`, `qpos` matches the wheel and `qvel` does not (first component −3 ulps: `0x3fe66327cffb07ff` vs `0x3fe66327cffb0802`). After ten steps, `qvel` versus the arm64 golden is exact, −2 ulps, −1 ulp: `0x3ff910c1b04b0f7a` (match), `0xc01a36e2e56175fc` vs `0xc01a36e2e56175fe`, `0x4026d2702fede5ae` vs `0x4026d2702fede5af`.
+
+`franka_emika_panda/panda.xml` at `qpos0`. Ferromotion reports 2 contacts and 10 `efc` rows (types 0, 3, and eight pyramidal rows). The wheel reports `ncon = 10`, `nefc = 42` (1 equality, 1 limit, 40 pyramidal rows from 10 contacts). The two deep pairs are the same geoms, `(29, 64)` and `(30, 64)`. The eight missing rows are fingertip pads at distance about `−6.9e-18`. Feeding the wheel's `geom_xpos`/`geom_xmat` and `xipos`/`ximat` into the same collider returns 10 contacts on those pairs. The first body `xpos` difference is `link5`, absolute error about `1e-17`, larger than the pad gap. The row-count gap is that pose difference, not a separate midphase reject.
+
+`shadow_dexee/shadow_dexee.xml` at `qpos0`: contact count 43 and `efc` length 230 match the wheel. `solver_niter` is 9 versus 8. `qacc` differs on all 12 dofs, max abs about `1.8e-8`. `agilex_piper/piper.xml` at `qpos0`: 1 contact, 10 `efc` rows, `solver_niter` 0, and `qacc` all zero, matching the wheel. Its step-1 miss is not a `qpos0` row-count bug.
+
+## What was not changed
+
+Golden arrays, equality, the default solver, initialization, the corpus sha, and the 212-model goal were not changed. Warp, Newton, Ferric, and ferromorphic event contracts were not executed. No measured energy and no GPU result is claimed.
 
 ## CI
 
