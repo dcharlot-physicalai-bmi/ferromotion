@@ -35,6 +35,8 @@ pub enum TimebaseError {
     MissingEpoch,
     AmbiguousEpoch,
     OffGrid,
+    /// `dt` bits are not `((period_ns as f64) * 1e-9).to_bits()`. Envelope v1 has no ratio exemption.
+    DtPeriodMismatch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,13 +131,14 @@ impl BoundaryClock {
         })
     }
 
-    /// Start an episode at tick 0. `dt` is the canonical dynamics step, stored by its bits.
-    /// `period_ns` is the integer scheduling period. They are not required to round-trip into each other.
+    /// Start an episode at tick 0. Requires
+    /// `dt.to_bits() == ((period_ns as f64) * 1e-9).to_bits()`.
     /// This is the only call that resets the epoch. [`BoundaryClock::reset_state`] does not.
     pub fn episode_start(&mut self, origin_ns: u64, dt: f64, period_ns: u64) -> Result<(), TimebaseError> {
         if !finite_positive(dt) || period_ns == 0 {
             return Err(TimebaseError::BadTick);
         }
+        require_default_mapping(dt.to_bits(), period_ns)?;
         self.tick = EPOCH_TICK0;
         self.epoch_tick0 = Some(EPOCH_TICK0);
         self.origin_ns = Some(origin_ns);
@@ -162,15 +165,54 @@ impl BoundaryClock {
 }
 
 /// Proposal carried beside a codec v2 chunk. The v2 bytes are not rewritten.
-/// The episode tick is [`EPOCH_TICK0`] and is not a field.
+/// Fields are private so a struct literal cannot skip [`EpisodeEnvelope::try_new`].
+/// Envelope v1 has no physical-time ratio.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EpisodeEnvelope {
-    pub version: u32,
-    /// Canonical dynamics `dt`, `f64::to_bits`.
-    pub dt_bits: u64,
-    /// Integer nanosecond scheduling period. Not required to equal `dt` after scaling.
-    pub period_ns: u64,
-    pub origin_ns: u64,
+    version: u32,
+    dt_bits: u64,
+    period_ns: u64,
+    origin_ns: u64,
+}
+
+impl EpisodeEnvelope {
+    /// Accepts only `dt_bits == ((period_ns as f64) * 1e-9).to_bits()`.
+    pub fn try_new(version: u32, dt_bits: u64, period_ns: u64, origin_ns: u64) -> Result<Self, TimebaseError> {
+        if version != EPISODE_ENVELOPE_VERSION {
+            return Err(TimebaseError::OffGrid);
+        }
+        require_default_mapping(dt_bits, period_ns)?;
+        Ok(EpisodeEnvelope { version, dt_bits, period_ns, origin_ns })
+    }
+
+    pub fn version(self) -> u32 {
+        self.version
+    }
+    pub fn dt_bits(self) -> u64 {
+        self.dt_bits
+    }
+    pub fn period_ns(self) -> u64 {
+        self.period_ns
+    }
+    pub fn origin_ns(self) -> u64 {
+        self.origin_ns
+    }
+}
+
+/// `((period_ns as f64) * 1e-9).to_bits()` must equal `dt_bits`. No other mapping is accepted.
+pub fn require_default_mapping(dt_bits: u64, period_ns: u64) -> Result<(), TimebaseError> {
+    let dt = f64::from_bits(dt_bits);
+    if !finite_positive(dt) || period_ns == 0 {
+        return Err(TimebaseError::BadTick);
+    }
+    let forward = (period_ns as f64) * 1e-9;
+    if !forward.is_finite() || forward <= 0.0 {
+        return Err(TimebaseError::BadTick);
+    }
+    if dt_bits != forward.to_bits() {
+        return Err(TimebaseError::DtPeriodMismatch);
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -249,9 +291,8 @@ pub fn meter_reading() -> Meter {
     Meter::Unmetered
 }
 
-/// Deterministic nominal seconds of one scheduling period: `period_ns as f64 * 1e-9`.
-/// A zero period is refused. The result is not required to round-trip to `period_ns`, and it is
-/// not required to equal the canonical dynamics `dt`.
+/// Forward product `((period_ns as f64) * 1e-9)`. A zero period is refused.
+/// [`require_default_mapping`] compares `dt` bits to this value. There is no ratio exemption.
 pub fn nominal_seconds(period_ns: u64) -> Result<f64, TimebaseError> {
     if period_ns == 0 {
         return Err(TimebaseError::BadTick);
@@ -280,38 +321,36 @@ pub fn bind_v2_timestamps(t0_ns: u64, step_duration_ns: u64, n_action_steps: u32
     let Some(envelope) = envelope else {
         return Err(TimebaseError::MissingEpoch);
     };
-    if envelope.version != EPISODE_ENVELOPE_VERSION || envelope.period_ns == 0 {
+    if envelope.version() != EPISODE_ENVELOPE_VERSION || envelope.period_ns() == 0 {
         return Err(TimebaseError::OffGrid);
     }
-    if !finite_positive(f64::from_bits(envelope.dt_bits)) {
-        return Err(TimebaseError::BadTick);
-    }
+    require_default_mapping(envelope.dt_bits(), envelope.period_ns())?;
     match clock.epoch_tick0 {
         None => return Err(TimebaseError::MissingEpoch),
         Some(tick0) if tick0 != EPOCH_TICK0 => return Err(TimebaseError::AmbiguousEpoch),
         Some(_) => {}
     }
-    if clock.origin_ns != Some(envelope.origin_ns) || clock.period_ns != Some(envelope.period_ns) {
+    if clock.origin_ns != Some(envelope.origin_ns()) || clock.period_ns != Some(envelope.period_ns()) {
         return Err(TimebaseError::AmbiguousEpoch);
     }
-    if clock.dt_bits != envelope.dt_bits {
+    if clock.dt_bits != envelope.dt_bits() {
         return Err(TimebaseError::DtMismatch);
     }
-    if step_duration_ns != envelope.period_ns || t0_ns < envelope.origin_ns {
+    if step_duration_ns != envelope.period_ns() || t0_ns < envelope.origin_ns() {
         return Err(TimebaseError::OffGrid);
     }
-    let delta = t0_ns - envelope.origin_ns;
-    if !delta.is_multiple_of(envelope.period_ns) {
+    let delta = t0_ns - envelope.origin_ns();
+    if !delta.is_multiple_of(envelope.period_ns()) {
         return Err(TimebaseError::OffGrid);
     }
-    let start = delta / envelope.period_ns;
+    let start = delta / envelope.period_ns();
     for k in 0..n_action_steps {
         let from_v2 = t0_ns
             .checked_add((k as u64).checked_mul(step_duration_ns).ok_or(TimebaseError::Overflow)?)
             .ok_or(TimebaseError::Overflow)?;
         let from_grid = tick_stamp_ns(
-            envelope.origin_ns,
-            envelope.period_ns,
+            envelope.origin_ns(),
+            envelope.period_ns(),
             start.checked_add(k as u64).ok_or(TimebaseError::Overflow)?,
         )?;
         if from_v2 != from_grid {
@@ -540,11 +579,15 @@ spike 4 1
         assert!(clock.episode_start(1_000, 0.0, 1_000).is_err());
         assert!(clock.episode_start(1_000, f64::INFINITY, 1_000).is_err());
         assert_eq!(clock.episode_start(1_000, 0.1, 0), Err(TimebaseError::BadTick));
+        assert_eq!(clock.episode_start(0, 0.1, 1_000), Err(TimebaseError::DtPeriodMismatch));
+        assert_eq!(clock.episode_start(0, 0.1, 20_000_000), Err(TimebaseError::DtPeriodMismatch));
         assert_eq!(clock.tick, 7, "a refused start does not move the tick");
-        clock.episode_start(1_000, 0.1, 1_000).unwrap();
+        let dt_1us = f64::from_bits(0x3eb0c6f7a0b5ed8e);
+        assert_eq!(dt_1us.to_bits(), (1_000_f64 * 1e-9).to_bits());
+        clock.episode_start(1_000, dt_1us, 1_000).unwrap();
         assert_eq!(clock.tick, 0);
         assert_eq!(clock.epoch_tick0, Some(0));
-        assert_eq!(clock.dt_bits, DT_POINT_ONE_BITS);
+        assert_eq!(clock.dt_bits, 0x3eb0c6f7a0b5ed8e);
         assert_eq!(clock.advance().unwrap(), 1);
         assert_eq!(clock.advance().unwrap(), 2);
         clock.ledger.push(Spike { t: 1, source: 0 });
@@ -555,7 +598,7 @@ spike 4 1
         assert_eq!(clock.origin_ns, Some(1_000));
         assert_eq!(clock.ledger.len(), 1);
         assert!(clock.neurons_cleared && clock.ring_cleared);
-        clock.episode_start(1_000, 0.1, 1_000).unwrap();
+        clock.episode_start(1_000, dt_1us, 1_000).unwrap();
         assert_eq!(clock.tick, 0);
         assert!(clock.ledger.is_empty());
         clock.tick = u64::MAX;
@@ -567,35 +610,39 @@ spike 4 1
     }
 
     #[test]
-    fn one_microsecond_is_a_valid_period_and_the_grid_is_integer() {
-        let nominal = nominal_seconds(1_000).unwrap();
-        assert_eq!(nominal.to_bits(), (1_000.0f64 * 1e-9).to_bits());
-        assert_ne!(nominal.to_bits(), (1_000.0f64 * 1e-9 * 1e9).to_bits());
+    fn forward_product_mapping_rejects_mismatched_dt_and_accepts_1000ns() {
+        const ONE_US: u64 = 0x3eb0c6f7a0b5ed8e;
+        const TWENTY_MS: u64 = 0x3f947ae147ae147b;
+        const TWENTY_MS_ONE_BIT_OFF: u64 = 0x3f947ae147ae147c;
+        assert_eq!((1_000_f64 * 1e-9).to_bits(), ONE_US);
+        assert_eq!((20_000_000_f64 * 1e-9).to_bits(), TWENTY_MS);
         assert_eq!(nominal_seconds(0), Err(TimebaseError::BadTick));
         assert_eq!(bind_dt(0.1, 0.1 + f64::EPSILON), Err(TimebaseError::DtMismatch));
-        assert_eq!(bind_dt(f64::NAN, 0.1), Err(TimebaseError::BadTick));
-        assert_eq!(bind_dt(-1.0, -1.0), Err(TimebaseError::BadTick));
         let mut clock = BoundaryClock::new(3, 1.0).unwrap();
+        assert_eq!(clock.episode_start(0, 0.1, 1_000), Err(TimebaseError::DtPeriodMismatch));
+        assert_eq!(clock.episode_start(0, 0.1, 20_000_000), Err(TimebaseError::DtPeriodMismatch));
+        assert_eq!(clock.episode_start(0, f64::from_bits(TWENTY_MS_ONE_BIT_OFF), 20_000_000), Err(TimebaseError::DtPeriodMismatch));
+        assert_eq!(clock.tick, 3);
         assert_eq!(
-            bind_v2_timestamps(0, 1_000, 1, None, &clock),
-            Err(TimebaseError::MissingEpoch)
+            EpisodeEnvelope::try_new(EPISODE_ENVELOPE_VERSION, 0.1f64.to_bits(), 1_000, 0),
+            Err(TimebaseError::DtPeriodMismatch)
         );
-        clock.episode_start(0, 0.1, 1_000).unwrap();
-        let envelope = EpisodeEnvelope {
-            version: EPISODE_ENVELOPE_VERSION,
-            dt_bits: DT_POINT_ONE_BITS,
-            period_ns: 1_000,
-            origin_ns: 0,
-        };
+        assert_eq!(
+            EpisodeEnvelope::try_new(EPISODE_ENVELOPE_VERSION, TWENTY_MS_ONE_BIT_OFF, 20_000_000, 0),
+            Err(TimebaseError::DtPeriodMismatch)
+        );
+        clock.episode_start(0, f64::from_bits(ONE_US), 1_000).unwrap();
+        let envelope = EpisodeEnvelope::try_new(EPISODE_ENVELOPE_VERSION, ONE_US, 1_000, 0).unwrap();
         assert_eq!(bind_v2_timestamps(0, 1_000, 2, Some(envelope), &clock), Ok(()));
-        let other_bits = EpisodeEnvelope { dt_bits: 1.0f64.to_bits(), ..envelope };
-        assert_eq!(bind_v2_timestamps(0, 1_000, 1, Some(other_bits), &clock), Err(TimebaseError::DtMismatch));
-        let other_origin = EpisodeEnvelope { origin_ns: 5, ..envelope };
+        assert_eq!(bind_v2_timestamps(0, 1_000, 1, None, &clock), Err(TimebaseError::MissingEpoch));
+        let other_origin = EpisodeEnvelope::try_new(EPISODE_ENVELOPE_VERSION, ONE_US, 1_000, 5).unwrap();
         assert_eq!(bind_v2_timestamps(5, 1_000, 1, Some(other_origin), &clock), Err(TimebaseError::AmbiguousEpoch));
         assert_eq!(bind_v2_timestamps(1, 1_000, 1, Some(envelope), &clock), Err(TimebaseError::OffGrid));
         assert_eq!(bind_v2_timestamps(0, 2_000, 1, Some(envelope), &clock), Err(TimebaseError::OffGrid));
         assert_eq!(tick_stamp_ns(0, 1_000, 3).unwrap(), 3_000);
         assert_eq!(tick_stamp_ns(u64::MAX, 1_000, 1), Err(TimebaseError::Overflow));
+        let twenty = EpisodeEnvelope::try_new(EPISODE_ENVELOPE_VERSION, TWENTY_MS, 20_000_000, 0).unwrap();
+        assert_eq!(bind_v2_timestamps(0, 20_000_000, 1, Some(twenty), &clock), Err(TimebaseError::AmbiguousEpoch));
         let idle = BoundaryClock::new(3, 0.1).unwrap();
         assert_eq!(bind_v2_timestamps(0, 1_000, 1, Some(envelope), &idle), Err(TimebaseError::MissingEpoch));
     }

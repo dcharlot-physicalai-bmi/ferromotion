@@ -422,14 +422,16 @@ mod tests {
         let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(hex, canonical);
         assert_eq!(digest_sha256(&bytes), GOLDEN_DIGEST);
+        let dt = 20_000_000_f64 * 1e-9;
         let mut clock = crate::ferromorphic_clock::BoundaryClock::new(4, 1.0).unwrap();
-        clock.episode_start(1_000_000_000, 0.1, 20_000_000).unwrap();
-        let envelope = crate::ferromorphic_clock::EpisodeEnvelope {
-            version: crate::ferromorphic_clock::EPISODE_ENVELOPE_VERSION,
-            dt_bits: 0.1f64.to_bits(),
-            period_ns: 20_000_000,
-            origin_ns: 1_000_000_000,
-        };
+        clock.episode_start(1_000_000_000, dt, 20_000_000).unwrap();
+        let envelope = crate::ferromorphic_clock::EpisodeEnvelope::try_new(
+            crate::ferromorphic_clock::EPISODE_ENVELOPE_VERSION,
+            dt.to_bits(),
+            20_000_000,
+            1_000_000_000,
+        )
+        .unwrap();
         assert_eq!(
             crate::ferromorphic_clock::bind_v2_timestamps(1_000_000_000, 20_000_000, 2, Some(envelope), &clock),
             Ok(())

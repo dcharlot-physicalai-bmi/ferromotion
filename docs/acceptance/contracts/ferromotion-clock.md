@@ -33,7 +33,7 @@ Tick phases recorded, and not simulated, are deliveries, neuron updates, enqueue
 
 `episode_start(origin_ns, dt, period_ns)` is the only call that resets the epoch. It sets `tick` to 0. There is no `tick0` argument. `reset_state` only clears neuron and ring flags. It leaves `tick`, the epoch, `period_ns`, `origin_ns`, `dt` bits, and the ledger unchanged.
 
-`dt` is the canonical dynamics step and is stored as `f64` bits. Two engines match only when those bits are equal and both values are finite and positive. `period_ns` is the integer scheduling period and must be nonzero. The conversion to a nominal duration is `period_ns as f64 * 1e-9`. That value is deterministic. It is not required to round-trip to `period_ns`, so a 1000 ns period is accepted. It is also not required to equal `dt`.
+`dt` is the canonical dynamics step, stored as `f64` bits. Two engines match only when those bits are equal and both values are finite and positive. `period_ns` is the integer scheduling period and must be nonzero. Envelope v1 has no ratio exemption. `episode_start` and `EpisodeEnvelope::try_new` both require `dt.to_bits() == ((period_ns as f64) * 1e-9).to_bits()`. A 1000 ns period is accepted when `dt` is that forward product (`0x3eb0c6f7a0b5ed8e`). `dt = 0.1` with 1000 ns, `dt = 0.1` with 20 ms, and the one-bit-off 20 ms pattern `0x3f947ae147ae147c` are `DtPeriodMismatch`. Fields of the envelope are private, so a struct literal cannot skip that check. `bind_v2_timestamps` runs the same check again.
 
 Tick arithmetic on this adapter is checked `u64`. `advance` and `delivery_step` return `Overflow` and do not wrap. Peer `Sim::step` is untouched, so a peer build that still wraps in release is not this adapter.
 
@@ -47,7 +47,7 @@ Tick arithmetic on this adapter is checked `u64`. `advance` and `delivery_step` 
 
 ## Action-chunk index
 
-Codec v2 timestamps are `t0_ns + k * step_duration_ns` with checked multiplication. That nanosecond index is not `Sim::t`. `map_chunk_index_to_tick` leaves the epoch unresolved. Passing an epoch in a test only checks overflow and `tick + 1 + delay`. It does not adopt the open epoch or overflow policy.
+Codec v2 timestamps are `t0_ns + k * step_duration_ns` with checked multiplication. That nanosecond index is not `Sim::t`. After `episode_start`, the episode tick is 0. `map_chunk_index_to_tick` counts from that 0 when the caller says an episode has started, and returns `EpochUnresolved` when it has not. Overflow of `tick + 1 + delay` is `Overflow`. `EPISODE_ENVELOPE_INTEROPERABLE` stays false until both Ferric and ferromorphic accept this version.
 
 ## Not claimed
 

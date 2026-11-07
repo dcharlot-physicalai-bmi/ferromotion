@@ -54,8 +54,10 @@ The episode epoch is an outer version-1 envelope (`dt_bits`, `period_ns`,
 `origin_ns`) with tick 0 fixed, described in `ferromotion-clock.md`. It is a
 proposal to Ferric and ferromorphic. It is not interoperable until both confirm
 it, and it does not change the golden v2 digest. A missing or disagreeing
-epoch, a `dt` bit mismatch, or a timestamp off the nanosecond grid is refused.
-A 1000 ns period is valid. `EntryProposed` and physical actuation stay refused.
+epoch, a timestamp off the nanosecond grid, or a `dt` whose bits are not
+`((period_ns as f64) * 1e-9).to_bits()` is refused. There is no ratio exemption.
+A 1000 ns period is valid only with forward-product bits `0x3eb0c6f7a0b5ed8e`.
+`EntryProposed` and physical actuation stay refused.
 No inference receipt exists. `DynamicsLab::step` is unchanged.
 
 Real weight, stats, and noise sha256 values for `lerobot/smolvla_base` are not
