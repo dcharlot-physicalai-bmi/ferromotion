@@ -7,6 +7,13 @@ That repository is Apache License 2.0. The fixture is a synthetic protocol
 vector. It was not produced by SmolVLA, a robot, or a meter. A digest match
 against it is not model evidence, rollout evidence, or an energy measurement.
 
+The file smolvla-empty-chunk-v2.json is a verbatim protocol fixture from the
+same repository at commit
+c05228929efc3bcb4210b475dd959370fa69893a
+(docs/acceptance/contracts/fixtures/smolvla-empty-chunk-v2.json).
+It is the nonempty vector with n_action_steps 0 and an empty value list.
+The same license and the same limits apply: a digest match is not model
+evidence, rollout evidence, or an energy measurement.
+
 The Rust receiver in ferromotion-core is an independent implementation of the
-byte layout described in that commit's
-docs/acceptance/contracts/smolvla-ferromotion.md. It does not copy Ferric source.
+byte layout described in those commits. It does not copy Ferric source.

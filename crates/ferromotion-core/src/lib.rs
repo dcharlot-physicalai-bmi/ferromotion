@@ -402,10 +402,12 @@ pub use external_oracles::{
     OracleCell, SmolVlaContract, UpstreamOracle, WarpNewtonProbe,
 };
 pub use smolvla_receiver::{
-    accept_for_control, accepts_entry, action_timestamp_ns, authorize_rollout, digest_sha256, encode, normalize_forward,
-    normalize_inverse, pad_state, protocol_receipt, refuse_aloha_delta, refuse_pixel, refuse_token_len, ChunkV2,
-    CodecError, ControlReject, InferenceFidelity, JointSpec, ProtocolReceipt, CODEC_V1_WITHDRAWN, CODEC_VERSION,
-    DIGEST_DOMAIN, FERRIC_CONTRACT_REVISION, GOLDEN_DIGEST, IMAGE_ALIGN_CORNERS, IMAGE_INTERPOLATION, IMAGE_PAD_LEFT,
+    accept_for_control, accepts_entry, action_timestamp_ns, authorize_rollout, check_horizon, digest_sha256, encode,
+    normalize_forward, normalize_inverse, pad_state, parse_chunk, protocol_receipt, refuse_aloha_delta, refuse_pixel,
+    refuse_token_len, verify_chunk, ActionChunk, ChunkV2, CodecError, ControlReject, InferenceFidelity, JointSpec,
+    ProtocolReceipt, CODEC_V1_WITHDRAWN, CODEC_VERSION,
+    DIGEST_DOMAIN, EMPTY_GOLDEN_DIGEST, FERRIC_CONTRACT_REVISION, FERRIC_EMPTY_FIXTURE_REVISION, GOLDEN_DIGEST,
+    IMAGE_ALIGN_CORNERS, IMAGE_INTERPOLATION, IMAGE_PAD_LEFT,
     IMAGE_PAD_TOP, IMAGE_SIDE, LEROBOT_UPSTREAM, PREDICT_ACTION_CHUNK, PREPROCESS_STEPS, PRE_UNPAD_STEPS,
     PRE_UNPAD_WIDTH, PROPOSED_FERRIC_ENTRY, SELECT_ACTION_IS_NOT_THE_ENTRY, SMOLVLA_HUB_ID, STATE_WIDTH, TOKEN_MAX,
 };

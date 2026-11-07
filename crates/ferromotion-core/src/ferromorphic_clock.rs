@@ -322,7 +322,8 @@ pub fn tick_stamp_ns(origin_ns: u64, period_ns: u64, tick: u64) -> Result<u64, T
 }
 
 /// Bind a codec v2 chunk to an episode without reading or writing its canonical bytes.
-/// The clock argument is an untrusted snapshot: this function rechecks
+/// The clock argument is an untrusted snapshot. This function does not keep a
+/// validity bit from an earlier call. It rechecks
 /// `dt_bits == ((period_ns as f64) * 1e-9).to_bits()` on the envelope, then requires
 /// the clock's epoch, origin, period, and `dt` bits to match that envelope.
 /// `step_duration_ns` must equal the envelope period. `t0_ns` must lie on

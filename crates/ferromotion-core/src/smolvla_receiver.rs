@@ -3,7 +3,8 @@
 //! The contract document and the protocol fixture were read from
 //! `dcharlot-physicalai-bmi/ferric` at `3ee11c015e3478c7c4aa0409499346f79ab1c8ce`
 //! (`docs/acceptance/contracts/smolvla-ferromotion.md` and
-//! `docs/acceptance/contracts/fixtures/smolvla-chunk-v2.json`). Codec version 1
+//! `docs/acceptance/contracts/fixtures/smolvla-chunk-v2.json`). The empty-horizon
+//! fixture is Ferric `c05228929efc3bcb4210b475dd959370fa69893a`. Codec version 1
 //! is withdrawn. This file does not copy Ferric's encoder.
 //!
 //! A digest that matches the fixture is a protocol check. It does not authorize
@@ -41,8 +42,14 @@ pub const IMAGE_PAD_LEFT: usize = 0;
 pub const IMAGE_PAD_TOP: usize = 0;
 pub const IMAGE_INTERPOLATION: &str = "bilinear";
 
-/// Golden protocol digest from the pinned fixture. Not a model output.
+/// Golden protocol digest from the pinned nonempty fixture. Not a model output.
 pub const GOLDEN_DIGEST: &str = "6d668d7e25c89249c890d895ef15b8fdcbb97dab7a1339a0a97605c6e1172d86";
+
+/// Ferric commit that published the empty-horizon fixture. Not an interoperability claim.
+pub const FERRIC_EMPTY_FIXTURE_REVISION: &str = "c05228929efc3bcb4210b475dd959370fa69893a";
+
+/// Digest of `fixtures/smolvla-empty-chunk-v2.json` canonical bytes. Not a model output.
+pub const EMPTY_GOLDEN_DIGEST: &str = "6295818fa11b85b37ad8054c75e0a1935b0c0cbb5d7e419090c2520a17b1744e";
 
 const MAGIC: &[u8] = b"FERRIC-SMOLVLA-CHUNK\0";
 
@@ -83,6 +90,8 @@ pub enum CodecError {
     JointCount,
     JointLimits,
     Horizon,
+    /// Action index is not in `0..steps`. An empty chunk has no index 0.
+    TimestampIndex { index: u32, steps: u32 },
     ActionDim,
     ChunkShape,
     NonFinite,
@@ -154,12 +163,50 @@ pub fn refuse_pixel(pixel: f32) -> Result<(), CodecError> {
     if pixel.is_finite() && (0.0..=1.0).contains(&pixel) { Ok(()) } else { Err(CodecError::PixelRange) }
 }
 
-/// `t0_ns + k * step_duration_ns`, checked. Zero duration is refused. No fps is read.
-pub fn action_timestamp_ns(t0_ns: u64, step_duration_ns: u64, k: u32) -> Result<u64, CodecError> {
+/// `n_action_steps > chunk_size` only. Zero is inside the helper.
+/// This does not decide which version-2 payloads encode.
+pub fn check_horizon(n_action_steps: u32, chunk_size: u32) -> Result<(), CodecError> {
+    if n_action_steps > chunk_size {
+        Err(CodecError::Horizon)
+    } else {
+        Ok(())
+    }
+}
+
+/// Shape of the value matrix. Provenance and joints are not this layer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActionChunk {
+    pub n_action_steps: u32,
+    pub action_dim: u32,
+    pub values: Vec<f32>,
+}
+
+impl ActionChunk {
+    /// `try_new(0, 1, [])` is a valid empty matrix. `action_dim == 0` is not.
+    pub fn try_new(n_action_steps: u32, action_dim: u32, values: Vec<f32>) -> Result<Self, CodecError> {
+        check_horizon(n_action_steps, CHUNK_SIZE)?;
+        if action_dim == 0 || action_dim > PRE_UNPAD_WIDTH as u32 {
+            return Err(CodecError::ActionDim);
+        }
+        let expect = (n_action_steps as usize).checked_mul(action_dim as usize).ok_or(CodecError::ChunkShape)?;
+        if values.len() != expect {
+            return Err(CodecError::ChunkShape);
+        }
+        Ok(ActionChunk { n_action_steps, action_dim, values })
+    }
+}
+
+/// Timestamp of action index `index`. Zero duration is refused before the index check.
+/// `index >= steps` is [`CodecError::TimestampIndex`], including index 0 of an empty chunk.
+/// No fps is read and no model runs.
+pub fn action_timestamp_ns(t0_ns: u64, step_duration_ns: u64, index: u32, steps: u32) -> Result<u64, CodecError> {
     if step_duration_ns == 0 {
         return Err(CodecError::StepDuration);
     }
-    let delta = (k as u64).checked_mul(step_duration_ns).ok_or(CodecError::TimestampOverflow)?;
+    if index >= steps {
+        return Err(CodecError::TimestampIndex { index, steps });
+    }
+    let delta = u64::from(index).checked_mul(step_duration_ns).ok_or(CodecError::TimestampOverflow)?;
     t0_ns.checked_add(delta).ok_or(CodecError::TimestampOverflow)
 }
 
@@ -201,9 +248,7 @@ pub fn encode(chunk: &ChunkV2) -> Result<Vec<u8>, CodecError> {
     if chunk.embodiment.is_empty() {
         return Err(CodecError::EmptyEmbodiment);
     }
-    if chunk.n_action_steps == 0 || chunk.n_action_steps > CHUNK_SIZE {
-        return Err(CodecError::Horizon);
-    }
+    check_horizon(chunk.n_action_steps, CHUNK_SIZE)?;
     if chunk.action_dim == 0 || chunk.action_dim > PRE_UNPAD_WIDTH as u32 {
         return Err(CodecError::ActionDim);
     }
@@ -220,7 +265,7 @@ pub fn encode(chunk: &ChunkV2) -> Result<Vec<u8>, CodecError> {
         return Err(CodecError::ChunkShape);
     }
     for k in 0..chunk.n_action_steps {
-        action_timestamp_ns(chunk.t0_ns, chunk.step_duration_ns, k)?;
+        action_timestamp_ns(chunk.t0_ns, chunk.step_duration_ns, k, chunk.n_action_steps)?;
     }
     for joint in &chunk.joints {
         if joint.name.is_empty() || joint.unit.is_empty() || joint.frame.is_empty() {
@@ -273,10 +318,119 @@ pub fn digest_sha256(bytes: &[u8]) -> String {
     sha256(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Same checks as [`encode`], then a refusal. A golden digest does not authorize a rollout.
+/// Same checks as [`encode`], then [`CodecError::EntryProposed`].
+/// An empty horizon is not a second refusal while the entry is proposed.
+/// An empty-horizon execution gate, if one is added, runs only after this gate clears.
+/// A golden digest does not authorize a rollout.
 pub fn authorize_rollout(chunk: &ChunkV2) -> Result<(), CodecError> {
     encode(chunk)?;
     Err(CodecError::EntryProposed)
+}
+
+/// Read a version-2 body. This is the byte layout, not the authorization gate.
+pub fn parse_chunk(bytes: &[u8]) -> Result<ChunkV2, CodecError> {
+    let mut cur = Cursor { bytes, at: 0 };
+    let magic = cur.take(MAGIC.len())?;
+    if magic != MAGIC {
+        return Err(CodecError::ChunkShape);
+    }
+    if cur.u32()? != CODEC_VERSION {
+        return Err(CodecError::ChunkShape);
+    }
+    let chunk = ChunkV2 {
+        lerobot_commit: cur.string()?,
+        model_id: cur.string()?,
+        weight_sha256: cur.hex64()?,
+        stats_sha256: cur.hex64()?,
+        noise_sha256: cur.hex64()?,
+        embodiment: cur.string()?,
+        t0_ns: cur.u64()?,
+        step_duration_ns: cur.u64()?,
+        n_action_steps: cur.u32()?,
+        action_dim: cur.u32()?,
+        joints: {
+            let n = cur.u32()? as usize;
+            let mut joints = Vec::with_capacity(n);
+            for _ in 0..n {
+                joints.push(JointSpec {
+                    name: cur.string()?,
+                    unit: cur.string()?,
+                    frame: cur.string()?,
+                    min: cur.f32()?,
+                    max: cur.f32()?,
+                });
+            }
+            joints
+        },
+        values_time_major: {
+            let flags = cur.take(2)?;
+            if flags != [1, 1] {
+                return Err(CodecError::ChunkShape);
+            }
+            let rest = cur.bytes.len() - cur.at;
+            if !rest.is_multiple_of(4) {
+                return Err(CodecError::ChunkShape);
+            }
+            let n = rest / 4;
+            let mut values = Vec::with_capacity(n);
+            for _ in 0..n {
+                values.push(cur.f32()?);
+            }
+            values
+        },
+    };
+    if cur.at != cur.bytes.len() {
+        return Err(CodecError::ChunkShape);
+    }
+    Ok(chunk)
+}
+
+/// Parse, then require [`encode`] to reproduce the same bytes.
+pub fn verify_chunk(bytes: &[u8]) -> Result<ChunkV2, CodecError> {
+    let chunk = parse_chunk(bytes)?;
+    if encode(&chunk)? != bytes {
+        return Err(CodecError::ChunkShape);
+    }
+    Ok(chunk)
+}
+
+struct Cursor<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8], CodecError> {
+        let end = self.at.checked_add(n).ok_or(CodecError::ChunkShape)?;
+        let out = self.bytes.get(self.at..end).ok_or(CodecError::ChunkShape)?;
+        self.at = end;
+        Ok(out)
+    }
+
+    fn u32(&mut self) -> Result<u32, CodecError> {
+        let b = self.take(4)?;
+        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    fn u64(&mut self) -> Result<u64, CodecError> {
+        let b = self.take(8)?;
+        Ok(u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
+    }
+
+    fn f32(&mut self) -> Result<f32, CodecError> {
+        Ok(f32::from_bits(self.u32()?))
+    }
+
+    fn string(&mut self) -> Result<String, CodecError> {
+        let n = self.u32()? as usize;
+        let bytes = self.take(n)?;
+        String::from_utf8(bytes.to_vec()).map_err(|_| CodecError::ChunkShape)
+    }
+
+    fn hex64(&mut self) -> Result<String, CodecError> {
+        let bytes = self.take(64)?;
+        String::from_utf8(bytes.to_vec()).map_err(|_| CodecError::BadProvenance)
+    }
 }
 
 /// The entry stays proposed, so rollout stays unauthorized even after a digest match.
@@ -472,7 +626,7 @@ mod tests {
         chunk.n_action_steps = 51;
         assert_eq!(encode(&chunk), Err(CodecError::Horizon));
         chunk.n_action_steps = 0;
-        assert_eq!(encode(&chunk), Err(CodecError::Horizon));
+        assert_eq!(encode(&chunk), Err(CodecError::ChunkShape));
         chunk.n_action_steps = 2;
         chunk.action_dim = 0;
         assert_eq!(encode(&chunk), Err(CodecError::ActionDim));
@@ -509,9 +663,9 @@ mod tests {
 
     #[test]
     fn timestamps_are_checked_and_a_digest_match_still_refuses_actuation_and_select_action() {
-        assert_eq!(action_timestamp_ns(1_000_000_000, 20_000_000, 0), Ok(1_000_000_000));
-        assert_eq!(action_timestamp_ns(1_000_000_000, 20_000_000, 1), Ok(1_020_000_000));
-        assert_eq!(action_timestamp_ns(1, 0, 0), Err(CodecError::StepDuration));
+        assert_eq!(action_timestamp_ns(1_000_000_000, 20_000_000, 0, 2), Ok(1_000_000_000));
+        assert_eq!(action_timestamp_ns(1_000_000_000, 20_000_000, 1, 2), Ok(1_020_000_000));
+        assert_eq!(action_timestamp_ns(1, 0, 0, 1), Err(CodecError::StepDuration));
         assert!(FIXTURE.contains("1000000000") && FIXTURE.contains("1020000000"));
         let got = accept_for_control(&protocol_fixture(), PROPOSED_FERRIC_ENTRY, false, GOLDEN_DIGEST).unwrap();
         assert!(got.matches_golden_fixture && !got.rollout_authorized && !got.model_executed);
@@ -569,5 +723,104 @@ mod tests {
             assert!(PRE_UNPAD_STEPS == 50 && PRE_UNPAD_WIDTH == 32);
         }
         assert_eq!(PREPROCESS_STEPS[5], "normalize");
+    }
+
+    fn empty_protocol_chunk() -> ChunkV2 {
+        let mut chunk = protocol_fixture();
+        chunk.n_action_steps = 0;
+        chunk.values_time_major.clear();
+        chunk
+    }
+
+    fn decode_hex(hex: &str) -> Vec<u8> {
+        (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect()
+    }
+
+    /// Nonempty golden stays the published v2 fixture. The empty fixture shares its identity.
+    #[test]
+    fn nonempty_golden_is_unchanged_and_matches_the_empty_identity() {
+        let full = protocol_fixture();
+        let empty = empty_protocol_chunk();
+        assert_eq!(full.n_action_steps, 2);
+        assert_eq!(full.values_time_major.len(), 4);
+        assert_eq!(digest_sha256(&encode(&full).unwrap()), GOLDEN_DIGEST);
+        assert_eq!(empty.action_dim, full.action_dim);
+        assert_eq!(empty.joints, full.joints);
+        assert_eq!(empty.model_id, full.model_id);
+        assert_eq!(empty.weight_sha256, full.weight_sha256);
+        assert_eq!(empty.stats_sha256, full.stats_sha256);
+        assert_eq!(empty.noise_sha256, full.noise_sha256);
+        assert_eq!(empty.embodiment, full.embodiment);
+        assert_eq!(empty.t0_ns, full.t0_ns);
+        assert_eq!(empty.step_duration_ns, full.step_duration_ns);
+        assert_eq!(empty.n_action_steps, 0);
+        assert!(empty.values_time_major.is_empty());
+        assert_ne!(encode(&empty).unwrap(), encode(&full).unwrap());
+    }
+
+    /// Published empty fixture at Ferric `c052289`. This encoder recomputes the bytes.
+    /// Ferric names the authorization error `ProposedEntryInvoked`; this receiver's
+    /// corresponding refusal is `EntryProposed`. Neither test runs a model.
+    #[test]
+    fn published_empty_horizon_matches_canonical_bytes_and_refuses_index_zero() {
+        const EMPTY: &str = include_str!("../../../docs/acceptance/contracts/fixtures/smolvla-empty-chunk-v2.json");
+        assert!(EMPTY.contains("\"kind\": \"protocol_test\""));
+        assert!(EMPTY.contains("\"not_model_evidence\": true"));
+        assert!(EMPTY.contains("\"not_rollout_evidence\": true"));
+        assert!(EMPTY.contains("\"not_energy_evidence\": true"));
+        assert!(EMPTY.contains("\"model_status\": \"proposed\""));
+        assert!(EMPTY.contains("\"n_action_steps\": 0"));
+        assert!(EMPTY.contains("\"action_dim\": 2"));
+        assert!(EMPTY.contains("\"values_time_major\": []"));
+        assert!(EMPTY.contains("\"execution_error\": \"ProposedEntryInvoked\""));
+        assert!(EMPTY.contains("\"timestamp_index_zero\": \"TimestampIndex\""));
+        assert_eq!(json_string(EMPTY, "digest_sha256"), EMPTY_GOLDEN_DIGEST);
+        assert_eq!(check_horizon(0, 50), Ok(()));
+        assert_eq!(check_horizon(0, 0), Ok(()));
+        let shape = ActionChunk::try_new(0, 2, Vec::new()).unwrap();
+        let mut chunk = empty_protocol_chunk();
+        assert_eq!(shape.n_action_steps, chunk.n_action_steps);
+        assert_eq!(shape.action_dim, chunk.action_dim);
+        chunk.values_time_major = shape.values;
+        let bytes = encode(&chunk).unwrap();
+        let published = decode_hex(&json_string(EMPTY, "canonical_hex"));
+        assert_eq!(bytes, published);
+        assert_eq!(bytes.len(), 449);
+        assert_eq!(digest_sha256(&bytes), EMPTY_GOLDEN_DIGEST);
+        assert_eq!(verify_chunk(&bytes).unwrap(), chunk);
+        assert_eq!(
+            action_timestamp_ns(chunk.t0_ns, chunk.step_duration_ns, 0, 0),
+            Err(CodecError::TimestampIndex { index: 0, steps: 0 })
+        );
+        let receipt = protocol_receipt(&chunk, EMPTY_GOLDEN_DIGEST).unwrap();
+        assert!(receipt.matches_golden_fixture);
+        assert!(!receipt.rollout_authorized);
+        assert!(!receipt.model_executed);
+        assert_eq!(receipt.inference, InferenceFidelity::NotExecuted);
+        assert_eq!(receipt.measured_receipts, 0);
+        assert_eq!(authorize_rollout(&chunk), Err(CodecError::EntryProposed));
+        assert_eq!(FERRIC_EMPTY_FIXTURE_REVISION.len(), 40);
+    }
+
+    #[test]
+    fn empty_horizon_negative_cases_stay_on_their_own_layers() {
+        let chunk = empty_protocol_chunk();
+        let mut bad = chunk.clone();
+        bad.weight_sha256.clear();
+        assert_eq!(encode(&bad), Err(CodecError::MissingWeightProvenance));
+        assert_eq!(authorize_rollout(&bad), Err(CodecError::MissingWeightProvenance));
+        bad = chunk.clone();
+        bad.stats_sha256.clear();
+        assert_eq!(encode(&bad), Err(CodecError::MissingStatsProvenance));
+        bad = chunk.clone();
+        bad.noise_sha256.clear();
+        assert_eq!(encode(&bad), Err(CodecError::MissingNoiseProvenance));
+        assert_eq!(authorize_rollout(&bad), Err(CodecError::MissingNoiseProvenance));
+        assert_eq!(ActionChunk::try_new(0, chunk.action_dim, vec![0.0]), Err(CodecError::ChunkShape));
+        bad = chunk.clone();
+        bad.step_duration_ns = 0;
+        assert_eq!(encode(&bad), Err(CodecError::StepDuration));
+        assert_eq!(ActionChunk::try_new(0, 0, Vec::new()), Err(CodecError::ActionDim));
+        assert_eq!(check_horizon(51, 50), Err(CodecError::Horizon));
     }
 }
