@@ -32,6 +32,11 @@ pub enum TimebaseError {
     Overflow,
     Unordered,
     StampMismatch,
+    MissingEpoch,
+    AmbiguousEpoch,
+    OffGrid,
+    /// `dt_ns` does not convert to an `f64` second that multiplies back to the same integer.
+    InexactDt,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,26 +60,25 @@ pub const TICK_PHASES: [TickPhase; 4] = [
     TickPhase::Increment,
 ];
 
-/// Choices the peer left open. None of these is applied to an integrator.
+/// Foreman decision for this adapter: ticks are `u64` and every sum is checked.
+/// Overflow is a hard error. Values are never wrapped. Peer `Sim::step` is not
+/// changed by this crate, so this is not yet an interoperability claim.
+pub const TICK_ARITHMETIC: &str = "checked_u64_fail_closed";
+
+/// Still open with the peer: `DynamicsLab` keeps its accumulated `f64` time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnresolvedPolicy {
-    /// Checked delivery is the contract helper. `Sim::step` still uses wrapping
-    /// addition in release and panics in debug. Returning `Overflow` from
-    /// `Sim::step` is negotiable and is not adopted here.
-    OverflowCheckedVersusWrapping,
-    /// The published step receipt has no epoch. Whether a joint record carries
-    /// one is negotiable. This adapter leaves it unset.
-    EpochNotInReceipt,
     /// `DynamicsLab` keeps its `f64` accumulator. Replacing that with
-    /// `step as f64 * dt` inside the lab is negotiable and is not done here.
+    /// `step as f64 * dt` inside the lab is not done here.
     AccumulatorRemainsInsideDynamicsLab,
 }
 
-pub const UNRESOLVED: [UnresolvedPolicy; 3] = [
-    UnresolvedPolicy::OverflowCheckedVersusWrapping,
-    UnresolvedPolicy::EpochNotInReceipt,
-    UnresolvedPolicy::AccumulatorRemainsInsideDynamicsLab,
-];
+pub const UNRESOLVED: [UnresolvedPolicy; 1] = [UnresolvedPolicy::AccumulatorRemainsInsideDynamicsLab];
+
+/// Outer episode envelope. Version 1 is a proposal. It is not codec v2 and it
+/// is not part of the v2 digest. Peers have not accepted it.
+pub const EPISODE_ENVELOPE_VERSION: u32 = 1;
+pub const EPISODE_ENVELOPE_INTEROPERABLE: bool = false;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Spike {
@@ -95,11 +99,15 @@ pub struct StepReceipt {
 pub struct BoundaryClock {
     pub tick: u64,
     pub dt_bits: u64,
+    /// Integer nanoseconds of one shared tick, set by [`BoundaryClock::episode_start`].
+    pub dt_ns: Option<u64>,
+    /// Nanosecond stamp of `epoch_tick0`. Not a v2 `t0_ns` field.
+    pub origin_ns: Option<u64>,
     pub ledger: Vec<Spike>,
     pub neurons_cleared: bool,
     pub ring_cleared: bool,
-    /// Unset until the peers agree. Reset does not fill this in.
-    pub epoch: Option<u64>,
+    /// Tick at episode start. `reset_state` does not write this.
+    pub epoch_tick0: Option<u64>,
 }
 
 impl BoundaryClock {
@@ -110,18 +118,52 @@ impl BoundaryClock {
         Ok(BoundaryClock {
             tick,
             dt_bits: dt.to_bits(),
+            dt_ns: None,
+            origin_ns: None,
             ledger: Vec::new(),
             neurons_cleared: false,
             ring_cleared: false,
-            epoch: None,
+            epoch_tick0: None,
         })
     }
 
-    /// Peer `reset_state`: neurons and the ring clear. Tick, ledger, and epoch stay.
+    /// Episode start. Sets the shared epoch tick and this clock's tick to `tick0`.
+    /// This is not [`BoundaryClock::reset_state`]: that call preserves tick and epoch.
+    pub fn episode_start(&mut self, tick0: u64, origin_ns: u64, dt_ns: u64) -> Result<(), TimebaseError> {
+        if dt_ns == 0 {
+            return Err(TimebaseError::BadTick);
+        }
+        self.tick = tick0;
+        self.epoch_tick0 = Some(tick0);
+        self.origin_ns = Some(origin_ns);
+        self.dt_ns = Some(dt_ns);
+        self.ledger.clear();
+        self.neurons_cleared = true;
+        self.ring_cleared = true;
+        Ok(())
+    }
+
+    /// Next tick. Checked add. On overflow the tick is left unchanged.
+    pub fn advance(&mut self) -> Result<u64, TimebaseError> {
+        self.tick = self.tick.checked_add(1).ok_or(TimebaseError::Overflow)?;
+        Ok(self.tick)
+    }
+
+    /// Peer `reset_state`: neurons and the ring clear. Tick, ledger, epoch, and
+    /// `dt_ns` stay. An episode is not started here.
     pub fn reset_state(&mut self) {
         self.neurons_cleared = true;
         self.ring_cleared = true;
     }
+}
+
+/// Proposal carried beside a codec v2 chunk. The v2 bytes are not rewritten.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EpisodeEnvelope {
+    pub version: u32,
+    pub epoch_tick0: u64,
+    pub origin_ns: u64,
+    pub dt_ns: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -198,6 +240,70 @@ pub fn order_spikes(spikes: &mut [Spike]) {
 
 pub fn meter_reading() -> Meter {
     Meter::Unmetered
+}
+
+/// Specified conversion: `seconds = dt_ns as f64 * 1e-9`. Accepted only when
+/// `seconds * 1e9` is exactly `dt_ns as f64`. No rounding step is applied.
+pub fn f64_seconds_per_tick(dt_ns: u64) -> Result<f64, TimebaseError> {
+    if dt_ns == 0 {
+        return Err(TimebaseError::BadTick);
+    }
+    let seconds = (dt_ns as f64) * 1e-9;
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return Err(TimebaseError::InexactDt);
+    }
+    let back = seconds * 1e9;
+    if back != dt_ns as f64 {
+        return Err(TimebaseError::InexactDt);
+    }
+    Ok(seconds)
+}
+
+/// Nanosecond stamp of `tick` on an episode grid: `origin_ns + (tick - tick0) * dt_ns`.
+pub fn tick_stamp_ns(origin_ns: u64, tick0: u64, dt_ns: u64, tick: u64) -> Result<u64, TimebaseError> {
+    if dt_ns == 0 {
+        return Err(TimebaseError::BadTick);
+    }
+    if tick < tick0 {
+        return Err(TimebaseError::OffGrid);
+    }
+    let steps = tick - tick0;
+    let delta = steps.checked_mul(dt_ns).ok_or(TimebaseError::Overflow)?;
+    origin_ns.checked_add(delta).ok_or(TimebaseError::Overflow)
+}
+
+/// Bind a codec v2 chunk to an episode without reading or writing its canonical bytes.
+/// `t0_ns` and `step_duration_ns` must already lie on `origin_ns + n * dt_ns`.
+pub fn bind_v2_timestamps(t0_ns: u64, step_duration_ns: u64, n_action_steps: u32, envelope: Option<EpisodeEnvelope>, clock_epoch: Option<u64>) -> Result<(), TimebaseError> {
+    let Some(envelope) = envelope else {
+        return Err(TimebaseError::MissingEpoch);
+    };
+    if envelope.version != EPISODE_ENVELOPE_VERSION || envelope.dt_ns == 0 {
+        return Err(TimebaseError::OffGrid);
+    }
+    let Some(clock_epoch) = clock_epoch else {
+        return Err(TimebaseError::MissingEpoch);
+    };
+    if envelope.epoch_tick0 != clock_epoch {
+        return Err(TimebaseError::AmbiguousEpoch);
+    }
+    if step_duration_ns != envelope.dt_ns || t0_ns < envelope.origin_ns {
+        return Err(TimebaseError::OffGrid);
+    }
+    let delta = t0_ns - envelope.origin_ns;
+    if !delta.is_multiple_of(envelope.dt_ns) {
+        return Err(TimebaseError::OffGrid);
+    }
+    let start = delta / envelope.dt_ns;
+    for k in 0..n_action_steps {
+        let from_v2 = t0_ns.checked_add((k as u64).checked_mul(step_duration_ns).ok_or(TimebaseError::Overflow)?).ok_or(TimebaseError::Overflow)?;
+        let from_grid = tick_stamp_ns(envelope.origin_ns, 0, envelope.dt_ns, start.checked_add(k as u64).ok_or(TimebaseError::Overflow)?)?;
+        if from_v2 != from_grid {
+            return Err(TimebaseError::OffGrid);
+        }
+    }
+    let _ = EPISODE_ENVELOPE_INTEROPERABLE;
+    Ok(())
 }
 
 /// A chunk index is not a tick until an epoch is agreed. A supplied epoch is a
@@ -368,9 +474,8 @@ mod tests {
         assert!(clock.neurons_cleared && clock.ring_cleared);
         assert_eq!(clock.tick, 7);
         assert_eq!(clock.ledger, vec![Spike { t: 6, source: 1 }]);
-        assert_eq!(clock.epoch, None);
+        assert_eq!(clock.epoch_tick0, None);
         assert_eq!(clock.dt_bits, DT_POINT_ONE_BITS);
-        assert!(UNRESOLVED.contains(&UnresolvedPolicy::EpochNotInReceipt));
         assert!(UNRESOLVED.contains(&UnresolvedPolicy::AccumulatorRemainsInsideDynamicsLab));
         assert_eq!(meter_reading(), Meter::Unmetered);
     }
@@ -408,5 +513,39 @@ spike 4 1
         let stamped = text.replace("spike 4 0", "spike 3 0");
         assert_eq!(parse_step_receipt(&stamped), Err(TimebaseError::StampMismatch));
         assert_eq!(FERROMORPHIC_CLOCK_PATH, "docs/contracts/ferromotion-clock.md");
+    }
+
+    #[test]
+    fn episode_start_sets_the_epoch_and_reset_state_preserves_it() {
+        let mut clock = BoundaryClock::new(0, 0.1).unwrap();
+        clock.episode_start(5, 1_000, 1_000).unwrap();
+        assert_eq!(clock.advance().unwrap(), 6);
+        clock.ledger.push(Spike { t: 5, source: 0 });
+        clock.reset_state();
+        assert_eq!(clock.tick, 6);
+        assert_eq!(clock.epoch_tick0, Some(5));
+        assert_eq!(clock.dt_ns, Some(1_000));
+        assert_eq!(clock.ledger.len(), 1);
+        assert!(clock.neurons_cleared && clock.ring_cleared);
+        clock.tick = u64::MAX;
+        assert_eq!(clock.advance(), Err(TimebaseError::Overflow));
+        assert_eq!(clock.tick, u64::MAX);
+        const { assert!(!EPISODE_ENVELOPE_INTEROPERABLE); }
+        assert_eq!(TICK_ARITHMETIC, "checked_u64_fail_closed");
+    }
+
+    #[test]
+    fn nanosecond_grid_refuses_inexact_f64_and_off_grid_or_missing_epochs() {
+        assert_eq!(f64_seconds_per_tick(0), Err(TimebaseError::BadTick));
+        let exact = f64_seconds_per_tick(1_000_000_000).unwrap();
+        assert_eq!(exact.to_bits(), 1.0f64.to_bits());
+        let envelope = EpisodeEnvelope { version: EPISODE_ENVELOPE_VERSION, epoch_tick0: 5, origin_ns: 1_000_000_000, dt_ns: 20_000_000 };
+        assert_eq!(bind_v2_timestamps(1_000_000_000, 20_000_000, 2, None, Some(5)), Err(TimebaseError::MissingEpoch));
+        assert_eq!(bind_v2_timestamps(1_000_000_000, 20_000_000, 2, Some(envelope), None), Err(TimebaseError::MissingEpoch));
+        assert_eq!(bind_v2_timestamps(1_000_000_000, 20_000_000, 2, Some(envelope), Some(4)), Err(TimebaseError::AmbiguousEpoch));
+        assert_eq!(bind_v2_timestamps(1_000_000_001, 20_000_000, 2, Some(envelope), Some(5)), Err(TimebaseError::OffGrid));
+        assert_eq!(bind_v2_timestamps(1_000_000_000, 10_000_000, 2, Some(envelope), Some(5)), Err(TimebaseError::OffGrid));
+        assert_eq!(bind_v2_timestamps(1_000_000_000, 20_000_000, 2, Some(envelope), Some(5)), Ok(()));
+        assert_eq!(tick_stamp_ns(1_000_000_000, 5, 20_000_000, 6).unwrap(), 1_020_000_000);
     }
 }

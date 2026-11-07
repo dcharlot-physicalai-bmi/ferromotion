@@ -422,6 +422,17 @@ mod tests {
         let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(hex, canonical);
         assert_eq!(digest_sha256(&bytes), GOLDEN_DIGEST);
+        let envelope = crate::ferromorphic_clock::EpisodeEnvelope {
+            version: crate::ferromorphic_clock::EPISODE_ENVELOPE_VERSION,
+            epoch_tick0: 0,
+            origin_ns: 1_000_000_000,
+            dt_ns: 20_000_000,
+        };
+        assert_eq!(
+            crate::ferromorphic_clock::bind_v2_timestamps(1_000_000_000, 20_000_000, 2, Some(envelope), Some(0)),
+            Ok(())
+        );
+        assert_eq!(encode(&protocol_fixture()).unwrap(), bytes);
         let receipt = protocol_receipt(&protocol_fixture(), GOLDEN_DIGEST).unwrap();
         assert!(receipt.matches_golden_fixture);
         assert!(!receipt.rollout_authorized);
@@ -520,8 +531,9 @@ mod tests {
         );
         assert_eq!(crate::ferromorphic_clock::map_chunk_index_to_tick(1, Some(u64::MAX), 0), Err(crate::ferromorphic_clock::TimebaseError::Overflow));
         const { assert!(!crate::ferromorphic_clock::JOINT_LOOP_EXECUTED); }
-        assert!(crate::ferromorphic_clock::UNRESOLVED.contains(&crate::ferromorphic_clock::UnresolvedPolicy::EpochNotInReceipt));
-        assert!(crate::ferromorphic_clock::UNRESOLVED.contains(&crate::ferromorphic_clock::UnresolvedPolicy::OverflowCheckedVersusWrapping));
+        assert!(crate::ferromorphic_clock::UNRESOLVED.contains(&crate::ferromorphic_clock::UnresolvedPolicy::AccumulatorRemainsInsideDynamicsLab));
+        assert_eq!(crate::ferromorphic_clock::TICK_ARITHMETIC, "checked_u64_fail_closed");
+        const { assert!(!crate::ferromorphic_clock::EPISODE_ENVELOPE_INTEROPERABLE); }
     }
 
     #[test]

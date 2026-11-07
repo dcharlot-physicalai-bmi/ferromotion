@@ -47,13 +47,15 @@ on the right. Images, if a length is presented, are bilinear into 512² with
 `align_corners` false and pad on the left and the top. Pixels outside `[0, 1]`
 are refused before the `pixel * 2 - 1` map. Aloha joint deltas are refused.
 
-## Clock
+## Clock envelope
 
-Action index `k` is not a ferromorphic tick. `map_chunk_index_to_tick` returns
-`EpochUnresolved` until an epoch is agreed. A caller-supplied epoch is only
-arithmetic: spikes stamped at that tick stay visible at `tick + 1 + delay`, and
-an overflowing sum is `Overflow`. The epoch and the wrapping-versus-checked
-`Sim::step` policy are still open. `DynamicsLab::step` is unchanged.
+Version 2 timestamps stay `t0_ns` and `step_duration_ns` inside the v2 body.
+The episode epoch is an outer version-1 envelope (`epoch_tick0`, `origin_ns`,
+`dt_ns`), described in `ferromotion-clock.md`. It is a proposal to Ferric and
+ferromorphic. It is not interoperable yet, and it does not change the golden
+v2 digest. A missing epoch, an epoch that disagrees with the clock, or a
+timestamp off the nanosecond grid is refused. `EntryProposed` and physical
+actuation stay refused. No inference receipt exists. `DynamicsLab::step` is unchanged.
 
 Real weight, stats, and noise sha256 values for `lerobot/smolvla_base` are not
 in the fixture. The hashes there are synthetic.

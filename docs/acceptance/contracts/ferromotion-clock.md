@@ -29,13 +29,21 @@ At step `k` the peer schedule is: sense the plant at `k`; control with spikes `t
 
 Tick phases recorded, and not simulated, are deliveries, neuron updates, enqueue at `t + 1 + delay`, then increment.
 
-## Unresolved, for peer agreement
+## Foreman decision, not yet a peer interoperability claim
 
-These are not applied to either integrator.
+`episode_start(tick0, origin_ns, dt_ns)` is the only call that writes the shared epoch. It sets `tick` to `tick0`. `reset_state` still only clears neuron and ring flags. It leaves `tick`, `epoch_tick0`, `dt_ns`, `origin_ns`, and the ledger unchanged. Those two calls are not aliases.
 
-1. **Overflow.** The checked helper refuses a sum that does not fit. The peer's `Sim::step` still uses ordinary `+` (panic in debug, wrap in release). Whether that method returns an error is negotiable. This tree does not change it.
-2. **Epoch.** The peer receipt has no epoch. `DynamicsLab::set_state` zeros the lab's `f64` time, which is a different reset from `reset_state`. Until agreed, `BoundaryClock.epoch` stays `None` and no receipt claims an epoch.
-3. **Accumulator.** `DynamicsLab::time` remains the sum of the `dt` values passed to `DynamicsLab::step`, including that function's eight internal substeps of the pendulum. The shared clock, if adopted, is the integer tick and one multiply. Whether the lab drops the accumulator is negotiable. It is not dropped here.
+Tick arithmetic on this adapter is checked `u64`. `advance` and `delivery_step` return `Overflow` and do not wrap. Peer `Sim::step` is untouched, so a peer build that still wraps in release is not this adapter.
+
+The shared duration is integer nanoseconds. `f64_seconds_per_tick` computes `dt_ns as f64 * 1e-9` and accepts it only when `seconds * 1e9` equals `dt_ns as f64` with no rounding. Otherwise the bind is `InexactDt`.
+
+## Outer envelope, codec v2 unchanged
+
+`EpisodeEnvelope` version 1 carries `epoch_tick0`, `origin_ns`, and `dt_ns` beside a codec v2 chunk. It is not written into the v2 canonical bytes and it is not part of the v2 digest. `EPISODE_ENVELOPE_INTEROPERABLE` is false until Ferric and ferromorphic accept this envelope. `bind_v2_timestamps` refuses a missing epoch, an epoch that disagrees with the clock, a `step_duration_ns` that is not `dt_ns`, and a `t0_ns` that is not `origin_ns + n * dt_ns`.
+
+## Still open
+
+`DynamicsLab::time` remains the sum of the `dt` values passed to `DynamicsLab::step`. That accumulator is not the shared tick. Replacing it is not part of this decision.
 
 ## Action-chunk index
 

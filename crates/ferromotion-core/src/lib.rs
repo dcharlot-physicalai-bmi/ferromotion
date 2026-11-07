@@ -410,10 +410,12 @@ pub use smolvla_receiver::{
     PRE_UNPAD_WIDTH, PROPOSED_FERRIC_ENTRY, SELECT_ACTION_IS_NOT_THE_ENTRY, SMOLVLA_HUB_ID, STATE_WIDTH, TOKEN_MAX,
 };
 pub use ferromorphic_clock::{
-    accept_event_step, accumulated_f64, bind_dt, delivery_step, finite_positive, map_chunk_index_to_tick, meter_reading,
-    order_spikes, parse_step_receipt, propose_joint_step, refractory_ticks, same_dt, step_seconds, BoundaryClock,
-    ChunkTickMap, Meter, ProposedJointStep, Spike, StepReceipt, TickPhase, TimebaseError, UnresolvedPolicy,
-    DT_POINT_ONE_BITS, FERROMORPHIC_CLOCK_PATH, FERROMORPHIC_CLOCK_REVISION, JOINT_LOOP_EXECUTED, TICK_PHASES, UNRESOLVED,
+    accept_event_step, accumulated_f64, bind_dt, bind_v2_timestamps, delivery_step, f64_seconds_per_tick, finite_positive,
+    map_chunk_index_to_tick, meter_reading, order_spikes, parse_step_receipt, propose_joint_step, refractory_ticks,
+    same_dt, step_seconds, tick_stamp_ns, BoundaryClock, ChunkTickMap, EpisodeEnvelope, Meter, ProposedJointStep, Spike,
+    StepReceipt, TickPhase, TimebaseError, UnresolvedPolicy, DT_POINT_ONE_BITS, EPISODE_ENVELOPE_INTEROPERABLE,
+    EPISODE_ENVELOPE_VERSION, FERROMORPHIC_CLOCK_PATH, FERROMORPHIC_CLOCK_REVISION, JOINT_LOOP_EXECUTED, TICK_ARITHMETIC,
+    TICK_PHASES, UNRESOLVED,
 };
 pub use collision::{CapsuleCollisionCost, PlaneCollisionCost, SphereCollisionCost};
 pub use cosserat::CosseratRod;
