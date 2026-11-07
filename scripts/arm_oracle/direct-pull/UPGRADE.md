@@ -14,7 +14,7 @@ The immutable URL is the raw file at the commit that contains this exact blob. O
 set -euo pipefail
 export LC_ALL=C
 unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN || true
-C=COMMIT_THAT_CONTAINS_THIS_BLOB
+C=41ed70b2c14aee8f028018df14c60c05faf668be
 curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' \
   -o recover-stage3.sh \
   "https://raw.githubusercontent.com/dcharlot-physicalai-bmi/ferromotion/${C}/scripts/arm_oracle/direct-pull/recover-stage3.sh"
