@@ -21,3 +21,21 @@ The arm64 unit-test goldens claim MuJoCo 3.13.0. The source SHA, dylib hash, com
 If those arm64 flags stay irrecoverable, the replacement would be a new oracle named `mujoco-3.13.0-arm64-pinned-build`, with a recorded source SHA, compiler command, artifact sha256, and a verified aarch64 host. It would not be labeled as the old goldens. Adopting it needs a foreman decision, and only after a run reproduces the existing arrays bitwise may those arrays be treated as proven. This note does not make that decision.
 
 The blanket unfuse experiment is archived under `docs/acceptance/research/2026-11-07-unfused-kinematics/` and is not the default.
+
+## Named source build `mujoco-3.13.0-x86_64-contract-off`
+
+Built on this x86_64 host from MuJoCo tag `3.13.0`, commit `123347c0eeab7e13c8da0828ab593bbd95bcf335`. Compiler `/usr/lib/llvm-18/bin/clang` 18.1.3. Flags include `-O3 -DNDEBUG -fno-fast-math -ffp-contract=off -fno-math-errno -march=x86-64-v2 -mno-fma -mno-avx`. ARM flags are N/A for this build. Linker is `clang++ -fuse-ld=gold` (GNU gold 1.16). Artifact `libmujoco.so.3.13.0` sha256 `64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc`. The reproducible command is `scripts/build_mujoco_3130_x86_contract_off.sh`. Host CPU is an Intel Xeon family 6 model 207. The compile does not use the host's FMA or AVX. libm is glibc 2.39. This oracle does not replace the PyPI wheel, the arm64 golden arrays, or `conformance/menagerie_ledger.json`.
+
+`mju_mulQuat` in this artifact is SSE `mulpd`/`addpd`. The probe vector used by `fp_contract` is the same bits as that export. `MUL_QUAT` stays `contracted`. The contracted formula does not match that export. Switching the default to unfused is not selected: the arm64 golden still does not match this oracle, and the op bisect is not a single site.
+
+On the unit-test model `geom_frames_match_mujocos_kinematics_bit_for_bit`, this oracle and the PyPI wheel produced the same 4 geom frames. 38 of 48 components differ from the embedded arm64 golden, 10 match. There is no bitwise link. The arm64 arrays stay unproven provenance.
+
+At `qpos0`, default ferromotion geom frames were bit-exact for 0 of 14842 geoms against this oracle. The largest absolute error is far above an ulp (`wonik_allegro/right_hand.xml`), so that composite is not only contraction.
+
+Instrumented call order at `qpos0`, 212 loaded models and 5 refusals, is in `docs/acceptance/oracles/x86_64-contract-off-op-bisect.json`. Exports compared to this `.so`: `mul_quat` 103 first, `rot_vec_quat` 56 first, no covered-export divergence 53. Including a same-flags recompile of `mji_mulMatVec3` (not an export of the `.so`): `mul_quat` 83, `rot_vec_quat` 52, `mul_mat_vec3` 24, and 53 with none of those. `sincos`, the mass matrix, constraints, and tendons are not in that bisect. An uninstrumented op is not a pass. The 53 models are not 212/212.
+
+The 20-step trajectory against this same `.so`, with the published step seed, is 1 of 212 bit-exact (`realsense_d435i/d435i.xml`). First nonzero recorded array: `qpos` 172, `qvel` 37, `qacc_warmstart` 2. That array summary is not the op bisect. It matches the preserved wheel ledger's score and does not replace that ledger.
+
+## Arm64 source oracle
+
+Not built and not run. No verified aarch64 route was supplied. A cross `libstdc++` for aarch64 is present on this machine and was not used. A Jetson name is not an architecture. The next requirement is a verified aarch64 host, then the same kind of recorded clang or gcc command with explicit `-ffp-contract` and the ISA flags that apply there. Until that run exists, arm64 passes stay unset.

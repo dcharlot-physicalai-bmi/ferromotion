@@ -362,7 +362,7 @@ pub(crate) mod mujoco_sparse;
 pub(crate) mod mujoco_tendon;
 pub(crate) mod mujoco_solver;
 pub(crate) mod mujoco_step;
-pub use fp_contract::{mul_quat_with, Contraction, MUL_QUAT};
+pub use fp_contract::{capture_ops, mul_quat_with, record_op, Contraction, OpSample, MUL_QUAT};
 pub use mujoco_step::MjNativeState;
 pub(crate) mod png;
 pub mod mjcf_sensor;

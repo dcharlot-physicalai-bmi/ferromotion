@@ -32,6 +32,7 @@ pub(crate) fn sincos(x: f64) -> (f64, f64) {
     }
     // SAFETY: a pure libm function of one double, returning two doubles in registers (an HFA)
     let r = unsafe { __sincos_stret(x) };
+    crate::fp_contract::record_op("sincos", &[x], &[r.sin, r.cos]);
     (r.sin, r.cos)
 }
 
@@ -44,7 +45,9 @@ pub(crate) fn sincos(x: f64) -> (f64, f64) {
 /// That is a fixture adjustment, not a port of the arm64 function, so it is not used.
 #[cfg(not(target_vendor = "apple"))]
 pub(crate) fn sincos(x: f64) -> (f64, f64) {
-    (x.sin(), x.cos())
+    let out = (x.sin(), x.cos());
+    crate::fp_contract::record_op("sincos", &[x], &[out.0, out.1]);
+    out
 }
 
 /// `mjtSameFrame`: where [`mj_local2global`] takes an element's frame from instead of composing it.
@@ -115,7 +118,12 @@ pub(crate) type XFrame = ([f64; 3], [f64; 9]);
 
 /// `mji_mulMatVec3`, contracted.
 fn mul_mat_vec3(m: &[f64; 9], v: &[f64; 3]) -> [f64; 3] {
-    [m[2].mul_add(v[2], m[0].mul_add(v[0], m[1] * v[1])), m[5].mul_add(v[2], m[3].mul_add(v[0], m[4] * v[1])), m[8].mul_add(v[2], m[6].mul_add(v[0], m[7] * v[1]))]
+    let out = [m[2].mul_add(v[2], m[0].mul_add(v[0], m[1] * v[1])), m[5].mul_add(v[2], m[3].mul_add(v[0], m[4] * v[1])), m[8].mul_add(v[2], m[6].mul_add(v[0], m[7] * v[1]))];
+    let mut inputs = [0.0; 12];
+    inputs[..9].copy_from_slice(m);
+    inputs[9..].copy_from_slice(v);
+    crate::fp_contract::record_op("mul_mat_vec3", &inputs, &out);
+    out
 }
 
 /// `mji_mulQuat` / `mju_mulQuat` (no normalisation).
@@ -127,6 +135,10 @@ pub(crate) fn mul_quat(a: &[f64; 4], b: &[f64; 4]) -> [f64; 4] {
 /// `mji_rotVecQuat`, contracted (no zero-vector shortcut, unlike `mju_rotVecQuat`).
 fn rot_vec_quat(v: &[f64; 3], q: &[f64; 4]) -> [f64; 3] {
     if q[0] == 1.0 && q[1] == 0.0 && q[2] == 0.0 && q[3] == 0.0 {
+        let mut inputs = [0.0; 7];
+        inputs[..3].copy_from_slice(v);
+        inputs[3..].copy_from_slice(q);
+        crate::fp_contract::record_op("rot_vec_quat", &inputs, v);
         return *v;
     }
     let t = [
@@ -134,16 +146,22 @@ fn rot_vec_quat(v: &[f64; 3], q: &[f64; 4]) -> [f64; 3] {
         (-q[1]).mul_add(v[2], q[0].mul_add(v[1], q[3] * v[0])),
         (-q[2]).mul_add(v[0], q[0].mul_add(v[2], q[1] * v[1])),
     ];
-    [
+    let out = [
         2.0f64.mul_add(q[2].mul_add(t[2], -(q[3] * t[1])), v[0]),
         2.0f64.mul_add(q[3].mul_add(t[0], -(q[1] * t[2])), v[1]),
         2.0f64.mul_add(q[1].mul_add(t[1], -(q[2] * t[0])), v[2]),
-    ]
+    ];
+    let mut inputs = [0.0; 7];
+    inputs[..3].copy_from_slice(v);
+    inputs[3..].copy_from_slice(q);
+    crate::fp_contract::record_op("rot_vec_quat", &inputs, &out);
+    out
 }
 
 /// `mju_normalize4`: below `mjMINVAL` the unit quaternion; within `mjMINVAL` of 1 left alone; otherwise
 /// MULTIPLIED by the reciprocal of the norm.
 pub(crate) fn normalize4(q: &mut [f64; 4]) {
+    let before = *q;
     let norm = q[3].mul_add(q[3], q[2].mul_add(q[2], q[0].mul_add(q[0], q[1] * q[1]))).sqrt();
     if norm < 1e-15 {
         *q = [1.0, 0.0, 0.0, 0.0];
@@ -153,6 +171,7 @@ pub(crate) fn normalize4(q: &mut [f64; 4]) {
             *x *= inv;
         }
     }
+    crate::fp_contract::record_op("normalize4", &before, q);
 }
 
 /// `mju_quat2Mat` (its products are separate statements, so nothing fuses).
@@ -178,11 +197,17 @@ pub(crate) fn quat2mat(q: &[f64; 4]) -> [f64; 9] {
 
 /// `mji_axisAngle2Quat`.
 pub(crate) fn axis_angle2quat(axis: &[f64; 3], angle: f64) -> [f64; 4] {
-    if angle == 0.0 {
-        return [1.0, 0.0, 0.0, 0.0];
-    }
-    let (s, c) = sincos(angle * 0.5);
-    [c, axis[0] * s, axis[1] * s, axis[2] * s]
+    let out = if angle == 0.0 {
+        [1.0, 0.0, 0.0, 0.0]
+    } else {
+        let (s, c) = sincos(angle * 0.5);
+        [c, axis[0] * s, axis[1] * s, axis[2] * s]
+    };
+    let mut inputs = [0.0; 4];
+    inputs[..3].copy_from_slice(axis);
+    inputs[3] = angle;
+    crate::fp_contract::record_op("axis_angle2quat", &inputs, &out);
+    out
 }
 
 /// `mj_local2Global`: an element's world frame from its body's, as its `sameframe` tag says.

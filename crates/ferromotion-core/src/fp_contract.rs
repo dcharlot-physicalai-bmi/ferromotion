@@ -19,7 +19,48 @@ pub enum Contraction {
 pub const MUL_QUAT: Contraction = Contraction::Contracted;
 
 pub fn mul_quat(a: &[f64; 4], b: &[f64; 4]) -> [f64; 4] {
-    mul_quat_with(MUL_QUAT, a, b)
+    let out = mul_quat_with(MUL_QUAT, a, b);
+    let mut inputs = [0.0; 8];
+    inputs[..4].copy_from_slice(a);
+    inputs[4..].copy_from_slice(b);
+    record_op("mul_quat", &inputs, &out);
+    out
+}
+
+/// One executed call. Present only while [`capture_ops`] is running.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpSample {
+    pub op: &'static str,
+    pub inputs: Vec<u64>,
+    pub outputs: Vec<u64>,
+}
+
+use std::cell::RefCell;
+
+thread_local! {
+    static OP_TRACE: RefCell<Option<Vec<OpSample>>> = const { RefCell::new(None) };
+}
+
+/// Record `op` when a capture is active. A capture that is off does not store the call.
+pub fn record_op(op: &'static str, inputs: &[f64], outputs: &[f64]) {
+    OP_TRACE.with(|slot| {
+        let mut guard = slot.borrow_mut();
+        if let Some(buf) = guard.as_mut() {
+            buf.push(OpSample {
+                op,
+                inputs: inputs.iter().copied().map(f64::to_bits).collect(),
+                outputs: outputs.iter().copied().map(f64::to_bits).collect(),
+            });
+        }
+    });
+}
+
+/// Run `f` and return the instrumented calls it made, in order.
+pub fn capture_ops<R>(f: impl FnOnce() -> R) -> (R, Vec<OpSample>) {
+    OP_TRACE.with(|slot| *slot.borrow_mut() = Some(Vec::new()));
+    let value = f();
+    let samples = OP_TRACE.with(|slot| slot.borrow_mut().take().unwrap_or_default());
+    (value, samples)
 }
 
 pub fn mul_quat_with(policy: Contraction, a: &[f64; 4], b: &[f64; 4]) -> [f64; 4] {
@@ -67,5 +108,11 @@ mod tests {
         let unfused = mul_quat_with(Contraction::Unfused, &a, &b);
         assert_eq!(unfused.map(f64::to_bits), wheel);
         assert_ne!(contracted.map(f64::to_bits), wheel);
+        let (again, samples) = capture_ops(|| mul_quat(&a, &b));
+        assert_eq!(again.map(f64::to_bits), contracted.map(f64::to_bits));
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].op, "mul_quat");
+        assert_eq!(samples[0].outputs, contracted.map(f64::to_bits).to_vec());
+        assert_ne!(samples[0].outputs, wheel.to_vec());
     }
 }

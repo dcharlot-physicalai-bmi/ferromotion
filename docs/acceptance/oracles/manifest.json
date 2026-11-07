@@ -19,6 +19,12 @@
       "executed": false,
       "passes": null,
       "note": "Not executed. An unexecuted ARM run is not zero passes and is not a pass."
+    },
+    "x86_64_source_contract_off": {
+      "executed": true,
+      "step_bit_exact_212": false,
+      "qpos0_geom_frames_bit_exact": "0/14842",
+      "covered_op_bisect_is_not_a_pass": true
     }
   },
   "oracles": [
@@ -95,6 +101,68 @@
           "limit": "Array-level, from the ledger detail strings. Not an opcode bisect."
         }
       }
+    },
+    {
+      "id": "mujoco-3.13.0-x86_64-contract-off",
+      "role": "fresh source build, separate from the PyPI wheel and from the arm64 golden arrays",
+      "status": "built_on_this_x86_64_host",
+      "replaces_wheel": false,
+      "replaces_arm64_goldens": false,
+      "replaces_baseline_ledger": false,
+      "mujoco_version": "3.13.0",
+      "mujoco_source_sha": "123347c0eeab7e13c8da0828ab593bbd95bcf335",
+      "mujoco_git_tag": "3.13.0",
+      "resolved_deps": {
+        "ccd": "7931e764a19ef6b21b443376c699bbc9c6d4fba8",
+        "eigen3": "ea13a98decd497a8c5588fb5de71b57bcf10d864",
+        "lodepng": "17d08dd26cac4d63f43af217ebd70318bfb8189c",
+        "marchingcubecpp": "f03a1b3ec29b1d7d865691ca8aea4f1eb2c2873d",
+        "miniz": "d10b03cc73475af673df40f06e5cefd1d5f940d9",
+        "qhull": "d1c2fc0caa5f644f3a0f220290d4a868c68ed4f6",
+        "tinyobjloader": "2945a967c5303b2c8c14174117c45f3302591150",
+        "tinyxml2": "e6caeae85799003f4ca74ff26ee16a789bc2af48"
+      },
+      "compiler": "/usr/lib/llvm-18/bin/clang",
+      "compiler_version": "Ubuntu clang version 18.1.3 (1ubuntu1)",
+      "compiler_target": "x86_64-pc-linux-gnu",
+      "cxx": "/usr/lib/llvm-18/bin/clang++",
+      "contraction": "-ffp-contract=off",
+      "fma": "-mno-fma",
+      "isa": "-march=x86-64-v2 -mno-avx -mno-fma",
+      "arm_flags": "N/A",
+      "fast_math": "-fno-fast-math -fno-math-errno",
+      "optimization": "-O3 -DNDEBUG",
+      "avx_cmake": "MUJOCO_ENABLE_AVX=OFF MUJOCO_ENABLE_AVX_INTRINSICS=OFF",
+      "lto": "OFF",
+      "linker": "clang++ -fuse-ld=gold",
+      "linker_version": "GNU gold (GNU Binutils for Ubuntu 2.42) 1.16",
+      "cpu_arch": "x86_64",
+      "cpu_model": "Intel(R) Xeon(R) Processor family 6 model 207 stepping 2",
+      "host_features_not_used_by_the_compiler_flags": [
+        "fma",
+        "avx",
+        "avx512f"
+      ],
+      "os": "Ubuntu 24.04.5 LTS",
+      "libm": "glibc 2.39 libm.so.6",
+      "library_path": "/usr/lib/gcc/x86_64-linux-gnu/14",
+      "artifact": "libmujoco.so.3.13.0",
+      "artifact_sha256": "64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc",
+      "build_script": "scripts/build_mujoco_3130_x86_contract_off.sh",
+      "mju_mulQuat_instructions": "SSE mulpd/addpd, no FMA",
+      "mju_mulQuat_probe_bits": "3fe8000000000000 bfc5c28f5c28f5c2 3fc3333333333333 3fdc28f5c28f5c29",
+      "arm64_golden_geom_frames_model": {
+        "compared": true,
+        "bitwise_match": false,
+        "components": 48,
+        "matching_components": 10,
+        "differing_components": 38,
+        "same_bytes_as_pypi_wheel_on_this_model": true,
+        "old_provenance": "unproven provenance"
+      },
+      "qpos0_geom_frames_versus_default_ferromotion": "0 of 14842 bit-exact",
+      "op_bisect": "docs/acceptance/oracles/x86_64-contract-off-op-bisect.json",
+      "default_mul_quat_changed": false
     }
   ],
   "proposal_awaiting_foreman": {

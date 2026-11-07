@@ -1850,6 +1850,15 @@ impl MjcfTree {
         self.mj_kin.geom_frames(qpos).into_iter().map(|(p, m)| (Vector3::from(p), Matrix3::new(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]))).collect()
     }
 
+    /// Instrumented calls made by [`Self::geom_frames_mujoco`] at `qpos`, in execution order.
+    /// An operation that is absent from a later oracle comparison is not a pass.
+    pub fn trace_mujoco_kinematics_ops(&self, qpos: &[f64]) -> Vec<crate::fp_contract::OpSample> {
+        let (_, samples) = crate::fp_contract::capture_ops(|| {
+            let _ = self.geom_frames_mujoco(qpos);
+        });
+        samples
+    }
+
     /// Every body's compiled frame in its parent, `(body_pos, body_quat)`, in MuJoCo's body order (the world
     /// first) and MuJoCo's own arithmetic.
     pub fn body_frames_compiled(&self) -> Vec<([f64; 3], [f64; 4])> {

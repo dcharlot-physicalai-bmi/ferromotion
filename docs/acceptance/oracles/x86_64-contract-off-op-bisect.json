@@ -1,0 +1,1104 @@
+{
+  "oracle_id": "mujoco-3.13.0-x86_64-contract-off",
+  "loaded_models": 212,
+  "refused_models": 5,
+  "export_only_first_op": {
+    "mul_quat": 103,
+    "rot_vec_quat": 56,
+    "no_divergence_in_covered_ops": 53
+  },
+  "with_same_flags_mul_mat_vec3_first_op": {
+    "mul_quat": 83,
+    "rot_vec_quat": 52,
+    "mul_mat_vec3": 24,
+    "no_divergence_in_compared_ops": 53
+  },
+  "note": "53 models with no compared-op divergence are not passes. sincos, solver, mass matrix, constraints, tendons, and the 20-step trajectory were not compared.",
+  "models": [
+    {
+      "model": "agilex_piper/piper.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "agilex_piper/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "agility_cassie/cassie.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "agility_cassie/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "aloha/aloha.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "aloha/filtered_cartesian_actuators.xml",
+      "loaded": false,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "aloha/joint_position_actuators.xml",
+      "loaded": false,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "aloha/keyframe_ctrl.xml",
+      "loaded": false,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "aloha/keyframe_no_act.xml",
+      "loaded": false,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "aloha/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "anybotics_anymal_b/anymal_b.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "anybotics_anymal_b/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "anybotics_anymal_c/anymal_c.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "anybotics_anymal_c/anymal_c_mjx.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "anybotics_anymal_c/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "anybotics_anymal_c/scene_mjx.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "apptronik_apollo/apptronik_apollo.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "apptronik_apollo/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "arx_l5/arx_l5.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "arx_l5/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "berkeley_humanoid/berkeley_humanoid.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "berkeley_humanoid/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "bitcraze_crazyflie_2/cf2.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "bitcraze_crazyflie_2/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "booster_t1/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "booster_t1/t1.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "boston_dynamics_spot/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "boston_dynamics_spot/scene_arm.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "boston_dynamics_spot/spot.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "boston_dynamics_spot/spot_arm.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "dynamixel_2r/dynamixel_2r.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "dynamixel_2r/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "flexiv_rizon4/flexiv_rizon4.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "flexiv_rizon4/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "flexiv_rizon4s/flexiv_rizon4s.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "flexiv_rizon4s/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "flybody/fruitfly.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "flybody/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "fourier_n1/n1.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "fourier_n1/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "franka_emika_panda/hand.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "franka_emika_panda/mjx_hand.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "franka_emika_panda/mjx_panda.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "franka_emika_panda/mjx_panda_nohand.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "franka_emika_panda/mjx_scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "franka_emika_panda/mjx_single_cube.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "franka_emika_panda/panda.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "franka_emika_panda/panda_nohand.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "franka_emika_panda/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "franka_fr3/fr3.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "franka_fr3/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "franka_fr3_v2/fr3v2.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "franka_fr3_v2/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "google_barkour_v0/barkour_v0.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "google_barkour_v0/barkour_v0_mjx.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "google_barkour_v0/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "google_barkour_v0/scene_barkour.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "google_barkour_v0/scene_mjx.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "google_barkour_vb/barkour_vb.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "google_barkour_vb/barkour_vb_mjx.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "google_barkour_vb/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "google_barkour_vb/scene_hfield_mjx.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "google_barkour_vb/scene_mjx.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "google_robot/robot.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "google_robot/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "hello_robot_stretch/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "hello_robot_stretch/stretch.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "hello_robot_stretch_3/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "hello_robot_stretch_3/stretch.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "i2rt_yam/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "i2rt_yam/yam.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "iit_softfoot/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "iit_softfoot/softfoot.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "kinova_gen3/gen3.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "kinova_gen3/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "kuka_iiwa_14/iiwa14.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "kuka_iiwa_14/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "leap_hand/left_hand.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "leap_hand/right_hand.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "leap_hand/scene_left.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "leap_hand/scene_right.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "low_cost_robot_arm/low_cost_robot_arm.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "low_cost_robot_arm/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "ms_human_700/MS-Human-700-Locomotion.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "ms_human_700/MS-Human-700-Manipulation.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "ms_human_700/MS-Human-700.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "ms_human_700/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "ms_human_700/scene_locomotion.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "ms_human_700/scene_manipulation.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "pal_talos/scene_motor.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "pal_talos/scene_position.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "pal_talos/talos.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "pal_talos/talos_motor.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "pal_talos/talos_position.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "pal_tiago/scene_motor.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "pal_tiago/scene_position.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "pal_tiago/scene_velocity.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "pal_tiago/tiago.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "pal_tiago/tiago_motor.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "pal_tiago/tiago_position.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "pal_tiago/tiago_velocity.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "pal_tiago_dual/scene_motor.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "pal_tiago_dual/scene_position.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "pal_tiago_dual/scene_velocity.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "pal_tiago_dual/tiago_dual.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "pal_tiago_dual/tiago_dual_motor.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "pal_tiago_dual/tiago_dual_position.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "pal_tiago_dual/tiago_dual_velocity.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "pndbotics_adam_lite/adam_lite.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "pndbotics_adam_lite/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "rainbow_robotics_rby1/rby1a_1.2.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "rainbow_robotics_rby1/rby1a_1.2_no_gripper.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "rainbow_robotics_rby1/rby1m_1.2.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "rainbow_robotics_rby1/rby1m_1.2_no_gripper.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "rainbow_robotics_rby1/rby1m_1.3.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "rainbow_robotics_rby1/scene_rby1a_1.2.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "rainbow_robotics_rby1/scene_rby1a_1.2_no_gripper.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "rainbow_robotics_rby1/scene_rby1m_1.2.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "rainbow_robotics_rby1/scene_rby1m_1.2_no_gripper.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "rainbow_robotics_rby1/scene_rby1m_1.3.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "realsense_d435i/d435i.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "rethink_robotics_sawyer/sawyer.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "rethink_robotics_sawyer/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "robot_soccer_kit/robot_soccer_kit.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "robot_soccer_kit/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "robotiq_2f85/2f85.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "robotiq_2f85/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "robotiq_2f85_v4/2f85.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "robotiq_2f85_v4/mjx_2f85.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "robotiq_2f85_v4/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "robotis_omy_3m/omy_3m.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "robotis_omy_3m/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "robotis_op3/op3.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "robotis_op3/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "robotstudio_so101/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "robotstudio_so101/scene_box.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "robotstudio_so101/so101.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "seeed_rebot_devarm/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "seeed_rebot_devarm/seeed_rebot_devarm.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "shadow_dexee/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "shadow_dexee/shadow_dexee.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "shadow_hand/keyframes.xml",
+      "loaded": false,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "shadow_hand/left_hand.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "shadow_hand/right_hand.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "shadow_hand/scene_left.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "shadow_hand/scene_right.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "sharpa_wave/left_hand.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "sharpa_wave/right_hand.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "sharpa_wave/scene_left.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "sharpa_wave/scene_right.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "skydio_x2/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "skydio_x2/x2.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "stanford_tidybot/base.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "stanford_tidybot/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "stanford_tidybot/scene_base.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "stanford_tidybot/tidybot.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "tetheria_aero_hand_open/left_hand.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "tetheria_aero_hand_open/right_hand.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "tetheria_aero_hand_open/scene_right.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "toddlerbot_2xc/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "toddlerbot_2xc/scene_mjx.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "toddlerbot_2xc/scene_pos.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "toddlerbot_2xc/toddlerbot_2xc.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "toddlerbot_2xc/toddlerbot_2xc_mjx.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "toddlerbot_2xc/toddlerbot_2xc_pos.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "toddlerbot_2xm/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "toddlerbot_2xm/scene_mjx.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "toddlerbot_2xm/scene_pos.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "toddlerbot_2xm/toddlerbot_2xm.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "toddlerbot_2xm/toddlerbot_2xm_mjx.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "toddlerbot_2xm/toddlerbot_2xm_pos.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "trossen_vx300s/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "trossen_vx300s/vx300s.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "trossen_wx250s/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "trossen_wx250s/wx250s.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "trossen_wxai/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "trossen_wxai/wxai_follower.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "trossen_wxai/wxai_follower_biarm.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "trs_so_arm100/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "trs_so_arm100/so_arm100.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "ufactory_lite6/lite6.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "ufactory_lite6/lite6_gripper_narrow.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "ufactory_lite6/lite6_gripper_wide.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "ufactory_lite6/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "ufactory_xarm7/hand.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "ufactory_xarm7/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "ufactory_xarm7/xarm7.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "ufactory_xarm7/xarm7_nohand.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "umi_gripper/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "umi_gripper/umi_gripper.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "unitree_a1/a1.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "unitree_a1/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "unitree_g1/g1.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "unitree_g1/g1_mjx.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "unitree_g1/g1_with_hands.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "unitree_g1/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "unitree_g1/scene_mjx.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "unitree_g1/scene_with_hands.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "unitree_go1/go1.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "unitree_go1/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "unitree_go2/go2.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "unitree_go2/go2_mjx.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "unitree_go2/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "unitree_go2/scene_mjx.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "unitree_h1/h1.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "unitree_h1/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "unitree_z1/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "unitree_z1/z1.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "unitree_z1/z1_gripper.xml",
+      "loaded": true,
+      "first_divergent_covered_export": null
+    },
+    {
+      "model": "universal_robots_ur10e/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "universal_robots_ur10e/ur10e.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "universal_robots_ur5e/scene.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "universal_robots_ur5e/ur5e.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "mul_quat"
+    },
+    {
+      "model": "wonik_allegro/left_hand.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "wonik_allegro/right_hand.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "wonik_allegro/scene_left.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    },
+    {
+      "model": "wonik_allegro/scene_right.xml",
+      "loaded": true,
+      "first_divergent_covered_export": "rot_vec_quat"
+    }
+  ]
+}
