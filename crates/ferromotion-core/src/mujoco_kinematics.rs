@@ -9,8 +9,10 @@
 //! decides which corner, or which side, from the last bits of the geom poses, and MuJoCo then reports a
 //! different contact. The collision pass therefore takes its geom poses from here when it has `qpos`.
 //!
-//! ⛔ Every helper is contracted as clang contracts MuJoCo's C on arm64 (see [`crate::mujoco_ccd`]): the left
-//! product of `a*b + c*d` is fused, each later product of a chain is fused into the running sum.
+//! `mul_quat` is the first call site with an explicit contraction policy ([`crate::fp_contract::MUL_QUAT`]).
+//! The selected policy is the published `mul_add` chain. Other helpers keep that same published chain.
+//! Neither fact is a recovered `-ffp-contract` or `-mfma` flag for the arm64 goldens. Those flags are
+//! unproven provenance (`docs/acceptance/oracles/manifest.json`).
 
 /// `sin` and `cos` of ONE argument as MuJoCo's Apple build computes them.
 ///
@@ -116,14 +118,10 @@ fn mul_mat_vec3(m: &[f64; 9], v: &[f64; 3]) -> [f64; 3] {
     [m[2].mul_add(v[2], m[0].mul_add(v[0], m[1] * v[1])), m[5].mul_add(v[2], m[3].mul_add(v[0], m[4] * v[1])), m[8].mul_add(v[2], m[6].mul_add(v[0], m[7] * v[1]))]
 }
 
-/// `mji_mulQuat` / `mju_mulQuat` (no normalisation), contracted.
+/// `mji_mulQuat` / `mju_mulQuat` (no normalisation).
+/// The body is [`crate::fp_contract::mul_quat`], which follows [`crate::fp_contract::MUL_QUAT`].
 pub(crate) fn mul_quat(a: &[f64; 4], b: &[f64; 4]) -> [f64; 4] {
-    [
-        (-a[3]).mul_add(b[3], (-a[2]).mul_add(b[2], a[0].mul_add(b[0], -(a[1] * b[1])))),
-        (-a[3]).mul_add(b[2], a[2].mul_add(b[3], a[0].mul_add(b[1], a[1] * b[0]))),
-        a[3].mul_add(b[1], a[2].mul_add(b[0], a[0].mul_add(b[2], -(a[1] * b[3])))),
-        a[3].mul_add(b[0], (-a[2]).mul_add(b[1], a[0].mul_add(b[3], a[1] * b[2]))),
-    ]
+    crate::fp_contract::mul_quat(a, b)
 }
 
 /// `mji_rotVecQuat`, contracted (no zero-vector shortcut, unlike `mju_rotVecQuat`).

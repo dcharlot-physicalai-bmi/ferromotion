@@ -1,0 +1,115 @@
+{
+  "schema": "ferromotion.oracle-manifest.v1",
+  "equality": "bit_exact_f64_to_bits",
+  "interop_clock": false,
+  "default_build": {
+    "mul_quat": "contracted",
+    "other_call_sites": "published_mul_add_unchanged",
+    "note": "Default stays the published contracted mul_quat. Unfused is implemented and tested against one Linux wheel vector. It is not selected."
+  },
+  "goal": {
+    "models_per_platform": 212,
+    "x86_64_linux_wheel": {
+      "executed": true,
+      "step_bit_exact": 1,
+      "step_mismatch": 211,
+      "passes_212": false
+    },
+    "arm64": {
+      "executed": false,
+      "passes": null,
+      "note": "Not executed. An unexecuted ARM run is not zero passes and is not a pass."
+    }
+  },
+  "oracles": [
+    {
+      "id": "unit-test-goldens-arm64",
+      "role": "embedded bit arrays in ferromotion-core unit tests",
+      "status": "unproven provenance",
+      "mujoco_version_claimed": "3.13.0",
+      "mujoco_source_sha": "unproven provenance",
+      "build_artifact": "unproven provenance",
+      "build_artifact_sha256": "unproven provenance",
+      "compiler": "unproven provenance",
+      "compiler_version": "unproven provenance",
+      "ffp_contract": "unproven provenance",
+      "mfma": "unproven provenance",
+      "isa": "unproven provenance",
+      "cpu_arch_claimed": "arm64",
+      "libm": "unproven provenance",
+      "toolchain": "unproven provenance",
+      "inputs": "the literal arrays in the unit tests; the capturing command is unproven provenance",
+      "bitwise_reproduction": "not_executed",
+      "comments_are_not_records": [
+        "Source comments name Apple clang, -ffp-contract=on, and __sincos_stret.",
+        "scripts/mujoco_ccd_harness_build.sh is a local harness, not the golden build.",
+        "No dylib, build log, or artifact hash for those arrays is in this repository."
+      ]
+    },
+    {
+      "id": "linux-x86_64-pypi-wheel-3.13.0",
+      "role": "conformance oracle for Menagerie step and native comparisons",
+      "status": "artifact pinned; compiler flags unproven provenance",
+      "mujoco_version": "3.13.0",
+      "mujoco_source_sha": "unproven provenance",
+      "distribution": "PyPI mujoco==3.13.0",
+      "build_artifact": "libmujoco.so.3.13.0",
+      "build_artifact_sha256": "dc9599faeffba8e6ea9f53928de08301ee8c2ba780c4afceadeebe63573c3a1a",
+      "elf": "ELF 64-bit LSB shared object, x86-64",
+      "compiler_comment_section": [
+        "GCC: (GNU) 8.5.0 20210514 (Red Hat 8.5.0-28)",
+        "GCC: (GNU) 14.2.1 20250110 (Red Hat 14.2.1-11)",
+        "clang version 20.1.8 (llvm-project 87f0227cb60147a26a1eeb4fb06e3b505e9c7261)",
+        "Linker: LLD 20.1.8 (llvm-project 87f0227cb60147a26a1eeb4fb06e3b505e9c7261)"
+      ],
+      "which_comment_compiled_mju_mulQuat": "unproven provenance",
+      "ffp_contract": "unproven provenance",
+      "mfma": "unproven provenance",
+      "instruction_observation": "objdump of mju_mulQuat on this artifact shows vmulpd and vaddpd. The sampled lines contain no vfmadd. A byte search of the file found no ASCII 'vfmadd'. This is not a recovered -ffp-contract flag.",
+      "cpu_arch": "x86_64",
+      "libm": "glibc 2.39 libm.so.6 on the comparison host (Ubuntu 24.04). The wheel's build-host libm is unproven provenance.",
+      "toolchain_on_comparison_host": "rustc 1.99.1 as recorded in conformance/menagerie_ledger.json",
+      "inputs": {
+        "menagerie_repo": "https://github.com/google-deepmind/mujoco_menagerie",
+        "menagerie_sha": "4d038b3feae26ec82b46a4d586379114012a8ac7",
+        "step_count": 20,
+        "step_seed": 20260928,
+        "native_states": 3,
+        "native_seed": 20260927
+      },
+      "baseline_ledger": {
+        "path": "conformance/menagerie_ledger.json",
+        "sha256": "ca4761e6a3c6cfa022d283e5888acf8e6e196a5fa3946f9fde3b691fa159a776",
+        "preserved": true,
+        "step_bit_exact": 1,
+        "step_mismatch": 211,
+        "of": 212,
+        "efc_J": "359/636",
+        "qacc": "20/636",
+        "first_divergent_recorded_array": {
+          "qpos": 172,
+          "qvel": 37,
+          "qacc_warmstart": 2,
+          "failed_step_1": 210,
+          "failed_step_2": 1,
+          "limit": "Array-level, from the ledger detail strings. Not an opcode bisect."
+        }
+      }
+    }
+  ],
+  "proposal_awaiting_foreman": {
+    "id": "mujoco-3.13.0-arm64-pinned-build",
+    "status": "not_adopted",
+    "does_not_replace": "unit-test-goldens-arm64",
+    "reason": "The arm64 golden compiler, flags, source SHA, and artifact hash are unproven provenance. They cannot be reconstructed by guess.",
+    "required_before_any_relabel": [
+      "A verified aarch64 worker, named in the run record.",
+      "MuJoCo 3.13.0 source SHA.",
+      "Compiler version and the exact -ffp-contract and ISA flags, including whether -mfma was passed.",
+      "sha256 of the built artifact.",
+      "libm and OS recorded from that host.",
+      "A run that reproduces the existing golden arrays bitwise.",
+      "Foreman decision to adopt that named build. Until then the old arrays stay unproven and are not edited."
+    ]
+  }
+}

@@ -1,0 +1,219 @@
+diff --git a/crates/ferromotion-core/src/mjcf_tree.rs b/crates/ferromotion-core/src/mjcf_tree.rs
+index 7d0ae62..691a2c2 100644
+--- a/crates/ferromotion-core/src/mjcf_tree.rs
++++ b/crates/ferromotion-core/src/mjcf_tree.rs
+@@ -3825,7 +3825,7 @@ fn uu_cross(b: &Vector3<f64>, c: &Vector3<f64>) -> Vector3<f64> {
+ fn uu_normvec(v: &mut [f64]) -> f64 {
+     let mut n2 = 0.0f64;
+     for x in v.iter() {
+-        n2 = x.mul_add(*x, n2);
++        n2 += x * x;
+     }
+     if n2 < 1e-14 {
+         return 0.0;
+@@ -3858,14 +3858,9 @@ fn uu_quat2mat(q: &[f64; 4]) -> Matrix3<f64> {
+     )
+ }
+ 
+-/// `mjuu_mulquat`, contracted, normalised as it normalises.
++/// `mjuu_mulquat`: the same unfused product as `mju_mulQuat`, then the compiler normalises.
+ fn uu_mulquat(a: &[f64; 4], b: &[f64; 4]) -> [f64; 4] {
+-    let mut r = [
+-        (-a[3]).mul_add(b[3], (-a[2]).mul_add(b[2], a[0].mul_add(b[0], -(a[1] * b[1])))),
+-        (-a[3]).mul_add(b[2], a[2].mul_add(b[3], a[0].mul_add(b[1], a[1] * b[0]))),
+-        a[3].mul_add(b[1], a[2].mul_add(b[0], a[0].mul_add(b[2], -(a[1] * b[3])))),
+-        a[3].mul_add(b[0], (-a[2]).mul_add(b[1], a[0].mul_add(b[3], a[1] * b[2]))),
+-    ];
++    let mut r = crate::mujoco_kinematics::mul_quat(a, b);
+     uu_normvec4(&mut r);
+     r
+ }
+@@ -9015,6 +9010,33 @@ mod tests {
+         }
+     }
+ 
++    /// Linux `libmujoco.so.3.13.0` `mj_kinematics` for one unnormalised body quaternion and one slide.
++    /// The expected bits are that wheel, not the arm64 arrays above.
++    #[test]
++    fn linux_wheel_kinematics_matches_unfused_quat_and_slide() {
++        const MODEL: &str = r#"<mujoco>
++  <worldbody>
++    <body pos="0.1 -0.2 0.3" quat="0.9 0.1 -0.2 0.3">
++      <geom type="capsule" fromto="0 0 0 0.4 0.1 -0.2" size="0.05"/>
++    </body>
++    <body pos="1 0 0">
++      <joint type="slide" axis="0.2 0.3 -0.4"/>
++      <geom type="sphere" size="0.1" pos="0.01 0.02 0.03"/>
++    </body>
++  </worldbody>
++</mujoco>"#;
++        let want: [[u64; 12]; 2] = [
++            [0x3fcf87469a23920f, 0xbf9840ac76918410, 0x3fd355b1504d9bc2, 0x3fc2bca833447d76, 0xbfe82d229fd3cdb7, 0xbfe46f33b3822d91, 0xbfc10c07e45c5f7c, 0x3fe3fcb8c5188adf, 0xbfe89fc95a27eb68, 0x3fef5dfac2880b97, 0x3fc94dcfa4e3aa9a, 0xbf82d138d1811598],
++            [0x3ff25bcf5c0485d3, 0x3fccf18f5a73b68d, 0xbfcf568f59e1f6d1, 0x3ff0000000000000, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000, 0x3ff0000000000000, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000, 0x3ff0000000000000],
++        ];
++        let t = tree_from_mjcf_str(MODEL).unwrap();
++        let got = t.geom_frames_mujoco(&[0.37]);
++        for (g, ((p, m), w)) in got.iter().zip(&want).enumerate() {
++            let ours = [p[0], p[1], p[2], m[(0, 0)], m[(0, 1)], m[(0, 2)], m[(1, 0)], m[(1, 1)], m[(1, 2)], m[(2, 0)], m[(2, 1)], m[(2, 2)]];
++            assert_eq!(ours.map(f64::to_bits), *w, "geom {g}");
++        }
++    }
++
+     /// **`mj_collision`'s labels and order.** Each contact names its two geoms as MuJoCo does — the lower
+     /// body's geom first, even for an explicit `<pair>` written the other way round, then the lower geom
+     /// TYPE first (so a sphere precedes the box it touches whatever their ids) — and the list runs body pair
+diff --git a/crates/ferromotion-core/src/mujoco_kinematics.rs b/crates/ferromotion-core/src/mujoco_kinematics.rs
+index 1d42c71..e17eaa1 100644
+--- a/crates/ferromotion-core/src/mujoco_kinematics.rs
++++ b/crates/ferromotion-core/src/mujoco_kinematics.rs
+@@ -9,8 +9,10 @@
+ //! decides which corner, or which side, from the last bits of the geom poses, and MuJoCo then reports a
+ //! different contact. The collision pass therefore takes its geom poses from here when it has `qpos`.
+ //!
+-//! ⛔ Every helper is contracted as clang contracts MuJoCo's C on arm64 (see [`crate::mujoco_ccd`]): the left
+-//! product of `a*b + c*d` is fused, each later product of a chain is fused into the running sum.
++//! Quaternion multiply, `rotVecQuat`, `normalize4` and `mulMatVec3` follow the C expression order
++//! with a separate rounding for each product. That matches the exported functions in the Linux
++//! `libmujoco.so.3.13.0` wheel, whose text contains `vmul`/`vadd` and no `vfmadd`. It is not the
++//! arm64 explicit-FMA chain. Arm64 unit-test goldens are a different build and are not edited here.
+ 
+ /// `sin` and `cos` of ONE argument as MuJoCo's Apple build computes them.
+ ///
+@@ -111,42 +113,51 @@ pub(crate) struct MjKinematics {
+ /// A frame in the world as `mjData` holds it: position and row-major rotation matrix.
+ pub(crate) type XFrame = ([f64; 3], [f64; 9]);
+ 
+-/// `mji_mulMatVec3`, contracted.
++/// `mji_mulMatVec3`: each product rounds, then the sum is left-associative.
+ fn mul_mat_vec3(m: &[f64; 9], v: &[f64; 3]) -> [f64; 3] {
+-    [m[2].mul_add(v[2], m[0].mul_add(v[0], m[1] * v[1])), m[5].mul_add(v[2], m[3].mul_add(v[0], m[4] * v[1])), m[8].mul_add(v[2], m[6].mul_add(v[0], m[7] * v[1]))]
++    [
++        (m[0] * v[0] + m[1] * v[1]) + m[2] * v[2],
++        (m[3] * v[0] + m[4] * v[1]) + m[5] * v[2],
++        (m[6] * v[0] + m[7] * v[1]) + m[8] * v[2],
++    ]
+ }
+ 
+-/// `mji_mulQuat` / `mju_mulQuat` (no normalisation), contracted.
++/// `mji_mulQuat` / `mju_mulQuat`, each product rounded, then the C left-associative sum.
++/// This matches `mju_mulQuat` in the Linux `libmujoco.so.3.13.0` wheel on the regression set.
+ pub(crate) fn mul_quat(a: &[f64; 4], b: &[f64; 4]) -> [f64; 4] {
++    let (p00, p11, p22, p33) = (a[0] * b[0], a[1] * b[1], a[2] * b[2], a[3] * b[3]);
++    let (p01, p10, p23, p32) = (a[0] * b[1], a[1] * b[0], a[2] * b[3], a[3] * b[2]);
++    let (p02, p13, p20, p31) = (a[0] * b[2], a[1] * b[3], a[2] * b[0], a[3] * b[1]);
++    let (p03, p12, p21, p30) = (a[0] * b[3], a[1] * b[2], a[2] * b[1], a[3] * b[0]);
+     [
+-        (-a[3]).mul_add(b[3], (-a[2]).mul_add(b[2], a[0].mul_add(b[0], -(a[1] * b[1])))),
+-        (-a[3]).mul_add(b[2], a[2].mul_add(b[3], a[0].mul_add(b[1], a[1] * b[0]))),
+-        a[3].mul_add(b[1], a[2].mul_add(b[0], a[0].mul_add(b[2], -(a[1] * b[3])))),
+-        a[3].mul_add(b[0], (-a[2]).mul_add(b[1], a[0].mul_add(b[3], a[1] * b[2]))),
++        ((p00 - p11) - p22) - p33,
++        ((p01 + p10) + p23) - p32,
++        ((p02 - p13) + p20) + p31,
++        ((p03 + p12) - p21) + p30,
+     ]
+ }
+ 
+-/// `mji_rotVecQuat`, contracted (no zero-vector shortcut, unlike `mju_rotVecQuat`).
++/// `mji_rotVecQuat`: products round, then add and subtract. No zero-vector shortcut
++/// (`mju_rotVecQuat` has one; the kinematics inline does not).
+ fn rot_vec_quat(v: &[f64; 3], q: &[f64; 4]) -> [f64; 3] {
+     if q[0] == 1.0 && q[1] == 0.0 && q[2] == 0.0 && q[3] == 0.0 {
+         return *v;
+     }
+-    let t = [
+-        (-q[3]).mul_add(v[1], q[0].mul_add(v[0], q[2] * v[2])),
+-        (-q[1]).mul_add(v[2], q[0].mul_add(v[1], q[3] * v[0])),
+-        (-q[2]).mul_add(v[0], q[0].mul_add(v[2], q[1] * v[1])),
+-    ];
++    let t0 = q[0] * v[0] + q[2] * v[2] - q[3] * v[1];
++    let t1 = q[0] * v[1] + q[3] * v[0] - q[1] * v[2];
++    let t2 = q[0] * v[2] + q[1] * v[1] - q[2] * v[0];
+     [
+-        2.0f64.mul_add(q[2].mul_add(t[2], -(q[3] * t[1])), v[0]),
+-        2.0f64.mul_add(q[3].mul_add(t[0], -(q[1] * t[2])), v[1]),
+-        2.0f64.mul_add(q[1].mul_add(t[1], -(q[2] * t[0])), v[2]),
++        v[0] + 2.0 * (q[2] * t2 - q[3] * t1),
++        v[1] + 2.0 * (q[3] * t0 - q[1] * t2),
++        v[2] + 2.0 * (q[1] * t1 - q[2] * t0),
+     ]
+ }
+ 
+ /// `mju_normalize4`: below `mjMINVAL` the unit quaternion; within `mjMINVAL` of 1 left alone; otherwise
+ /// MULTIPLIED by the reciprocal of the norm.
+ pub(crate) fn normalize4(q: &mut [f64; 4]) {
+-    let norm = q[3].mul_add(q[3], q[2].mul_add(q[2], q[0].mul_add(q[0], q[1] * q[1]))).sqrt();
++    let norm = ((q[0] * q[0] + q[1] * q[1]) + q[2] * q[2]) + q[3] * q[3];
++    let norm = norm.sqrt();
+     if norm < 1e-15 {
+         *q = [1.0, 0.0, 0.0, 0.0];
+     } else if (norm - 1.0).abs() > 1e-15 {
+@@ -262,7 +273,7 @@ impl MjKinematics {
+                     match j.kind {
+                         KinJointKind::Slide => {
+                             let s = qpos[j.qposadr] - j.qpos0;
+-                            p = [xaxis[0].mul_add(s, p[0]), xaxis[1].mul_add(s, p[1]), xaxis[2].mul_add(s, p[2])];
++                            p = [p[0] + xaxis[0] * s, p[1] + xaxis[1] * s, p[2] + xaxis[2] * s];
+                         }
+                         KinJointKind::Ball | KinJointKind::Hinge => {
+                             let qloc = if j.kind == KinJointKind::Ball {
+@@ -336,6 +347,59 @@ mod tests {
+         assert_ne!(c.to_bits(), (1.0 - s * s).sqrt().copysign(c).to_bits());
+     }
+ 
++    /// Linux `libmujoco.so.3.13.0` exports, captured on x86_64. Each product rounds before the
++    /// left-associative sum. These are not the arm64 goldens.
++    #[test]
++    fn linux_wheel_quaternion_exports_match_unfused_products() {
++        let cases: [([u64; 4], [u64; 4], [u64; 4], [u64; 3], [u64; 4]); 5] = [
++            (
++                [0x3feccccccccccccd, 0x3fb999999999999a, 0xbfc999999999999a, 0x3fd3333333333333],
++                [0x3fe999999999999a, 0xbfb999999999999a, 0x3fd999999999999a, 0x3fc999999999999a],
++                [0x3fe8000000000000, 0xbfc5c28f5c28f5c2, 0x3fc3333333333333, 0x3fdc28f5c28f5c29],
++                [0x3fb020c49ba5e354, 0xbfe599999999999a, 0x3ff2dd2f1a9fbe77],
++                [0x3fed8c554c37f5ab, 0x3fba43da0adc6898, 0xbfca43da0adc6898, 0x3fd3b2e388254e72],
++            ),
++            (
++                [0x3fed906bcf328d46, 0x3fd87de2a6aea963, 0x0000000000000000, 0x0000000000000000],
++                [0x3fe6a09e667f3bcd, 0x0000000000000000, 0x3fe6a09e667f3bcd, 0x0000000000000000],
++                [0x3fe4e7ae9144f0fc, 0x3fd1517a7bdb3895, 0x3fe4e7ae9144f0fc, 0x3fd1517a7bdb3895],
++                [0x3fc999999999999a, 0xbff3cc8a99af5453, 0x3fe0f876ccdf6cd9],
++                [0x3fed906bcf328d46, 0x3fd87de2a6aea963, 0x0000000000000000, 0x0000000000000000],
++            ),
++            (
++                [0x3ff0000000000000, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000],
++                [0x3fe0000000000000, 0x3fe0000000000000, 0x3fe0000000000000, 0x3fe0000000000000],
++                [0x3fe0000000000000, 0x3fe0000000000000, 0x3fe0000000000000, 0x3fe0000000000000],
++                [0x3fc999999999999a, 0xbfe0000000000000, 0x3ff4000000000000],
++                [0x3ff0000000000000, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000],
++            ),
++            (
++                [0x3feac4bdd6e3fd71, 0x3fccb0bf0b6b7109, 0xbfc0907dc1930691, 0x3fdee8dd4748bf14],
++                [0x3fe6a09e667f3bcd, 0x0000000000000000, 0x0000000000000000, 0x3fe6a09e667f3bcd],
++                [0x3fd0000000000001, 0x3fb126145e9ecd56, 0xbfd0000000000000, 0x3feddb3d742c2656],
++                [0x3fe10e70a75f5988, 0xbfe620d1ed49465f, 0x3ff0b4c629a2008c],
++                [0x3feac4bdd6e3fd71, 0x3fccb0bf0b6b7109, 0xbfc0907dc1930691, 0x3fdee8dd4748bf14],
++            ),
++            (
++                [0xbfc999999999999a, 0x3fd999999999999a, 0x3fb999999999999a, 0x3fe999999999999a],
++                [0x3fd3333333333333, 0xbfe0000000000000, 0x3fc999999999999a, 0x3fb999999999999a],
++                [0x3fa47ae147ae147a, 0x3fb1eb851eb851ea, 0xbfdcccccccccccce, 0x3fd6666666666666],
++                [0x3fdf5c28f5c28f5c, 0x3fe4dd2f1a9fbe78, 0x3feec083126e978d],
++                [0xbfcbc46092eb3117, 0x3fdbc46092eb3117, 0x3fbbc46092eb3117, 0x3febc46092eb3117],
++            ),
++        ];
++        let v = [0.2, -0.5, 1.25];
++        for (a_b, b_b, prod_b, rot_b, norm_b) in cases {
++            let a = a_b.map(f64::from_bits);
++            let b = b_b.map(f64::from_bits);
++            assert_eq!(mul_quat(&a, &b).map(f64::to_bits), prod_b);
++            assert_eq!(rot_vec_quat(&v, &a).map(f64::to_bits), rot_b);
++            let mut q = a;
++            normalize4(&mut q);
++            assert_eq!(q.map(f64::to_bits), norm_b);
++        }
++    }
++
+     /// The one argument this port was caught out by: `euler="-1.397059993 …"` halves to −0.6985299965, and
+     /// there `__sincos_stret`'s sine is one ulp from `sin`'s. MuJoCo's arm64 build gets the former, so a
+     /// separate `sin`/`cos` pair put `hello_robot_stretch_3`'s camera bodies 1.8e-16 off.
