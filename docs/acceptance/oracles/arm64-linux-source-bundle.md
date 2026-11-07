@@ -17,3 +17,5 @@ sha256sum libmujoco.so.3.13.0
 and a call of `mju_mulQuat` on `[0.9, 0.1, -0.2, 0.3]` and `[0.8, -0.1, 0.4, 0.2]`, compared with the x86 contract-off bits `3fe8000000000000 bfc5c28f5c28f5c2 3fc3333333333333 3fdc28f5c28f5c29`. A difference does not edit any golden.
 
 The packed V2 archive is sha256 `0c98f3bc63175eb56af0c40164ae78aac43efef231875042986fe1df1bd0c0ad` (159 parts, 35371 manifest entries). Script, receipt, and hexfloat fixes after that archive are a small overlay applied onto an unpacked V2 tree. They do not replace the archive. ARM has not been built or run.
+
+`scripts/arm_oracle/direct-pull/` is a later public-fetch procedure for thor2. It checks out ferromotion `e0557dd109151a02702dfb262ea0a8c2b9dd07db` and the pinned MuJoCo, dependency, and Menagerie commits. It does not recreate the archive manifest. The two x86 schedule files are not in that commit, so the corpus and Rust stages stop until those exact bytes are supplied.
