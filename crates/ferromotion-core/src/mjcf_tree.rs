@@ -3798,6 +3798,7 @@ pub(crate) fn mesh_inertia_mujoco(mesh: &crate::TriMesh3, method: MeshInertia) -
         }
         total += volume;
         for (j, &(a, b)) in k.iter().enumerate() {
+            // C: `2*(DD + EE + FF) + DE + ED + DF + FD + EF + FE`, then `P += volume/C * that`.
             // `2*(DD + EE + FF) + DE + ED + DF + FD + EF + FE`, each later product fused into the running sum
             let sq = f[a].mul_add(f[b], d[a].mul_add(d[b], e[a] * e[b]));
             let mut sum = 2.0f64.mul_add(sq, d[a] * e[b]);
@@ -5852,6 +5853,13 @@ impl Walk<'_> {
                 aamm[k + 3] = aamm[k + 3].max(p[k]);
             }
         }
+        let mut recorded = vec![volume, com.x, com.y, com.z, boxsz[0], boxsz[1], boxsz[2]];
+        for col in 0..3 {
+            for row in 0..3 {
+                recorded.push(unit[(row, col)]);
+            }
+        }
+        crate::fp_contract::record_op("mesh_inertia", &[mesh.verts.len() as f64, mesh.tris.len() as f64], &recorded);
         let d = MeshData { volume, com, quat, boxsz, aamm };
         // what `mjCMesh::Process` stores back into its float vertex array: CoM-centred, in the principal frame
         let stored = crate::TriMesh3 { verts: final_f64.iter().map(|v| v.map(|x| x as f32 as f64)).collect(), tris: mesh.tris.clone() };

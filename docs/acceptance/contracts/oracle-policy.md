@@ -49,6 +49,8 @@ With `quat2mat` and `sincos` added to the qpos0 op comparison, the published def
 
 The published default is what the arm64 golden tests run. That suite still fails the same three tests and passes the other 13 `bit_for_bit` tests. The contract-off sites are not selected by architecture. A wrong sha refuses the process.
 
+Compiled `body_inertia` / `body_mass` is a separate branch, written up in `docs/acceptance/oracles/mass-inertia-branch.md`. Unfusing the mesh face integral does not move Stretch3's 3.533517429953547e-7 error. No compiler fix was committed. The `qacc` 24/636 to 23/636 regression from adding `mul_mat_vec3` stands; it was not re-run, because the mass and contact-row defects are still open. Piper's `efc_J` 56 versus 80 is `nefc` 7 versus 10 at `nv = 8`, and both libraries report one condim-3 contact and `nefc = 10` at `qpos0`.
+
 ## Arm64 source oracle
 
 Not built and not run. No verified aarch64 route was supplied. A cross `libstdc++` for aarch64 is present on this machine and was not used. A Jetson name is not an architecture. The next requirement is a verified aarch64 host, then the same kind of recorded clang or gcc command with explicit `-ffp-contract` and the ISA flags that apply there. Until that run exists, arm64 passes stay unset.
