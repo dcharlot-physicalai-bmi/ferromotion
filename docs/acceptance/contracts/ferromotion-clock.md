@@ -39,11 +39,17 @@ Tick arithmetic on this adapter is checked `u64`. `advance` and `delivery_step` 
 
 ## Outer envelope, codec v2 unchanged
 
-`EpisodeEnvelope` version 1 carries `dt_bits`, `period_ns`, and `origin_ns` beside a codec v2 chunk. The episode tick is 0 and is not a field of the chunk. The envelope is not written into the v2 canonical bytes and it is not part of the v2 digest. `EPISODE_ENVELOPE_INTEROPERABLE` stays false until both Ferric and ferromorphic confirm this spec. `bind_v2_timestamps` refuses a missing epoch, an origin or period that disagrees with the clock, `dt` bits that disagree, a `step_duration_ns` that is not `period_ns`, and a `t0_ns` that is not `origin_ns + n * period_ns`. A matching digest still does not authorize inference or physical actuation.
+`EpisodeEnvelope` version 1 carries `dt_bits`, `period_ns`, and `origin_ns` beside a codec v2 chunk. The episode tick is 0 and is not a field of the chunk. The envelope is not written into the v2 canonical bytes and it is not part of the v2 digest. `EPISODE_ENVELOPE_INTEROPERABLE` stays false until both Ferric and ferromorphic accept the full scope in writing. A narrow accept of the `dt` mapping is not that accept.
+
+`BoundaryClock`'s fields are public and are an untrusted snapshot. `episode_start` checks the forward mapping only when it is called. A later write to `tick`, `dt_bits`, `period_ns`, `origin_ns`, or `epoch_tick0` is not trusted. A private `EpisodeEnvelope` constructor does not make those public fields trusted. `bind_v2_timestamps` rechecks the envelope mapping and requires the clock's epoch, origin, period, and `dt` bits to match that envelope. It refuses a missing epoch, an origin or period that disagrees, `dt` bits that disagree, a `step_duration_ns` that is not `period_ns`, and a `t0_ns` that is not `origin_ns + n * period_ns`. Bind does not read `tick` as authorization. A matching digest or a matching bind does not authorize inference or physical actuation, and it is not evidence that a joint step ran.
 
 ## Still open
 
 `DynamicsLab::time` remains the sum of the `dt` values passed to `DynamicsLab::step`. That accumulator is not the shared tick. Replacing it is not part of this decision.
+
+Codec v2 still refuses `n_action_steps == 0` at encode and decode (`CodecError::Horizon`). That refusal is unchanged. An empty chunk is not executable. Whether the protocol later allows a separate non-executable empty fixture, or Ferric's `check_horizon` also rejects 0, is waiting on bmi-3. This tree does not adopt either choice yet. `accept_event_step` is a different helper: a zero `max_delay` accepts only an event equal to the clock. It is not permission to encode a zero-length action chunk.
+
+Nanosecond stamps above `2^53` are the declared `u64` grid. The `f64` forward product `(period_ns as f64) * 1e-9` cannot represent every integer nanosecond past that magnitude. That rounding is the formula already required above. It is not a ratio exemption and it is not interoperability.
 
 ## Action-chunk index
 

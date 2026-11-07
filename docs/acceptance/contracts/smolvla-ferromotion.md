@@ -57,7 +57,10 @@ it, and it does not change the golden v2 digest. A missing or disagreeing
 epoch, a timestamp off the nanosecond grid, or a `dt` whose bits are not
 `((period_ns as f64) * 1e-9).to_bits()` is refused. There is no ratio exemption.
 A 1000 ns period is valid only with forward-product bits `0x3eb0c6f7a0b5ed8e`.
-`EntryProposed` and physical actuation stay refused.
+The public `BoundaryClock` is an untrusted snapshot and is rechecked at bind.
+`n_action_steps == 0` stays `CodecError::Horizon`. That is not an executable
+empty chunk. A change to that rule waits on bmi-3. `EntryProposed` and physical
+actuation stay refused. These tests are not inference and not a joint step.
 No inference receipt exists. `DynamicsLab::step` is unchanged.
 
 Real weight, stats, and noise sha256 values for `lerobot/smolvla_base` are not

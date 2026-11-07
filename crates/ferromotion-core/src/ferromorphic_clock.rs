@@ -95,11 +95,18 @@ pub struct StepReceipt {
     pub spikes: Vec<Spike>,
 }
 
+/// Public fields are an untrusted snapshot. [`BoundaryClock::episode_start`] checks
+/// the forward mapping only at that call. A later write to `tick`, `dt_bits`,
+/// `period_ns`, `origin_ns`, or `epoch_tick0` is not trusted. [`bind_v2_timestamps`]
+/// rechecks the epoch, origin, period, and `dt` bits against the envelope.
+/// A private [`EpisodeEnvelope`] does not make this state trusted, and a successful
+/// bind does not execute a joint step.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BoundaryClock {
     pub tick: u64,
     pub dt_bits: u64,
-    /// Integer nanosecond scheduling period. Independent of [`Self::dt_bits`].
+    /// Integer nanosecond scheduling period. Not independent of `dt_bits`: the
+    /// forward product is required at `episode_start` and again at bind.
     pub period_ns: Option<u64>,
     /// Nanosecond stamp of tick 0. Not a v2 `t0_ns` field.
     pub origin_ns: Option<u64>,
@@ -315,8 +322,11 @@ pub fn tick_stamp_ns(origin_ns: u64, period_ns: u64, tick: u64) -> Result<u64, T
 }
 
 /// Bind a codec v2 chunk to an episode without reading or writing its canonical bytes.
+/// The clock argument is an untrusted snapshot: this function rechecks
+/// `dt_bits == ((period_ns as f64) * 1e-9).to_bits()` on the envelope, then requires
+/// the clock's epoch, origin, period, and `dt` bits to match that envelope.
 /// `step_duration_ns` must equal the envelope period. `t0_ns` must lie on
-/// `origin_ns + n * period_ns`. The canonical `dt` bits must match the clock.
+/// `origin_ns + n * period_ns`. A match does not run inference or a joint step.
 pub fn bind_v2_timestamps(t0_ns: u64, step_duration_ns: u64, n_action_steps: u32, envelope: Option<EpisodeEnvelope>, clock: &BoundaryClock) -> Result<(), TimebaseError> {
     let Some(envelope) = envelope else {
         return Err(TimebaseError::MissingEpoch);
@@ -361,8 +371,8 @@ pub fn bind_v2_timestamps(t0_ns: u64, step_duration_ns: u64, n_action_steps: u32
     Ok(())
 }
 
-/// A chunk index is not a tick until an epoch is agreed. A supplied epoch is a
-/// hypothetical for the overflow and delay arithmetic; it does not adopt a policy.
+/// Result of counting a chunk index from tick 0. `EpochUnresolved` means the caller
+/// said no episode has started. It is not a second epoch and it does not authorize a step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChunkTickMap {
     EpochUnresolved,
@@ -645,5 +655,39 @@ spike 4 1
         assert_eq!(bind_v2_timestamps(0, 20_000_000, 1, Some(twenty), &clock), Err(TimebaseError::AmbiguousEpoch));
         let idle = BoundaryClock::new(3, 0.1).unwrap();
         assert_eq!(bind_v2_timestamps(0, 1_000, 1, Some(envelope), &idle), Err(TimebaseError::MissingEpoch));
+    }
+
+    #[test]
+    fn a_public_clock_mutation_is_rejected_on_the_next_bind() {
+        const ONE_US: u64 = 0x3eb0c6f7a0b5ed8e;
+        const TWENTY_MS: u64 = 0x3f947ae147ae147b;
+        let mut clock = BoundaryClock::new(9, 1.0).unwrap();
+        clock.episode_start(0, f64::from_bits(ONE_US), 1_000).unwrap();
+        let envelope = EpisodeEnvelope::try_new(EPISODE_ENVELOPE_VERSION, ONE_US, 1_000, 0).unwrap();
+        assert_eq!(bind_v2_timestamps(0, 1_000, 1, Some(envelope), &clock), Ok(()));
+        clock.dt_bits ^= 1;
+        assert_eq!(bind_v2_timestamps(0, 1_000, 1, Some(envelope), &clock), Err(TimebaseError::DtMismatch));
+        clock.dt_bits = ONE_US;
+        clock.period_ns = Some(2_000);
+        assert_eq!(bind_v2_timestamps(0, 1_000, 1, Some(envelope), &clock), Err(TimebaseError::AmbiguousEpoch));
+        clock.period_ns = Some(1_000);
+        clock.origin_ns = Some(1);
+        assert_eq!(bind_v2_timestamps(0, 1_000, 1, Some(envelope), &clock), Err(TimebaseError::AmbiguousEpoch));
+        clock.origin_ns = Some(0);
+        clock.epoch_tick0 = Some(1);
+        assert_eq!(bind_v2_timestamps(0, 1_000, 1, Some(envelope), &clock), Err(TimebaseError::AmbiguousEpoch));
+        clock.epoch_tick0 = None;
+        assert_eq!(bind_v2_timestamps(0, 1_000, 1, Some(envelope), &clock), Err(TimebaseError::MissingEpoch));
+        clock.epoch_tick0 = Some(EPOCH_TICK0);
+        clock.tick = 40;
+        assert_eq!(bind_v2_timestamps(0, 1_000, 1, Some(envelope), &clock), Ok(()));
+        assert!(!propose_joint_step(0, 0).executed);
+        clock.dt_bits = TWENTY_MS;
+        clock.period_ns = Some(20_000_000);
+        assert_eq!(bind_v2_timestamps(0, 1_000, 1, Some(envelope), &clock), Err(TimebaseError::AmbiguousEpoch));
+        assert_eq!(
+            EpisodeEnvelope::try_new(EPISODE_ENVELOPE_VERSION, 0.1f64.to_bits(), 1_000, 0),
+            Err(TimebaseError::DtPeriodMismatch)
+        );
     }
 }
