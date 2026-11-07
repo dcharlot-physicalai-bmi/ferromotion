@@ -108,12 +108,14 @@ The native tally is the MuJoCo 3.13.0 CPU column of that matrix: trajectories (`
 
 MuJoCo Warp `4d1c64bc077d725247e9bf5e2ac3f357749ff804` (Apache-2.0, Google DeepMind and NVIDIA) and Newton `1a497c00ed255db343e39eec4d614864c9aa9b95` (Apache-2.0 code, CC-BY-4.0 documentation) were checked as external oracles only. This host had no NVIDIA device and neither package imported. That cell is **blocked**. Warp's own README at that revision says differentiability is not yet available; a later GPU forward would still not count as a gradient test. Menagerie assets stay in the upstream checkout under each model's license.
 
-SmolVLA (`lerobot/smolvla_base` at `5e8d12a6e2975b0e5e5fce7c8caf47c371d257b6`, Apache-2.0, paper arXiv:2506.01844) is scoped as an observation → action-chunk → simulated rollout → recovery contract at the Ferric boundary. Weights were not downloaded. There is no action-output agreement, no rollout, and no claim that the model fits a browser or a device. Physical actuation is rejected.
+SmolVLA (`lerobot/smolvla_base`, Apache-2.0, paper arXiv:2506.01844) stays an unexecuted model. Codec version 2 is pinned to Ferric `3ee11c015e3478c7c4aa0409499346f79ab1c8ce` in `docs/acceptance/contracts/smolvla-ferromotion.md`. The fixture digest is a protocol test. It does not authorize a rollout, and physical actuation is still refused. The entry remains proposed. Real weight sha256 values were not published.
+
+The ferromorphic clock document `549aacdc5f7f4bd947c26877f14b8edc42febd5a` is recorded in `docs/acceptance/contracts/ferromotion-clock.md`. The integer-tick adapter does not replace `DynamicsLab`'s accumulated `f64` time, and the joint loop was not executed.
 
 Counterpart inputs still required, not invented here:
 
-* bmi-3 Ferric: a pinned inference entry point that accepts the SmolVLA checkpoint, the preprocessing and normalization definition, and a sha256 of the action chunk in joint units, plus the resource bound and a joule trace only if an instrument actually recorded one.
-* bmi-2 ferromorphic: the event and time contract (ordering, timestep, timestamp units) that a policy receipt must carry so a rollout can be aligned with the ferromotion step clock.
+* bmi-3 Ferric: a released sha for `ferric.smolvla.predict_action_chunk.v1` (the contract pin above is still marked proposed), the real weight, stats, and noise sha256 values, and a joule trace only if an instrument recorded one. The codec v2 golden is a protocol vector, not that release.
+* bmi-2 ferromorphic: agreement on the three open clock policies (checked overflow versus wrapping `Sim::step`, whether a joint epoch exists, and whether `DynamicsLab` keeps its `f64` accumulator). The clock document pin above is not a completed joint run.
 
 ## Licenses and redistribution
 

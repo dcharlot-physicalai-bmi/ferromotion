@@ -1,0 +1,12 @@
+The file smolvla-chunk-v2.json is a verbatim protocol fixture from
+dcharlot-physicalai-bmi/ferric at commit
+3ee11c015e3478c7c4aa0409499346f79ab1c8ce
+(docs/acceptance/contracts/fixtures/smolvla-chunk-v2.json).
+
+That repository is Apache License 2.0. The fixture is a synthetic protocol
+vector. It was not produced by SmolVLA, a robot, or a meter. A digest match
+against it is not model evidence, rollout evidence, or an energy measurement.
+
+The Rust receiver in ferromotion-core is an independent implementation of the
+byte layout described in that commit's
+docs/acceptance/contracts/smolvla-ferromotion.md. It does not copy Ferric source.

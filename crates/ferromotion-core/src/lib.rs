@@ -211,6 +211,8 @@ mod chomp;
 mod closed_loop;
 mod joint_acceptance;
 mod external_oracles;
+mod smolvla_receiver;
+mod ferromorphic_clock;
 mod collision;
 mod constraint;
 mod constraints;
@@ -398,6 +400,20 @@ pub use joint_acceptance::{decide, pinned_task, ClosedLoopTask, Decision, Energy
 pub use external_oracles::{
     inference_claim, reject_action, warp_newton_probe, warp_oracle, newton_oracle, ActionReject, InferenceClaim,
     OracleCell, SmolVlaContract, UpstreamOracle, WarpNewtonProbe,
+};
+pub use smolvla_receiver::{
+    accept_for_control, accepts_entry, action_timestamp_ns, authorize_rollout, digest_sha256, encode, normalize_forward,
+    normalize_inverse, pad_state, protocol_receipt, refuse_aloha_delta, refuse_pixel, refuse_token_len, ChunkV2,
+    CodecError, ControlReject, InferenceFidelity, JointSpec, ProtocolReceipt, CODEC_V1_WITHDRAWN, CODEC_VERSION,
+    DIGEST_DOMAIN, FERRIC_CONTRACT_REVISION, GOLDEN_DIGEST, IMAGE_ALIGN_CORNERS, IMAGE_INTERPOLATION, IMAGE_PAD_LEFT,
+    IMAGE_PAD_TOP, IMAGE_SIDE, LEROBOT_UPSTREAM, PREDICT_ACTION_CHUNK, PREPROCESS_STEPS, PRE_UNPAD_STEPS,
+    PRE_UNPAD_WIDTH, PROPOSED_FERRIC_ENTRY, SELECT_ACTION_IS_NOT_THE_ENTRY, SMOLVLA_HUB_ID, STATE_WIDTH, TOKEN_MAX,
+};
+pub use ferromorphic_clock::{
+    accept_event_step, accumulated_f64, bind_dt, delivery_step, finite_positive, map_chunk_index_to_tick, meter_reading,
+    order_spikes, parse_step_receipt, propose_joint_step, refractory_ticks, same_dt, step_seconds, BoundaryClock,
+    ChunkTickMap, Meter, ProposedJointStep, Spike, StepReceipt, TickPhase, TimebaseError, UnresolvedPolicy,
+    DT_POINT_ONE_BITS, FERROMORPHIC_CLOCK_PATH, FERROMORPHIC_CLOCK_REVISION, JOINT_LOOP_EXECUTED, TICK_PHASES, UNRESOLVED,
 };
 pub use collision::{CapsuleCollisionCost, PlaneCollisionCost, SphereCollisionCost};
 pub use cosserat::CosseratRod;
