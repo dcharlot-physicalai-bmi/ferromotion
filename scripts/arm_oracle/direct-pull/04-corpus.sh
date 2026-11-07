@@ -11,10 +11,15 @@ RUN="${1:?run directory from 01-materialize.sh}"
 native="$RUN/schedules/x86-native.txt"
 step="$RUN/schedules/x86-step.txt"
 if [[ ! -f "$native" || ! -f "$step" ]]; then
+  if [[ -f "$DIRECT_PULL_DIR/schedules/x86-native.txt.xz" ]]; then
+    bash "$DIRECT_PULL_DIR/materialize-schedules.sh" "$RUN"
+  fi
+fi
+if [[ ! -f "$native" || ! -f "$step" ]]; then
   cat >&2 <<EOF
 STOP before the corpus comparison.
-x86-native.txt and x86-step.txt are not in ferromotion ${FERROMOTION_COMMIT} and they have no public URL.
-This script will not fetch them, synthesize them, or treat a different file as those inputs.
+The xz fixtures are not beside this script, so the pinned schedule bytes were not expanded.
+This script does not synthesize them.
 If a later decision supplies the original bytes, put them at:
   $native
   $step

@@ -59,6 +59,11 @@ bound_inputs=(
   "$ROOT/rust/OPTIONAL-RUSTUP.md"
 )
 for path in "${bound_inputs[@]}"; do
+  # The C library is linked before the x86 replay schedules exist.
+  # The corpus receipt binds those two files. The build receipt does not.
+  if [[ "$ROLE" == "build" && "$path" == */schedules/* ]]; then
+    continue
+  fi
   if [[ ! -f "$path" ]]; then
     echo "refusing: receipt cannot bind $path" >&2
     exit 2
@@ -171,6 +176,10 @@ tmp="$(mktemp)"
     echo "# goldens receipt does not bind libmujoco. The corpus receipt does."
   fi
   for path in "${bound_inputs[@]}"; do
+    if [[ "$ROLE" == "build" && "$path" == */schedules/* ]]; then
+      echo "# schedules are bound by the corpus receipt"
+      continue
+    fi
     sha256sum "$path"
   done
   if [[ -f "$ROOT/provenance/OVERLAY.txt" ]]; then

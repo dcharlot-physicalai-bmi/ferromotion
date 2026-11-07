@@ -106,9 +106,9 @@ if [[ "$build_rc" -ne 0 ]]; then
 fi
 SO="$WORK/cmake/lib/libmujoco.so.3.13.0"
 sha256sum "$SO" | tee "$WORK/libmujoco.so.3.13.0.sha256"
+echo "built $SO"
 export ARM_ORACLE_ROOT="$ROOT"
 "$SCRIPT_DIR/write-receipt.sh" "$WORK" "$WORK/cmake/lib" build
-echo "built $SO"
 echo "record $WORK/libmujoco.so.3.13.0.sha256 together with $WORK/RECEIPT.txt"
 echo "The receipt binds libmujoco.so.3.13.0, libactuator.so, libelasticity.so, libsensor.so, and libsdf_plugin.so."
 echo "It is not 64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc and not a Darwin dylib."

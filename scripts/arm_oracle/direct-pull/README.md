@@ -60,6 +60,14 @@ Stage 4 stops with exit 2 while the two schedule files are absent or hashed diff
 
 Stage 5 runs `run-goldens.sh` and `run-rust-212.sh` with `--locked`, `--jobs 2`, offline mode, and a target directory outside the source tree. The Darwin tests are expected to fail on Linux; exit 1 there does not cancel the 212 comparison. `run-rust-212.sh` exits 0 only for full parity: 212 models, 20 steps, every model stepped, and every `N of M` tally equal. A finished mismatch is exit 1. The receipt hashes the library, four plugins, schedules, executables, outputs, and toolchain.
 
+## Schedule bytes
+
+`x86-native.txt` is 73420440 bytes. `x86-step.txt` is 7582957 bytes. Of the native file, the `d` records are the recorded x86 field text. The loader ignores them when it reads `model`, `qpos`, `qvel`, `ctrl`, and `act`, but they are part of the pinned sha256. Recomputing them would be a different file. The fixtures `schedules/x86-native.txt.xz` (12611308 bytes, sha256 `1ed398c90a318fd9a514c7f6c8e14b966427c577f31410c872e90f84df537c4e`) and `schedules/x86-step.txt.xz` (2742944 bytes, sha256 `237fdfb8ea17eafe3a01f73c3418ecdc03af65b86e711f80d137353a1ccd55ed`) decompress with `xz -dc` to the original bytes. `materialize-schedules.sh` checks both the xz sha256 and the plaintext sha256.
+
+## This Thor2 build
+
+Stages 1 and 2 passed, and the compile linked. `write-receipt.sh` then exited 2 because `schedules/x86-native.txt` was not in the run directory, so `03-cbuild.sh` from `ecfccc6` wrote neither `stage3-ok` nor `build-dir.txt`. The libraries stayed at `build-20261107T131346Z`. `recover-stage3.sh` checks those files, the flags in `identity.txt` and `build.ninja`, and the stage3 logs. It does not run cmake. It writes `stage3-ok` only after the on-host `write-receipt.sh` succeeds.
+
 ## Approval boundary
 
 Stages 1 and 2 are ready to approve. Stage 3 is ready to approve on thor2 after stage 2's receipt. Stages 4 and 5 are written and will refuse until the two schedule files are supplied by a separate decision. They are not fetched from the agent store.
