@@ -34,7 +34,20 @@ At `qpos0`, default ferromotion geom frames were bit-exact for 0 of 14842 geoms 
 
 Instrumented call order at `qpos0`, 212 loaded models and 5 refusals, is in `docs/acceptance/oracles/x86_64-contract-off-op-bisect.json`. Exports compared to this `.so`: `mul_quat` 103 first, `rot_vec_quat` 56 first, no covered-export divergence 53. Including a same-flags recompile of `mji_mulMatVec3` (not an export of the `.so`): `mul_quat` 83, `rot_vec_quat` 52, `mul_mat_vec3` 24, and 53 with none of those. `sincos`, the mass matrix, constraints, and tendons are not in that bisect. An uninstrumented op is not a pass. The 53 models are not 212/212.
 
-The 20-step trajectory against this same `.so`, with the published step seed, is 1 of 212 bit-exact (`realsense_d435i/d435i.xml`). First nonzero recorded array: `qpos` 172, `qvel` 37, `qacc_warmstart` 2. That array summary is not the op bisect. It matches the preserved wheel ledger's score and does not replace that ledger.
+The 20-step trajectory against this same `.so`, with the published step seed, is 1 of 212 bit-exact (`realsense_d435i/d435i.xml`) under the published default and stays 1 of 212 after each opt-in site. Native counts, same oracle, 212 models and 3 states:
+
+| Policy sites unfused | M | efc_J | qacc | qfrc_bias | ten_length | xpos | body_inertia |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| none (published default) | 18/636 | 359/636 | 20/636 | 88/636 | 597/636 | 150/636 | 115/212 |
+| `mul_quat` | 21/636 | 365/636 | 23/636 | 144/636 | 598/636 | 293/636 | 115/212 |
+| `mul_quat`, `rot_vec_quat` | 22/636 | 367/636 | 24/636 | 151/636 | 599/636 | 296/636 | 115/212 |
+| those plus `mul_mat_vec3` | 22/636 | 369/636 | 23/636 | 167/636 | 601/636 | 563/636 | 115/212 |
+
+`qacc` lost one match when `mul_mat_vec3` was added (24/636 back to 23/636). `body_inertia` did not move. Its worst absolute error is 3.53e-7 on `hello_robot_stretch_3/stretch.xml`, which is not an ulp and is not explained by these three products. `body_mass` stays 192/212; its worst error is 4.44e-16.
+
+With `quat2mat` and `sincos` added to the qpos0 op comparison, the published default still has 53 models with no covered-op mismatch (`mul_quat` 103, `rot_vec_quat` 56). Those 53 next fail a listed native stage: `body_inertia` 21, `xpos` 27, `body_mass` 2, `qfrc_bias` 1, `xquat` 1, `qacc` 1. After all three sites are unfused, covered-op mismatches fall to `normalize4` on 6 models and 206 with no covered-op mismatch. Those 206 are not trajectory passes. `efc_J` still has length mismatches (a different contact row count), which are not ulp errors.
+
+The published default is what the arm64 golden tests run. That suite still fails the same three tests and passes the other 13 `bit_for_bit` tests. The contract-off sites are not selected by architecture. A wrong sha refuses the process.
 
 ## Arm64 source oracle
 

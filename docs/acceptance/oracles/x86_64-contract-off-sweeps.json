@@ -1,0 +1,28 @@
+{
+  "oracle_id": "mujoco-3.13.0-x86_64-contract-off",
+  "artifact_sha256": "64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc",
+  "default_policy_unchanged": true,
+  "trajectory_bit_exact_of_212": {
+    "published_default": 1,
+    "sites_mul_quat": 1,
+    "sites_mul_quat_rot_vec_quat": 1,
+    "sites_mul_quat_rot_vec_quat_mul_mat_vec3": 1,
+    "exact_model": "realsense_d435i/d435i.xml"
+  },
+  "native_bit_exact": {
+    "published_default": {"M": "18/636", "efc_J": "359/636", "efc_pos": "376/636", "qacc": "20/636", "qfrc_bias": "88/636", "ten_length": "597/636", "xpos": "150/636", "xquat": "100/636", "body_inertia": "115/212", "body_mass": "192/212"},
+    "sites_mul_quat": {"M": "21/636", "efc_J": "365/636", "efc_pos": "398/636", "qacc": "23/636", "qfrc_bias": "144/636", "ten_length": "598/636", "xpos": "293/636", "xquat": "549/636", "body_inertia": "115/212", "body_mass": "192/212"},
+    "sites_mul_quat_rot_vec_quat": {"M": "22/636", "efc_J": "367/636", "efc_pos": "399/636", "qacc": "24/636", "qfrc_bias": "151/636", "ten_length": "599/636", "xpos": "296/636", "xquat": "549/636", "body_inertia": "115/212", "body_mass": "192/212"},
+    "sites_mul_quat_rot_vec_quat_mul_mat_vec3": {"M": "22/636", "efc_J": "369/636", "efc_pos": "409/636", "qacc": "23/636", "qfrc_bias": "167/636", "ten_length": "601/636", "xpos": "563/636", "xquat": "549/636", "body_inertia": "115/212", "body_mass": "192/212"}
+  },
+  "qacc_regression_when_mul_mat_vec3_added": "24/636 to 23/636",
+  "op_bisect_qpos0": {
+    "published_default_covered_exports_plus_sincos_and_quat2mat": {"mul_quat": 103, "rot_vec_quat": 56, "no_covered_divergence": 53},
+    "all_three_sites_unfused": {"normalize4": 6, "no_covered_divergence": 206}
+  },
+  "the_53_op_clean_models_first_native_stage": {"body_inertia": 21, "xpos": 27, "body_mass": 2, "qfrc_bias": 1, "xquat": 1, "qacc": 1},
+  "body_inertia_worst_abs": "3.53e-7 on hello_robot_stretch_3/stretch.xml",
+  "body_inertia_is_not_fixed_by_the_three_sites": true,
+  "arm64_golden_suite_under_published_default": {"bit_for_bit_failed": ["geom_frames_match_mujocos_kinematics_bit_for_bit", "spatial_tendons_step_as_mujoco_does_bit_for_bit", "the_native_mass_matrix_and_bias_are_mujocos_bit_for_bit"], "bit_for_bit_passed": 13},
+  "uncovered_not_passes": ["normalize4 on 6 models after the three sites", "solver internals beyond qacc", "tendon wrap geometry beyond ten_length", "contact row topology where efc_J lengths differ"]
+}

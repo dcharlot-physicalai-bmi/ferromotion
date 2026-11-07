@@ -6,6 +6,13 @@ use std::fs;
 use std::path::Path;
 
 fn main() {
+    match ferromotion_core::install_policy_from_env() {
+        Ok(policy) => eprintln!("{}", ferromotion_core::policy_receipt(policy)),
+        Err(error) => {
+            eprintln!("policy refused: {error:?}");
+            std::process::exit(2);
+        }
+    }
     let root = std::env::args().nth(1).expect("menagerie root");
     let mut models = Vec::new();
     for ent in fs::read_dir(&root).unwrap().flatten() {

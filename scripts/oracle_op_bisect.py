@@ -22,6 +22,8 @@ COVERED = {
     "normalize4": "mju_normalize4",
     "rot_vec_quat": "mju_rotVecQuat",
     "axis_angle2quat": "mju_axisAngle2Quat",
+    "quat2mat": "mju_quat2Mat",
+    "sincos": "libm_sin_cos",
 }
 
 
@@ -33,6 +35,7 @@ def load_so(path: str) -> ctypes.CDLL:
     lib.mju_normalize4.argtypes = [p]
     lib.mju_rotVecQuat.argtypes = [p, p, p]
     lib.mju_axisAngle2Quat.argtypes = [p, p, ctypes.c_double]
+    lib.mju_quat2Mat.argtypes = [p, p]
     return lib
 
 
@@ -71,6 +74,17 @@ def oracle_out(lib: ctypes.CDLL, op: str, inputs: list[int]) -> list[int] | None
         angle = struct.unpack("<d", int(inputs[3]).to_bytes(8, "little"))[0]
         lib.mju_axisAngle2Quat(res, axis, ctypes.c_double(angle))
         return doubles_to_bits(res)
+    if op == "quat2mat":
+        res = (ctypes.c_double * 9)()
+        q = bits_to_doubles(inputs[:4])
+        lib.mju_quat2Mat(res, q)
+        return doubles_to_bits(res)
+    if op == "sincos":
+        # The pinned source defines mju_sin/mju_cos as libm sin/cos. This is that macro, not a separate symbol.
+        angle = struct.unpack("<d", int(inputs[0]).to_bytes(8, "little"))[0]
+        import math
+        pair = (math.sin(angle), math.cos(angle))
+        return [struct.unpack("<Q", struct.pack("<d", x))[0] for x in pair]
     return None
 
 
@@ -123,7 +137,7 @@ def main() -> int:
     summary = {
         "oracle_so": sys.argv[1],
         "covered_ops": sorted(COVERED),
-        "uncovered_ops_are_not_passes": ["mul_mat_vec3", "sincos", "solver", "mass_matrix", "constraints", "tendons", "20_step_trajectory"],
+        "uncovered_ops_are_not_passes": ["solver_internals", "mass_matrix_entries_not_named_M", "constraint_rows_not_named_efc_J", "tendon_wrap_geometry"],
         "loaded_models": loaded,
         "refused_models": refused,
         "models_with_a_covered_mismatch": covered_mismatches,

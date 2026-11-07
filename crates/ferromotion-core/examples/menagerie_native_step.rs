@@ -43,6 +43,13 @@ struct Case {
 }
 
 fn main() {
+    match ferromotion_core::install_policy_from_env() {
+        Ok(policy) => eprintln!("{}", ferromotion_core::policy_receipt(policy)),
+        Err(error) => {
+            eprintln!("policy refused: {error:?}");
+            std::process::exit(2);
+        }
+    }
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
         eprintln!("usage: menagerie_native_step <menagerie root> <trajectory txt> [substring]");

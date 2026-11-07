@@ -12,6 +12,7 @@
 //! the one to read.
 
 use ferromotion_core::tree_from_mjcf;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 /// An integer, or Python's `float.hex`, to the bit.
@@ -57,7 +58,20 @@ struct Model {
 /// (compared, bit-identical, worst |difference|, where)
 type Tally = (usize, usize, f64, String);
 
+const STAGE_ORDER: &[&str] = &[
+    "body_mass", "body_inertia", "body_ipos", "body_iquat", "body_pos", "body_quat", "qpos0",
+    "xpos", "xquat", "xmat", "xipos", "ximat", "M", "qfrc_bias", "ten_length", "ten_velocity",
+    "efc_J", "efc_pos", "qacc",
+];
+
 fn main() {
+    match ferromotion_core::install_policy_from_env() {
+        Ok(policy) => eprintln!("{}", ferromotion_core::policy_receipt(policy)),
+        Err(error) => {
+            eprintln!("policy refused: {error:?}");
+            std::process::exit(2);
+        }
+    }
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
         eprintln!("usage: menagerie_native <menagerie root> <native oracle txt> [substring]");
@@ -82,6 +96,7 @@ fn main() {
     }
     let mut tally: BTreeMap<String, Tally> = BTreeMap::new();
     let mut notes: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let model_misses: RefCell<Vec<String>> = RefCell::new(Vec::new());
     let (mut nmodels, mut refused) = (0usize, 0usize);
     let mut unsupported: BTreeMap<String, usize> = BTreeMap::new();
     let mut compare = |kind: &str, name: &str, rel: &str, ours: &[f64], want: &[f64]| {
@@ -93,6 +108,7 @@ fn main() {
             e.1 += 1;
             return;
         }
+        model_misses.borrow_mut().push(name.to_string());
         let worst = if ours.len() == want.len() { ours.iter().zip(want).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max) } else { f64::INFINITY };
         if worst >= e.2 {
             e.2 = worst;
@@ -128,6 +144,7 @@ fn main() {
         let rows_ok = !missing.iter().any(|w| w.starts_with("rows:"));
         let solve_ok = missing.is_empty();
         nmodels += 1;
+        model_misses.borrow_mut().clear();
         let ours: BTreeMap<&str, Vec<f64>> = t.mujoco_native_model().into_iter().collect();
         for (name, want) in &m.arrays {
             if let Some(o) = ours.get(name.as_str()) {
@@ -146,6 +163,16 @@ fn main() {
                 }
             }
         }
+        let misses = model_misses.borrow();
+        let listed = STAGE_ORDER.iter().copied().find(|stage| misses.iter().any(|name| name == stage));
+        let stage = if let Some(stage) = listed {
+            stage.to_string()
+        } else if let Some(other) = misses.first() {
+            format!("unlisted:{other}")
+        } else {
+            "no_listed_stage_mismatch".to_string()
+        };
+        println!("first_stage\t{}\t{stage}", m.rel);
     }
     println!("MuJoCo 3.13.0's own arrays, BIT FOR BIT: {nmodels} models compared ({refused} refused)");
     for (why, n) in &unsupported {

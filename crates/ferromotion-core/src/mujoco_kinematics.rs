@@ -118,7 +118,7 @@ pub(crate) type XFrame = ([f64; 3], [f64; 9]);
 
 /// `mji_mulMatVec3`, contracted.
 fn mul_mat_vec3(m: &[f64; 9], v: &[f64; 3]) -> [f64; 3] {
-    let out = [m[2].mul_add(v[2], m[0].mul_add(v[0], m[1] * v[1])), m[5].mul_add(v[2], m[3].mul_add(v[0], m[4] * v[1])), m[8].mul_add(v[2], m[6].mul_add(v[0], m[7] * v[1]))];
+    let out = crate::fp_contract::mul_mat_vec3_with(crate::fp_contract::active_policy().mul_mat_vec3, m, v);
     let mut inputs = [0.0; 12];
     inputs[..9].copy_from_slice(m);
     inputs[9..].copy_from_slice(v);
@@ -141,16 +141,7 @@ fn rot_vec_quat(v: &[f64; 3], q: &[f64; 4]) -> [f64; 3] {
         crate::fp_contract::record_op("rot_vec_quat", &inputs, v);
         return *v;
     }
-    let t = [
-        (-q[3]).mul_add(v[1], q[0].mul_add(v[0], q[2] * v[2])),
-        (-q[1]).mul_add(v[2], q[0].mul_add(v[1], q[3] * v[0])),
-        (-q[2]).mul_add(v[0], q[0].mul_add(v[2], q[1] * v[1])),
-    ];
-    let out = [
-        2.0f64.mul_add(q[2].mul_add(t[2], -(q[3] * t[1])), v[0]),
-        2.0f64.mul_add(q[3].mul_add(t[0], -(q[1] * t[2])), v[1]),
-        2.0f64.mul_add(q[1].mul_add(t[1], -(q[2] * t[0])), v[2]),
-    ];
+    let out = crate::fp_contract::rot_vec_quat_with(crate::fp_contract::active_policy().rot_vec_quat, v, q);
     let mut inputs = [0.0; 7];
     inputs[..3].copy_from_slice(v);
     inputs[3..].copy_from_slice(q);
@@ -176,23 +167,26 @@ pub(crate) fn normalize4(q: &mut [f64; 4]) {
 
 /// `mju_quat2Mat` (its products are separate statements, so nothing fuses).
 pub(crate) fn quat2mat(q: &[f64; 4]) -> [f64; 9] {
-    if q[0] == 1.0 && q[1] == 0.0 && q[2] == 0.0 && q[3] == 0.0 {
-        return [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
-    }
-    let (q00, q01, q02, q03) = (q[0] * q[0], q[0] * q[1], q[0] * q[2], q[0] * q[3]);
-    let (q11, q12, q13) = (q[1] * q[1], q[1] * q[2], q[1] * q[3]);
-    let (q22, q23, q33) = (q[2] * q[2], q[2] * q[3], q[3] * q[3]);
-    [
-        q00 + q11 - q22 - q33,
-        2.0 * (q12 - q03),
-        2.0 * (q13 + q02),
-        2.0 * (q12 + q03),
-        q00 - q11 + q22 - q33,
-        2.0 * (q23 - q01),
-        2.0 * (q13 - q02),
-        2.0 * (q23 + q01),
-        q00 - q11 - q22 + q33,
-    ]
+    let out = if q[0] == 1.0 && q[1] == 0.0 && q[2] == 0.0 && q[3] == 0.0 {
+        [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    } else {
+        let (q00, q01, q02, q03) = (q[0] * q[0], q[0] * q[1], q[0] * q[2], q[0] * q[3]);
+        let (q11, q12, q13) = (q[1] * q[1], q[1] * q[2], q[1] * q[3]);
+        let (q22, q23, q33) = (q[2] * q[2], q[2] * q[3], q[3] * q[3]);
+        [
+            q00 + q11 - q22 - q33,
+            2.0 * (q12 - q03),
+            2.0 * (q13 + q02),
+            2.0 * (q12 + q03),
+            q00 - q11 + q22 - q33,
+            2.0 * (q23 - q01),
+            2.0 * (q13 - q02),
+            2.0 * (q23 + q01),
+            q00 - q11 - q22 + q33,
+        ]
+    };
+    crate::fp_contract::record_op("quat2mat", q, &out);
+    out
 }
 
 /// `mji_axisAngle2Quat`.

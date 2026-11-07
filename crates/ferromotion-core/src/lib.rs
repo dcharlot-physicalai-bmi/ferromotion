@@ -362,7 +362,11 @@ pub(crate) mod mujoco_sparse;
 pub(crate) mod mujoco_tendon;
 pub(crate) mod mujoco_solver;
 pub(crate) mod mujoco_step;
-pub use fp_contract::{capture_ops, mul_quat_with, record_op, Contraction, OpSample, MUL_QUAT};
+pub use fp_contract::{
+    active_policy, capture_ops, install_policy, install_policy_from_env, mul_mat_vec3_with, mul_quat_with, policy_receipt,
+    record_op, reset_policy, rot_vec_quat_with, BuildPolicy, Contraction, OpSample, PolicyError, DEFAULT_POLICY, MUL_QUAT,
+    ORACLE_X86_CONTRACT_OFF_ID, ORACLE_X86_CONTRACT_OFF_SHA256,
+};
 pub use mujoco_step::MjNativeState;
 pub(crate) mod png;
 pub mod mjcf_sensor;
