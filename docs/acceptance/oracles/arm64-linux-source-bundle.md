@@ -2,6 +2,8 @@
 
 Not built. Not run. This is not a Darwin build and it does not replace the embedded arm64 golden arrays.
 
+A packed source bundle for a later thor2 run, not executed here, is `ferromotion-arm64-linux-oracle-thor2.tar.gz` in the cloud artifact store. Its README is the runbook. thor stays unused until that thor2 run is reviewed.
+
 The script `scripts/build_mujoco_3130_arm64_linux_contract_off.sh` exits unless `uname` is Linux and `aarch64`. On this x86_64 cloud host it refuses. It must not be copied onto a Mac and run there. Apple `__sincos_stret` and the unproven dylib goldens are a different oracle.
 
 When a verified Linux aarch64 worker is approved, the script clones nothing by itself. The caller supplies a checkout of MuJoCo `3.13.0` at `123347c0eeab7e13c8da0828ab593bbd95bcf335`. Flags are `-O3 -DNDEBUG -fno-fast-math -ffp-contract=off -fno-math-errno -march=armv8-a`. x86 `-mno-fma` and `-mno-avx` are N/A and are not passed. The oracle id to record after the build, once its sha256 is known, is `mujoco-3.13.0-arm64-linux-contract-off`. Until that sha exists, no policy may select it.
