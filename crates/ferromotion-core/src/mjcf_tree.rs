@@ -3964,28 +3964,24 @@ pub(crate) fn quat_to_rotation(q: &[f64; 4]) -> Matrix3<f64> {
 }
 
 /// A mesh as MuJoCo's OBJ reader (tinyobjloader with `real_t = float`) delivers it: coordinates rounded to
-/// `f32`, quads split along their **shorter diagonal** (measured in `f32`), larger polygons refused because
-/// tinyobj's ear clipping is not reproduced here.
+/// `f32`, quads split along their **shorter diagonal** (measured in `f32`).
 /// **tinyobjloader's built-in ear clipping, ported branch for branch** — how a face with more than four
-/// vertices becomes triangles, which is what MuJoCo gets because its OBJ decoder builds tinyobj without
-/// `TINYOBJLOADER_USE_MAPBOX_EARCUT`. Three Menagerie families (`arx_l5`, `hello_robot_stretch_3`,
-/// `trossen_wxai`) have such faces and were refused outright until this existed.
+/// vertices becomes triangles. MuJoCo 3.13.0 builds tinyobj without `TINYOBJLOADER_USE_MAPBOX_EARCUT`, and
+/// `obj_decoder.cc` keeps a face only when the triangulated `num_face_vertices` is 3 or 4. Three Menagerie
+/// families (`arx_l5`, `hello_robot_stretch_3`, `trossen_wxai`) have such faces.
 ///
-/// Measured against MuJoCo's own `mesh_face` on `hello_robot_stretch_3`, the only Menagerie model with faces
-/// this large: the 49-, 72-, 73- and 85-gons come out **triangle for triangle identical**, all 271 of them.
-/// The 215-gon does not — MuJoCo emits NOTHING for it (its face count is short by exactly that polygon's
-/// 213) while this emits 201, none of them MuJoCo's. That polygon is degenerate at the `f32` noise floor:
-/// its corner cross products run 1e-10 to 1e-9 against an `f32::EPSILON` of 1.19e-7, so which corner first
-/// clears the threshold, and every ear test after it, is decided in the last bits. It moves four geoms of
-/// one model by 1.29e-4 m and nothing else in the corpus. Fused multiply-add in `cross`/`area` is not the
-/// cause — tried, no change.
+/// The PyPI wheel's tinyobj (no `tryParseDouble`, libc++) does not triangulate a regular polygon of more
+/// than 100 vertices, so that wheel's `mesh_facenum` for `link_SG3_gripper_body` is 23,575. The 3.13.0 tag
+/// pinned to tinyobj `2945a967` does triangulate them: a regular n-gon becomes n−2 triangles, and the
+/// gripper mesh is 23,776 faces. Those 201 extra triangles are this ear clip of its one 215-gon, in the
+/// same order as that source build's `mesh_face`. The polygon is degenerate at the `f32` noise floor, so
+/// the clip stops early and drops the vertices it cannot ear; a regular 215-gon still yields all 213.
 ///
-/// It is not a textbook ear clip and the differences are the whole point of porting it rather than writing
-/// one: the working plane is chosen from the FIRST corner of the polygon whose cross product clears
-/// `f32::EPSILON`, not from a fitted normal; convexity is judged by `cross * area < 0` where `area` is one
-/// term of the shoelace sum and not the polygon's area; the ear test is `pnpoly` on the other vertices; and
-/// when no ear is found for a full cycle of `guess_vert` the remaining vertices are silently DROPPED. All of
-/// it runs in `f32`, because tinyobj's `real_t` is `float`.
+/// It is not a textbook ear clip: the working plane is chosen from the FIRST corner of the polygon whose
+/// cross product clears `f32::EPSILON`, not from a fitted normal; convexity is judged by `cross * area < 0`
+/// where `area` is one term of the shoelace sum and not the polygon's area; the ear test is `pnpoly` on the
+/// other vertices; and when no ear is found for a full cycle of `guess_vert` the remaining vertices are
+/// silently dropped. All of it runs in `f32`, because tinyobj's `real_t` is `float`.
 fn triangulate_as_tinyobj(poly: &[usize], verts: &[Vector3<f64>]) -> Vec<[usize; 3]> {
     let vf = |i: usize| -> [f32; 3] {
         let v = verts[i];
@@ -4127,18 +4123,8 @@ pub(crate) fn obj_as_mujoco_reads_it(text: &str) -> Result<crate::TriMesh3, Stri
                             tris.push([poly[1], poly[2], poly[3]]);
                         }
                     }
-                    // ⛔⛔ **MuJoCo DROPS a face with more than 100 vertices.** Not an error, not a
-                    // fallback — the face is silently absent from the mesh. Measured by bisection on
-                    // synthetic OBJ files: a 100-gon yields its 98 triangles and a 101-gon yields none,
-                    // and the cap is on the VERTEX COUNT, not on the line (a 100-gon written with 6-digit
-                    // indices, 701 characters, still triangulates).
-                    //
-                    // It matters once: `hello_robot_stretch_3/link_SG3_gripper_body` holds one 215-gon
-                    // among 23,103 faces. Fanning it gave this port 23,776 triangles against MuJoCo's
-                    // 23,575 — a DIFFERENT SOLID over the same 14,083 vertices — which moved that mesh's
-                    // centre of mass by 2.7e-3, the body's `ipos` by 2.5e-3 (the worst in Menagerie), its
-                    // `qfrc_gravcomp` by 3.6e-4, and its constrained acceleration by 1.4e-2.
-                    101.. => {}
+                    // Polygons of 5 or more vertices, including past 100. A drop at 100 matched the PyPI
+                    // wheel's older tinyobj and not tinyobj 2945a967, which is what the 3.13.0 tag builds.
                     _ => tris.extend(triangulate_as_tinyobj(&poly, &verts)),
                 }
             }
@@ -10410,15 +10396,10 @@ mod tests {
         assert_eq!(tuned.force(l, v, 1.0, 0.0), 0.0);
         assert!(tuned.force(l, v, 0.0, 1.0) < 0.0, "activation, not control, drives it");
     }
-    /// ⛔⛔ **MuJoCo DROPS an OBJ face with more than 100 vertices** — silently, not as an error and not
-    /// with a fallback. Found by bisection against MuJoCo 3.13.0 on synthetic files: a 100-gon yields its
-    /// 98 triangles and a 101-gon yields none. The cap is on the VERTEX COUNT, not the line: a 100-gon
-    /// written with 6-digit indices, 701 characters long, still triangulates.
-    ///
-    /// It decides one mesh in Menagerie — `hello_robot_stretch_3/link_SG3_gripper_body` has a 215-gon —
-    /// and through it that model's centre of mass, gravity compensation and constrained acceleration.
+    /// A regular n-gon is n−2 triangles for every n the 3.13.0 source build triangulates, including past
+    /// 100. The separate triangle keeps the count unambiguous. The PyPI wheel drops n>100; this does not.
     #[test]
-    fn an_obj_face_with_more_than_a_hundred_vertices_is_dropped_as_mujoco_drops_it() {
+    fn an_obj_polygon_is_ear_clipped_including_past_a_hundred_vertices() {
         let ngon = |n: usize| -> String {
             let mut s = String::new();
             for k in 0..n {
@@ -10437,10 +10418,11 @@ mod tests {
         };
         let tris = |n: usize| obj_as_mujoco_reads_it(&ngon(n)).expect("parses").tris.len();
         assert_eq!(tris(100), 98 + 1, "a 100-gon is fanned into 98 triangles");
-        assert_eq!(tris(101), 1, "a 101-gon is DROPPED, leaving only the separate triangle");
-        assert_eq!(tris(215), 1, "and so is the 215-gon that decides hello_robot_stretch_3");
-        // the boundary is exactly there, and small faces are untouched
+        assert_eq!(tris(101), 99 + 1, "a 101-gon is triangulated, not dropped");
+        assert_eq!(tris(215), 213 + 1, "a regular 215-gon is triangulated into 213 triangles");
+        // small faces stay on the same path
         assert_eq!(tris(99), 97 + 1);
         assert_eq!(tris(5), 3 + 1);
+        assert_eq!(tris(250), 248 + 1);
     }
 }
