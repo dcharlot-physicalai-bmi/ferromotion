@@ -11,7 +11,7 @@
 //! that `examples/menagerie_step.rs` could not make, because a state one ulp off lands elsewhere wherever
 //! MuJoCo's step is not continuous.
 
-use ferromotion_core::{tree_from_mjcf, MjNativeState};
+use ferromotion_core::{MjNativeState, tree_from_mjcf};
 use std::collections::BTreeMap;
 
 fn hex(s: &str) -> f64 {
@@ -53,14 +53,25 @@ fn main() {
     let mut cases: Vec<Case> = Vec::new();
     for line in std::fs::read_to_string(&args[2]).unwrap().lines() {
         let t: Vec<&str> = line.split('\t').collect();
-        let vals = || t.get(1).map_or(Vec::new(), |s| s.split_whitespace().map(hex).collect::<Vec<f64>>());
+        let vals = || {
+            t.get(1).map_or(Vec::new(), |s| {
+                s.split_whitespace().map(hex).collect::<Vec<f64>>()
+            })
+        };
         let c = cases.last_mut();
         match t[0] {
-            "model" => cases.push(Case { rel: t[1].to_string(), ..Default::default() }),
+            "model" => cases.push(Case {
+                rel: t[1].to_string(),
+                ..Default::default()
+            }),
             "s" => c.unwrap().steps.push(MjNativeState::default()),
             key => {
                 let c = c.unwrap();
-                let st = if c.steps.is_empty() { &mut c.start } else { c.steps.last_mut().unwrap() };
+                let st = if c.steps.is_empty() {
+                    &mut c.start
+                } else {
+                    c.steps.last_mut().unwrap()
+                };
                 match key {
                     "qpos" => st.qpos = vals(),
                     "qvel" => st.qvel = vals(),
@@ -75,15 +86,39 @@ fn main() {
     let (mut exact, mut compared, mut refused_load) = (0usize, 0usize, 0usize);
     let mut refused: BTreeMap<String, usize> = BTreeMap::new();
     let mut first_miss: Vec<String> = Vec::new();
+    let mut ledger: Vec<String> = Vec::new();
+    let json_str = |s: &str| {
+        let mut o = String::from("\"");
+        for c in s.chars() {
+            match c {
+                '"' => o.push_str("\\\""),
+                '\\' => o.push_str("\\\\"),
+                '\n' => o.push_str("\\n"),
+                c => o.push(c),
+            }
+        }
+        o.push('"');
+        o
+    };
     for c in &cases {
         if filter.as_ref().is_some_and(|f| !c.rel.contains(f.as_str())) {
             continue;
         }
         let path = root.join(&c.rel);
         let dir = path.parent().unwrap().to_path_buf();
-        let Ok(xml) = std::fs::read_to_string(&path) else { continue };
+        let Ok(xml) = std::fs::read_to_string(&path) else {
+            ledger.push(format!(
+                "{{\"model\":{},\"status\":\"missing_file\"}}",
+                json_str(&c.rel)
+            ));
+            continue;
+        };
         let Ok(t) = tree_from_mjcf(&xml, &|p: &str| std::fs::read(dir.join(p)).ok()) else {
             refused_load += 1;
+            ledger.push(format!(
+                "{{\"model\":{},\"status\":\"loader_refused\"}}",
+                json_str(&c.rel)
+            ));
             continue;
         };
         let mut st = c.start.clone();
@@ -91,12 +126,16 @@ fn main() {
         st.qacc_warmstart = vec![0.0; st.qvel.len()];
         let mut ok = true;
         let mut counted = false;
+        let mut failed_step: Option<usize> = None;
+        let mut fail_detail = String::new();
         for (k, want) in c.steps.iter().enumerate() {
             let next = match t.mujoco_native_step(&st, &ctrl) {
                 Ok(n) => n,
                 Err(why) => {
-                    *refused.entry(why).or_default() += 1;
+                    *refused.entry(why.clone()).or_default() += 1;
                     ok = false;
+                    failed_step = Some(k + 1);
+                    fail_detail = why;
                     break;
                 }
             };
@@ -104,18 +143,29 @@ fn main() {
                 compared += 1;
                 counted = true;
             }
-            let same = |a: &[f64], b: &[f64]| a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits());
-            if !(same(&next.qpos, &want.qpos) && same(&next.qvel, &want.qvel) && same(&next.act, &want.act) && same(&next.qacc_warmstart, &want.qacc_warmstart)) {
-                let off = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
+            let same = |a: &[f64], b: &[f64]| {
+                a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
+            };
+            if !(same(&next.qpos, &want.qpos)
+                && same(&next.qvel, &want.qvel)
+                && same(&next.act, &want.act)
+                && same(&next.qacc_warmstart, &want.qacc_warmstart))
+            {
+                let off = |a: &[f64], b: &[f64]| {
+                    a.iter()
+                        .zip(b)
+                        .map(|(x, y)| (x - y).abs())
+                        .fold(0.0, f64::max)
+                };
+                failed_step = Some(k + 1);
+                fail_detail = format!(
+                    "qpos off {:.2e}, qvel {:.2e}, qacc_warmstart {:.2e}",
+                    off(&next.qpos, &want.qpos),
+                    off(&next.qvel, &want.qvel),
+                    off(&next.qacc_warmstart, &want.qacc_warmstart)
+                );
                 if first_miss.len() < 25 {
-                    first_miss.push(format!(
-                        "{}: step {}: qpos off {:.2e}, qvel {:.2e}, qacc_warmstart {:.2e}",
-                        c.rel,
-                        k + 1,
-                        off(&next.qpos, &want.qpos),
-                        off(&next.qvel, &want.qvel),
-                        off(&next.qacc_warmstart, &want.qacc_warmstart)
-                    ));
+                    first_miss.push(format!("{}: step {}: {fail_detail}", c.rel, k + 1));
                 }
                 ok = false;
                 break;
@@ -130,13 +180,33 @@ fn main() {
         if ok && counted {
             exact += 1;
         }
+        let status = if ok && counted {
+            "bit_exact"
+        } else if failed_step.is_some() {
+            "mismatch"
+        } else {
+            "not_stepped"
+        };
+        ledger.push(format!(
+            "{{\"model\":{},\"status\":\"{status}\",\"steps\":{},\"failed_step\":{},\"detail\":{}}}",
+            json_str(&c.rel),
+            c.steps.len(),
+            failed_step.map_or("null".into(), |k| k.to_string()),
+            json_str(&fail_detail),
+        ));
     }
     let nsteps = cases.first().map_or(0, |c| c.steps.len());
-    println!("mj_step against MuJoCo 3.13.0, BIT FOR BIT at every one of {nsteps} steps: {exact} of {compared} models stepped ({refused_load} the loader refuses)");
+    println!(
+        "mj_step against MuJoCo 3.13.0, BIT FOR BIT at every one of {nsteps} steps: {exact} of {compared} models stepped ({refused_load} the loader refuses)"
+    );
     for (why, n) in &refused {
         println!("  not stepped: {n} models: {why}");
     }
     for m in &first_miss {
         println!("  {m}");
+    }
+    if let Ok(path) = std::env::var("MENAGERIE_LEDGER") {
+        std::fs::write(&path, ledger.join("\n") + "\n")
+            .unwrap_or_else(|e| panic!("writing {path}: {e}"));
     }
 }

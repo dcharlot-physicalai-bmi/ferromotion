@@ -209,6 +209,8 @@ mod catmull_rom;
 mod cfd_contact;
 mod chomp;
 mod closed_loop;
+mod joint_acceptance;
+mod external_oracles;
 mod collision;
 mod constraint;
 mod constraints;
@@ -392,6 +394,11 @@ pub use camera::{calibrate, PinholeCamera};
 pub use catmull_rom::CatmullRom;
 pub use chomp::{Chomp, ChompResult};
 pub use closed_loop::{Pin, PlanarLoop};
+pub use joint_acceptance::{decide, pinned_task, ClosedLoopTask, Decision, EnergyTrace, EvidenceKind, JointReceipt, ResourceBound, PINNED_CLOSED_LOOP_TASK};
+pub use external_oracles::{
+    inference_claim, reject_action, warp_newton_probe, warp_oracle, newton_oracle, ActionReject, InferenceClaim,
+    OracleCell, SmolVlaContract, UpstreamOracle, WarpNewtonProbe,
+};
 pub use collision::{CapsuleCollisionCost, PlaneCollisionCost, SphereCollisionCost};
 pub use cosserat::CosseratRod;
 pub use foci::{collision_cost, collision_grad_p, collision_kernel, overlap_integral, plan as foci_plan, FociPlan, Gaussian3, RobotSplat};

@@ -1,0 +1,51 @@
+name: menagerie-conformance
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# This workflow is the conformance gate. A checked-in ledger is not read back as
+# a success. The job fails if MuJoCo or the corpus pin is missing, if any XML is
+# unclassified, or if any loadable model disagrees bit-for-bit.
+#
+# Branch protection is not changed here. To make this check required on the
+# repository, a repository administrator sets, outside this workflow:
+#   required status check: menagerie-conformance / bit-exact
+#   (GitHub's check name is "<workflow name> / <job name>")
+# That setting was not applied by this change.
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bit-exact:
+    name: bit-exact
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Pin check
+        run: python3 scripts/menagerie_conformance.py --self-test
+      - name: MuJoCo 3.13.0
+        run: python3 -m pip install "mujoco==3.13.0" numpy
+      - name: Menagerie at the pinned sha
+        run: |
+          set -euo pipefail
+          sha=$(python3 -c 'import json; print(json.load(open("conformance/menagerie_pin.json"))["menagerie_sha"])')
+          git clone --filter=blob:none https://github.com/google-deepmind/mujoco_menagerie.git "$RUNNER_TEMP/menagerie"
+          git -C "$RUNNER_TEMP/menagerie" checkout "$sha"
+          test "$(git -C "$RUNNER_TEMP/menagerie" rev-parse HEAD)" = "$sha"
+      - name: Execute conformance
+        run: python3 scripts/menagerie_conformance.py "$RUNNER_TEMP/menagerie" --out conformance/menagerie_ledger.json
+      - name: Upload ledger
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: menagerie-ledger
+          path: conformance/menagerie_ledger.json
