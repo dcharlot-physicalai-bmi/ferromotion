@@ -4,9 +4,28 @@
 # and the on-host write-receipt.sh then succeeds.
 set -euo pipefail
 export LC_ALL=C
-DIRECT_PULL_DIR="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=lib.sh
-source "$DIRECT_PULL_DIR/lib.sh"
+# Constants are in this file so one download is enough. They match pins.sh.
+FERROMOTION_COMMIT=e0557dd109151a02702dfb262ea0a8c2b9dd07db
+MUJOCO_COMMIT=123347c0eeab7e13c8da0828ab593bbd95bcf335
+MENAGERIE_COMMIT=4d038b3feae26ec82b46a4d586379114012a8ac7
+CCD_COMMIT=7931e764a19ef6b21b443376c699bbc9c6d4fba8
+QHULL_COMMIT=d1c2fc0caa5f644f3a0f220290d4a868c68ed4f6
+TINYXML2_COMMIT=e6caeae85799003f4ca74ff26ee16a789bc2af48
+TINYOBJ_COMMIT=2945a967c5303b2c8c14174117c45f3302591150
+LODEPNG_COMMIT=17d08dd26cac4d63f43af217ebd70318bfb8189c
+MINIZ_COMMIT=d10b03cc73475af673df40f06e5cefd1d5f940d9
+MARCHING_COMMIT=f03a1b3ec29b1d7d865691ca8aea4f1eb2c2873d
+SCHEDULE_NATIVE_SHA256=a3168d763bed63c9181275b6a908348c0c0609fde425be1ece840c75d110b5b7
+SCHEDULE_STEP_SHA256=a039f949d938cefc0cf3633edec1415497f8400a776b88809adf9bb06f5678be
+OPTIONAL_RUSTUP_SHA256=f12be4b1317237cfd74c4486558717adec0b92ff57dd3074b2e96e600cc1890d
+THOR2_RUN=/home/cbio/ferromotion-oracle/e0557dd109151a02702dfb262ea0a8c2b9dd07db-20261107T131232Z
+THOR2_BUILD=/home/cbio/ferromotion-oracle/123347c0eeab7e13c8da0828ab593bbd95bcf335/build-20261107T131346Z
+THOR2_BOOTSTRAP=/home/cbio/ferromotion-direct-pull-ecfccc6c-zKqin1Nw
+THOR2_LIB_MUJOCO=cefada9b5165a787e2c2695c9db172993c922f5533e19ed8108a181c53f85845
+THOR2_LIB_ACTUATOR=34050ae42ebb3b4f3dabf9e7f68c855ac7cad47cd14fe0a1f0d19822050ed8ba
+THOR2_LIB_ELASTICITY=41f7c82839c38b656c9e42cc64979a8043686487a69b80f7689f07d5171390a7
+THOR2_LIB_SENSOR=4500baca85f2b3f9b6c2ba7862cd59b8ac2a78c38a24e013f24c2c43cdedd8c5
+THOR2_LIB_SDF=f3c586acf687a3a0bd2097b5f5f38671e16051665803d0c75ac4da3aabc070b3
 RUN="$THOR2_RUN"
 BUILD="$THOR2_BUILD"
 BOOT="$THOR2_BOOTSTRAP"
@@ -68,10 +87,17 @@ sha_file="$BUILD/libmujoco.so.3.13.0.sha256"
 got_file="$(awk 'NR==1 {print $1}' "$sha_file")"
 [[ "$got_file" == "$THOR2_LIB_MUJOCO" ]] || fail "sha256 file says $got_file"
 
+sha_of() {
+  local file="$1"
+  sha256sum "$file" | awk '{print $1}'
+}
 check_lib() {
-  local name="$1" want="$2" path="$LIBDIR/$name" got
+  local name="$1"
+  local want="$2"
+  local path="$LIBDIR/$name"
+  local got
   [[ -f "$path" ]] || fail "$path is missing"
-  got="$(direct_pull_sha "$path")"
+  got="$(sha_of "$path")"
   [[ "$got" == "$want" ]] || fail "$name sha256 $got is not $want"
   echo "library $name $got"
 }
@@ -81,10 +107,16 @@ check_lib libelasticity.so "$THOR2_LIB_ELASTICITY"
 check_lib libsensor.so "$THOR2_LIB_SENSOR"
 check_lib libsdf_plugin.so "$THOR2_LIB_SDF"
 
-bash "$DIRECT_PULL_DIR/materialize-schedules.sh" "$RUN"
+native="$RUN/schedules/x86-native.txt"
+step="$RUN/schedules/x86-step.txt"
+[[ -f "$native" && -f "$step" ]] || fail "pinned schedules are not in $RUN/schedules"
+[[ "$(sha_of "$native")" == "$SCHEDULE_NATIVE_SHA256" ]] || fail "x86-native.txt sha256 is not the pin"
+[[ "$(sha_of "$step")" == "$SCHEDULE_STEP_SHA256" ]] || fail "x86-step.txt sha256 is not the pin"
 
 expect_head() {
-  local dir="$1" want="$2" got
+  local dir="$1"
+  local want="$2"
+  local got
   [[ -d "$dir/.git" ]] || fail "$dir has no .git"
   got="$(git -C "$dir" rev-parse HEAD)"
   [[ "$got" == "$want" ]] || fail "$dir HEAD $got is not $want"
@@ -130,9 +162,9 @@ fi
 rust_note="$RUN/rust/OPTIONAL-RUSTUP.md"
 src_note="$RUN/ferromotion/scripts/arm_oracle/OPTIONAL-RUSTUP.md"
 [[ -f "$src_note" ]] || fail "pinned OPTIONAL-RUSTUP.md is not in the ferromotion checkout"
-direct_pull_require_sha "$src_note" "$OPTIONAL_RUSTUP_SHA256"
+[[ "$(sha_of "$src_note")" == "$OPTIONAL_RUSTUP_SHA256" ]] || fail "OPTIONAL-RUSTUP.md sha256 is not the pin"
 if [[ -f "$rust_note" ]]; then
-  direct_pull_require_sha "$rust_note" "$OPTIONAL_RUSTUP_SHA256"
+  [[ "$(sha_of "$rust_note")" == "$OPTIONAL_RUSTUP_SHA256" ]] || fail "run OPTIONAL-RUSTUP.md sha256 is not the pin"
 else
   mkdir -p "$RUN/rust"
   cp -f "$src_note" "$rust_note"
