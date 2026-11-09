@@ -282,7 +282,13 @@ impl MjKinematics {
                     match j.kind {
                         KinJointKind::Slide => {
                             let s = qpos[j.qposadr] - j.qpos0;
-                            p = [xaxis[0].mul_add(s, p[0]), xaxis[1].mul_add(s, p[1]), xaxis[2].mul_add(s, p[2])];
+                            // Published default keeps the fused `mul_add`. The contract-off oracle
+                            // compiles `mji_addToScl3` as `p += axis * s` (mulpd then add, no FMA).
+                            p = if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+                                [p[0] + xaxis[0] * s, p[1] + xaxis[1] * s, p[2] + xaxis[2] * s]
+                            } else {
+                                [xaxis[0].mul_add(s, p[0]), xaxis[1].mul_add(s, p[1]), xaxis[2].mul_add(s, p[2])]
+                            };
                         }
                         KinJointKind::Ball | KinJointKind::Hinge => {
                             let qloc = if j.kind == KinJointKind::Ball {

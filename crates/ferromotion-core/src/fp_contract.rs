@@ -9,9 +9,9 @@
 pub enum Contraction {
     /// Published `mul_add` chain. This is the build default.
     Contracted,
-    /// Each product rounds, then the C expression adds left to right.
-    /// Observed to match exported `mju_mulQuat` in the pinned Linux x86_64 wheel
-    /// on the vector in the unit test. Not selected for the default build.
+    /// Each product rounds, then the sums follow the SSE schedule in
+    /// `mju_mulQuat` of libmujoco `64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc`
+    /// (`mulpd`/`addpd`/`subpd`, no FMA). Not the published default.
     Unfused,
 }
 
@@ -78,7 +78,9 @@ pub fn install_policy(id: &str, artifact_sha256: &str, sites: &str) -> Result<Bu
             BuildPolicy {
                 id: ORACLE_X86_CONTRACT_OFF_ID,
                 artifact_sha256: ORACLE_X86_CONTRACT_OFF_SHA256,
-                mul_quat: Contraction::Contracted,
+                // `mju_mulQuat` in that artifact is the unfused SSE schedule.
+                // `rot_vec_quat` stays contracted until the site is named.
+                mul_quat: Contraction::Unfused,
                 rot_vec_quat: Contraction::Contracted,
                 mul_mat_vec3: Contraction::Contracted,
             }
@@ -214,15 +216,20 @@ pub fn mul_quat_with(policy: Contraction, a: &[f64; 4], b: &[f64; 4]) -> [f64; 4
             a[3].mul_add(b[0], (-a[2]).mul_add(b[1], a[0].mul_add(b[3], a[1] * b[2]))),
         ],
         Contraction::Unfused => {
+            // Products first, then the lanes of the `64156abe` `mju_mulQuat` schedule:
+            // r0 = ((p00 - p11) - p22) - p33
+            // r1 = ((p10 + p01) + p23) - p32
+            // r2 = ((p02 - p13) + p20) + p31
+            // r3 = ((p12 + p03) - p21) + p30
             let (p00, p11, p22, p33) = (a[0] * b[0], a[1] * b[1], a[2] * b[2], a[3] * b[3]);
             let (p01, p10, p23, p32) = (a[0] * b[1], a[1] * b[0], a[2] * b[3], a[3] * b[2]);
             let (p02, p13, p20, p31) = (a[0] * b[2], a[1] * b[3], a[2] * b[0], a[3] * b[1]);
             let (p03, p12, p21, p30) = (a[0] * b[3], a[1] * b[2], a[2] * b[1], a[3] * b[0]);
             [
                 ((p00 - p11) - p22) - p33,
-                ((p01 + p10) + p23) - p32,
+                ((p10 + p01) + p23) - p32,
                 ((p02 - p13) + p20) + p31,
-                ((p03 + p12) - p21) + p30,
+                ((p12 + p03) - p21) + p30,
             ]
         }
     }
