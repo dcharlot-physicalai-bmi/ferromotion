@@ -18,8 +18,23 @@ use crate::mujoco_kinematics::{KinJointKind, KinState, MjKinematics, SameFrame};
 /// `mjMINVAL`
 const MJ_MINVAL: f64 = 1e-15;
 
+fn contract_off() -> bool {
+    crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID
+}
+
 /// `mju_mulInertVec`: a 6-D motion vector through a com-based inertia (`i` = the 10 numbers of `cinert`).
 fn mul_inert_vec(i: &[f64; 10], v: &[f64; 6]) -> [f64; 6] {
+    // `mju_mulInertVec` in the contract-off library, left to right, one product at a time.
+    if contract_off() {
+        return [
+            (((i[0] * v[0] + i[3] * v[1]) + i[4] * v[2]) - i[8] * v[4]) + i[7] * v[5],
+            (((i[3] * v[0] + i[1] * v[1]) + i[5] * v[2]) + i[8] * v[3]) - i[6] * v[5],
+            (((i[4] * v[0] + i[5] * v[1]) + i[2] * v[2]) - i[7] * v[3]) + i[6] * v[4],
+            (i[8] * v[1] - i[7] * v[2]) + i[9] * v[3],
+            (i[6] * v[2] - i[8] * v[0]) + i[9] * v[4],
+            (i[7] * v[0] - i[6] * v[1]) + i[9] * v[5],
+        ];
+    }
     [
         i[7].mul_add(v[5], (-i[8]).mul_add(v[4], i[4].mul_add(v[2], i[0].mul_add(v[0], i[3] * v[1])))),
         (-i[6]).mul_add(v[5], i[8].mul_add(v[3], i[5].mul_add(v[2], i[3].mul_add(v[0], i[1] * v[1])))),
@@ -32,6 +47,10 @@ fn mul_inert_vec(i: &[f64; 10], v: &[f64; 6]) -> [f64; 6] {
 
 /// `mji_dot6`: `((v0·w0 + v2·w2) + (v1·w1 + v3·w3)) + (v4·w4 + v5·w5)`, each pair contracted.
 fn dot6(a: &[f64; 6], b: &[f64; 6]) -> f64 {
+    // `mji_dot6`: the same addition order as `mju_dot`, products not fused.
+    if contract_off() {
+        return ((a[0] * b[0] + a[2] * b[2]) + (a[1] * b[1] + a[3] * b[3])) + (a[4] * b[4] + a[5] * b[5]);
+    }
     (a[0].mul_add(b[0], a[2] * b[2]) + a[1].mul_add(b[1], a[3] * b[3])) + a[4].mul_add(b[4], a[5] * b[5])
 }
 
@@ -46,16 +65,25 @@ pub(crate) fn dot_sparse(v: &[f64], x: &[f64], ind: &[usize]) -> f64 {
     let n = v.len();
     let (mut r0, mut r1, mut r2, mut r3) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     let mut i = 0;
+    // Published path fuses each `res += a*b`. The contract-off library adds the product.
+    let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
     while i + 4 <= n {
-        r0 = v[i].mul_add(x[ind[i]], r0);
-        r1 = v[i + 1].mul_add(x[ind[i + 1]], r1);
-        r2 = v[i + 2].mul_add(x[ind[i + 2]], r2);
-        r3 = v[i + 3].mul_add(x[ind[i + 3]], r3);
+        if separate {
+            r0 += v[i] * x[ind[i]];
+            r1 += v[i + 1] * x[ind[i + 1]];
+            r2 += v[i + 2] * x[ind[i + 2]];
+            r3 += v[i + 3] * x[ind[i + 3]];
+        } else {
+            r0 = v[i].mul_add(x[ind[i]], r0);
+            r1 = v[i + 1].mul_add(x[ind[i + 1]], r1);
+            r2 = v[i + 2].mul_add(x[ind[i + 2]], r2);
+            r3 = v[i + 3].mul_add(x[ind[i + 3]], r3);
+        }
         i += 4;
     }
     let mut r = (r0 + r2) + (r1 + r3);
     while i < n {
-        r = v[i].mul_add(x[ind[i]], r);
+        r = if separate { r + v[i] * x[ind[i]] } else { v[i].mul_add(x[ind[i]], r) };
         i += 1;
     }
     r
@@ -82,6 +110,10 @@ fn fmax(a: f64, b: f64) -> f64 {
 
 /// `mji_cross`, contracted.
 fn cross(a: &[f64; 3], b: &[f64; 3]) -> [f64; 3] {
+    // `mji_cross`. The contract-off library subtracts the products.
+    if contract_off() {
+        return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    }
     [a[1].mul_add(b[2], -(a[2] * b[1])), a[2].mul_add(b[0], -(a[0] * b[2])), a[0].mul_add(b[1], -(a[1] * b[0]))]
 }
 
@@ -122,6 +154,26 @@ fn cross_force(vel: &[f64; 6], f: &[f64; 6]) -> [f64; 6] {
 fn inert_com(inert: &[f64; 3], mat: &[f64; 9], dif: &[f64; 3], mass: f64) -> [f64; 10] {
     let tmp = [mat[0] * inert[0], mat[3] * inert[0], mat[6] * inert[0], mat[1] * inert[1], mat[4] * inert[1], mat[7] * inert[1], mat[2] * inert[2], mat[5] * inert[2], mat[8] * inert[2]];
     let mut r = [0.0; 10];
+    // `mju_inertCom` adds the products. The published path keeps the fused chain below.
+    if contract_off() {
+        r[0] = (mat[0] * tmp[0] + mat[1] * tmp[3]) + mat[2] * tmp[6];
+        r[1] = (mat[3] * tmp[1] + mat[4] * tmp[4]) + mat[5] * tmp[7];
+        r[2] = (mat[6] * tmp[2] + mat[7] * tmp[5]) + mat[8] * tmp[8];
+        r[3] = (mat[0] * tmp[1] + mat[1] * tmp[4]) + mat[2] * tmp[7];
+        r[4] = (mat[0] * tmp[2] + mat[1] * tmp[5]) + mat[2] * tmp[8];
+        r[5] = (mat[3] * tmp[2] + mat[4] * tmp[5]) + mat[5] * tmp[8];
+        r[0] += mass * (dif[1] * dif[1] + dif[2] * dif[2]);
+        r[1] += mass * (dif[0] * dif[0] + dif[2] * dif[2]);
+        r[2] += mass * (dif[0] * dif[0] + dif[1] * dif[1]);
+        r[3] -= mass * dif[0] * dif[1];
+        r[4] -= mass * dif[0] * dif[2];
+        r[5] -= mass * dif[1] * dif[2];
+        r[6] = mass * dif[0];
+        r[7] = mass * dif[1];
+        r[8] = mass * dif[2];
+        r[9] = mass;
+        return r;
+    }
     r[0] = mat[2].mul_add(tmp[6], mat[0].mul_add(tmp[0], mat[1] * tmp[3]));
     r[1] = mat[5].mul_add(tmp[7], mat[3].mul_add(tmp[1], mat[4] * tmp[4]));
     r[2] = mat[8].mul_add(tmp[8], mat[6].mul_add(tmp[2], mat[7] * tmp[5]));
@@ -762,29 +814,7 @@ impl SmoothModel {
             }
         }
         // `mj_factorI`: L'DL in place, rows from the last back
-        let mut qld = m.clone();
-        let mut qld_diag_inv = vec![0.0; nv];
-        for k in (0..nv).rev() {
-            let start = self.m_rowadr[k];
-            let diag = self.m_rownnz[k] - 1;
-            let end = start + diag;
-            if qld[end] < MJ_MINVAL {
-                qld[end] = MJ_MINVAL;
-            }
-            let inv_d = 1.0 / qld[end];
-            qld_diag_inv[k] = inv_d;
-            for adr in (start..end).rev() {
-                let i = self.m_colind[adr];
-                let scl = -qld[adr] * inv_d;
-                let (ri, n) = (self.m_rowadr[i], self.m_rownnz[i]);
-                for t in 0..n {
-                    qld[ri + t] = qld[start + t].mul_add(scl, qld[ri + t]);
-                }
-            }
-            for t in 0..diag {
-                qld[start + t] *= inv_d;
-            }
-        }
+        let (qld, qld_diag_inv) = self.factor_i(&m);
         // `mj_comVel`
         let mut cvel = vec![[0.0; 6]; nbody];
         let mut cdof_dot = vec![[0.0; 6]; nv];
@@ -1216,12 +1246,19 @@ impl SmoothModel {
             }
             let inv_d = 1.0 / qld[end];
             diag_inv[k] = inv_d;
+            // Published path fuses the rank-1 update. `mj_factorI` calls `mju_addToScl`,
+            // which is `row += src * scl`.
+            let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
             for adr in (start..end).rev() {
                 let i = self.m_colind[adr];
                 let scl = -qld[adr] * inv_d;
                 let (ri, n) = (self.m_rowadr[i], self.m_rownnz[i]);
                 for t in 0..n {
-                    qld[ri + t] = qld[start + t].mul_add(scl, qld[ri + t]);
+                    qld[ri + t] = if separate {
+                        qld[ri + t] + qld[start + t] * scl
+                    } else {
+                        qld[start + t].mul_add(scl, qld[ri + t])
+                    };
                 }
             }
             for t in 0..diag {
@@ -1252,9 +1289,12 @@ impl SmoothModel {
             let xi = x[i];
             if xi != 0.0 {
                 let (start, end) = (self.m_rowadr[i], self.m_rowadr[i] + self.m_rownnz[i] - 1);
+                // Published path fuses `x - qLD·x_i`. `mj_solveLD` in the contract-off
+                // library subtracts the product.
+                let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
                 for adr in start..end {
                     let c = self.m_colind[adr];
-                    x[c] = (-qld[adr]).mul_add(xi, x[c]);
+                    x[c] = if separate { x[c] - qld[adr] * xi } else { (-qld[adr]).mul_add(xi, x[c]) };
                 }
             }
         }

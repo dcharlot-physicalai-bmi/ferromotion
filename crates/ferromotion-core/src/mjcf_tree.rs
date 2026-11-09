@@ -7859,11 +7859,17 @@ mod tests {
               <body name="b" pos="0.3 0 0"><joint name="h2" type="hinge" axis="0 1 0"/><geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.03"/></body></body></worldbody>
             <actuator><plugin joint="h1" plugin="mujoco.pid" instance="pid1" actdim="2" ctrlrange="-1 1" forcerange="-20 20"/>
               <position joint="h2" kp="10" kv="0.5"/></actuator></mujoco>"#;
+        let _ = crate::fp_contract::install_policy(
+            crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID,
+            crate::fp_contract::ORACLE_X86_CONTRACT_OFF_SHA256,
+            "",
+        );
         let t = tree_from_mjcf_str(xml).unwrap();
         let mut st = crate::MjNativeState { qpos: vec![0.14, -0.3], qvel: vec![0.17, -0.4], act: vec![0.1, 0.05], qacc_warmstart: vec![0.0; 2], ..Default::default() };
         for k in 0..10 {
             st = t.mujoco_native_step(&st, if k < 5 { &[0.9, 0.4] } else { &[-0.5, 0.4] }).unwrap();
         }
+        crate::fp_contract::reset_policy();
         let qvel = st.qvel.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
         let oracle_qvel = [0xbfdd5ed456588f98, 0x4014f1cceb4c77f3];
         assert_eq!(

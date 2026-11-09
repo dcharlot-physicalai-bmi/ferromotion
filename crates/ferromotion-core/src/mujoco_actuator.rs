@@ -114,8 +114,14 @@ impl Pid {
         };
         if let Some(slew) = self.slew_max.filter(|_| time > 0.0) {
             let prev = act[usize::from(self.ki != 0.0)];
-            // contracted as the C compiles: `prev ∓ slew·h` is one fused multiply-add each way
-            u = u.clamp((-slew).mul_add(h, prev), slew.mul_add(h, prev));
+            // Published path fuses `prev ∓ slew·h`. The contract-off plugin
+            // multiplies `slew * h` once, then `prev - sh` and `sh + prev`.
+            u = if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+                let sh = slew * h;
+                u.clamp(prev - sh, sh + prev)
+            } else {
+                u.clamp((-slew).mul_add(h, prev), slew.mul_add(h, prev))
+            };
         }
         u
     }
@@ -125,7 +131,12 @@ impl Pid {
         if self.ki == 0.0 {
             return 0.0;
         }
-        let i = error.mul_add(h, act[0]);
+        // Published path is `fma(e, h, ∫)`. The contract-off plugin is `∫ + e*h`.
+        let i = if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+            act[0] + error * h
+        } else {
+            error.mul_add(h, act[0])
+        };
         match self.i_max {
             Some(m) => i.clamp(-m, m),
             None => i,
@@ -137,9 +148,15 @@ impl Pid {
         let error = self.setpoint(a, ctrl, act, time, h) - length;
         // `ctrl_dot` is zero for a stateless setpoint, so the error's rate is the transmission's
         let error_dot = 0.0 - velocity;
-        // `kp·e + kd·ė + ki·∫e`, contracted as `libactuator.dylib` compiles it: the LEFT product of the sum
-        // fused, then the integral term
-        self.ki.mul_add(self.integral(act, error, h), self.kp.mul_add(error, self.kd * error_dot))
+        // Published path matches `libactuator.dylib`: `fma(ki, ∫, fma(kp, e, kd*ė))`.
+        // `Pid::Compute` in libactuator 64156abe multiplies the three terms, then
+        // adds `(kd*ė + kp*e) + ki*∫`.
+        let integral = self.integral(act, error, h);
+        if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+            (self.kd * error_dot + self.kp * error) + self.ki * integral
+        } else {
+            self.ki.mul_add(integral, self.kp.mul_add(error, self.kd * error_dot))
+        }
     }
 
     /// `Pid::ActDot`: rates that land each activation exactly on its next value after one Euler step —

@@ -64,8 +64,11 @@ impl SmoothModel {
                 }
             }
         }
+        // Published path fuses `qvel + h·qacc`. `mju_addToScl` in the contract-off
+        // library adds the product.
+        let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
         for (v, a) in next.qvel.iter_mut().zip(qacc) {
-            *v = a.mul_add(h, *v);
+            *v = if separate { *v + *a * h } else { a.mul_add(h, *v) };
         }
         let v = qvel_pos.map_or_else(|| next.qvel.clone(), <[f64]>::to_vec);
         self.integrate_pos(&mut next.qpos, &v, h);
@@ -336,8 +339,10 @@ impl SmoothModel {
                 }
             }
         }
-        // qH = M + qDeriv·(−h) on M's pattern
-        let qh: Vec<f64> = qderiv.iter().zip(&sd.m).map(|(q, m)| q.mul_add(-h, *m)).collect();
+        // qH = M + qDeriv·(−h) on M's pattern. Published path fuses that.
+        // `mju_addScl` in the contract-off library is `M + qDeriv*(-h)`.
+        let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
+        let qh: Vec<f64> = qderiv.iter().zip(&sd.m).map(|(q, m)| if separate { *m + *q * -h } else { q.mul_add(-h, *m) }).collect();
         let mut qh = qh;
         // standalone free bodies: their rows back to M
         let free: Vec<usize> = (0..self.jnt_type.len()).filter(|&j| self.jnt_type[j] == KinJointKind::Free && self.is_free_body(self.jnt_bodyid[j])).collect();
