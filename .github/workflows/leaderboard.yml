@@ -5,7 +5,7 @@ name: leaderboard
 # On merge to main: regenerate and commit standings.json + STANDINGS.md so external models land automatically.
 on:
   push:
-    branches: [main]
+    branches: [main, "cursor/**"]
     paths: ['physbench-leaderboard/**']
   pull_request:
     paths: ['physbench-leaderboard/**']
