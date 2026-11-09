@@ -132,49 +132,16 @@ expect_head "$RUN/deps/marchingcubecpp" "$MARCHING_COMMIT"
 expect_head "$RUN/menagerie" "$MENAGERIE_COMMIT"
 expect_head "$RUN/ferromotion" "$FERROMOTION_COMMIT"
 
-revisions="$RUN/provenance/REVISIONS"
-rev_body="$(cat <<EOF
-mujoco $MUJOCO_COMMIT
-ccd $CCD_COMMIT
-qhull $QHULL_COMMIT
-tinyxml2 $TINYXML2_COMMIT
-tinyobjloader $TINYOBJ_COMMIT
-lodepng $LODEPNG_COMMIT
-miniz $MINIZ_COMMIT
-marchingcubecpp $MARCHING_COMMIT
-menagerie $MENAGERIE_COMMIT
-ferromotion $FERROMOTION_COMMIT
-EOF
-)"
-if [[ -f "$revisions" ]]; then
-  got="$(cat "$revisions")"
-  [[ "$got" == "$rev_body" ]] || fail "existing REVISIONS does not match the checked-out commits"
-else
-  printf '%s\n' "$rev_body" >"$revisions"
-fi
-commit_file="$RUN/provenance/ferromotion-commit.txt"
-if [[ -f "$commit_file" ]]; then
-  got="$(tr -d '[:space:]' <"$commit_file")"
-  [[ "$got" == "$FERROMOTION_COMMIT" ]] || fail "existing ferromotion-commit.txt is $got"
-else
-  printf '%s\n' "$FERROMOTION_COMMIT" >"$commit_file"
-fi
-rust_note="$RUN/rust/OPTIONAL-RUSTUP.md"
-src_note="$RUN/ferromotion/scripts/arm_oracle/OPTIONAL-RUSTUP.md"
-[[ -f "$src_note" ]] || fail "pinned OPTIONAL-RUSTUP.md is not in the ferromotion checkout"
-[[ "$(sha_of "$src_note")" == "$OPTIONAL_RUSTUP_SHA256" ]] || fail "OPTIONAL-RUSTUP.md sha256 is not the pin"
-if [[ -f "$rust_note" ]]; then
-  [[ "$(sha_of "$rust_note")" == "$OPTIONAL_RUSTUP_SHA256" ]] || fail "run OPTIONAL-RUSTUP.md sha256 is not the pin"
-else
-  mkdir -p "$RUN/rust"
-  cp -f "$src_note" "$rust_note"
-fi
-
-# shellcheck source=../limits.sh
-source "$RUN/scripts/limits.sh"
-arm_oracle_apply_limits
-export ARM_ORACLE_ROOT="$RUN"
-"$RUN/scripts/write-receipt.sh" "$BUILD" "$LIBDIR" build
+# The archive receipt wants scripts/README.md, rust/OPTIONAL-RUSTUP.md, and
+# provenance/REVISIONS. Those paths are not in a stage-1 direct-pull tree.
+# Record the checkout commits instead of creating stand-ins for them.
+here="$(cd "$(dirname "$0")" && pwd)"
+[[ -f "$here/direct-pull-receipt.sh" ]] || fail "direct-pull-receipt.sh is not beside this script"
+"$here/direct-pull-receipt.sh" "$RUN" "$BUILD" "$LIBDIR" direct-pull-build
+grep -F -q "receipt_schema direct-pull-v1" "$BUILD/RECEIPT.txt" || fail "receipt schema is not direct-pull-v1"
+grep -F -q "archive_manifest_rebuilt no" "$BUILD/RECEIPT.txt" || fail "receipt claims the archive manifest was rebuilt"
+grep -F -q "source_head ferromotion $FERROMOTION_COMMIT" "$BUILD/RECEIPT.txt" || fail "receipt ferromotion commit is wrong"
+grep -F -q "source_tree ferromotion b30b3d5a5600110e1b871d931aceecfb284b5b67" "$BUILD/RECEIPT.txt" || fail "receipt ferromotion tree is wrong"
 grep -F -q "$THOR2_LIB_MUJOCO" "$BUILD/RECEIPT.txt" || fail "receipt does not contain the libmujoco sha256"
 grep -F -q "$THOR2_LIB_ACTUATOR" "$BUILD/RECEIPT.txt" || fail "receipt does not contain libactuator"
 grep -F -q "$THOR2_LIB_ELASTICITY" "$BUILD/RECEIPT.txt" || fail "receipt does not contain libelasticity"

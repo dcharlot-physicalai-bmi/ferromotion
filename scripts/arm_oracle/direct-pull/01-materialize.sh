@@ -61,6 +61,9 @@ cp -f "$RUN/ferromotion/scripts/arm_oracle/oracle_dump.c" "$RUN/probes/oracle_du
 cp -f "$RUN/ferromotion/scripts/arm_oracle/pyhex.h" "$RUN/probes/pyhex.h"
 cp -f "$RUN/ferromotion/scripts/arm_oracle/hexfloat_selftest.c" "$RUN/probes/hexfloat_selftest.c"
 cp -f "$RUN/ferromotion/scripts/arm_oracle/expected-load-failures.txt" "$RUN/probes/expected-load-failures.txt"
+if [[ -f "$DIRECT_PULL_DIR/probes/mulquat.c" ]]; then
+  cp -f "$DIRECT_PULL_DIR/probes/mulquat.c" "$RUN/probes/mulquat.c"
+fi
 chmod +x "$RUN/scripts/"*.sh
 
 direct_pull_need cargo
