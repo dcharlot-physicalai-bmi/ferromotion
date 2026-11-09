@@ -116,10 +116,15 @@ pub(crate) struct MjKinematics {
 /// A frame in the world as `mjData` holds it: position and row-major rotation matrix.
 pub(crate) type XFrame = ([f64; 3], [f64; 9]);
 
-/// `mji_mulMatVec3`. Always the contracted product. The unfused form was selectable and
-/// dropped one `qacc` match (24/636 to 23/636); that selection was reverted.
+/// `mji_mulMatVec3`. The published path fuses each row. The contract-off identity uses
+/// the source order `(m0*v0 + m1*v1) + m2*v2`. Naming the site is still refused.
 fn mul_mat_vec3(m: &[f64; 9], v: &[f64; 3]) -> [f64; 3] {
-    let out = crate::fp_contract::mul_mat_vec3_with(crate::fp_contract::Contraction::Contracted, m, v);
+    let mode = if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+        crate::fp_contract::Contraction::Unfused
+    } else {
+        crate::fp_contract::Contraction::Contracted
+    };
+    let out = crate::fp_contract::mul_mat_vec3_with(mode, m, v);
     let mut inputs = [0.0; 12];
     inputs[..9].copy_from_slice(m);
     inputs[9..].copy_from_slice(v);

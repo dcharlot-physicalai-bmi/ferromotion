@@ -79,14 +79,18 @@ impl SmoothModel {
 
     /// `mj_integratePos`
     pub(crate) fn integrate_pos(&self, qpos: &mut [f64], qvel: &[f64], dt: f64) {
+        let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
         for (j, &kind) in self.jnt_type.iter().enumerate() {
             let (mut padr, mut vadr) = (self.jnt_qposadr[j], self.jnt_dofadr[j]);
             match kind {
-                KinJointKind::Hinge | KinJointKind::Slide => qpos[padr] = dt.mul_add(qvel[vadr], qpos[padr]),
+                // `mj_integratePos`: `qpos += dt * qvel`. The published path fuses that.
+                KinJointKind::Hinge | KinJointKind::Slide => {
+                    qpos[padr] = if separate { qpos[padr] + dt * qvel[vadr] } else { dt.mul_add(qvel[vadr], qpos[padr]) };
+                }
                 KinJointKind::Free | KinJointKind::Ball => {
                     if kind == KinJointKind::Free {
                         for i in 0..3 {
-                            qpos[padr + i] = dt.mul_add(qvel[vadr + i], qpos[padr + i]);
+                            qpos[padr + i] = if separate { qpos[padr + i] + dt * qvel[vadr + i] } else { dt.mul_add(qvel[vadr + i], qpos[padr + i]) };
                         }
                         padr += 3;
                         vadr += 3;
@@ -276,6 +280,7 @@ impl SmoothModel {
         // row's last). A joint transmission and a damper touch only the diagonal; a fixed tendon's
         // `moment'·b·moment` reaches every pair of its dofs, and of those only the ones M stores survive.
         let mut qderiv = vec![0.0; self.m_colind.len()];
+        let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
         let diag = |i: usize| self.m_rowadr[i] + self.m_rownnz[i] - 1;
         let at = |r: usize, c: usize| (self.m_rowadr[r]..self.m_rowadr[r] + self.m_rownnz[r]).find(|&k| self.m_colind[k] == c);
         for (i, a) in self.actuators.iter().enumerate() {
@@ -314,7 +319,7 @@ impl SmoothModel {
                     let scl = mr * bias_vel;
                     for (&c, &mc) in cols.iter().zip(vals) {
                         if let Some(k) = at(r, c) {
-                            qderiv[k] = scl.mul_add(mc, qderiv[k]);
+                            qderiv[k] = if separate { qderiv[k] + scl * mc } else { scl.mul_add(mc, qderiv[k]) };
                         }
                     }
                 }
@@ -334,14 +339,13 @@ impl SmoothModel {
                 let scl = jr * b;
                 for (&c, &jc) in t.colind.iter().zip(jrow) {
                     if let Some(k) = at(r, c) {
-                        qderiv[k] = scl.mul_add(jc, qderiv[k]);
+                        qderiv[k] = if separate { qderiv[k] + scl * jc } else { scl.mul_add(jc, qderiv[k]) };
                     }
                 }
             }
         }
         // qH = M + qDeriv·(−h) on M's pattern. Published path fuses that.
         // `mju_addScl` in the contract-off library is `M + qDeriv*(-h)`.
-        let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
         let qh: Vec<f64> = qderiv.iter().zip(&sd.m).map(|(q, m)| if separate { *m + *q * -h } else { q.mul_add(-h, *m) }).collect();
         let mut qh = qh;
         // standalone free bodies: their rows back to M

@@ -119,6 +119,21 @@ fn cross(a: &[f64; 3], b: &[f64; 3]) -> [f64; 3] {
 
 /// `mji_crossMotion`: `vel × v` for motion vectors.
 fn cross_motion(vel: &[f64; 6], v: &[f64; 6]) -> [f64; 6] {
+    // `mji_crossMotion`. The contract-off library adds the two products, then adds that sum.
+    if contract_off() {
+        let mut r = [
+            -vel[2] * v[1] + vel[1] * v[2],
+            vel[2] * v[0] - vel[0] * v[2],
+            -vel[1] * v[0] + vel[0] * v[1],
+            -vel[2] * v[4] + vel[1] * v[5],
+            vel[2] * v[3] - vel[0] * v[5],
+            -vel[1] * v[3] + vel[0] * v[4],
+        ];
+        r[3] += -vel[5] * v[1] + vel[4] * v[2];
+        r[4] += vel[5] * v[0] - vel[3] * v[2];
+        r[5] += -vel[4] * v[0] + vel[3] * v[1];
+        return r;
+    }
     let mut r = [
         (-vel[2]).mul_add(v[1], vel[1] * v[2]),
         vel[2].mul_add(v[0], -(vel[0] * v[2])),
@@ -135,6 +150,21 @@ fn cross_motion(vel: &[f64; 6], v: &[f64; 6]) -> [f64; 6] {
 
 /// `mji_crossForce`: `vel ×* f` for force vectors.
 fn cross_force(vel: &[f64; 6], f: &[f64; 6]) -> [f64; 6] {
+    // `mji_crossForce`, same product-then-add order as the contract-off library.
+    if contract_off() {
+        let mut r = [
+            -vel[2] * f[1] + vel[1] * f[2],
+            vel[2] * f[0] - vel[0] * f[2],
+            -vel[1] * f[0] + vel[0] * f[1],
+            -vel[2] * f[4] + vel[1] * f[5],
+            vel[2] * f[3] - vel[0] * f[5],
+            -vel[1] * f[3] + vel[0] * f[4],
+        ];
+        r[0] += -vel[5] * f[4] + vel[4] * f[5];
+        r[1] += vel[5] * f[3] - vel[3] * f[5];
+        r[2] += -vel[4] * f[3] + vel[3] * f[4];
+        return r;
+    }
     let mut r = [
         (-vel[2]).mul_add(f[1], vel[1] * f[2]),
         vel[2].mul_add(f[0], -(vel[0] * f[2])),
@@ -212,10 +242,12 @@ fn mul_dof_vec(dof: &[[f64; 6]], vec: &[f64]) -> [f64; 6] {
         1 => dof[0].map(|x| x * vec[0]),
         _ => {
             let mut r = [0.0; 6];
+            // `mju_mulMatTVec` adds `dof * scale`. The published path fuses that.
+            let separate = contract_off();
             for (d, &v) in dof.iter().zip(vec) {
                 if v != 0.0 {
                     for k in 0..6 {
-                        r[k] = d[k].mul_add(v, r[k]);
+                        r[k] = if separate { r[k] + d[k] * v } else { d[k].mul_add(v, r[k]) };
                     }
                 }
             }
