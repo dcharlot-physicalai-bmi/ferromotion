@@ -43,3 +43,5 @@ Against the ARM dumps, that tree matched 20-step on 1/212 models, with `body_ine
 The three Darwin goldens failed on Linux. The stage 5 script expects that failure.
 
 Receipt sha256 prefixes: goldens `df0a1a98`, rust212 `5cfc11a4`.
+
+The rust212 receipt is the directory `rust212-20261109T215708Z` under the MuJoCo build home. It is a dated record of the e0557dd comparison. A later stage 05 re-run does not overwrite it.

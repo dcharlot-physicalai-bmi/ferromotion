@@ -34,23 +34,29 @@ if [[ ! -d "$LIBDIR" ]]; then
   exit 2
 fi
 arm_oracle_select_cargo
-arm_oracle_require_vendor "$ROOT/ferromotion"
+FM="${ARM_ORACLE_FERROMOTION:-$ROOT/ferromotion}"
+arm_oracle_require_vendor "$FM"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="$HOME/ferromotion-oracle/$REV/rust212-$STAMP"
+if [[ "$(basename "$OUT")" == "rust212-20261109T215708Z" ]]; then
+  echo "refusing: $OUT is the dated e0557dd rust212 receipt and is not overwritten" >&2
+  exit 2
+fi
 if [[ -e "$OUT" ]]; then
   echo "refusing: $OUT already exists" >&2
   exit 2
 fi
 mkdir "$OUT"
+arm_oracle_write_ferromotion_tested "$FM" "$OUT/ferromotion-tested.txt"
 arm_oracle_cargo_target "$OUT"
-cd "$ROOT/ferromotion"
+cd "$FM"
 set +e
 arm_oracle_timeout "$ARM_ORACLE_WALL_TIMEOUT" \
-  "${ARM_ORACLE_CARGO[@]}" run --locked --jobs 2 --release -p ferromotion-core --example menagerie_native -- \
+  "${ARM_ORACLE_CARGO[@]}" run --offline --locked --jobs 2 --release -p ferromotion-core --example menagerie_native -- \
   "$ROOT/menagerie" "$RUN/native.txt" >"$OUT/native.txt" 2>&1
 native_rc=$?
 arm_oracle_timeout "$ARM_ORACLE_WALL_TIMEOUT" \
-  "${ARM_ORACLE_CARGO[@]}" run --locked --jobs 2 --release -p ferromotion-core --example menagerie_native_step -- \
+  "${ARM_ORACLE_CARGO[@]}" run --offline --locked --jobs 2 --release -p ferromotion-core --example menagerie_native_step -- \
   "$ROOT/menagerie" "$RUN/step.txt" >"$OUT/step.txt" 2>&1
 step_rc=$?
 set -e
@@ -59,8 +65,8 @@ set -e
   echo "menagerie_native_step_exit $step_rc"
   echo "cargo_target_dir $CARGO_TARGET_DIR"
 } >"$OUT/result.txt"
-if [[ -e "$ROOT/ferromotion/target" ]]; then
-  echo "execution: cargo wrote $ROOT/ferromotion/target inside the source tree" >&2
+if [[ -e "$FM/target" || -e "$ROOT/ferromotion/target" ]]; then
+  echo "execution: cargo wrote a target directory inside a ferromotion source tree" >&2
   exit 3
 fi
 export ARM_ORACLE_ROOT="$ROOT"

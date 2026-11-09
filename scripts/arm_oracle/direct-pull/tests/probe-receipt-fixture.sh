@@ -187,6 +187,7 @@ arm_oracle_write_role_identity "$rust/identity.txt" rust "$stage3"
 for f in native.txt step.txt result.txt accept.txt; do
   printf 'rust\n' >"$rust/$f"
 done
+printf 'ferromotion_tested_commit e0557dd109151a02702dfb262ea0a8c2b9dd07db\nferromotion_tested_tree b30b3d5a5600110e1b871d931aceecfb284b5b67\n' >"$rust/ferromotion-tested.txt"
 FERROMOTION_RECEIPT_LAYOUT_TEST=1 run_receipt "$rust" "$libdir" rust >"$tmp/rust.out" 2>"$tmp/rust.err"
 grep -q 'identity_role rust' "$rust/RECEIPT.txt"
 grep -q 'rust_links_libmujoco no' "$rust/RECEIPT.txt"
@@ -197,6 +198,7 @@ mkdir -p "$goldens"
 printf 'identity_role goldens\n' >"$goldens/identity.txt"
 printf 'cargo\n' >"$goldens/cargo-test.txt"
 printf 'result\n' >"$goldens/result.txt"
+printf 'ferromotion_tested_commit e0557dd109151a02702dfb262ea0a8c2b9dd07db\nferromotion_tested_tree b30b3d5a5600110e1b871d931aceecfb284b5b67\n' >"$goldens/ferromotion-tested.txt"
 if FERROMOTION_RECEIPT_LAYOUT_TEST=1 run_receipt "$goldens" /nonexistent goldens >"$tmp/g.out" 2>"$tmp/g.err"; then
   :
 else

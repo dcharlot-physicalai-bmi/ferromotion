@@ -8,6 +8,7 @@ DIRECT_PULL_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=lib.sh
 source "$DIRECT_PULL_DIR/lib.sh"
 RUN="${1:?run directory from 01-materialize.sh}"
+direct_pull_hold_energy_lock "$RUN" stage4
 native="$RUN/schedules/x86-native.txt"
 step="$RUN/schedules/x86-step.txt"
 if [[ ! -f "$native" || ! -f "$step" ]]; then

@@ -56,6 +56,20 @@ arm_oracle_root() {
   return 2
 }
 
+arm_oracle_host_is_thor_local() {
+  local short full name
+  short="$(hostname -s 2>/dev/null || true)"
+  full="$(hostname -f 2>/dev/null || true)"
+  name="$(hostname 2>/dev/null || true)"
+  if [[ "$short" == "thor.local" || "$full" == "thor.local" || "$name" == "thor.local" ]]; then
+    return 0
+  fi
+  if [[ "$short" == "thor" && "$full" == "thor.local" ]]; then
+    return 0
+  fi
+  return 1
+}
+
 arm_oracle_require_thor2() {
   local why="$1"
   if [[ "${FERROMOTION_ORACLE_SMOKE:-}" == "x86" ]]; then
@@ -70,10 +84,19 @@ arm_oracle_require_thor2() {
     echo "refusing: Linux aarch64 only (got $(uname -s) $(uname -m)). $why" >&2
     exit 2
   fi
-  if [[ "$(hostname -s)" != "thor2" ]]; then
-    echo "refusing: $why (hostname -s is '$(hostname -s)'). Do not run this on thor." >&2
+  if [[ "$(hostname -s)" == "thor2" ]]; then
+    return 0
+  fi
+  # thor.local is bmi-1. The stage must already hold /tmp/bmi-energy.lock.
+  if arm_oracle_host_is_thor_local && [[ "${BMI_ENERGY_LOCK_HELD:-}" == "1" ]]; then
+    return 0
+  fi
+  if arm_oracle_host_is_thor_local; then
+    echo "refusing: $why on thor.local without /tmp/bmi-energy.lock held by the stage" >&2
     exit 2
   fi
+  echo "refusing: $why (hostname -s is '$(hostname -s)'). Do not run this on thor." >&2
+  exit 2
 }
 
 arm_oracle_version_at_least() {
@@ -147,10 +170,24 @@ arm_oracle_require_vendor() {
   fi
 }
 
+arm_oracle_write_ferromotion_tested() {
+  local fm="$1" dest="$2"
+  if [[ -f "$fm/PROVENANCE.txt" ]]; then
+    cp -f "$fm/PROVENANCE.txt" "$dest"
+    return 0
+  fi
+  {
+    echo "ferromotion_tested_commit $(git -C "$fm" rev-parse HEAD)"
+    echo "ferromotion_tested_tree $(git -C "$fm" rev-parse 'HEAD^{tree}')"
+    echo "ferromotion_tested_dir $fm"
+  } >"$dest"
+}
+
 arm_oracle_cargo_target() {
   local out="$1"
   local fm out_abs parent
-  fm="$(cd "$ROOT/ferromotion" && pwd)"
+  fm="${ARM_ORACLE_FERROMOTION:-$ROOT/ferromotion}"
+  fm="$(cd "$fm" && pwd)"
   parent="$(cd "$(dirname "$out")" && pwd)"
   out_abs="$parent/$(basename "$out")"
   case "$out_abs" in

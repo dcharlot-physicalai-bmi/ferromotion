@@ -170,10 +170,10 @@ case "$ROLE" in
     extras=("$BUILD/oracle_dump" "$BUILD/classify.txt" "$BUILD/failures.txt" "$BUILD/native.txt" "$BUILD/step.txt" "$BUILD/libdir.txt")
     ;;
   rust)
-    extras=("$BUILD/native.txt" "$BUILD/step.txt" "$BUILD/result.txt" "$BUILD/accept.txt")
+    extras=("$BUILD/native.txt" "$BUILD/step.txt" "$BUILD/result.txt" "$BUILD/accept.txt" "$BUILD/ferromotion-tested.txt")
     ;;
   goldens)
-    extras=("$BUILD/cargo-test.txt" "$BUILD/result.txt")
+    extras=("$BUILD/cargo-test.txt" "$BUILD/result.txt" "$BUILD/ferromotion-tested.txt")
     ;;
   *) fail "unknown role $ROLE" ;;
 esac
@@ -231,6 +231,13 @@ tmp="$(mktemp)"
     awk 'NR==1 || /^release:/ || /^host:/ {print "cargo_vv "$0}' "$RUN/provenance/cargo-vv.txt"
   fi
   echo "identity_file $BUILD/identity.txt"
+  if [[ -f "$BUILD/ferromotion-tested.txt" ]]; then
+    cat "$BUILD/ferromotion-tested.txt"
+  fi
+  if [[ -n "${ENERGY_LOCK_FILE:-}" && -f "$ENERGY_LOCK_FILE" ]]; then
+    cat "$ENERGY_LOCK_FILE"
+    echo "$receipt" >>"$(dirname "$ENERGY_LOCK_FILE")/energy-lock-receipts.txt"
+  fi
   echo
   echo "# source commits and trees"
   for spec in "${repos[@]}"; do

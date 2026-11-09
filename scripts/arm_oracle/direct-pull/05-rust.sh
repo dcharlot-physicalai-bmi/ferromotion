@@ -9,6 +9,7 @@ DIRECT_PULL_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=lib.sh
 source "$DIRECT_PULL_DIR/lib.sh"
 RUN="${1:?run directory that passed 04-corpus.sh}"
+direct_pull_hold_energy_lock "$RUN" stage5
 if [[ ! -f "$RUN/provenance/stage4-ok" ]]; then
   echo "refusing: $RUN has no stage4-ok. The ARM dumps do not exist yet." >&2
   exit 2

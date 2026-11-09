@@ -66,8 +66,7 @@ They were not run on ARM.
 
 ## Thor2 order
 
-Each script refuses any host whose `hostname -s` is not `thor2`, and refuses a
-reused output directory. `FERROMOTION_ORACLE_SMOKE=x86` exists so the x86 host
+Each script allows hostname `thor2`. On `thor.local` the direct-pull stage holds `flock /tmp/bmi-energy.lock` for the whole run and the runner refuses if that lock was not taken. A reused output directory is also refused. `FERROMOTION_ORACLE_SMOKE=x86` exists so the x86 host
 can check the Rust runners. A smoke receipt is marked `x86_smoke_not_arm`.
 Do not set that variable on thor2.
 

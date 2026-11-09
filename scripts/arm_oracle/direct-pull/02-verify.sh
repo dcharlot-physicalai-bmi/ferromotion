@@ -7,6 +7,7 @@ DIRECT_PULL_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=lib.sh
 source "$DIRECT_PULL_DIR/lib.sh"
 RUN="${1:?run directory from 01-materialize.sh}"
+direct_pull_hold_energy_lock "$RUN" stage2
 if [[ ! -f "$RUN/provenance/stage1-ok" ]]; then
   echo "refusing: $RUN has no stage1-ok" >&2
   exit 2

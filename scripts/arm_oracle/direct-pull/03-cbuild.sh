@@ -7,6 +7,7 @@ DIRECT_PULL_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=lib.sh
 source "$DIRECT_PULL_DIR/lib.sh"
 RUN="${1:?run directory that passed 02-verify.sh}"
+direct_pull_hold_energy_lock "$RUN" stage3
 if [[ ! -f "$RUN/provenance/stage2-ok" ]]; then
   echo "refusing: $RUN has no stage2-ok" >&2
   exit 2

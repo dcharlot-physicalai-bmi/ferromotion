@@ -1,5 +1,56 @@
 # Direct-pull receipt for the linked Thor2 build
 
+## Stage 5 re-run
+
+Stage 04 and the e0557dd stage 05 already ran. Do not run them again. The rust212 receipt `rust212-20261109T215708Z` stays. This re-run checks out the fidelity branch tip `515a7dec4b4ed2fa7257f328c7c3f9b169b8d7ba` (tree `67e20a00014302498e9b350862549f9d705911a6`), which contains `7998624df8a4ac2591187540a59ddc9b13d51640`, into a sibling directory. Cargo uses the existing vendor and `--offline`. A missing crate is listed and cargo is not started.
+
+Replace `REPLACE_WITH_FULL_SHA` with the full SHA of the commit that contains these scripts. Fetch with tokens unset. `sha256sum -c` is the check.
+
+```bash
+set -euo pipefail
+export LC_ALL=C
+unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN || true
+C=REPLACE_WITH_FULL_SHA
+BASE="https://raw.githubusercontent.com/dcharlot-physicalai-bmi/ferromotion/${C}"
+D="$HOME/ferromotion-oracle/stage5-rereun-${C}"
+RUN=/home/cbio/ferromotion-oracle/e0557dd109151a02702dfb262ea0a8c2b9dd07db-20261107T131232Z
+mkdir -p "$D/runners"
+curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/05-rust-rereun.sh" "$BASE/scripts/arm_oracle/direct-pull/05-rust-rereun.sh"
+curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/direct-pull-receipt.sh" "$BASE/scripts/arm_oracle/direct-pull/direct-pull-receipt.sh"
+curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/lib.sh" "$BASE/scripts/arm_oracle/direct-pull/lib.sh"
+curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/pins.sh" "$BASE/scripts/arm_oracle/direct-pull/pins.sh"
+curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/runners/compiler-rt.sh" "$BASE/scripts/arm_oracle/compiler-rt.sh"
+curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/runners/limits.sh" "$BASE/scripts/arm_oracle/limits.sh"
+curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/runners/run-goldens.sh" "$BASE/scripts/arm_oracle/run-goldens.sh"
+curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/runners/run-rust-212.sh" "$BASE/scripts/arm_oracle/run-rust-212.sh"
+cd "$D"
+sha256sum -c - <<'EOF'
+60b1452e25e825f7f91d3539de2f633dfe732cc833ab3bb2306527a5b5d972dc  05-rust-rereun.sh
+6f6cbf65af7d13edbac0814510438e47f0af783b4b3c5ac62b3f891521f7f484  direct-pull-receipt.sh
+560f1f0aa2384f81bba8357bafe9ac9770a2caa7a72c1b3ff6fd2d3afcbbbfa6  lib.sh
+d59c887207dc2f46023d8fd634ec684d50f895beb7bc7ab6b13c057b12742028  pins.sh
+61972b22b66be5b5de9b9b887d80505b2d8b3a2b9e77f0845b424b0cba34ba08  runners/compiler-rt.sh
+5ef914c76008d0651e6d957c15604b64a0b92d50f49642c6915678b4dd67fca9  runners/limits.sh
+a30706b42abc25d0085f7a2ce90f839dfaf2ddc492bae3c461dfe81c48c3da4d  runners/run-goldens.sh
+bfe9dbbf219b96a88a3933e670199b2222c6c777ada69f42f11263e821265829  runners/run-rust-212.sh
+EOF
+chmod +x 05-rust-rereun.sh direct-pull-receipt.sh runners/*.sh
+# CPU only. The runners force 2 jobs, --offline, and OMP_NUM_THREADS=1.
+setsid nohup bash -c '
+  set -euo pipefail
+  export LC_ALL=C
+  export OMP_NUM_THREADS=1
+  export CARGO_NET_OFFLINE=true
+  unset CUDA_VISIBLE_DEVICES MUJOCO_GL || true
+  bash "$1/05-rust-rereun.sh" "$2" > "$1/stage5-rereun.log" 2>&1
+' bash "$D" "$RUN" > "$D/driver.log" 2>&1 < /dev/null &
+echo $! > "$D/driver.pid"
+echo "driver pid $(cat "$D/driver.pid")"
+echo "tail -f $D/stage5-rereun.log"
+```
+
+Exit 0 is Rust-versus-ARM-dump parity for `515a7dec4b4ed2fa7257f328c7c3f9b169b8d7ba`. Exit 1 is a finished mismatch. Exit 2 is a refusal, including a vendored-crate gap. The new receipt names that commit and tree `67e20a00014302498e9b350862549f9d705911a6`.
+
 ## Stages 4 and 5 only
 
 Stage 3 already passed. Do not run it again. `provenance/build-dir.txt` and `stage3-ok` point at `build-20261109T213225Z`. libmujoco is `9164828bf04729b20b640bd09105baea98137a8749e262fc06fddc44ca869eb9`. Leave `build-20261107T131346Z` untouched.
@@ -32,19 +83,19 @@ curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/runners/run-gold
 curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/runners/run-rust-212.sh" "$BASE/scripts/arm_oracle/run-rust-212.sh"
 cd "$D"
 sha256sum -c - <<'EOF'
-50541eeae5424cbbcf42d48dca5cc4112f74fb08d3f8a32a519183b0f8024774  04-corpus.sh
-8b2408ee41f950dd329af8ad04a361fb449d186a1b10127f2f40599bfd2bbdd4  05-rust.sh
+7e98a4d9ab69c79251663e8ff58c961ea91891e09a5d7c8f3f948cd174194345  04-corpus.sh
+1ea51dd026e7493e7debcaf4862b54cc982072630bf400c65d0b6809e5ceac58  05-rust.sh
 5ea7fee85bf55cbe239df15abbb59123a027d275566c5903986acbb32b3a59ff  compare-arm-x86.sh
-a6aa4ab9b14b36bfa2f7aac0e49b3cc1ce799bb5d1ff1507dca5b56160e2cd45  direct-pull-receipt.sh
-2276697c6c8e2474b6bc42e7052c6f3ae31677d8fde8ef65f41cefc0de06ca32  lib.sh
-1bbe650fac082b8c01ba00ab2c2e1965fea7a5fb3ff75285d1086cb75b7e0f66  pins.sh
+6f6cbf65af7d13edbac0814510438e47f0af783b4b3c5ac62b3f891521f7f484  direct-pull-receipt.sh
+560f1f0aa2384f81bba8357bafe9ac9770a2caa7a72c1b3ff6fd2d3afcbbbfa6  lib.sh
+d59c887207dc2f46023d8fd634ec684d50f895beb7bc7ab6b13c057b12742028  pins.sh
 61972b22b66be5b5de9b9b887d80505b2d8b3a2b9e77f0845b424b0cba34ba08  runners/compiler-rt.sh
-394990f2ca39eba1be353136fdb810bb0b269e892cc32f3b1ddf53b19735c049  runners/limits.sh
+5ef914c76008d0651e6d957c15604b64a0b92d50f49642c6915678b4dd67fca9  runners/limits.sh
 64c139aec23de404820a41a3a8ce5f842d6c48a1432e446ab373a721b8c8b1d8  runners/read-mulquat-fixture.sh
 e9c5cf157fff0009c2530bf3da9885aa061e668cd458b4b26fb45fffda6bf8c9  runners/run-probes.sh
 e2cdf6e2532b599ce77b4fb4337bf602e32fa0ec77765b3b853044043786cacc  runners/run-212.sh
-414530c0c9f76377a610a754e20fd208fc1892e304aa56070d53dd5f8637e21a  runners/run-goldens.sh
-da3307c9025b5783e422207714d6b0ffed1587a80a78efd1ffa8f5ae6ba711ee  runners/run-rust-212.sh
+a30706b42abc25d0085f7a2ce90f839dfaf2ddc492bae3c461dfe81c48c3da4d  runners/run-goldens.sh
+bfe9dbbf219b96a88a3933e670199b2222c6c777ada69f42f11263e821265829  runners/run-rust-212.sh
 EOF
 chmod +x 04-corpus.sh 05-rust.sh compare-arm-x86.sh direct-pull-receipt.sh runners/*.sh
 # CPU only. The scripts force 2 jobs, OMP_NUM_THREADS=1, and no GPU cmake flag.

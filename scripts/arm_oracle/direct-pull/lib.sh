@@ -105,6 +105,124 @@ direct_pull_require_sha() {
   fi
 }
 
+direct_pull_host_is_thor_local() {
+  local short full name
+  short="$(hostname -s 2>/dev/null || true)"
+  full="$(hostname -f 2>/dev/null || true)"
+  name="$(hostname 2>/dev/null || true)"
+  if [[ "$short" == "thor.local" || "$full" == "thor.local" || "$name" == "thor.local" ]]; then
+    return 0
+  fi
+  if [[ "$short" == "thor" && "$full" == "thor.local" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+# On thor.local, hold bmi-1's energy-measurement lock until this process exits.
+# Other hosts, including thor2, do not take it. The wait is bounded.
+direct_pull_hold_energy_lock() {
+  local run="$1" stage="$2"
+  local wait_s="${BMI_ENERGY_LOCK_WAIT:-120}"
+  local requested acquired
+  if ! direct_pull_host_is_thor_local; then
+    return 0
+  fi
+  if ! command -v flock >/dev/null 2>&1; then
+    echo "refusing: flock is not on PATH, so thor.local cannot hold /tmp/bmi-energy.lock" >&2
+    exit 2
+  fi
+  mkdir -p "$run/provenance"
+  exec 9>/tmp/bmi-energy.lock
+  requested="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if ! flock -w "$wait_s" 9; then
+    echo "refusing: /tmp/bmi-energy.lock not acquired within ${wait_s}s on thor.local" >&2
+    exit 2
+  fi
+  acquired="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  export BMI_ENERGY_LOCK_HELD=1
+  export ENERGY_LOCK_FILE="$run/provenance/energy-lock-${stage}.txt"
+  {
+    echo "energy_lock_path /tmp/bmi-energy.lock"
+    echo "energy_lock_host thor.local"
+    echo "energy_lock_stage $stage"
+    echo "energy_lock_wait_bound_s $wait_s"
+    echo "energy_lock_requested_utc $requested"
+    echo "energy_lock_acquired_utc $acquired"
+    echo "energy_lock_pid $$"
+  } >"$ENERGY_LOCK_FILE"
+  trap 'direct_pull_finish_energy_lock' EXIT
+}
+
+direct_pull_finish_energy_lock() {
+  local rel file list receipt
+  [[ "${BMI_ENERGY_LOCK_HELD:-}" == "1" ]] || return 0
+  rel="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  file="${ENERGY_LOCK_FILE:-}"
+  if [[ -n "$file" ]]; then
+    echo "energy_lock_released_utc $rel" >>"$file"
+    list="$(dirname "$file")/energy-lock-receipts.txt"
+    if [[ -f "$list" ]]; then
+      while IFS= read -r receipt; do
+        [[ -f "$receipt" ]] || continue
+        if ! grep -q '^energy_lock_released_utc ' "$receipt"; then
+          echo "energy_lock_released_utc $rel" >>"$receipt"
+          sha256sum "$receipt" >"$(dirname "$receipt")/RECEIPT.sha256"
+        fi
+      done <"$list"
+    fi
+  fi
+}
+
+# List Cargo.lock crates the vendored directory cannot satisfy offline.
+# Prints one missing line per crate and returns 2 when any are missing.
+direct_pull_list_missing_vendor() {
+  local lockfile="$1" vendor="$2"
+  local missing=0 name ver src dir found cargo_ver
+  [[ -f "$lockfile" ]] || {
+    echo "missing lock $lockfile" >&2
+    return 2
+  }
+  [[ -d "$vendor" ]] || {
+    echo "missing vendor $vendor" >&2
+    return 2
+  }
+  while IFS=$'\t' read -r name ver src; do
+    [[ -n "$name" ]] || continue
+    if [[ "$src" == git+* ]]; then
+      echo "missing git ${name} ${ver} ${src}"
+      missing=1
+      continue
+    fi
+    if [[ "$src" != registry+* ]]; then
+      continue
+    fi
+    found=0
+    for dir in "$vendor/$name" "$vendor/${name}-${ver}"; do
+      [[ -f "$dir/Cargo.toml" && -f "$dir/.cargo-checksum.json" ]] || continue
+      cargo_ver="$(awk -F'"' '/^version = /{print $2; exit}' "$dir/Cargo.toml")"
+      if [[ "$cargo_ver" == "$ver" ]]; then
+        found=1
+        break
+      fi
+    done
+    if [[ "$found" -ne 1 ]]; then
+      echo "missing registry ${name} ${ver}"
+      missing=1
+    fi
+  done < <(awk '
+    function emit() {
+      if (name != "" && src != "") printf "%s\t%s\t%s\n", name, ver, src
+    }
+    /^\[\[package\]\]/ { emit(); name=""; ver=""; src=""; next }
+    /^name = / { name=$0; sub(/^name = "/, "", name); sub(/"$/, "", name); next }
+    /^version = / { ver=$0; sub(/^version = "/, "", ver); sub(/"$/, "", ver); next }
+    /^source = / { src=$0; sub(/^source = "/, "", src); sub(/"$/, "", src); next }
+    END { emit() }
+  ' "$lockfile")
+  [[ "$missing" -eq 0 ]]
+}
+
 direct_pull_run_root() {
   local base="${FERROMOTION_ORACLE_HOME:-$HOME/ferromotion-oracle}"
   local stamp run

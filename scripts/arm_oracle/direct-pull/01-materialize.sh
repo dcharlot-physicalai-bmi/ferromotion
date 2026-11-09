@@ -12,6 +12,7 @@ direct_pull_need sha256sum
 direct_pull_need timeout
 RUN="$(direct_pull_run_root)"
 mkdir -p "$RUN/provenance" "$RUN/deps" "$RUN/probes" "$RUN/scripts" "$RUN/fixtures" "$RUN/schedules"
+direct_pull_hold_energy_lock "$RUN" stage1
 direct_pull_askpass "$RUN/provenance"
 {
   echo "run $RUN"

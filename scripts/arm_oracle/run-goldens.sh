@@ -16,7 +16,8 @@ if ! ROOT="$(arm_oracle_root "$0")"; then
 fi
 REV="123347c0eeab7e13c8da0828ab593bbd95bcf335"
 arm_oracle_select_cargo
-arm_oracle_require_vendor "$ROOT/ferromotion"
+FM="${ARM_ORACLE_FERROMOTION:-$ROOT/ferromotion}"
+arm_oracle_require_vendor "$FM"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="$HOME/ferromotion-oracle/$REV/goldens-$STAMP"
 if [[ -e "$OUT" ]]; then
@@ -24,11 +25,12 @@ if [[ -e "$OUT" ]]; then
   exit 2
 fi
 mkdir "$OUT"
+arm_oracle_write_ferromotion_tested "$FM" "$OUT/ferromotion-tested.txt"
 arm_oracle_cargo_target "$OUT"
-cd "$ROOT/ferromotion"
+cd "$FM"
 set +e
 arm_oracle_timeout "$ARM_ORACLE_WALL_TIMEOUT" \
-  "${ARM_ORACLE_CARGO[@]}" test --locked --jobs 2 -p ferromotion-core --lib -- --test-threads=2 \
+  "${ARM_ORACLE_CARGO[@]}" test --offline --locked --jobs 2 -p ferromotion-core --lib -- --test-threads=2 \
   geom_frames_match_mujocos_kinematics_bit_for_bit \
   spatial_tendons_step_as_mujoco_does_bit_for_bit \
   the_native_mass_matrix_and_bias_are_mujocos_bit_for_bit \
@@ -40,8 +42,8 @@ set -e
   echo "cargo_target_dir $CARGO_TARGET_DIR"
   echo "These tests embed the unproven Darwin arrays. A failure is not relabeled as the Linux oracle."
 } >"$OUT/result.txt"
-if [[ -e "$ROOT/ferromotion/target" ]]; then
-  echo "execution: cargo wrote $ROOT/ferromotion/target inside the source tree" >&2
+if [[ -e "$FM/target" || -e "$ROOT/ferromotion/target" ]]; then
+  echo "execution: cargo wrote a target directory inside a ferromotion source tree" >&2
   exit 3
 fi
 ran="$(grep -Ec 'test [^ ]*(geom_frames_match_mujocos_kinematics_bit_for_bit|spatial_tendons_step_as_mujoco_does_bit_for_bit|the_native_mass_matrix_and_bias_are_mujocos_bit_for_bit) \.\.\. ' "$OUT/cargo-test.txt" || true)"
