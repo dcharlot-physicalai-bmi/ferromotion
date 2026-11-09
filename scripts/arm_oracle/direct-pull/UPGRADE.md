@@ -10,7 +10,7 @@ On thor2, from an empty directory, with no `GH_TOKEN`:
 set -euo pipefail
 export LC_ALL=C
 unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN || true
-C=COMMIT
+C=93117aa508b99de85fb550364a0aa8cc64b563b4
 BASE="https://raw.githubusercontent.com/dcharlot-physicalai-bmi/ferromotion/${C}/scripts/arm_oracle/direct-pull"
 D="$HOME/ferromotion-oracle/receipt-${C}"
 RUN=/home/cbio/ferromotion-oracle/e0557dd109151a02702dfb262ea0a8c2b9dd07db-20261107T131232Z
