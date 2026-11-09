@@ -131,7 +131,7 @@ echo "case hash-refusal"
 prepare hash
 rc="$(run_real /tmp/case-hash)"
 [[ "$rc" -eq 2 ]]
-grep -F -q "libmujoco.so.3.13.0 sha256" /tmp/case-hash.err
+grep -F -q "undefined __muloti4" /tmp/case-hash.err
 [[ ! -e "/home/cbio/$RUN_REL/provenance/stage3-ok" ]]
 echo "hash-refusal exit $rc"
 

@@ -35,8 +35,9 @@ if [[ ! -f "$RUN/provenance/stage3-ok" ]]; then
   echo "refusing: $RUN has no stage3-ok. The C library has not been built by stage 3." >&2
   exit 2
 fi
-# Install the compiler-rt linkers over the stage-1 copies from e0557dd.
-# Those copies link libmujoco without libclang_rt.builtins and fail on __muloti4.
+# Install the runners that link the self-contained library. They do not append
+# the builtins archive: __muloti4 is GLOBAL HIDDEN, so that append cannot
+# satisfy an undefined reference in the DSO.
 runner_src=""
 if [[ -f "$DIRECT_PULL_DIR/runners/compiler-rt.sh" ]]; then
   runner_src="$DIRECT_PULL_DIR/runners"
@@ -62,6 +63,10 @@ grep -q 'rtlib=compiler-rt' "$RUN/scripts/compiler-rt.sh" || {
   exit 2
 }
 BUILD="$(tr -d '[:space:]' <"$RUN/provenance/build-dir.txt")"
+if [[ "$BUILD" == *build-20261107T131346Z* ]]; then
+  echo "refusing: $BUILD is the library with undefined __muloti4. Leave it untouched. Run 03-cbuild.sh for a new build directory." >&2
+  exit 2
+fi
 export RUSTUP_AUTO_INSTALL=0
 set +e
 "$RUN/scripts/run-probes.sh" "$BUILD" | tee "$RUN/provenance/stage4-probes.log"

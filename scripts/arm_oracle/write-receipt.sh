@@ -72,12 +72,14 @@ done
 
 extras=()
 case "$ROLE" in
-  build) ;;
+  build)
+    extras=("$OUT/compiler-rt.txt")
+    ;;
   probe)
-    extras=("$OUT/compiler-rt.txt" "$OUT/mulquat" "$OUT/mulquat-arm64.txt" "$OUT/mulquat-x86.txt" "$OUT/result.txt")
+    extras=("$OUT/mulquat" "$OUT/mulquat-arm64.txt" "$OUT/mulquat-x86.txt" "$OUT/result.txt")
     ;;
   corpus)
-    extras=("$OUT/compiler-rt.txt" "$OUT/oracle_dump" "$OUT/classify.txt" "$OUT/failures.txt" "$OUT/native.txt" "$OUT/step.txt" "$OUT/libdir.txt")
+    extras=("$OUT/oracle_dump" "$OUT/classify.txt" "$OUT/failures.txt" "$OUT/native.txt" "$OUT/step.txt" "$OUT/libdir.txt")
     ;;
   rust)
     extras=("$OUT/native.txt" "$OUT/step.txt" "$OUT/result.txt" "$OUT/accept.txt")
@@ -121,9 +123,6 @@ tmp="$(mktemp)"
   echo "clang $(clang --version 2>/dev/null | head -n 1 || echo absent)"
   if [[ -f "$OUT/compiler-rt.txt" ]]; then
     cat "$OUT/compiler-rt.txt"
-  elif [[ "$ROLE" == "probe" || "$ROLE" == "corpus" ]]; then
-    echo "refusing: $OUT/compiler-rt.txt is missing" >&2
-    exit 2
   fi
   echo "cmake $(cmake --version 2>/dev/null | head -n 1 || echo absent)"
   if command -v ninja >/dev/null 2>&1; then

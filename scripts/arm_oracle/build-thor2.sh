@@ -52,6 +52,9 @@ if [[ -d /usr/lib/gcc/aarch64-linux-gnu/13 ]]; then
   export LIBRARY_PATH="/usr/lib/gcc/aarch64-linux-gnu/13${LIBRARY_PATH:+:$LIBRARY_PATH}"
 fi
 FLAGS="-O3 -DNDEBUG -fno-fast-math -ffp-contract=off -fno-math-errno -march=armv8-a"
+rt="$(arm_oracle_compiler_rt_path)" || exit 2
+arm_oracle_compiler_rt_record "$WORK/compiler-rt.txt" || exit 2
+SHARED_LINK="$(arm_oracle_shared_link_flags)"
 {
   echo "hostname $(hostname)"
   echo "uname $(uname -s) $(uname -m)"
@@ -59,6 +62,8 @@ FLAGS="-O3 -DNDEBUG -fno-fast-math -ffp-contract=off -fno-math-errno -march=armv
   echo "cmake $cmake_line"
   echo "ninja $(ninja --version)"
   echo "flags $FLAGS"
+  echo "shared_link $SHARED_LINK"
+  echo "compiler_rt_path $rt"
   echo "jobs 2"
   echo "work $WORK"
   echo "rlimit_cpu_seconds_per_process $(ulimit -t)"
@@ -74,6 +79,8 @@ arm_oracle_timeout "$ARM_ORACLE_WALL_TIMEOUT" cmake -S "$ROOT/src/mujoco" -B "$W
   -DCMAKE_CXX_FLAGS_RELEASE="$FLAGS" \
   -DCMAKE_C_FLAGS_DEBUG="$FLAGS" \
   -DCMAKE_CXX_FLAGS_DEBUG="$FLAGS" \
+  -DCMAKE_SHARED_LINKER_FLAGS="$SHARED_LINK" \
+  -DCMAKE_MODULE_LINKER_FLAGS="$SHARED_LINK" \
   -DMUJOCO_BUILD_EXAMPLES=OFF \
   -DMUJOCO_BUILD_SIMULATE=OFF \
   -DMUJOCO_BUILD_TESTS=OFF \
@@ -105,6 +112,10 @@ if [[ "$build_rc" -ne 0 ]]; then
   exit 3
 fi
 SO="$WORK/cmake/lib/libmujoco.so.3.13.0"
+if ! arm_oracle_reject_undefined_builtins "$WORK/cmake/lib"; then
+  echo "execution: a built shared library still imports a compiler-rt builtin" >&2
+  exit 3
+fi
 sha256sum "$SO" | tee "$WORK/libmujoco.so.3.13.0.sha256"
 echo "built $SO"
 export ARM_ORACLE_ROOT="$ROOT"

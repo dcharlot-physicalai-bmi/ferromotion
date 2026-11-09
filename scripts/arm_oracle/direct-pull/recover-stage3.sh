@@ -26,6 +26,12 @@ THOR2_LIB_ACTUATOR=34050ae42ebb3b4f3dabf9e7f68c855ac7cad47cd14fe0a1f0d19822050ed
 THOR2_LIB_ELASTICITY=41f7c82839c38b656c9e42cc64979a8043686487a69b80f7689f07d5171390a7
 THOR2_LIB_SENSOR=4500baca85f2b3f9b6c2ba7862cd59b8ac2a78c38a24e013f24c2c43cdedd8c5
 THOR2_LIB_SDF=f3c586acf687a3a0bd2097b5f5f38671e16051665803d0c75ac4da3aabc070b3
+# This hash is the 2026-11-07 library. nm -D --undefined-only lists __muloti4.
+# Do not point stage3-ok back at that directory. 03-cbuild.sh writes a new one.
+if [[ "$THOR2_LIB_MUJOCO" == "cefada9b5165a787e2c2695c9db172993c922f5533e19ed8108a181c53f85845" ]]; then
+  echo "refusing: build-20261107T131346Z (libmujoco $THOR2_LIB_MUJOCO) has undefined __muloti4. Leave that directory untouched as evidence. Run 03-cbuild.sh." >&2
+  exit 2
+fi
 RUN="$THOR2_RUN"
 BUILD="$THOR2_BUILD"
 BOOT="$THOR2_BOOTSTRAP"

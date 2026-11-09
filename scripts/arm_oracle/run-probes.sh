@@ -23,12 +23,11 @@ if [[ -e "$OUT" ]]; then
   exit 2
 fi
 mkdir "$OUT"
-rt="$(arm_oracle_compiler_rt_path)" || exit 2
-arm_oracle_compiler_rt_record "$OUT/compiler-rt.txt" || exit 2
 set +e
-# The builtins archive follows libmujoco so __muloti4 is resolved without relinking the .so.
+# The shared library already contains __muloti4. Appending the builtins archive
+# here fails: the symbol is GLOBAL HIDDEN, and ld will not use it to satisfy a DSO.
 arm_oracle_timeout 600 clang -O2 -I"$ROOT/src/mujoco/include" "$ROOT/probes/mulquat.c" "$SO" \
-  -o "$OUT/mulquat" -Wl,-rpath,"$BUILD/cmake/lib" -lm "$rt"
+  -o "$OUT/mulquat" -Wl,-rpath,"$BUILD/cmake/lib" -lm
 clang_rc=$?
 set -e
 if [[ "$clang_rc" -ne 0 ]]; then

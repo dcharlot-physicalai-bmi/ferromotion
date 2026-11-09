@@ -1,9 +1,47 @@
 # clang's compiler-rt builtins. Source this file. Do not execute it.
 # shellcheck shell=bash
 #
-# libmujoco built by clang on aarch64 references __muloti4. That symbol is
-# provided by libclang_rt.builtins, not by libgcc_s. The shared library's
-# NEEDED list does not change. Callers pass the archive on the link line.
+# On aarch64, clang lowers __builtin_mul_overflow of __int128 to a call to
+# __muloti4. On x86_64 the same builtin is inlined (mulq writes the 128-bit
+# product in rdx:rax), so the x86 library does not reference __muloti4.
+# The symbol in libclang_rt.builtins-*.a is GLOBAL HIDDEN. ld will not use a
+# hidden archive symbol to satisfy an undefined reference in a DSO, which is
+# why appending the archive to the probe link fails. The shared-library link
+# has to absorb the builtin. CMAKE_SHARED_LINKER_FLAGS are emitted before the
+# .o files, so a bare archive there is skipped. -rtlib=compiler-rt is a driver
+# option and is not a compile flag.
+
+# Driver options for the shared-library link only. Compile flags stay contract-off.
+arm_oracle_shared_link_flags() {
+  printf '%s\n' "-rtlib=compiler-rt -unwindlib=libgcc"
+}
+
+# Fail if a built shared library still imports a compiler-rt integer helper.
+# Those names are __muloti4 and the other __*ti* / overflow helpers.
+arm_oracle_reject_undefined_builtins() {
+  local libdir="$1"
+  local so sym bad path
+  bad=0
+  if ! command -v nm >/dev/null 2>&1; then
+    echo "refusing: nm is not on PATH" >&2
+    return 3
+  fi
+  shopt -s nullglob
+  for so in "$libdir"/*.so "$libdir"/*.so.*; do
+    [[ -f "$so" ]] || continue
+    path="$so"
+    while IFS= read -r sym; do
+      [[ -n "$sym" ]] || continue
+      if [[ "$sym" == "__muloti4" ]] || [[ "$sym" =~ ^__[A-Za-z0-9_]*ti[0-9]*$ ]] || [[ "$sym" =~ ^__[A-Za-z0-9_]*o[dt]i[0-9]+$ ]]; then
+        echo "refusing: $path has undefined compiler-rt symbol $sym" >&2
+        bad=1
+      fi
+    done < <(nm -D --undefined-only "$path" 2>/dev/null | awk '{print $NF}')
+  done
+  shopt -u nullglob
+  [[ "$bad" -eq 0 ]] || return 3
+  return 0
+}
 
 arm_oracle_compiler_rt_path() {
   local path base

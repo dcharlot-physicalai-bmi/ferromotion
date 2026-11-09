@@ -150,7 +150,7 @@ set +e
 bash "$RECOVER" >/tmp/case-hash.out 2>/tmp/case-hash.err
 echo "hash_refusal:$?"
 set -e
-grep -F -q "libmujoco.so.3.13.0 sha256" /tmp/case-hash.err
+grep -F -q "undefined __muloti4" /tmp/case-hash.err
 [[ ! -f "$RUN/provenance/stage3-ok" ]]
 [[ ! -f "$RUN/scripts/README.md" ]]
 echo "hash refusal on the real tree, no marker, no README invented"

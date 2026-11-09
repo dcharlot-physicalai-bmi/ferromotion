@@ -60,9 +60,11 @@ SCHEDULE_NATIVE_XZ_SHA256=1ed398c90a318fd9a514c7f6c8e14b966427c577f31410c872e90f
 SCHEDULE_STEP_XZ_SHA256=237fdfb8ea17eafe3a01f73c3418ecdc03af65b86e711f80d137353a1ccd55ed
 OPTIONAL_RUSTUP_SHA256=f12be4b1317237cfd74c4486558717adec0b92ff57dd3074b2e96e600cc1890d
 
-# This Thor2 build linked, then write-receipt exited 2 because the schedules were absent.
+# Evidence of the first Thor2 link. libmujoco imports __muloti4. Do not recover it.
+# 03-cbuild.sh writes a new build-$STAMP directory and a new library hash.
 THOR2_RUN=/home/cbio/ferromotion-oracle/e0557dd109151a02702dfb262ea0a8c2b9dd07db-20261107T131232Z
-THOR2_BUILD=/home/cbio/ferromotion-oracle/123347c0eeab7e13c8da0828ab593bbd95bcf335/build-20261107T131346Z
+THOR2_BUILD_WITH_UNDEFINED_MULOTI4=/home/cbio/ferromotion-oracle/123347c0eeab7e13c8da0828ab593bbd95bcf335/build-20261107T131346Z
+THOR2_BUILD=$THOR2_BUILD_WITH_UNDEFINED_MULOTI4
 THOR2_BOOTSTRAP=/home/cbio/ferromotion-direct-pull-ecfccc6c-zKqin1Nw
 THOR2_LIB_MUJOCO=cefada9b5165a787e2c2695c9db172993c922f5533e19ed8108a181c53f85845
 THOR2_LIB_ACTUATOR=34050ae42ebb3b4f3dabf9e7f68c855ac7cad47cd14fe0a1f0d19822050ed8ba

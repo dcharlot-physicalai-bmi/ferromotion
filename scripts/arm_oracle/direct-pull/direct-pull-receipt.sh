@@ -122,12 +122,15 @@ for spec in "${repos[@]}"; do
 done
 
 case "$ROLE" in
-  direct-pull-build|build) extras=() ;;
+  build)
+    extras=("$BUILD/compiler-rt.txt")
+    ;;
+  direct-pull-build) extras=() ;;
   probe)
-    extras=("$BUILD/compiler-rt.txt" "$BUILD/mulquat" "$BUILD/mulquat-arm64.txt" "$BUILD/mulquat-x86.txt" "$BUILD/result.txt")
+    extras=("$BUILD/mulquat" "$BUILD/mulquat-arm64.txt" "$BUILD/mulquat-x86.txt" "$BUILD/result.txt")
     ;;
   corpus)
-    extras=("$BUILD/compiler-rt.txt" "$BUILD/oracle_dump" "$BUILD/classify.txt" "$BUILD/failures.txt" "$BUILD/native.txt" "$BUILD/step.txt" "$BUILD/libdir.txt")
+    extras=("$BUILD/oracle_dump" "$BUILD/classify.txt" "$BUILD/failures.txt" "$BUILD/native.txt" "$BUILD/step.txt" "$BUILD/libdir.txt")
     ;;
   rust)
     extras=("$BUILD/native.txt" "$BUILD/step.txt" "$BUILD/result.txt" "$BUILD/accept.txt")
@@ -164,13 +167,14 @@ tmp="$(mktemp)"
   echo "uname_m $(uname -m)"
   echo "uname_r $(uname -r)"
   echo "clang $(clang --version 2>/dev/null | head -n 1 || echo absent)"
-  if [[ "$ROLE" == "probe" || "$ROLE" == "corpus" ]]; then
+  if [[ "$ROLE" == "build" ]]; then
     [[ -f "$BUILD/compiler-rt.txt" ]] || fail "$BUILD/compiler-rt.txt is missing"
     rt_path="$(awk '/^compiler_rt_path /{print $2}' "$BUILD/compiler-rt.txt")"
     rt_sha="$(awk '/^compiler_rt_sha256 /{print $2}' "$BUILD/compiler-rt.txt")"
     [[ -n "$rt_path" && -f "$rt_path" ]] || fail "compiler-rt path is not a file"
     rt_got="$(sha_of "$rt_path")"
     [[ "$rt_got" == "$rt_sha" ]] || fail "compiler-rt sha256 does not match $rt_path"
+    echo "shared_link -rtlib=compiler-rt -unwindlib=libgcc"
     cat "$BUILD/compiler-rt.txt"
   elif [[ "$ROLE" == "rust" ]]; then
     echo "rust_links_libmujoco no"
