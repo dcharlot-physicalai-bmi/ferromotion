@@ -146,37 +146,33 @@ fn convex_pyramids_match_the_source_compilers_mass_inertia_and_volume_bits() {
     }
 }
 
-/// Principal moments of the pyramids match. These frame components do not. They stay asserted
-/// unequal: an ulp is not a pass, and equality is not widened to hide them.
+/// Pyramid frames match the contract-off compiler, including the components that used to miss by an ulp.
 #[test]
-fn pyramid_frame_ulps_stay_unmatched_against_the_source_compiler() {
+fn pyramid_frames_match_the_source_compiler() {
     let tree = compile("pyr6");
     let p = tree.body_ipos["b"];
     let q = tree.body_iquat_wxyz["b"];
     assert_eq!(p.x.to_bits(), 0x3c6279a74b20663c);
     assert_eq!(p.z.to_bits(), 0x3fd0000000000001);
-    assert_ne!(p.y.to_bits(), 0x3c7bb67af0b09959, "oracle ipos y");
+    assert_eq!(p.y.to_bits(), 0x3c7bb67af0b09959, "oracle ipos y");
     assert_eq!(q[1].to_bits(), 0x3fe6a09e667f3bd9);
     assert_eq!(q[3].to_bits(), 0x3fe6a09e667f3bd9);
-    assert_ne!(q[0].to_bits(), 0);
-    assert_ne!(q[2].to_bits(), 0);
+    assert_eq!(q[0].to_bits(), 0);
+    assert_eq!(q[2].to_bits(), 0);
     let tree = compile("pyr101");
     let p = tree.body_ipos["b"];
-    assert_ne!(p.x.to_bits(), 0xbdd7015627fe8558);
-    assert_ne!(p.y.to_bits(), 0xbc5bf320a662a454);
-    assert_ne!(p.z.to_bits(), 0x3fcffffffffffffe);
+    assert_eq!(p.x.to_bits(), 0xbdd7015627fe8558);
+    assert_eq!(p.y.to_bits(), 0xbc5bf320a662a454);
+    assert_eq!(p.z.to_bits(), 0x3fcffffffffffffe);
 }
 
-/// The L prism's triangles match the source build. Its principal moments differ by a few ulps
-/// (contracted face integral versus `-ffp-contract=off`). That is not declared equal.
+/// The L prism's triangles and principal moments match the contract-off source build.
 #[test]
-fn ell_prism_inertia_ulps_stay_unmatched_against_the_source_compiler() {
+fn ell_prism_inertia_matches_the_source_compiler() {
     let tree = compile("prism_ell");
     let got = tree.body_iinertia["b"].map(f64::to_bits);
     let oracle = [0x3ff668bdbb5a3878, 0x3ff1f8c6d9f8c6db, 0x3fdc28552406106d];
     assert_eq!(tree.body_mass["b"].to_bits(), 0x3ff0000000000000);
-    for (g, o) in got.iter().zip(oracle) {
-        assert_ne!(*g, o);
-    }
+    assert_eq!(got, oracle);
 }
 

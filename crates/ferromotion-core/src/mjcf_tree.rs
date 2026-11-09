@@ -3754,7 +3754,7 @@ pub(crate) fn mesh_inertia_mujoco(mesh: &crate::TriMesh3, method: MeshInertia) -
     let (mut facecen, mut total_area) = (Vector3::zeros(), 0.0);
     for t in &mesh.tris {
         let (_, c, area) = tri(v(t[0]), v(t[1]), v(t[2]));
-        facecen = Vector3::new(area.mul_add(c.x, facecen.x), area.mul_add(c.y, facecen.y), area.mul_add(c.z, facecen.z));
+        facecen = Vector3::new(facecen.x + area * c.x, facecen.y + area * c.y, facecen.z + area * c.z);
         total_area += area;
     }
     if total_area < MINVAL {
@@ -3773,10 +3773,9 @@ pub(crate) fn mesh_inertia_mujoco(mesh: &crate::TriMesh3, method: MeshInertia) -
             volume = volume.abs();
         }
         vol += volume;
-        // `CoM += volume * (center * 3.0 / 4.0 + facecen / 4.0)`: the sum's terms are quotients, so only the
-        // accumulation fuses
+        // `CoM += volume * (center * 3.0 / 4.0 + facecen / 4.0)`
         let x = |k: usize| c[k] * 3.0 / 4.0 + facecen[k] / 4.0;
-        com = Vector3::new(volume.mul_add(x(0), com.x), volume.mul_add(x(1), com.y), volume.mul_add(x(2), com.z));
+        com = Vector3::new(com.x + volume * x(0), com.y + volume * x(1), com.z + volume * x(2));
     }
     if vol < MINVAL {
         return Err(if vol < 0.0 { "mesh volume is negative (misoriented triangles)".into() } else { "mesh volume is too small".into() });
@@ -3798,16 +3797,16 @@ pub(crate) fn mesh_inertia_mujoco(mesh: &crate::TriMesh3, method: MeshInertia) -
         }
         total += volume;
         for (j, &(a, b)) in k.iter().enumerate() {
-            // C: `2*(DD + EE + FF) + DE + ED + DF + FD + EF + FE`, then `P += volume/C * that`.
-            // `2*(DD + EE + FF) + DE + ED + DF + FD + EF + FE`, each later product fused into the running sum
-            let sq = f[a].mul_add(f[b], d[a].mul_add(d[b], e[a] * e[b]));
-            let mut sum = 2.0f64.mul_add(sq, d[a] * e[b]);
-            sum = d[b].mul_add(e[a], sum);
-            sum = d[a].mul_add(f[b], sum);
-            sum = d[b].mul_add(f[a], sum);
-            sum = e[a].mul_add(f[b], sum);
-            sum = e[b].mul_add(f[a], sum);
-            p[j] = (volume / cdiv).mul_add(sum, p[j]);
+            // `P += volume/C * (2*(DD + EE + FF) + DE + ED + DF + FD + EF + FE)`, no FMA.
+            let (dd, ee, ff) = (d[a] * d[b], e[a] * e[b], f[a] * f[b]);
+            let mut sum = 2.0 * ((dd + ee) + ff);
+            sum += d[a] * e[b];
+            sum += d[b] * e[a];
+            sum += d[a] * f[b];
+            sum += d[b] * f[a];
+            sum += e[a] * f[b];
+            sum += e[b] * f[a];
+            p[j] += (volume / cdiv) * sum;
         }
     }
     let inertia = Matrix3::new(p[1] + p[2], -p[3], -p[4], -p[3], p[0] + p[2], -p[5], -p[4], -p[5], p[0] + p[1]);
@@ -3819,23 +3818,23 @@ pub(crate) fn mesh_inertia_mujoco(mesh: &crate::TriMesh3, method: MeshInertia) -
 // product of a chain into the running sum, `s += a*b`). A stored mesh vertex is a double rounded to `f32`:
 // one ulp in the centre of mass can move a whole binade of vertices to the neighbouring float.
 
-/// `mjuu_dot3`, contracted.
+/// `mjuu_dot3`, as the contract-off compiler leaves `a0*b0 + a1*b1 + a2*b2`.
 fn uu_dot3(a: &Vector3<f64>, b: &Vector3<f64>) -> f64 {
-    a.z.mul_add(b.z, a.x.mul_add(b.x, a.y * b.y))
+    (a.x * b.x + a.y * b.y) + a.z * b.z
 }
 
-/// `mjuu_crossvec` (`b × c`), contracted.
+/// `mjuu_crossvec` (`b × c`), separate products.
 fn uu_cross(b: &Vector3<f64>, c: &Vector3<f64>) -> Vector3<f64> {
-    Vector3::new(b.y.mul_add(c.z, -(b.z * c.y)), b.z.mul_add(c.x, -(b.x * c.z)), b.x.mul_add(c.y, -(b.y * c.x)))
+    Vector3::new(b.y * c.z - b.z * c.y, b.z * c.x - b.x * c.z, b.x * c.y - b.y * c.x)
 }
 
 /// `mjuu_normvec`: the squared norm below `mjEPS` (1e-14) leaves the vector alone and returns 0, and a norm
 /// within `mjEPS` of 1 leaves it alone too; otherwise each component is DIVIDED by the norm, which is
-/// returned. The sum of squares is one fused accumulation.
+/// returned. The sum of squares is `nrm += v*v`, not an FMA.
 fn uu_normvec(v: &mut [f64]) -> f64 {
     let mut n2 = 0.0f64;
     for x in v.iter() {
-        n2 = x.mul_add(*x, n2);
+        n2 += *x * *x;
     }
     if n2 < 1e-14 {
         return 0.0;
@@ -3868,31 +3867,31 @@ fn uu_quat2mat(q: &[f64; 4]) -> Matrix3<f64> {
     )
 }
 
-/// `mjuu_mulquat`, contracted, normalised as it normalises.
+/// `mjuu_mulquat`, the contract-off products, then `mjuu_normvec`.
 fn uu_mulquat(a: &[f64; 4], b: &[f64; 4]) -> [f64; 4] {
     let mut r = [
-        (-a[3]).mul_add(b[3], (-a[2]).mul_add(b[2], a[0].mul_add(b[0], -(a[1] * b[1])))),
-        (-a[3]).mul_add(b[2], a[2].mul_add(b[3], a[0].mul_add(b[1], a[1] * b[0]))),
-        a[3].mul_add(b[1], a[2].mul_add(b[0], a[0].mul_add(b[2], -(a[1] * b[3])))),
-        a[3].mul_add(b[0], (-a[2]).mul_add(b[1], a[0].mul_add(b[3], a[1] * b[2]))),
+        ((a[0] * b[0] - a[1] * b[1]) - a[2] * b[2]) - a[3] * b[3],
+        ((a[0] * b[1] + a[1] * b[0]) + a[2] * b[3]) - a[3] * b[2],
+        ((a[0] * b[2] - a[1] * b[3]) + a[2] * b[0]) + a[3] * b[1],
+        ((a[0] * b[3] + a[1] * b[2]) - a[2] * b[1]) + a[3] * b[0],
     ];
     uu_normvec4(&mut r);
     r
 }
 
-/// `mjuu_mulmat` (3×3), contracted.
+/// `mjuu_mulmat` (3×3): `((a0*b0 + a1*b1) + a2*b2)`.
 fn uu_mulmat(a: &Matrix3<f64>, b: &Matrix3<f64>) -> Matrix3<f64> {
-    Matrix3::from_fn(|i, j| a[(i, 2)].mul_add(b[(2, j)], a[(i, 0)].mul_add(b[(0, j)], a[(i, 1)] * b[(1, j)])))
+    Matrix3::from_fn(|i, j| (a[(i, 0)] * b[(0, j)] + a[(i, 1)] * b[(1, j)]) + a[(i, 2)] * b[(2, j)])
 }
 
-/// `mjuu_mulvecmat`: `mat · vec`, contracted.
+/// `mjuu_mulvecmat`: `mat · vec`.
 fn uu_mulvecmat(v: &Vector3<f64>, m: &Matrix3<f64>) -> Vector3<f64> {
-    Vector3::from_fn(|k, _| m[(k, 2)].mul_add(v.z, m[(k, 0)].mul_add(v.x, m[(k, 1)] * v.y)))
+    Vector3::from_fn(|k, _| (m[(k, 0)] * v.x + m[(k, 1)] * v.y) + m[(k, 2)] * v.z)
 }
 
-/// `mjuu_mulvecmatT`: `matᵀ · vec`, contracted.
+/// `mjuu_mulvecmatT`: `matᵀ · vec`.
 fn uu_mulvecmat_t(v: &Vector3<f64>, m: &Matrix3<f64>) -> Vector3<f64> {
-    Vector3::from_fn(|k, _| m[(2, k)].mul_add(v.z, m[(0, k)].mul_add(v.x, m[(1, k)] * v.y)))
+    Vector3::from_fn(|k, _| (m[(0, k)] * v.x + m[(1, k)] * v.y) + m[(2, k)] * v.z)
 }
 
 /// **MuJoCo's `mjuu_eig3`, ported line for line** — a Jacobi iteration from the identity quaternion with its
@@ -3925,18 +3924,18 @@ pub(crate) fn eig3_mujoco(mat: &Matrix3<f64>) -> ([f64; 3], [f64; 4]) {
             break;
         }
         let tau = (d[(ck, ck)] - d[(rk, rk)]) / (2.0 * d[(rk, ck)]);
-        let t = if tau >= 0.0 { 1.0 / (tau + tau.mul_add(tau, 1.0).sqrt()) } else { -1.0 / (-tau + tau.mul_add(tau, 1.0).sqrt()) };
-        let c = 1.0 / t.mul_add(t, 1.0).sqrt();
+        let t = if tau >= 0.0 { 1.0 / (tau + (1.0 + tau * tau).sqrt()) } else { -1.0 / (-tau + (1.0 + tau * tau).sqrt()) };
+        let c = 1.0 / (1.0 + t * t).sqrt();
         if c > 1.0 - EPS {
             break;
         }
         let mut tmp = [0.0; 4];
-        let half = (-0.5f64).mul_add(c, 0.5).sqrt();
+        let half = (0.5 - 0.5 * c).sqrt();
         tmp[rotk + 1] = if tau >= 0.0 { -half } else { half };
         if rotk == 1 {
             tmp[rotk + 1] = -tmp[rotk + 1];
         }
-        tmp[0] = (-tmp[rotk + 1]).mul_add(tmp[rotk + 1], 1.0).sqrt();
+        tmp[0] = (1.0 - tmp[rotk + 1] * tmp[rotk + 1]).sqrt();
         normalize(&mut tmp);
         quat = mulquat(&quat, &tmp);
         normalize(&mut quat);
@@ -4933,21 +4932,21 @@ fn inertial_of(el: &El, c: &Compiler) -> Result<BodyInertial, String> {
 }
 
 /// `mjuu_globalinertia`: a principal inertia in a frame, as the six entries of the tensor in the parent
-/// (`xx yy zz xy xz yz`), contracted.
+/// (`xx yy zz xy xz yz`). Products are separate, as in the contract-off compiler.
 fn uu_globalinertia(local: &[f64; 3], quat: &[f64; 4]) -> [f64; 6] {
     let m = uu_quat2mat(quat);
     let mm = |k: usize| m[(k / 3, k % 3)];
     let t = [mm(0) * local[0], mm(3) * local[0], mm(6) * local[0], mm(1) * local[1], mm(4) * local[1], mm(7) * local[1], mm(2) * local[2], mm(5) * local[2], mm(8) * local[2]];
-    let row = |a: usize, b: usize, c: usize, x: usize, y: usize, z: usize| mm(c).mul_add(t[z], mm(a).mul_add(t[x], mm(b) * t[y]));
+    let row = |a: usize, b: usize, c: usize, x: usize, y: usize, z: usize| (mm(a) * t[x] + mm(b) * t[y]) + mm(c) * t[z];
     [row(0, 1, 2, 0, 3, 6), row(3, 4, 5, 1, 4, 7), row(6, 7, 8, 2, 5, 8), row(0, 1, 2, 1, 4, 7), row(0, 1, 2, 2, 5, 8), row(3, 4, 5, 2, 5, 8)]
 }
 
-/// `mjuu_offcenter`: the parallel-axis term of a point mass at `v`, contracted.
+/// `mjuu_offcenter`: `mass * (y*y + z*z)` and the three products, no FMA.
 fn uu_offcenter(mass: f64, v: &[f64; 3]) -> [f64; 6] {
     [
-        mass * v[1].mul_add(v[1], v[2] * v[2]),
-        mass * v[0].mul_add(v[0], v[2] * v[2]),
-        mass * v[0].mul_add(v[0], v[1] * v[1]),
+        mass * (v[1] * v[1] + v[2] * v[2]),
+        mass * (v[0] * v[0] + v[2] * v[2]),
+        mass * (v[0] * v[0] + v[1] * v[1]),
         -mass * v[0] * v[1],
         -mass * v[0] * v[2],
         -mass * v[1] * v[2],
@@ -5680,7 +5679,7 @@ impl Walk<'_> {
             "capsule" => {
                 need(2)?;
                 let (r, h) = (size[0], 2.0 * size[1]);
-                pi * (r * r).mul_add(h, 4.0 * r * r * r / 3.0)
+                pi * (r * r * h + 4.0 * r * r * r / 3.0)
             }
             "cylinder" => {
                 need(2)?;
@@ -5733,12 +5732,12 @@ impl Walk<'_> {
             }
             "capsule" => {
                 let (r, h) = (size[0], 2.0 * size[1]);
-                let sphere_mass = mass * 4.0 * r / 4.0f64.mul_add(r, 3.0 * h);
+                let sphere_mass = mass * 4.0 * r / (4.0 * r + 3.0 * h);
                 let cylinder_mass = mass - sphere_mass;
-                let side = cylinder_mass * (3.0 * r).mul_add(r, h * h) / 12.0;
+                let side = cylinder_mass * (3.0 * r * r + h * h) / 12.0;
                 let mut i = [side, side, cylinder_mass * r * r / 2.0];
                 let sphere_inertia = 2.0 * sphere_mass * r * r / 5.0;
-                let shift = sphere_mass * h * 3.0f64.mul_add(r, 2.0 * h) / 8.0;
+                let shift = sphere_mass * h * (3.0 * r + 2.0 * h) / 8.0;
                 i[0] += sphere_inertia + shift;
                 i[1] += sphere_inertia + shift;
                 i[2] += sphere_inertia;
@@ -5746,7 +5745,7 @@ impl Walk<'_> {
             }
             "cylinder" => {
                 let (r, h) = (size[0], 2.0 * size[1]);
-                let side = mass * (3.0 * r).mul_add(r, h * h) / 12.0;
+                let side = mass * (3.0 * r * r + h * h) / 12.0;
                 [side, side, mass * r * r / 2.0]
             }
             "ellipsoid" | "box" | "hfield" => {
@@ -5757,7 +5756,7 @@ impl Walk<'_> {
             // the mesh's equivalent inertia box, in the mesh's principal frame (already the geom's)
             _ => {
                 let b = boxsz;
-                [mass * b[1].mul_add(b[1], b[2] * b[2]) / 3.0, mass * b[0].mul_add(b[0], b[2] * b[2]) / 3.0, mass * b[0].mul_add(b[0], b[1] * b[1]) / 3.0]
+                [mass * (b[1] * b[1] + b[2] * b[2]) / 3.0, mass * (b[0] * b[0] + b[2] * b[2]) / 3.0, mass * (b[0] * b[0] + b[1] * b[1]) / 3.0]
             }
         };
         Ok(Some(GeomMass { mass, pose: mj, inertia }))
@@ -5906,7 +5905,7 @@ impl Walk<'_> {
                 for p in &sel {
                     mass += p.mass;
                     for (k, c) in com.iter_mut().enumerate() {
-                        *c = p.mass.mul_add(p.pose.pos[k], *c);
+                        *c += p.mass * p.pose.pos[k];
                     }
                 }
                 if mass < 1e-14 {
@@ -8890,19 +8889,19 @@ mod tests {
     fn the_mesh_compiler_stores_mujocos_frame_and_vertices_bit_for_bit() {
         const PRISM: &str = "v 0 0 0\nv 0.3 0 0\nv 0.05 0.2 0\nv 0 0 0.12\nv 0.3 0 0.12\nv 0.05 0.2 0.12\nv 0.1 0.05 0.06\nf 1 3 2\nf 4 5 6\nf 1 2 5\nf 1 5 4\nf 2 3 6\nf 2 6 5\nf 3 1 4\nf 3 4 6\n";
         #[allow(clippy::type_complexity)]
-        let cases: [(&str, [f64; 3], [f64; 4], [u32; 21]); 5] = [
-            (r#"scale="1 1 1""#, [0.11666667088866235, 0.06666666766007741, 0.0599999986588955], [0.1435361039704115, 0.6923852878686818, -0.1435361039704115, 0.6923852878686818], [0xbd75c28f, 0x3ddc43b8, 0xbda4f77d, 0xbd75c28f, 0xbc3fd1b1, 0x3e476670, 0xbd75c28f, 0xbdc44982, 0xbde9d562, 0x3d75c28f, 0x3ddc43b8, 0xbda4f77d, 0x3d75c28f, 0xbc3fd1b1, 0x3e476670, 0x3d75c28f, 0xbdc44982, 0xbde9d562, 0xa3111111, 0x3cb38ebc, 0xbc0e02de]),
-            (r#"scale="-1 1 1""#, [-0.11666667088866235, 0.06666666766007741, 0.0599999986588955], [-0.14353610397041147, 0.6923852878686818, 0.14353610397041147, 0.6923852878686818], [0xbd75c28f, 0x3ddc43b8, 0x3da4f77d, 0xbd75c28f, 0xbc3fd1b1, 0xbe476670, 0xbd75c28f, 0xbdc44982, 0x3de9d562, 0x3d75c28f, 0x3ddc43b8, 0x3da4f77d, 0x3d75c28f, 0xbc3fd1b1, 0xbe476670, 0x3d75c28f, 0xbdc44982, 0x3de9d562, 0xa2ddddde, 0x3cb38ebc, 0x3c0e02de]),
-            (r#"scale="0.5 -2 1.5""#, [0.05833333544433117, -0.1333333353201548, 0.08999999798834324], [0.7054104385769813, 0.7054104385769813, -0.04895010874994723, -0.04895010874994723], [0xbd9c099b, 0xbdb851eb, 0xbdfdf2e3, 0x3d9437d8, 0xbdb851eb, 0xbe143088, 0x3b7a3868, 0xbdb851eb, 0x3e8994fd, 0xbd9c099b, 0x3db851eb, 0xbdfdf2e3, 0x3d9437d8, 0x3db851eb, 0xbe143088, 0x3b7a3868, 0x3db851eb, 0x3e8994fd, 0xbc52a811, 0x00000000, 0xbd0282a0]),
-            (r#"refquat="1 -1 0.3 0" refpos="0.01 0.02 -0.03""#, [0.05824561799328291, -0.11473684199118726, 0.07140351099236919], [0.5233267598406292, 0.6080047538712383, 0.4345389905553699, 0.4094327629682389], [0x3d75c28a, 0xbddc43ba, 0xbda4f77d, 0x3d75c290, 0x3c3fd1a6, 0x3e476670, 0x3d75c293, 0x3dc44981, 0xbde9d562, 0xbd75c294, 0xbddc43b7, 0xbda4f77d, 0xbd75c28e, 0x3c3fd1bc, 0x3e476670, 0xbd75c28b, 0x3dc44983, 0xbde9d562, 0xb17e90f7, 0xbcb38ebc, 0xbc0e02de]),
-            (r#"scale="1 1 -1" refquat="0.9 0.1 0.2 0.3""#, [0.10649123216668764, 0.010175436735153203, -0.10105263218283654], [0.30406589296972475, 0.7519565609609825, -0.38723438184744163, 0.4383546471471347], [0x3d75c28f, 0x3ddc43b8, 0xbda4f77d, 0x3d75c28f, 0xbc3fd1b1, 0x3e476670, 0x3d75c28f, 0xbdc44982, 0xbde9d562, 0xbd75c28f, 0x3ddc43b8, 0xbda4f77d, 0xbd75c28f, 0xbc3fd1b1, 0x3e476670, 0xbd75c28f, 0xbdc44982, 0xbde9d562, 0x29d97476, 0x3cb38ebc, 0xbc0e02de]),
+        let cases: [(&str, [u64; 3], [u64; 4], [u32; 21]); 5] = [
+            (r#"scale="1 1 1""#, [4593071140271816704, 4589468260337276245, 4588807732127072257], [4594339453445378288, 4604411671794160834, 13817711490300154096, 4604411671794160834], [0xbd75c28f, 0x3ddc43b8, 0xbda4f77d, 0xbd75c28f, 0xbc3fd1b1, 0x3e476670, 0xbd75c28f, 0xbdc44982, 0xbde9d562, 0x3d75c28f, 0x3ddc43b8, 0xbda4f77d, 0x3d75c28f, 0xbc3fd1b1, 0x3e476670, 0x3d75c28f, 0xbdc44982, 0xbde9d562, 0xa3111111, 0x3cb38ebc, 0xbc0e02de]),
+            (r#"scale="-1 1 1""#, [13816443177126592512, 4589468260337276245, 4588807732127072257], [13817711490300154096, 4604411671794160834, 4594339453445378288, 4604411671794160834], [0xbd75c28f, 0x3ddc43b8, 0x3da4f77d, 0xbd75c28f, 0xbc3fd1b1, 0xbe476670, 0xbd75c28f, 0xbdc44982, 0x3de9d562, 0x3d75c28f, 0x3ddc43b8, 0x3da4f77d, 0x3d75c28f, 0xbc3fd1b1, 0xbe476670, 0x3d75c28f, 0xbdc44982, 0x3de9d562, 0xa2ddddde, 0x3cb38ebc, 0x3c0e02de]),
+            (r#"scale="0.5 -2 1.5""#, [4588567540644446209, 13817343896819422551, 4591149603981623297], [4604528991921913518, 4604528991921913518, 13810587312019402483, 13810587312019402483], [0xbd9c099b, 0xbdb851eb, 0xbdfdf2e3, 0x3d9437d8, 0xbdb851eb, 0xbe143088, 0x3b7a3868, 0xbdb851eb, 0x3e8994fd, 0xbd9c099b, 0x3db851eb, 0xbdfdf2e3, 0x3d9437d8, 0x3db851eb, 0xbe143088, 0x3b7a3868, 0x3db851eb, 0x3e8994fd, 0xbc52a811, 0xa3800000, 0xbd0282a0]),
+            (r#"refquat="1 -1 0.3 0" refpos="0.01 0.02 -0.03""#, [4588554899227490853, 13816304118299335590, 4589809585871135791], [4602888927946498949, 4603651639511224413, 4601499578461678381, 4601047304872854053], [0x3d75c28a, 0xbddc43ba, 0xbda4f77d, 0x3d75c290, 0x3c3fd1a6, 0x3e476670, 0x3d75c293, 0x3dc44981, 0xbde9d562, 0xbd75c294, 0xbddc43b7, 0xbda4f77d, 0xbd75c28e, 0x3c3fd1bc, 0x3e476670, 0xbd75c28b, 0x3dc44983, 0xbde9d562, 0xb17e90f7, 0xbcb38ebc, 0xbc0e02de]),
+            (r#"scale="1 1 -1" refquat="0.9 0.1 0.2 0.3""#, [4592337922639230840, 4577019361696415747, 13815318067064235622], [4599149184087004035, 4604948242120761775, 13824019451243854462, 4601568315220097765], [0x3d75c28f, 0x3ddc43b8, 0xbda4f77d, 0x3d75c28f, 0xbc3fd1b1, 0x3e476670, 0x3d75c28f, 0xbdc44982, 0xbde9d562, 0xbd75c28f, 0x3ddc43b8, 0xbda4f77d, 0xbd75c28f, 0xbc3fd1b1, 0x3e476670, 0xbd75c28f, 0xbdc44982, 0xbde9d562, 0x29d97600, 0x3cb38ebc, 0xbc0e02de]),
         ];
         for (attrs, pos, quat, vert) in cases {
             let xml = format!(r#"<mujoco><asset><mesh name="p" file="prism.obj" {attrs}/></asset><worldbody><body><freejoint/><geom type="mesh" mesh="p"/></body></worldbody></mujoco>"#);
             let t = tree_from_mjcf(&xml, &|p: &str| (p == "prism.obj").then(|| PRISM.as_bytes().to_vec())).unwrap();
             let d = &t.mesh_props["p"];
-            assert_eq!([d.com.x, d.com.y, d.com.z], pos, "{attrs}: mesh_pos");
-            assert_eq!(d.quat, quat, "{attrs}: mesh_quat");
+            assert_eq!([d.com.x.to_bits(), d.com.y.to_bits(), d.com.z.to_bits()], pos, "{attrs}: mesh_pos");
+            assert_eq!(d.quat.map(f64::to_bits), quat, "{attrs}: mesh_quat");
             let got: Vec<u32> = t.mesh_hulls["p"].verts.iter().flat_map(|v| [v.x as f32, v.y as f32, v.z as f32]).map(f32::to_bits).collect();
             assert_eq!(got, vert, "{attrs}: mesh_vert");
         }
@@ -8917,11 +8916,9 @@ mod tests {
     /// `body_iquat` and `body_ipos` are compared bit for bit (the capsule's quaternion carries a `-0.0`).
     ///
     /// Undone, each of these fails here: the single-geom copy, `x / 180.0 * π`, the sameframe snap, the
-    /// fused parallel-axis term and centre-of-mass sum, the Euler composition order, and a `fullinertia`'s
-    /// eigenframe replacing the stated orientation. The fused `mjuu_globalinertia` is pinned by the corpus
-    /// instead (unfused, 58 of Menagerie's 4,626 bodies change). ⚠ The fused `xyaxes` dot product and
-    /// orthogonalisation and `axisangle`'s `mjuu_normvec` are ported but pinned by nothing: neither this
-    /// model nor any Menagerie body moves a bit when they are unfused.
+    /// parallel-axis term and centre-of-mass sum, the Euler composition order, and a `fullinertia`'s
+    /// eigenframe replacing the stated orientation. The `pair` bits are `mjuu_*` as compiled by
+    /// `libmujoco.so.3.13.0` sha256 `64156abe…` (`-ffp-contract=off`), not the fused products.
     #[test]
     fn body_inertia_and_frames_match_mujocos_compiler_bit_for_bit() {
         const MODEL: &str = r#"<mujoco>
@@ -8954,8 +8951,32 @@ mod tests {
 </mujoco>"#;
         let want: [(&str, [f64; 11]); 4] = [
             ("tiny", [3.343386009704378e-06, 5.297288492289184e-12, 5.297288492289184e-12, 4.0483328182308983e-13, 0.5889040235618007, 0.7567440281846111, 0.28377901056922916, -0.0, -0.00030000000000000003, 0.0004999999999999999, 0.00075]),
-            ("pair", [1.3883952591438333, 0.0054157787576827035, 0.004444959626535254, 0.002163181855674452, 0.7535891875991336, 0.23131982243392565, -0.0790689882846118, 0.610198796438066, 0.004111408683855843, 0.005306650499568431, -0.004145572778944047]),
-            ("full", [1.7, 0.02175572069593266, 0.017060856629607813, 0.012183422674459531, 0.9787378415042712, 0.13658524460465873, 0.1186397093384105, 0.09665054543013765, 0.01, 0.02, 0.03]),
+            ("pair", [
+                f64::from_bits(4608931595544370043),
+                f64::from_bits(4572893989947608286),
+                f64::from_bits(4571774711694224659),
+                f64::from_bits(4567134380285877288),
+                f64::from_bits(4604962947514200200),
+                f64::from_bits(4597502195219470119),
+                f64::from_bits(13813733978576742982),
+                f64::from_bits(4603671401689797218),
+                f64::from_bits(4571390153639527679),
+                f64::from_bits(4572768173632068056),
+                f64::from_bits(13794801579014216111),
+            ]),
+            ("full", [
+                f64::from_bits(4610334938539176755),
+                f64::from_bits(4581927880968064188),
+                f64::from_bits(4580574678532246221),
+                f64::from_bits(4578176886781602968),
+                f64::from_bits(4606990906301860495),
+                f64::from_bits(4594089022344182217),
+                f64::from_bits(4593213312675449881),
+                f64::from_bits(4591628826429314097),
+                f64::from_bits(4576918229304087675),
+                f64::from_bits(4581421828931458171),
+                f64::from_bits(4584304132692975288),
+            ]),
             ("snap", [0.5, 0.001, 0.002, 0.0025, 0.9233805168766387, 0.10259783520851541, 0.20519567041703082, 0.3077935056255462, 0.02, 0.03, 0.04]),
         ];
         let t = tree_from_mjcf_str(MODEL).unwrap();
