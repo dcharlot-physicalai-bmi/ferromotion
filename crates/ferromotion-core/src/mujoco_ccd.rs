@@ -58,10 +58,18 @@ type V3 = Vector3<f64>;
 // contracts MuJoCo's C: in `a*b + c*d` the LEFT product is fused and the right one rounded; a chain
 // `x + y + z` of products fuses each later product into the running sum; `s += a*b` is one fma.
 
+fn contract_off() -> bool {
+    crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID
+}
+
 /// `dot3` / `mju_dot3`.
 #[inline]
 fn dot3(a: &V3, b: &V3) -> f64 {
-    a.z.mul_add(b.z, a.x.mul_add(b.x, a.y * b.y))
+    if contract_off() {
+        (a.x * b.x + a.y * b.y) + a.z * b.z
+    } else {
+        a.z.mul_add(b.z, a.x.mul_add(b.x, a.y * b.y))
+    }
 }
 
 /// `norm3` / `mju_norm3`.
@@ -73,19 +81,31 @@ fn norm3(v: &V3) -> f64 {
 /// `cross3` / `mji_cross` / `mju_cross`.
 #[inline]
 fn cross3(a: &V3, b: &V3) -> V3 {
-    V3::new(a.y.mul_add(b.z, -(a.z * b.y)), a.z.mul_add(b.x, -(a.x * b.z)), a.x.mul_add(b.y, -(a.y * b.x)))
+    if contract_off() {
+        V3::new(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x)
+    } else {
+        V3::new(a.y.mul_add(b.z, -(a.z * b.y)), a.z.mul_add(b.x, -(a.x * b.z)), a.x.mul_add(b.y, -(a.y * b.x)))
+    }
 }
 
 /// `addScl3` / `mji_addToScl3`: `v1 + s·v2`, fused.
 #[inline]
 fn add_scl3(v1: &V3, v2: &V3, s: f64) -> V3 {
-    V3::new(s.mul_add(v2.x, v1.x), s.mul_add(v2.y, v1.y), s.mul_add(v2.z, v1.z))
+    if contract_off() {
+        V3::new(v1.x + s * v2.x, v1.y + s * v2.y, v1.z + s * v2.z)
+    } else {
+        V3::new(s.mul_add(v2.x, v1.x), s.mul_add(v2.y, v1.y), s.mul_add(v2.z, v1.z))
+    }
 }
 
 /// One row of a 3×3 product, `a·x + b·y + c·z`, as clang contracts it.
 #[inline]
 fn row3(a: f64, b: f64, c: f64, v: &V3) -> f64 {
-    c.mul_add(v.z, a.mul_add(v.x, b * v.y))
+    if contract_off() {
+        (a * v.x + b * v.y) + c * v.z
+    } else {
+        c.mul_add(v.z, a.mul_add(v.x, b * v.y))
+    }
 }
 
 /// `mulMatTVec3` / `mju_mulMatTVec3`: `matᵀ · v`.
@@ -109,21 +129,29 @@ fn local_to_global(m: &nalgebra::Matrix3<f64>, v: &V3, pos: &V3) -> V3 {
 /// The minors `M_i4` of `S2D` / `triAffineCoord`: `a₀a₁ − b₀b₁ − c₀c₁ + d₀d₁ + e₀e₁ − f₀f₁`, left to right.
 #[inline]
 fn minor6(a: (f64, f64), b: (f64, f64), c: (f64, f64), d: (f64, f64), e: (f64, f64), f: (f64, f64)) -> f64 {
-    let t = a.0.mul_add(a.1, -(b.0 * b.1));
-    let t = (-c.0).mul_add(c.1, t);
-    let t = d.0.mul_add(d.1, t);
-    let t = e.0.mul_add(e.1, t);
-    (-f.0).mul_add(f.1, t)
+    if contract_off() {
+        ((((a.0 * a.1 - b.0 * b.1) - c.0 * c.1) + d.0 * d.1) + e.0 * e.1) - f.0 * f.1
+    } else {
+        let t = a.0.mul_add(a.1, -(b.0 * b.1));
+        let t = (-c.0).mul_add(c.1, t);
+        let t = d.0.mul_add(d.1, t);
+        let t = e.0.mul_add(e.1, t);
+        (-f.0).mul_add(f.1, t)
+    }
 }
 
 /// The cofactors `C3i`: `a₀a₁ + b₀b₁ + c₀c₁ − d₀d₁ − e₀e₁ − f₀f₁`, left to right.
 #[inline]
 fn cofactor6(a: (f64, f64), b: (f64, f64), c: (f64, f64), d: (f64, f64), e: (f64, f64), f: (f64, f64)) -> f64 {
-    let t = a.0.mul_add(a.1, b.0 * b.1);
-    let t = c.0.mul_add(c.1, t);
-    let t = (-d.0).mul_add(d.1, t);
-    let t = (-e.0).mul_add(e.1, t);
-    (-f.0).mul_add(f.1, t)
+    if contract_off() {
+        ((((a.0 * a.1 + b.0 * b.1) + c.0 * c.1) - d.0 * d.1) - e.0 * e.1) - f.0 * f.1
+    } else {
+        let t = a.0.mul_add(a.1, b.0 * b.1);
+        let t = c.0.mul_add(c.1, t);
+        let t = (-d.0).mul_add(d.1, t);
+        let t = (-e.0).mul_add(e.1, t);
+        (-f.0).mul_add(f.1, t)
+    }
 }
 
 /// One convex geom as the CCD sees it (`mjCCDObj`): type, pose, MuJoCo size, hull data for a mesh.
@@ -182,9 +210,13 @@ impl<'a> CcdObj<'a> {
         match self.kind {
             GeomType::Sphere => s[0],
             GeomType::Capsule => s[0] + s[1],
-            GeomType::Cylinder => s[0].mul_add(s[0], s[1] * s[1]).sqrt(),
+            GeomType::Cylinder => {
+                if contract_off() { (s[0] * s[0] + s[1] * s[1]).sqrt() } else { s[0].mul_add(s[0], s[1] * s[1]).sqrt() }
+            }
             GeomType::Ellipsoid => s[0].max(s[1]).max(s[2]),
-            GeomType::Box | GeomType::Mesh => s[2].mul_add(s[2], s[0].mul_add(s[0], s[1] * s[1])).sqrt(),
+            GeomType::Box | GeomType::Mesh => {
+                if contract_off() { ((s[0] * s[0] + s[1] * s[1]) + s[2] * s[2]).sqrt() } else { s[2].mul_add(s[2], s[0].mul_add(s[0], s[1] * s[1])).sqrt() }
+            }
             GeomType::Plane | GeomType::HField => 0.0,
         }
     }
@@ -201,13 +233,21 @@ impl<'a> CcdObj<'a> {
             Some(Reduced::Line) => {
                 let dot = row3(mat[(0, 2)], mat[(1, 2)], mat[(2, 2)], dir);
                 let scl = if dot >= 0.0 { self.size[1] } else { -self.size[1] };
-                return V3::new(mat[(0, 2)].mul_add(scl, pos.x), mat[(1, 2)].mul_add(scl, pos.y), mat[(2, 2)].mul_add(scl, pos.z));
+                return if contract_off() {
+                    V3::new(pos.x + mat[(0, 2)] * scl, pos.y + mat[(1, 2)] * scl, pos.z + mat[(2, 2)] * scl)
+                } else {
+                    V3::new(mat[(0, 2)].mul_add(scl, pos.x), mat[(1, 2)].mul_add(scl, pos.y), mat[(2, 2)].mul_add(scl, pos.z))
+                };
             }
             None => {}
         }
         if self.kind == GeomType::Sphere {
             let r = self.size[0];
-            return V3::new(r.mul_add(dir.x, pos.x), r.mul_add(dir.y, pos.y), r.mul_add(dir.z, pos.z));
+            return if contract_off() {
+                V3::new(pos.x + r * dir.x, pos.y + r * dir.y, pos.z + r * dir.z)
+            } else {
+                V3::new(r.mul_add(dir.x, pos.x), r.mul_add(dir.y, pos.y), r.mul_add(dir.z, pos.z))
+            };
         }
         if self.kind == GeomType::HField {
             // `mjc_prism_support`: the best of the three vertices on the side `dir.z` points to
@@ -234,7 +274,11 @@ impl<'a> CcdObj<'a> {
                 let mut ls = Vector3::new(local_dir.x * self.size[0], local_dir.y * self.size[1], local_dir.z * self.size[2]);
                 let n2 = dot3(&ls, &ls);
                 if n2 < MINVAL2 {
-                    return V3::new(mat[(0, 0)].mul_add(self.size[0], pos.x), mat[(1, 0)].mul_add(self.size[0], pos.y), mat[(2, 0)].mul_add(self.size[0], pos.z));
+                    return if contract_off() {
+                        V3::new(pos.x + mat[(0, 0)] * self.size[0], pos.y + mat[(1, 0)] * self.size[0], pos.z + mat[(2, 0)] * self.size[0])
+                    } else {
+                        V3::new(mat[(0, 0)].mul_add(self.size[0], pos.x), mat[(1, 0)].mul_add(self.size[0], pos.y), mat[(2, 0)].mul_add(self.size[0], pos.z))
+                    };
                 }
                 let inv = 1.0 / n2.sqrt();
                 ls.x *= inv * self.size[0];
@@ -243,7 +287,7 @@ impl<'a> CcdObj<'a> {
                 local_to_global(&mat, &ls, &pos)
             }
             GeomType::Cylinder => {
-                let n2 = local_dir.x.mul_add(local_dir.x, local_dir.y * local_dir.y);
+                let n2 = if contract_off() { local_dir.x * local_dir.x + local_dir.y * local_dir.y } else { local_dir.x.mul_add(local_dir.x, local_dir.y * local_dir.y) };
                 let scl = if n2 >= MINVAL2 { self.size[0] / n2.sqrt() } else { 0.0 };
                 let ls = Vector3::new(scl * local_dir.x, scl * local_dir.y, if local_dir.z >= 0.0 { self.size[1] } else { -self.size[1] });
                 self.vertindex = if local_dir.z >= 0.0 { 0 } else { 1 };
@@ -283,12 +327,12 @@ fn mink_support(obj1: &mut CcdObj, obj2: &mut CcdObj, dir: &V3, dir_neg: &V3) ->
     let mut v1 = obj1.support(dir);
     if obj1.margin > 0.0 {
         let m = 0.5 * obj1.margin;
-        v1 = V3::new(dir.x.mul_add(m, v1.x), dir.y.mul_add(m, v1.y), dir.z.mul_add(m, v1.z));
+        v1 = if contract_off() { V3::new(v1.x + dir.x * m, v1.y + dir.y * m, v1.z + dir.z * m) } else { V3::new(dir.x.mul_add(m, v1.x), dir.y.mul_add(m, v1.y), dir.z.mul_add(m, v1.z)) };
     }
     let mut v2 = obj2.support(dir_neg);
     if obj2.margin > 0.0 {
         let m = 0.5 * obj2.margin;
-        v2 = V3::new(dir_neg.x.mul_add(m, v2.x), dir_neg.y.mul_add(m, v2.y), dir_neg.z.mul_add(m, v2.z));
+        v2 = if contract_off() { V3::new(v2.x + dir_neg.x * m, v2.y + dir_neg.y * m, v2.z + dir_neg.z * m) } else { V3::new(dir_neg.x.mul_add(m, v2.x), dir_neg.y.mul_add(m, v2.y), dir_neg.z.mul_add(m, v2.z)) };
     }
     Vertex { vert: v1 - v2, vert1: v1, vert2: v2, index1: obj1.vertindex, index2: obj2.vertindex }
 }
@@ -307,10 +351,17 @@ fn normalize3(v: &V3) -> V3 {
 
 /// `det3`: `v1 · (v2 × v3)` as MuJoCo writes it out, contracted.
 fn det3(v1: &V3, v2: &V3, v3: &V3) -> f64 {
-    let a = v2.y.mul_add(v3.z, -(v2.z * v3.y));
-    let b = v2.z.mul_add(v3.x, -(v2.x * v3.z));
-    let c = v2.x.mul_add(v3.y, -(v2.y * v3.x));
-    v1.z.mul_add(c, v1.x.mul_add(a, v1.y * b))
+    if contract_off() {
+        let a = v2.y * v3.z - v2.z * v3.y;
+        let b = v2.z * v3.x - v2.x * v3.z;
+        let c = v2.x * v3.y - v2.y * v3.x;
+        (v1.x * a + v1.y * b) + v1.z * c
+    } else {
+        let a = v2.y.mul_add(v3.z, -(v2.z * v3.y));
+        let b = v2.z.mul_add(v3.x, -(v2.x * v3.z));
+        let c = v2.x.mul_add(v3.y, -(v2.y * v3.x));
+        v1.z.mul_add(c, v1.x.mul_add(a, v1.y * b))
+    }
 }
 
 fn same_sign2(a: f64, b: f64) -> i32 {
@@ -329,9 +380,23 @@ fn lincomb(coef: &[f64], vs: &[V3]) -> V3 {
         match coef.len() {
             0 => 0.0,
             1 => coef[0] * vs[0][k],
-            2 => coef[0].mul_add(vs[0][k], coef[1] * vs[1][k]),
-            3 => coef[2].mul_add(vs[2][k], coef[0].mul_add(vs[0][k], coef[1] * vs[1][k])),
-            _ => coef[3].mul_add(vs[3][k], coef[2].mul_add(vs[2][k], coef[0].mul_add(vs[0][k], coef[1] * vs[1][k]))),
+            2 => {
+                if contract_off() { coef[0] * vs[0][k] + coef[1] * vs[1][k] } else { coef[0].mul_add(vs[0][k], coef[1] * vs[1][k]) }
+            }
+            3 => {
+                if contract_off() {
+                    (coef[0] * vs[0][k] + coef[1] * vs[1][k]) + coef[2] * vs[2][k]
+                } else {
+                    coef[2].mul_add(vs[2][k], coef[0].mul_add(vs[0][k], coef[1] * vs[1][k]))
+                }
+            }
+            _ => {
+                if contract_off() {
+                    ((coef[0] * vs[0][k] + coef[1] * vs[1][k]) + coef[2] * vs[2][k]) + coef[3] * vs[3][k]
+                } else {
+                    coef[3].mul_add(vs[3][k], coef[2].mul_add(vs[2][k], coef[0].mul_add(vs[0][k], coef[1] * vs[1][k])))
+                }
+            }
         }
     };
     V3::new(comp(0), comp(1), comp(2))
@@ -874,11 +939,19 @@ fn tri_point_intersect(v1: &V3, v2: &V3, v3: &V3, p: &V3) -> bool {
     if l[0] < 0.0 || l[1] < 0.0 || l[2] < 0.0 {
         return false;
     }
-    let pr = V3::new(
-        v3.x.mul_add(l[2], v1.x.mul_add(l[0], v2.x * l[1])),
-        v3.y.mul_add(l[2], v1.y.mul_add(l[0], v2.y * l[1])),
-        v3.z.mul_add(l[2], v1.z.mul_add(l[0], v2.z * l[1])),
-    );
+    let pr = if contract_off() {
+        V3::new(
+            (v1.x * l[0] + v2.x * l[1]) + v3.x * l[2],
+            (v1.y * l[0] + v2.y * l[1]) + v3.y * l[2],
+            (v1.z * l[0] + v2.z * l[1]) + v3.z * l[2],
+        )
+    } else {
+        V3::new(
+            v3.x.mul_add(l[2], v1.x.mul_add(l[0], v2.x * l[1])),
+            v3.y.mul_add(l[2], v1.y.mul_add(l[0], v2.y * l[1])),
+            v3.z.mul_add(l[2], v1.z.mul_add(l[0], v2.z * l[1])),
+        )
+    };
     norm3(&(pr - p)) < MINVAL
 }
 
@@ -900,10 +973,11 @@ fn rotmat120(axis: &V3) -> nalgebra::Matrix3<f64> {
     let s = 0.86602540378;
     let c = -0.5;
     let k = 1.0 - c;
+    let term = |p: f64, q: f64| if contract_off() { p * k + q } else { p.mul_add(k, q) };
     nalgebra::Matrix3::new(
-        (u1 * u1).mul_add(k, c), (u1 * u2).mul_add(k, -(u3 * s)), (u1 * u3).mul_add(k, u2 * s),
-        (u2 * u1).mul_add(k, u3 * s), (u2 * u2).mul_add(k, c), (u2 * u3).mul_add(k, -(u1 * s)),
-        (u1 * u3).mul_add(k, -(u2 * s)), (u2 * u3).mul_add(k, u1 * s), (u3 * u3).mul_add(k, c),
+        term(u1 * u1, c), term(u1 * u2, -(u3 * s)), term(u1 * u3, u2 * s),
+        term(u2 * u1, u3 * s), term(u2 * u2, c), term(u2 * u3, -(u1 * s)),
+        term(u1 * u3, -(u2 * s)), term(u2 * u3, u1 * s), term(u3 * u3, c),
     )
 }
 
@@ -1915,7 +1989,11 @@ fn rotate_frame(pose: &GeomPose, origin: &V3, rot: &nalgebra::Matrix3<f64>) -> G
     let mut mat = nalgebra::Matrix3::zeros();
     for i in 0..3 {
         for j in 0..3 {
-            mat[(i, j)] = rot[(i, 2)].mul_add(pose.mat[(2, j)], rot[(i, 0)].mul_add(pose.mat[(0, j)], rot[(i, 1)] * pose.mat[(1, j)]));
+            mat[(i, j)] = if contract_off() {
+                (rot[(i, 0)] * pose.mat[(0, j)] + rot[(i, 1)] * pose.mat[(1, j)]) + rot[(i, 2)] * pose.mat[(2, j)]
+            } else {
+                rot[(i, 2)].mul_add(pose.mat[(2, j)], rot[(i, 0)].mul_add(pose.mat[(0, j)], rot[(i, 1)] * pose.mat[(1, j)]))
+            };
         }
     }
     let rel = origin - pose.pos;

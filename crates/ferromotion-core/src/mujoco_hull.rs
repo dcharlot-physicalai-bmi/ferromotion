@@ -441,11 +441,18 @@ fn make_polygons(verts: &[Vector3<f64>], faces: &[[usize; 3]], normal_verts: &[V
             }
         }
     }
-    // MuJoCo walks its `std::unordered_map` of polygons in libc++'s iteration order, and the collider reads
-    // polygons by index — so the order is part of the answer
-    let hashes: Vec<u64> = keys.iter().map(|&(t, p)| double_hash(t as f64) ^ double_hash(p as f64)).collect();
+    // The published path walks polygons in libc++ order, which is what the Apple build does.
+    // The contract-off oracle is linked with libstdc++, whose `unordered_map` walks a different order,
+    // and `alignedFaceEdge` keeps the first face in that order.
+    let order = if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+        let hashes: Vec<u64> = keys.iter().map(|&(t, p)| libstdcpp_hash_f64(t as f64) ^ libstdcpp_hash_f64(p as f64)).collect();
+        libstdcpp_unordered_order(&hashes)
+    } else {
+        let hashes: Vec<u64> = keys.iter().map(|&(t, p)| double_hash(t as f64) ^ double_hash(p as f64)).collect();
+        libcpp_unordered_order(&hashes)
+    };
     let mut out = Vec::new();
-    for i in libcpp_unordered_order(&hashes) {
+    for i in order {
         let p = &polys[i];
         for path in p.paths() {
             if path.len() < 3 {
@@ -566,6 +573,122 @@ fn libcpp_unordered_order(hashes: &[u64]) -> Vec<usize> {
     order
 }
 
+/// libstdc++ `std::hash<double>`: `_Hash_bytes` of the IEEE bits, seed `0xc70f6907`, and ±0 hashes to 0.
+fn libstdcpp_hash_f64(x: f64) -> u64 {
+    if x == 0.0 {
+        return 0;
+    }
+    libstdcpp_hash_bytes(&x.to_ne_bytes(), 0xc70f6907)
+}
+
+fn libstdcpp_hash_bytes(data: &[u8], seed: u64) -> u64 {
+    const MUL: u64 = (0xc6a4a793 << 32) + 0x5bd1e995;
+    let mut hash = seed ^ (data.len() as u64).wrapping_mul(MUL);
+    let mut i = 0;
+    while i + 8 <= data.len() {
+        let mut w = u64::from_le_bytes(data[i..i + 8].try_into().unwrap());
+        w = w.wrapping_mul(MUL);
+        w ^= w >> 47;
+        w = w.wrapping_mul(MUL);
+        hash ^= w;
+        hash = hash.wrapping_mul(MUL);
+        i += 8;
+    }
+    hash ^= hash >> 47;
+    hash = hash.wrapping_mul(MUL);
+    hash ^= hash >> 47;
+    hash
+}
+
+/// libstdc++ 14 `unordered_map` iteration for unique keys. The prime table is that library's
+/// `_M_next_bkt` image. Checked against g++ 14 on this host.
+fn libstdcpp_unordered_order(hashes: &[u64]) -> Vec<usize> {
+    const PRIMES: &[usize] = &[
+        2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97, 103, 109, 113, 127, 137, 139, 149, 157, 167, 179, 193, 199, 211, 227, 241, 257, 277, 293, 313, 337, 359, 383, 409, 439, 467, 503, 541, 577, 619, 661, 709, 761, 823, 887, 953, 1031, 1109, 1193, 1289, 1381, 1493, 1613, 1741, 1879, 2029, 2179, 2357, 2549, 2753, 2971, 3209, 3469, 3739, 4027, 4349, 4703, 5087, 5503, 5953, 6427, 6949, 7517, 8123, 8783, 9497, 10273, 11113, 12011, 12983, 14033, 15173, 16411, 17749, 19183, 20753, 22447, 24281, 26267, 28411, 30727, 33223, 35933, 38873, 42043, 45481, 49201, 53201, 57557, 62233, 67307, 72817, 78779, 85229, 92203, 99733, 107897, 116731, 126271, 136607, 147793, 159871, 172933, 187091, 202409,
+    ];
+    let next_bkt = |n: usize| PRIMES[PRIMES.partition_point(|&p| p < n)];
+    let n = hashes.len();
+    let nil = usize::MAX;
+    let bb = n;
+    let mut next = vec![nil; n + 1];
+    let mut buckets: Vec<usize> = Vec::new();
+    let mut bcount = 1usize;
+    let mut next_resize = 0usize;
+    let mut size = 0usize;
+    let bkt_of = |h: u64, bc: usize| (h % bc as u64) as usize;
+    let insert_begin = |bkt: usize, node: usize, bcount: usize, next: &mut [usize], buckets: &mut [usize], hashes: &[u64]| {
+        if buckets[bkt] != nil {
+            let before = buckets[bkt];
+            next[node] = next[before];
+            next[before] = node;
+        } else {
+            next[node] = next[bb];
+            next[bb] = node;
+            if next[node] != nil {
+                let old = next[node];
+                let ob = bkt_of(hashes[old], bcount);
+                buckets[ob] = node;
+            }
+            buckets[bkt] = bb;
+        }
+    };
+    for (i, &h) in hashes.iter().enumerate() {
+        let mut do_rehash = false;
+        let mut nb = 0usize;
+        if size + 1 > next_resize {
+            let base = if next_resize == 0 { (size + 1).max(11) } else { size + 1 };
+            let min_bkts = base as f64;
+            if min_bkts >= bcount as f64 {
+                let nxtb = (min_bkts.floor() as usize + 1).max(bcount * 2);
+                nb = next_bkt(nxtb);
+                do_rehash = true;
+            } else {
+                next_resize = bcount;
+            }
+        }
+        if do_rehash {
+            let mut newb = vec![nil; nb];
+            let mut p = next[bb];
+            next[bb] = nil;
+            let mut bbegin = 0usize;
+            while p != nil {
+                let nx = next[p];
+                let bk = bkt_of(hashes[p], nb);
+                if newb[bk] == nil {
+                    next[p] = next[bb];
+                    next[bb] = p;
+                    newb[bk] = bb;
+                    if next[p] != nil {
+                        newb[bbegin] = p;
+                    }
+                    bbegin = bk;
+                } else {
+                    let before = newb[bk];
+                    next[p] = next[before];
+                    next[before] = p;
+                }
+                p = nx;
+            }
+            buckets = newb;
+            bcount = nb;
+            next_resize = bcount;
+        }
+        if buckets.len() != bcount {
+            buckets = vec![nil; bcount];
+        }
+        next[i] = nil;
+        insert_begin(bkt_of(h, bcount), i, bcount, &mut next, &mut buckets, hashes);
+        size += 1;
+    }
+    let mut order = Vec::with_capacity(n);
+    let mut p = next[bb];
+    while p != nil {
+        order.push(p);
+        p = next[p];
+    }
+    order
+}
+
 /// `mjuu_makenormal`: the unit normal of `(b − a) × (c − a)`, or `(1, 0, 0)` below `mjEPS` = 1e-14. The
 /// winding is whatever the three vertices carry; nothing here reorients it.
 fn make_normal(a: &Vector3<f64>, b: &Vector3<f64>, c: &Vector3<f64>) -> Vector3<f64> {
@@ -595,6 +718,15 @@ mod tests {
             let hashes: Vec<u64> = keys.iter().map(|&(t, p)| double_hash(t) ^ double_hash(p)).collect();
             assert_eq!(libcpp_unordered_order(&hashes), order.to_vec());
         }
+    }
+
+    /// libstdc++ 14's iteration, pinned against g++ 14 `unordered_map` with MuJoCo's `PairHash`.
+    #[test]
+    fn polygon_order_is_libstdcpps_unordered_map_order() {
+        let keys: [(f64, f64); 20] = [(-7.0, 1.0), (-4.0, 6.0), (-1.0, 11.0), (2.0, 16.0), (5.0, 21.0), (8.0, 26.0), (11.0, 31.0), (14.0, 36.0), (17.0, 41.0), (20.0, 46.0), (23.0, 51.0), (26.0, 56.0), (29.0, 61.0), (32.0, 66.0), (35.0, 71.0), (38.0, 76.0), (41.0, 81.0), (44.0, 86.0), (47.0, 91.0), (50.0, 96.0)];
+        let hashes: Vec<u64> = keys.iter().map(|&(t, p)| libstdcpp_hash_f64(t) ^ libstdcpp_hash_f64(p)).collect();
+        let order = [18, 17, 15, 13, 0, 1, 19, 12, 7, 3, 4, 5, 2, 6, 16, 9, 14, 10, 8, 11];
+        assert_eq!(libstdcpp_unordered_order(&hashes), order.to_vec());
     }
 
     fn box_mesh(hx: f64, hy: f64, hz: f64) -> TriMesh3 {
