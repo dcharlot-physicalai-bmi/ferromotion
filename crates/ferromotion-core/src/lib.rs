@@ -416,6 +416,7 @@ pub use ferromorphic_clock::{
     nominal_seconds, map_chunk_index_to_tick, meter_reading, order_spikes, parse_step_receipt, propose_joint_step,
     refractory_ticks, same_dt, step_seconds, tick_stamp_ns, BoundaryClock, ChunkTickMap, EpisodeEnvelope, Meter,
     ProposedJointStep, Spike, StepReceipt, TickPhase, TimebaseError, UnresolvedPolicy, DT_POINT_ONE_BITS, EPOCH_TICK0,
+    MAX_EXACT_PERIOD_NS,
     EPISODE_ENVELOPE_INTEROPERABLE, EPISODE_ENVELOPE_VERSION, FERROMORPHIC_BIND_VERIFIED, FERROMORPHIC_CLOCK_PATH,
     FERROMORPHIC_CLOCK_REVISION, JOINT_LOOP_EXECUTED, TICK_ARITHMETIC, TICK_PHASES, UNRESOLVED,
 };

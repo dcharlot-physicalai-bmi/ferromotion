@@ -28,6 +28,10 @@ pub const FERROMORPHIC_BIND_VERIFIED: bool = false;
 /// `0.1_f64` as named by the peer receipt.
 pub const DT_POINT_ONE_BITS: u64 = 0x3fb9_9999_9999_999a;
 
+/// Largest scheduling period whose integer value is a distinct `f64`.
+/// `period_ns > MAX_EXACT_PERIOD_NS` is [`TimebaseError::InexactPeriod`].
+pub const MAX_EXACT_PERIOD_NS: u64 = 1 << 53;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TimebaseError {
     BadTick,
@@ -42,6 +46,9 @@ pub enum TimebaseError {
     OffGrid,
     /// `dt` bits are not `((period_ns as f64) * 1e-9).to_bits()`. Envelope v1 has no ratio exemption.
     DtPeriodMismatch,
+    /// `period_ns > 2^53`. Above that bound two integers can share one `f64`, so
+    /// `(period_ns as f64) * 1e-9` would collide. `2^53` itself is accepted.
+    InexactPeriod,
     /// `episode_start` would advance the episode identity past `u64::MAX`.
     EpochOverflow,
     /// The clock's episode identity is not the envelope's or the event's identity.
@@ -231,12 +238,23 @@ impl EpisodeEnvelope {
     }
 }
 
+/// `period_ns > 2^53` is refused. Every integer through [`MAX_EXACT_PERIOD_NS`] has its own `f64`.
+pub fn require_exact_period(period_ns: u64) -> Result<(), TimebaseError> {
+    if period_ns > MAX_EXACT_PERIOD_NS {
+        Err(TimebaseError::InexactPeriod)
+    } else {
+        Ok(())
+    }
+}
+
 /// `((period_ns as f64) * 1e-9).to_bits()` must equal `dt_bits`. No other mapping is accepted.
+/// A period above [`MAX_EXACT_PERIOD_NS`] is [`TimebaseError::InexactPeriod`] before that comparison.
 pub fn require_default_mapping(dt_bits: u64, period_ns: u64) -> Result<(), TimebaseError> {
     let dt = f64::from_bits(dt_bits);
     if !finite_positive(dt) || period_ns == 0 {
         return Err(TimebaseError::BadTick);
     }
+    require_exact_period(period_ns)?;
     let forward = (period_ns as f64) * 1e-9;
     if !forward.is_finite() || forward <= 0.0 {
         return Err(TimebaseError::BadTick);
@@ -329,6 +347,7 @@ pub fn nominal_seconds(period_ns: u64) -> Result<f64, TimebaseError> {
     if period_ns == 0 {
         return Err(TimebaseError::BadTick);
     }
+    require_exact_period(period_ns)?;
     let seconds = (period_ns as f64) * 1e-9;
     if !seconds.is_finite() || seconds <= 0.0 {
         return Err(TimebaseError::BadTick);
@@ -355,14 +374,17 @@ pub fn tick_stamp_ns(origin_ns: u64, period_ns: u64, tick: u64) -> Result<u64, T
 /// 2. Refuses an envelope version other than [`EPISODE_ENVELOPE_VERSION`], or a zero
 ///    period, with [`TimebaseError::OffGrid`].
 /// 3. Rechecks `dt_bits == ((period_ns as f64) * 1e-9).to_bits()` on the envelope.
-///    There is no ratio exemption.
-/// 4. Refuses a clock whose `period_ns` or `origin_ns` is unset with
+///    There is no ratio exemption. A period above [`MAX_EXACT_PERIOD_NS`] is
+///    [`TimebaseError::InexactPeriod`] before that comparison.
+/// 4. Refuses a clock `period_ns` or a `step_duration_ns` above [`MAX_EXACT_PERIOD_NS`]
+///    with [`TimebaseError::InexactPeriod`].
+/// 5. Refuses a clock whose `period_ns` or `origin_ns` is unset with
 ///    [`TimebaseError::MissingEpoch`]. Identity 0 alone is not a bindable episode.
-/// 5. Refuses `clock.epoch != envelope.epoch()` with [`TimebaseError::StaleEpoch`].
-/// 6. Refuses an origin or period that differs from the envelope with
+/// 6. Refuses `clock.epoch != envelope.epoch()` with [`TimebaseError::StaleEpoch`].
+/// 7. Refuses an origin or period that differs from the envelope with
 ///    [`TimebaseError::AmbiguousEpoch`].
-/// 7. Refuses `dt` bits that differ with [`TimebaseError::DtMismatch`].
-/// 8. Requires `step_duration_ns == period_ns` and `t0_ns` on
+/// 8. Refuses `dt` bits that differ with [`TimebaseError::DtMismatch`].
+/// 9. Requires `step_duration_ns == period_ns` and `t0_ns` on
 ///    `origin_ns + n * period_ns`.
 ///
 /// `n_action_steps == 0` still runs those checks and stamps no index. The call does
@@ -377,6 +399,9 @@ pub fn bind_v2_timestamps(t0_ns: u64, step_duration_ns: u64, n_action_steps: u32
         return Err(TimebaseError::OffGrid);
     }
     require_default_mapping(envelope.dt_bits(), envelope.period_ns())?;
+    if clock.period_ns.is_some_and(|period| period > MAX_EXACT_PERIOD_NS) || step_duration_ns > MAX_EXACT_PERIOD_NS {
+        return Err(TimebaseError::InexactPeriod);
+    }
     if clock.period_ns.is_none() || clock.origin_ns.is_none() {
         return Err(TimebaseError::MissingEpoch);
     }
@@ -821,5 +846,56 @@ spike 4 1
             EpisodeEnvelope::try_new(EPISODE_ENVELOPE_VERSION, 1, 0.1f64.to_bits(), 1_000, 0),
             Err(TimebaseError::DtPeriodMismatch)
         );
+    }
+
+    #[test]
+    fn a_period_above_2_pow_53_is_inexact_at_construction_start_and_bind() {
+        const POW: u64 = 1 << 53;
+        const NEXT: u64 = POW + 1;
+        assert_eq!(MAX_EXACT_PERIOD_NS, POW);
+        assert_eq!((POW as f64) as u64, POW);
+        assert_ne!((NEXT as f64) as u64, NEXT);
+        assert_eq!((POW as f64).to_bits(), (NEXT as f64).to_bits());
+        let dt = (POW as f64) * 1e-9;
+        assert!(dt.is_finite() && dt > 0.0);
+        let collided = (NEXT as f64) * 1e-9;
+        assert_eq!(dt.to_bits(), collided.to_bits());
+
+        assert_eq!(
+            EpisodeEnvelope::try_new(EPISODE_ENVELOPE_VERSION, 1, dt.to_bits(), NEXT, 0),
+            Err(TimebaseError::InexactPeriod)
+        );
+        assert_eq!(
+            EpisodeEnvelope::try_new(EPISODE_ENVELOPE_VERSION, 1, dt.to_bits(), u64::MAX, 0),
+            Err(TimebaseError::InexactPeriod)
+        );
+
+        let mut clock = BoundaryClock::new(6, dt).unwrap();
+        let untouched = clock.clone();
+        assert_eq!(clock.episode_start(0, NEXT), Err(TimebaseError::InexactPeriod));
+        assert_eq!(clock.episode_start(0, u64::MAX), Err(TimebaseError::InexactPeriod));
+        assert_eq!(clock, untouched);
+        clock.episode_start(0, POW).unwrap();
+        assert_eq!(clock.epoch, 1);
+        assert_eq!(clock.tick, 0);
+        assert_eq!(clock.period_ns, Some(POW));
+        assert_eq!(clock.dt_bits, dt.to_bits());
+        let envelope = EpisodeEnvelope::try_new(EPISODE_ENVELOPE_VERSION, clock.epoch, dt.to_bits(), POW, 0).unwrap();
+        assert_eq!(bind_v2_timestamps(0, POW, 1, Some(envelope), &clock), Ok(()));
+        assert_eq!(bind_v2_timestamps(0, POW, 0, Some(envelope), &clock), Ok(()));
+
+        clock.period_ns = Some(NEXT);
+        assert_eq!(bind_v2_timestamps(0, POW, 1, Some(envelope), &clock), Err(TimebaseError::InexactPeriod));
+        clock.period_ns = Some(u64::MAX);
+        assert_eq!(bind_v2_timestamps(0, POW, 1, Some(envelope), &clock), Err(TimebaseError::InexactPeriod));
+        clock.period_ns = Some(POW);
+        assert_eq!(bind_v2_timestamps(0, NEXT, 1, Some(envelope), &clock), Err(TimebaseError::InexactPeriod));
+        assert_eq!(bind_v2_timestamps(0, u64::MAX, 0, Some(envelope), &clock), Err(TimebaseError::InexactPeriod));
+        assert_eq!(nominal_seconds(POW).unwrap().to_bits(), dt.to_bits());
+        assert_eq!(nominal_seconds(NEXT), Err(TimebaseError::InexactPeriod));
+        assert_eq!(nominal_seconds(u64::MAX), Err(TimebaseError::InexactPeriod));
+        const { assert!(!EPISODE_ENVELOPE_INTEROPERABLE); }
+        const { assert!(!FERROMORPHIC_BIND_VERIFIED); }
+        const { assert!(!JOINT_LOOP_EXECUTED); }
     }
 }

@@ -50,6 +50,8 @@ spike 4 1
 
 `BoundaryClock::new` stores a finite positive `dt` and no period, so it has no pair to compare. Forming the pair is `episode_start` and `EpisodeEnvelope::try_new`. Both require the forward product. That is the construction check. It is not a ratio exemption. `bind_v2_timestamps` repeats it on every call.
 
+`period_ns > 2^53` is `InexactPeriod` at that construction, at `episode_start`, and on every bind. `2^53` is accepted. Every integer through `2^53` has its own `f64`, so two accepted periods cannot share `(period_ns as f64) * 1e-9`. `2^53 + 1` and `u64::MAX` are refused. The same refusal applies to a clock `period_ns` or a `step_duration_ns` above `2^53` on every bind, including a period written onto the public snapshot after `episode_start`.
+
 `reset_state` only clears neuron and ring flags. It leaves `tick`, the epoch, `period_ns`, `origin_ns`, `dt` bits, and the ledger unchanged.
 
 `dt` is the canonical dynamics step, stored as `f64` bits. Two engines match only when those bits are equal and both values are finite and positive. `period_ns` is the integer scheduling period and must be nonzero. Envelope v1 has no ratio exemption. A 1000 ns period is accepted when `dt` already has bits `0x3eb0c6f7a0b5ed8e`. `dt = 0.1` with 1000 ns, `dt = 0.1` with 20 ms, and the one-bit-off 20 ms pattern `0x3f947ae147ae147c` are `DtPeriodMismatch`. Fields of the envelope are private, so a struct literal cannot skip that check.
@@ -64,15 +66,16 @@ On every call, in this order:
 
 1. No envelope: `MissingEpoch`.
 2. Envelope version other than 1, or envelope `period_ns == 0`: `OffGrid`.
-3. `dt_bits == ((period_ns as f64) * 1e-9).to_bits()` on the envelope. No ratio exemption. Failure is `BadTick` or `DtPeriodMismatch`.
-4. Clock `period_ns` or `origin_ns` unset: `MissingEpoch`. Identity 0 with no period is not a bindable episode.
-5. `clock.epoch != envelope.epoch`: `StaleEpoch`.
-6. Clock origin or period differs from the envelope: `AmbiguousEpoch`.
-7. `clock.dt_bits != envelope.dt_bits`: `DtMismatch`.
-8. `step_duration_ns != period_ns`, or `t0_ns < origin_ns`, or `(t0_ns - origin_ns)` is not a multiple of `period_ns`: `OffGrid`.
-9. For each `k` in `0..n_action_steps`, checked `t0_ns + k * step_duration_ns` equals `origin_ns + ((t0_ns - origin_ns) / period_ns + k) * period_ns`. Overflow is `Overflow`. A mismatch is `OffGrid`.
-10. `n_action_steps == 0` still runs steps 1–8 and stamps no index. It is not a horizon success and it does not authorize a rollout.
-11. `Ok` does not set `EPISODE_ENVELOPE_INTEROPERABLE`, does not run inference, and does not run a joint step.
+3. `period_ns > 2^53` on the envelope is `InexactPeriod`. Otherwise `dt_bits == ((period_ns as f64) * 1e-9).to_bits()`. No ratio exemption. Failure is `BadTick`, `InexactPeriod`, or `DtPeriodMismatch`.
+4. Clock `period_ns`, when set, or `step_duration_ns` above `2^53`: `InexactPeriod`.
+5. Clock `period_ns` or `origin_ns` unset: `MissingEpoch`. Identity 0 with no period is not a bindable episode.
+6. `clock.epoch != envelope.epoch`: `StaleEpoch`.
+7. Clock origin or period differs from the envelope: `AmbiguousEpoch`.
+8. `clock.dt_bits != envelope.dt_bits`: `DtMismatch`.
+9. `step_duration_ns != period_ns`, or `t0_ns < origin_ns`, or `(t0_ns - origin_ns)` is not a multiple of `period_ns`: `OffGrid`.
+10. For each `k` in `0..n_action_steps`, checked `t0_ns + k * step_duration_ns` equals `origin_ns + ((t0_ns - origin_ns) / period_ns + k) * period_ns`. Overflow is `Overflow`. A mismatch is `OffGrid`.
+11. `n_action_steps == 0` still runs steps 1–9 and stamps no index. It is not a horizon success and it does not authorize a rollout.
+12. `Ok` does not set `EPISODE_ENVELOPE_INTEROPERABLE`, does not run inference, and does not run a joint step.
 
 A later write to `epoch`, `dt_bits`, `period_ns`, `origin_ns`, or `tick` is seen on the next call. Changing `tick` alone does not fail a bind that otherwise matches. A matching digest or a matching bind does not authorize inference or physical actuation.
 
@@ -88,7 +91,7 @@ Tick phases recorded, and not simulated, are deliveries, neuron updates, enqueue
 
 Codec v2 accepts `n_action_steps == 0` as a body when the rest of the payload is complete. `check_horizon` matches the pinned Ferric helper: only `n > chunk_size` is a horizon error. Asking for action index 0 of that body is `TimestampIndex`. `authorize_rollout` still returns `EntryProposed`. That is the authorization refusal. An empty-horizon execution gate is not in this revision. `accept_event_step` is a different helper: a zero `max_delay` accepts only an event equal to the clock. It does not encode a chunk and it does not run a joint step.
 
-Nanosecond stamps above `2^53` are the declared `u64` grid. The `f64` forward product `(period_ns as f64) * 1e-9` cannot represent every integer nanosecond past that magnitude. That rounding is the formula already required above. It is not a ratio exemption and it is not interoperability.
+A scheduling period above `2^53` is `InexactPeriod`. It is not installed and it is not bound. Integer stamps of an accepted period remain `origin_ns + tick * period_ns` in `u64`. The forward product of an accepted period is still `(period_ns as f64) * 1e-9`, with no ratio exemption. That product is not interoperability.
 
 ## Action-chunk index
 
@@ -96,7 +99,7 @@ Codec v2 timestamps are `t0_ns + k * step_duration_ns` with checked multiplicati
 
 ## What remains on the ferromorphic side
 
-* Implement the bind procedure in the section above, including per-call revalidation of the public snapshot and no cached validity bit. This repository does not claim that work is done.
+* Implement the bind procedure in the section above, including per-call revalidation of the public snapshot, no cached validity bit, and `InexactPeriod` for `period_ns > 2^53`. At their current pin, `2^53` and `2^53 + 1` both pass `Schedule::try_new`. This repository does not claim that work is done.
 * They do not parse Ferric codec v2. The outer envelope has to keep the inner v2 bytes unchanged. This adapter does not write the envelope into those bytes.
 * Their `from_text` returns `Unordered` when a spike tick is not the receipt step. This receiver returns `StampMismatch`. Valid receipt bytes already match. The error name is not required for that match.
 * No joint loop has been run in either repository. Inference stays unexecuted. `model_executed` stays false.
