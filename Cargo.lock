@@ -1256,6 +1256,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferromorphic"
+version = "0.23.2"
+source = "git+https://github.com/dcharlot-physicalai-bmi/ferromorphic.git?rev=15e219b8f7f1bc76029c359df676cbbcf9817ec0#15e219b8f7f1bc76029c359df676cbbcf9817ec0"
+
+[[package]]
 name = "ferromotion"
 version = "0.73.0"
 dependencies = [
@@ -1321,6 +1326,7 @@ dependencies = [
  "bytemuck",
  "clarabel",
  "faer",
+ "ferromorphic",
  "nalgebra",
  "pollster",
  "urdf-rs",

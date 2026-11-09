@@ -577,10 +577,13 @@ mod tests {
         assert_eq!(hex, canonical);
         assert_eq!(digest_sha256(&bytes), GOLDEN_DIGEST);
         let dt = 20_000_000_f64 * 1e-9;
-        let mut clock = crate::ferromorphic_clock::BoundaryClock::new(4, 1.0).unwrap();
-        clock.episode_start(1_000_000_000, dt, 20_000_000).unwrap();
+        let mut clock = crate::ferromorphic_clock::BoundaryClock::new(4, dt).unwrap();
+        clock.episode_start(1_000_000_000, 20_000_000).unwrap();
+        assert_eq!(clock.epoch, 1);
+        assert_eq!(clock.dt_bits, dt.to_bits());
         let envelope = crate::ferromorphic_clock::EpisodeEnvelope::try_new(
             crate::ferromorphic_clock::EPISODE_ENVELOPE_VERSION,
+            clock.epoch,
             dt.to_bits(),
             20_000_000,
             1_000_000_000,
@@ -698,6 +701,7 @@ mod tests {
         assert!(crate::ferromorphic_clock::UNRESOLVED.contains(&crate::ferromorphic_clock::UnresolvedPolicy::AccumulatorRemainsInsideDynamicsLab));
         assert_eq!(crate::ferromorphic_clock::TICK_ARITHMETIC, "checked_u64_fail_closed");
         const { assert!(!crate::ferromorphic_clock::EPISODE_ENVELOPE_INTEROPERABLE); }
+        const { assert!(!crate::ferromorphic_clock::FERROMORPHIC_BIND_VERIFIED); }
     }
 
     #[test]

@@ -38,6 +38,11 @@ optional = true
 version = "1"
 optional = true
 
+[dev-dependencies]
+# Pinned clock-contract peer. The integration test round-trips receipt v2 text.
+# It does not make the envelope, the joint loop, or inference interoperable.
+ferromorphic = { git = "https://github.com/dcharlot-physicalai-bmi/ferromorphic.git", rev = "15e219b8f7f1bc76029c359df676cbbcf9817ec0" }
+
 [[example]]
 name = "gpu_floating_gait_rl"
 required-features = ["gpu"]
