@@ -23,9 +23,12 @@ if [[ -e "$OUT" ]]; then
   exit 2
 fi
 mkdir "$OUT"
+rt="$(arm_oracle_compiler_rt_path)" || exit 2
+arm_oracle_compiler_rt_record "$OUT/compiler-rt.txt" || exit 2
 set +e
+# The builtins archive follows libmujoco so __muloti4 is resolved without relinking the .so.
 arm_oracle_timeout 600 clang -O2 -I"$ROOT/src/mujoco/include" "$ROOT/probes/mulquat.c" "$SO" \
-  -o "$OUT/mulquat" -Wl,-rpath,"$BUILD/cmake/lib" -lm
+  -o "$OUT/mulquat" -Wl,-rpath,"$BUILD/cmake/lib" -lm "$rt"
 clang_rc=$?
 set -e
 if [[ "$clang_rc" -ne 0 ]]; then

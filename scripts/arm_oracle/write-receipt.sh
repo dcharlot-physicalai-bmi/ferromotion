@@ -74,10 +74,10 @@ extras=()
 case "$ROLE" in
   build) ;;
   probe)
-    extras=("$OUT/mulquat" "$OUT/mulquat-arm64.txt" "$OUT/mulquat-x86.txt" "$OUT/result.txt")
+    extras=("$OUT/compiler-rt.txt" "$OUT/mulquat" "$OUT/mulquat-arm64.txt" "$OUT/mulquat-x86.txt" "$OUT/result.txt")
     ;;
   corpus)
-    extras=("$OUT/oracle_dump" "$OUT/classify.txt" "$OUT/failures.txt" "$OUT/native.txt" "$OUT/step.txt" "$OUT/libdir.txt")
+    extras=("$OUT/compiler-rt.txt" "$OUT/oracle_dump" "$OUT/classify.txt" "$OUT/failures.txt" "$OUT/native.txt" "$OUT/step.txt" "$OUT/libdir.txt")
     ;;
   rust)
     extras=("$OUT/native.txt" "$OUT/step.txt" "$OUT/result.txt" "$OUT/accept.txt")
@@ -119,6 +119,12 @@ tmp="$(mktemp)"
   echo "uname_m $(uname -m)"
   echo "uname_r $(uname -r)"
   echo "clang $(clang --version 2>/dev/null | head -n 1 || echo absent)"
+  if [[ -f "$OUT/compiler-rt.txt" ]]; then
+    cat "$OUT/compiler-rt.txt"
+  elif [[ "$ROLE" == "probe" || "$ROLE" == "corpus" ]]; then
+    echo "refusing: $OUT/compiler-rt.txt is missing" >&2
+    exit 2
+  fi
   echo "cmake $(cmake --version 2>/dev/null | head -n 1 || echo absent)"
   if command -v ninja >/dev/null 2>&1; then
     echo "ninja $(ninja --version)"
@@ -171,6 +177,20 @@ tmp="$(mktemp)"
     done
     if [[ -f "$LIBDIR/libmujoco.so" ]]; then
       sha256sum "$LIBDIR/libmujoco.so"
+    fi
+    if [[ -f "$OUT/compiler-rt.txt" ]]; then
+      rt_path="$(awk '/^compiler_rt_path /{print $2}' "$OUT/compiler-rt.txt")"
+      rt_sha="$(awk '/^compiler_rt_sha256 /{print $2}' "$OUT/compiler-rt.txt")"
+      if [[ -z "$rt_path" || ! -f "$rt_path" ]]; then
+        echo "refusing: compiler-rt path is not a file" >&2
+        exit 2
+      fi
+      rt_got="$(sha256sum "$rt_path" | awk '{print $1}')"
+      if [[ "$rt_got" != "$rt_sha" ]]; then
+        echo "refusing: compiler-rt sha256 does not match $rt_path" >&2
+        exit 2
+      fi
+      sha256sum "$rt_path"
     fi
   else
     echo "# goldens receipt does not bind libmujoco. The corpus receipt does."

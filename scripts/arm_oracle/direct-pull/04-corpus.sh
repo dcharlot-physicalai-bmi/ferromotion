@@ -35,6 +35,32 @@ if [[ ! -f "$RUN/provenance/stage3-ok" ]]; then
   echo "refusing: $RUN has no stage3-ok. The C library has not been built by stage 3." >&2
   exit 2
 fi
+# Install the compiler-rt linkers over the stage-1 copies from e0557dd.
+# Those copies link libmujoco without libclang_rt.builtins and fail on __muloti4.
+runner_src=""
+if [[ -f "$DIRECT_PULL_DIR/runners/compiler-rt.sh" ]]; then
+  runner_src="$DIRECT_PULL_DIR/runners"
+elif [[ -f "$DIRECT_PULL_DIR/../compiler-rt.sh" ]]; then
+  runner_src="$DIRECT_PULL_DIR/.."
+else
+  echo "refusing: compiler-rt.sh is not beside this script or in scripts/arm_oracle" >&2
+  exit 2
+fi
+for f in compiler-rt.sh limits.sh run-probes.sh run-212.sh; do
+  [[ -f "$runner_src/$f" ]] || {
+    echo "refusing: $runner_src/$f is missing" >&2
+    exit 2
+  }
+  cp -f "$runner_src/$f" "$RUN/scripts/$f"
+done
+if [[ -f "$DIRECT_PULL_DIR/direct-pull-receipt.sh" ]]; then
+  cp -f "$DIRECT_PULL_DIR/direct-pull-receipt.sh" "$RUN/scripts/write-receipt.sh"
+fi
+chmod +x "$RUN/scripts/"*.sh
+grep -q 'rtlib=compiler-rt' "$RUN/scripts/compiler-rt.sh" || {
+  echo "refusing: installed compiler-rt.sh does not query rtlib=compiler-rt" >&2
+  exit 2
+}
 BUILD="$(tr -d '[:space:]' <"$RUN/provenance/build-dir.txt")"
 export RUSTUP_AUTO_INSTALL=0
 set +e
@@ -46,7 +72,26 @@ if [[ "$probe_rc" -ne 0 && "$probe_rc" -ne 1 ]]; then
   exit "$probe_rc"
 fi
 "$RUN/scripts/run-212.sh" "$RUN/menagerie" "$BUILD" | tee "$RUN/provenance/stage4-212.log"
+wrote="$(grep -E '^wrote .*/native\.txt and .*/step\.txt$' "$RUN/provenance/stage4-212.log" | tail -n 1)"
+arm_native="${wrote#wrote }"
+arm_native="${arm_native%% and *}"
+arm_step="${wrote##* and }"
+if [[ ! -f "$arm_native" || ! -f "$arm_step" ]]; then
+  echo "refusing: stage 4 log did not name native.txt and step.txt" >&2
+  exit 3
+fi
+set +e
+bash "$DIRECT_PULL_DIR/compare-arm-x86.sh" "$arm_native" "$native" "$arm_step" "$step" \
+  "$RUN/provenance/stage4-x86-verdict.txt"
+x86_rc=$?
+set -e
 {
   echo "stage4-ok"
   echo "probe_wrapper_exit $probe_rc"
+  echo "x86_parity_exit $x86_rc"
+  echo "x86_verdict_file $RUN/provenance/stage4-x86-verdict.txt"
 } | tee "$RUN/provenance/stage4-ok"
+# Dumps exist either way. Exit 1 is a finished x86 mismatch, not a skipped probe.
+if [[ "$x86_rc" -ne 0 ]]; then
+  exit "$x86_rc"
+fi

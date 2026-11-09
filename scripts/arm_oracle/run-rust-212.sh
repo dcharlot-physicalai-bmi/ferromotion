@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Compare ferromotion to the dumps in a run-212 directory.
+# menagerie_native and menagerie_native_step do not link libmujoco, so they
+# do not need compiler-rt. A build script that linked the .so would.
 # The example programs return 0 when they finish printing mismatches.
 # This wrapper does not. See scripts/accept-rust-212.sh.
 # Exit 2: refused before cargo.

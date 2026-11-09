@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Stage 5. Darwin golden tests, then the 212-model Rust comparison.
 # Uses the already installed cargo +1.99.1. Does not install a toolchain.
-# Exit 0 from run-rust-212.sh is full parity only.
+# menagerie_native does not link libmujoco, so compiler-rt is not on this link line.
+# Exit 0 from run-rust-212.sh is Rust-versus-ARM-dump parity only. It is not ARM-versus-x86.
 set -euo pipefail
 export LC_ALL=C
 DIRECT_PULL_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -28,6 +29,7 @@ if [[ "$goldens_rc" -ne 0 && "$goldens_rc" -ne 1 ]]; then
 fi
 corpus_run="$(awk '/^wrote /{print $2}' "$RUN/provenance/stage4-212.log" | tail -n 1)"
 corpus_run="$(dirname "$corpus_run")"
+echo "rust_links_libmujoco no"
 if [[ ! -f "$corpus_run/native.txt" || ! -f "$corpus_run/libdir.txt" ]]; then
   echo "refusing: stage 4 log did not name a finished corpus directory" >&2
   exit 3

@@ -50,9 +50,11 @@ mkdir "$OUT"
 SO="$BUILD/cmake/lib/libmujoco.so.3.13.0"
 export MUJOCO_PLUGIN_DIR="$BUILD/cmake/lib"
 printf '%s\n' "$BUILD/cmake/lib" >"$OUT/libdir.txt"
+rt="$(arm_oracle_compiler_rt_path)" || exit 2
+arm_oracle_compiler_rt_record "$OUT/compiler-rt.txt" || exit 2
 set +e
 arm_oracle_timeout "$ARM_ORACLE_WALL_TIMEOUT" clang -O2 -I"$ROOT/probes" -I"$ROOT/src/mujoco/include" \
-  "$ROOT/probes/oracle_dump.c" "$SO" -o "$OUT/oracle_dump" -Wl,-rpath,"$BUILD/cmake/lib" -lm
+  "$ROOT/probes/oracle_dump.c" "$SO" -o "$OUT/oracle_dump" -Wl,-rpath,"$BUILD/cmake/lib" -lm "$rt"
 clang_rc=$?
 set -e
 if [[ "$clang_rc" -ne 0 ]]; then

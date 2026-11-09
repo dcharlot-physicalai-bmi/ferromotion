@@ -124,10 +124,10 @@ done
 case "$ROLE" in
   direct-pull-build|build) extras=() ;;
   probe)
-    extras=("$BUILD/mulquat" "$BUILD/mulquat-arm64.txt" "$BUILD/mulquat-x86.txt" "$BUILD/result.txt")
+    extras=("$BUILD/compiler-rt.txt" "$BUILD/mulquat" "$BUILD/mulquat-arm64.txt" "$BUILD/mulquat-x86.txt" "$BUILD/result.txt")
     ;;
   corpus)
-    extras=("$BUILD/oracle_dump" "$BUILD/classify.txt" "$BUILD/failures.txt" "$BUILD/native.txt" "$BUILD/step.txt" "$BUILD/libdir.txt")
+    extras=("$BUILD/compiler-rt.txt" "$BUILD/oracle_dump" "$BUILD/classify.txt" "$BUILD/failures.txt" "$BUILD/native.txt" "$BUILD/step.txt" "$BUILD/libdir.txt")
     ;;
   rust)
     extras=("$BUILD/native.txt" "$BUILD/step.txt" "$BUILD/result.txt" "$BUILD/accept.txt")
@@ -164,6 +164,17 @@ tmp="$(mktemp)"
   echo "uname_m $(uname -m)"
   echo "uname_r $(uname -r)"
   echo "clang $(clang --version 2>/dev/null | head -n 1 || echo absent)"
+  if [[ "$ROLE" == "probe" || "$ROLE" == "corpus" ]]; then
+    [[ -f "$BUILD/compiler-rt.txt" ]] || fail "$BUILD/compiler-rt.txt is missing"
+    rt_path="$(awk '/^compiler_rt_path /{print $2}' "$BUILD/compiler-rt.txt")"
+    rt_sha="$(awk '/^compiler_rt_sha256 /{print $2}' "$BUILD/compiler-rt.txt")"
+    [[ -n "$rt_path" && -f "$rt_path" ]] || fail "compiler-rt path is not a file"
+    rt_got="$(sha_of "$rt_path")"
+    [[ "$rt_got" == "$rt_sha" ]] || fail "compiler-rt sha256 does not match $rt_path"
+    cat "$BUILD/compiler-rt.txt"
+  elif [[ "$ROLE" == "rust" ]]; then
+    echo "rust_links_libmujoco no"
+  fi
   echo "cmake $(cmake --version 2>/dev/null | head -n 1 || echo absent)"
   if command -v ninja >/dev/null 2>&1; then
     echo "ninja $(ninja --version)"
@@ -188,6 +199,9 @@ tmp="$(mktemp)"
   done
   if [[ -f "$LIBDIR/libmujoco.so" ]]; then
     sha256sum "$LIBDIR/libmujoco.so"
+  fi
+  if [[ -n "${rt_path:-}" ]]; then
+    sha256sum "$rt_path"
   fi
   sha256sum "$BUILD/identity.txt"
   for rel in "${stage1_files[@]}" "${schedule_files[@]}"; do

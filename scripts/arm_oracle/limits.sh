@@ -1,5 +1,7 @@
 # Shared bounds for the thor2 oracle scripts. Source this file. Do not execute it.
 # shellcheck shell=bash
+# shellcheck source=compiler-rt.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/compiler-rt.sh"
 
 # ulimit -t sets RLIMIT_CPU. That is CPU seconds for one process.
 # It is not added up across cmake, ninja, cargo, or rustc.

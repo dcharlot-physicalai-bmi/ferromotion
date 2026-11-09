@@ -81,9 +81,12 @@ sha256sum -c MANIFEST.sha256
 `build-thor2.sh` runs `probes/hexfloat_selftest` before configure. A selftest
 failure exits 3 and does not start cmake.
 
-`run-probes.sh` exits 1 when the mulquat bits differ from the x86 contract-off vector.
-The bits are still written. They do not edit a golden. The receipt is written
-before that exit.
+`run-probes.sh` and `run-212.sh` link `libmujoco.so.3.13.0` with the archive from
+`clang -print-libgcc-file-name -rtlib=compiler-rt`, so clang's `__muloti4` is
+resolved without rebuilding the shared library. The receipt records that path
+and its sha256. `run-probes.sh` exits 1 when the mulquat bits differ from the
+x86 contract-off vector. The bits are still written. They do not edit a golden.
+The receipt is written before that exit.
 
 `run-212.sh` checks Menagerie HEAD and a clean `git status --porcelain`, then requires
 217 XML, 212 loads, and the five pinned failures. It writes a fresh `native.txt` and
