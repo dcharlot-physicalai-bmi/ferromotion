@@ -1066,6 +1066,7 @@ impl SmoothModel {
             };
         }
         let mut actuator_force = vec![0.0; nu];
+        let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
         for (i, a) in self.actuators.iter().enumerate() {
             use crate::mujoco_actuator::{ActBias, ActDyn, ActGain};
             // `Pid::Compute` (MuJoCo runs the plugins after the builtin laws; the outputs are disjoint),
@@ -1081,9 +1082,16 @@ impl SmoothModel {
                 continue;
             }
             let (p, len, vel) = (&a.act.gainprm, actuator_length[i], actuator_velocity[i]);
+            let affine = |prm: &[f64]| {
+                if separate {
+                    (prm[0] + prm[1] * len) + prm[2] * vel
+                } else {
+                    prm[2].mul_add(vel, prm[1].mul_add(len, prm[0]))
+                }
+            };
             let gain = match a.act.gain {
                 ActGain::Fixed => p[0],
-                ActGain::Affine => p[2].mul_add(vel, p[1].mul_add(len, p[0])),
+                ActGain::Affine => affine(p),
                 ActGain::Muscle => muscle_gain(len, vel, &a.act.lengthrange, a.act.acc0, p),
             };
             let input = match (a.act.dynamics, a.actadr) {
@@ -1097,7 +1105,7 @@ impl SmoothModel {
             let b = &a.act.biasprm;
             let bias = match a.act.bias {
                 ActBias::None => 0.0,
-                ActBias::Affine => b[2].mul_add(vel, b[1].mul_add(len, b[0])),
+                ActBias::Affine => affine(b),
                 ActBias::Muscle => muscle_bias(len, &a.act.lengthrange, a.act.acc0, b),
             };
             f += bias;
@@ -1112,7 +1120,7 @@ impl SmoothModel {
             let f = actuator_force[i];
             if f != 0.0 {
                 for (&c, &v) in cols.iter().zip(vals) {
-                    qfrc_actuator[c] = v.mul_add(f, qfrc_actuator[c]);
+                    qfrc_actuator[c] = if separate { qfrc_actuator[c] + v * f } else { v.mul_add(f, qfrc_actuator[c]) };
                 }
             }
         }
