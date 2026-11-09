@@ -25,14 +25,14 @@ curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/runners/run-gold
 curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/runners/run-rust-212.sh" "$BASE/scripts/arm_oracle/run-rust-212.sh"
 cd "$D"
 sha256sum -c - <<'EOF'
-60b1452e25e825f7f91d3539de2f633dfe732cc833ab3bb2306527a5b5d972dc  05-rust-rereun.sh
+972220a41726986e6909f0b6fcb0ec26510bee55076ce36f34549686a1a22e1e  05-rust-rereun.sh
 6f6cbf65af7d13edbac0814510438e47f0af783b4b3c5ac62b3f891521f7f484  direct-pull-receipt.sh
-560f1f0aa2384f81bba8357bafe9ac9770a2caa7a72c1b3ff6fd2d3afcbbbfa6  lib.sh
+baedafed35e277629cef12370b15762ac9a41b3361ee912b6f4ad8c916e1b011  lib.sh
 d59c887207dc2f46023d8fd634ec684d50f895beb7bc7ab6b13c057b12742028  pins.sh
 61972b22b66be5b5de9b9b887d80505b2d8b3a2b9e77f0845b424b0cba34ba08  runners/compiler-rt.sh
-5ef914c76008d0651e6d957c15604b64a0b92d50f49642c6915678b4dd67fca9  runners/limits.sh
-a30706b42abc25d0085f7a2ce90f839dfaf2ddc492bae3c461dfe81c48c3da4d  runners/run-goldens.sh
-bfe9dbbf219b96a88a3933e670199b2222c6c777ada69f42f11263e821265829  runners/run-rust-212.sh
+b0c08e9569be14e624caffe17563b4ade2b34c1e33cbe71b601401ef22e49f38  runners/limits.sh
+2f45544068625850ee7d9b15ebfb94d7fd524594d25d63d0ecef931e1f69f41e  runners/run-goldens.sh
+8f6a361a4db8487b95ab9b55fd3c8a9ff4e051b89908a3f392d0bccc49020b1d  runners/run-rust-212.sh
 EOF
 chmod +x 05-rust-rereun.sh direct-pull-receipt.sh runners/*.sh
 # CPU only. The runners force 2 jobs, --offline, and OMP_NUM_THREADS=1.
@@ -87,15 +87,15 @@ sha256sum -c - <<'EOF'
 1ea51dd026e7493e7debcaf4862b54cc982072630bf400c65d0b6809e5ceac58  05-rust.sh
 5ea7fee85bf55cbe239df15abbb59123a027d275566c5903986acbb32b3a59ff  compare-arm-x86.sh
 6f6cbf65af7d13edbac0814510438e47f0af783b4b3c5ac62b3f891521f7f484  direct-pull-receipt.sh
-560f1f0aa2384f81bba8357bafe9ac9770a2caa7a72c1b3ff6fd2d3afcbbbfa6  lib.sh
+baedafed35e277629cef12370b15762ac9a41b3361ee912b6f4ad8c916e1b011  lib.sh
 d59c887207dc2f46023d8fd634ec684d50f895beb7bc7ab6b13c057b12742028  pins.sh
 61972b22b66be5b5de9b9b887d80505b2d8b3a2b9e77f0845b424b0cba34ba08  runners/compiler-rt.sh
-5ef914c76008d0651e6d957c15604b64a0b92d50f49642c6915678b4dd67fca9  runners/limits.sh
+b0c08e9569be14e624caffe17563b4ade2b34c1e33cbe71b601401ef22e49f38  runners/limits.sh
 64c139aec23de404820a41a3a8ce5f842d6c48a1432e446ab373a721b8c8b1d8  runners/read-mulquat-fixture.sh
 e9c5cf157fff0009c2530bf3da9885aa061e668cd458b4b26fb45fffda6bf8c9  runners/run-probes.sh
 e2cdf6e2532b599ce77b4fb4337bf602e32fa0ec77765b3b853044043786cacc  runners/run-212.sh
-a30706b42abc25d0085f7a2ce90f839dfaf2ddc492bae3c461dfe81c48c3da4d  runners/run-goldens.sh
-bfe9dbbf219b96a88a3933e670199b2222c6c777ada69f42f11263e821265829  runners/run-rust-212.sh
+2f45544068625850ee7d9b15ebfb94d7fd524594d25d63d0ecef931e1f69f41e  runners/run-goldens.sh
+8f6a361a4db8487b95ab9b55fd3c8a9ff4e051b89908a3f392d0bccc49020b1d  runners/run-rust-212.sh
 EOF
 chmod +x 04-corpus.sh 05-rust.sh compare-arm-x86.sh direct-pull-receipt.sh runners/*.sh
 # CPU only. The scripts force 2 jobs, OMP_NUM_THREADS=1, and no GPU cmake flag.

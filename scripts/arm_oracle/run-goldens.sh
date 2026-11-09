@@ -4,8 +4,14 @@
 # Exit 1: the tests ran and failed. A failure is not relabeled as a Linux pass.
 # Exit 3: cargo did not finish the tests (compile, timeout, or missing summary).
 # Exit 2: refused before cargo (host, toolchain, vendor, target directory).
-set -euo pipefail
+set -Eeuo pipefail
 export LC_ALL=C
+refuse_unexpected() {
+  local rc=$?
+  echo "refusing: unexpected abort at line ${BASH_LINENO[0]} status $rc" >&2
+  exit 2
+}
+trap refuse_unexpected ERR
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=limits.sh
 source "$SCRIPT_DIR/limits.sh"
@@ -24,7 +30,7 @@ if [[ -e "$OUT" ]]; then
   echo "refusing: $OUT already exists" >&2
   exit 2
 fi
-mkdir "$OUT"
+mkdir -p "$OUT"
 arm_oracle_write_ferromotion_tested "$FM" "$OUT/ferromotion-tested.txt"
 arm_oracle_cargo_target "$OUT"
 cd "$FM"

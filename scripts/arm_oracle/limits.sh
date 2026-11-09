@@ -188,6 +188,7 @@ arm_oracle_cargo_target() {
   local fm out_abs parent
   fm="${ARM_ORACLE_FERROMOTION:-$ROOT/ferromotion}"
   fm="$(cd "$fm" && pwd)"
+  mkdir -p "$(dirname "$out")"
   parent="$(cd "$(dirname "$out")" && pwd)"
   out_abs="$parent/$(basename "$out")"
   case "$out_abs" in

@@ -113,6 +113,49 @@ host_ok=$?
 set -e
 [[ "$host_ok" -eq 0 ]]
 
+# The fetched tree has no .cargo. The reuse path still writes the offline config.
+reuse="$tmp/ferromotion-${FERROMOTION_RERUN_COMMIT}"
+mkdir -p "$reuse"
+cat >"$reuse/PROVENANCE.txt" <<EOF
+ferromotion_tested_commit $FERROMOTION_RERUN_COMMIT
+ferromotion_tested_tree $FERROMOTION_RERUN_TREE
+EOF
+[[ ! -d "$reuse/.cargo" ]]
+direct_pull_install_offline_cargo_config "$reuse"
+[[ -f "$reuse/.cargo/config.toml" ]]
+grep -F -x -q 'offline = true' "$reuse/.cargo/config.toml"
+grep -F -x -q "ferromotion_tested_commit $FERROMOTION_RERUN_COMMIT" "$reuse/PROVENANCE.txt"
+awk '
+  /echo "reusing / { reuse = NR }
+  /direct_pull_install_offline_cargo_config/ { install = NR }
+  END { exit !(reuse && install && reuse < install) }
+' "$pull/05-rust-rereun.sh"
+
+set +e
+bash "$pull/05-rust-rereun.sh" >"$tmp/noarg.out" 2>"$tmp/noarg.err"
+noarg_rc=$?
+bash "$pull/05-rust-rereun.sh" "$tmp/run" >"$tmp/nostage.out" 2>"$tmp/nostage.err"
+nostage_rc=$?
+set -e
+[[ "$noarg_rc" -eq 2 ]]
+[[ "$nostage_rc" -eq 2 ]]
+grep -q 'refusing:' "$tmp/noarg.err"
+grep -q 'stage4-ok' "$tmp/nostage.err"
+
+# A missing directory on a redirect is status 1. The script trap turns that into 2.
+set +e
+bash -c '
+  set -Eeuo pipefail
+  refuse_unexpected() { exit 2; }
+  trap refuse_unexpected ERR
+  cat >"$1/missing-dir/config.toml" <<EOF
+x
+EOF
+' bash "$tmp"
+redir_rc=$?
+set -e
+[[ "$redir_rc" -eq 2 ]]
+
 grep -q 'FERROMOTION_RERUN_COMMIT=515a7dec4b4ed2fa7257f328c7c3f9b169b8d7ba' "$pull/pins.sh"
 grep -q 'FERROMOTION_RERUN_CONTAINS=7998624df8a4ac2591187540a59ddc9b13d51640' "$pull/pins.sh"
 grep -q 'rust212-20261109T215708Z' "$pull/05-rust-rereun.sh"

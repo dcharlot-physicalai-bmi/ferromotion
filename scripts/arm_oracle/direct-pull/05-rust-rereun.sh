@@ -3,12 +3,24 @@
 # That tip contains 7998624df8a4ac2591187540a59ddc9b13d51640 and is one commit later.
 # The e0557dd checkout and rust212-20261109T215708Z stay where they are.
 # Cargo stays offline. A missing vendored crate is listed and cargo is not started.
-set -euo pipefail
+# Exit 1 is only the rust comparison's finished mismatch. Any other failure here is exit 2.
+# A runner's exit 3 still means cargo did not finish.
+set -Eeuo pipefail
 export LC_ALL=C
+refuse_unexpected() {
+  local rc=$?
+  echo "refusing: unexpected abort at line ${BASH_LINENO[0]} status $rc" >&2
+  exit 2
+}
+trap refuse_unexpected ERR
 DIRECT_PULL_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=lib.sh
 source "$DIRECT_PULL_DIR/lib.sh"
-RUN="${1:?run directory that passed 04-corpus.sh}"
+if [[ $# -lt 1 || -z "${1:-}" ]]; then
+  echo "refusing: run directory that passed 04-corpus.sh" >&2
+  exit 2
+fi
+RUN="$1"
 direct_pull_hold_energy_lock "$RUN" stage5-rereun
 if [[ ! -f "$RUN/provenance/stage4-ok" ]]; then
   echo "refusing: $RUN has no stage4-ok. The ARM dumps do not exist yet." >&2
@@ -125,16 +137,8 @@ fi
 if [[ ! -L "$dest/vendor" ]]; then
   ln -s "$RUN/ferromotion/vendor" "$dest/vendor"
 fi
-cat >"$dest/.cargo/config.toml" <<'EOF'
-[source.crates-io]
-replace-with = "vendored-sources"
-
-[source.vendored-sources]
-directory = "vendor"
-
-[net]
-offline = true
-EOF
+# Fresh and reused trees both land here. PROVENANCE is left as fetched.
+direct_pull_install_offline_cargo_config "$dest"
 
 export CARGO_NET_OFFLINE=true
 export RUSTUP_AUTO_INSTALL=0
@@ -160,6 +164,7 @@ else
   echo "refusing: run-rust-212.sh is not beside this script or in scripts/arm_oracle" >&2
   exit 2
 fi
+mkdir -p "$RUN/scripts" "$RUN/provenance"
 for f in compiler-rt.sh limits.sh run-goldens.sh run-rust-212.sh; do
   cp -f "$runner_src/$f" "$RUN/scripts/$f"
 done
@@ -179,7 +184,10 @@ set -e
 if [[ "$goldens_rc" -ne 0 && "$goldens_rc" -ne 1 ]]; then
   keep_superseded
   echo "execution: golden wrapper exit $goldens_rc" >&2
-  exit "$goldens_rc"
+  if [[ "$goldens_rc" -eq 3 ]]; then
+    exit 3
+  fi
+  exit 2
 fi
 corpus_run="$(grep -E '^wrote .+\/native\.txt and .+\/step\.txt$' "$RUN/provenance/stage4-212.log" | tail -n 1)"
 corpus_run="${corpus_run#wrote }"
@@ -187,7 +195,7 @@ corpus_run="${corpus_run%% and *}"
 corpus_run="$(dirname "$corpus_run")"
 if [[ ! -f "$corpus_run/native.txt" || ! -f "$corpus_run/libdir.txt" ]]; then
   echo "refusing: stage 4 log did not name a finished corpus directory" >&2
-  exit 3
+  exit 2
 fi
 set +e
 "$RUN/scripts/run-rust-212.sh" "$corpus_run" | tee "$RUN/provenance/stage5-rereun-rust.log"
@@ -202,4 +210,11 @@ set -e
   echo "supersedes $superseded"
 } | tee "$RUN/provenance/stage5-rereun-ok"
 keep_superseded
-exit "$rust_rc"
+# 0 is parity. 1 is a finished mismatch. 3 is cargo that did not finish.
+case "$rust_rc" in
+  0|1|3) exit "$rust_rc" ;;
+  *)
+    echo "refusing: rust wrapper exit $rust_rc" >&2
+    exit 2
+    ;;
+esac

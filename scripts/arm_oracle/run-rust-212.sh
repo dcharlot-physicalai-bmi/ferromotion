@@ -8,8 +8,14 @@
 # Exit 3: cargo/timeout failed, or the summary is not 212 models and 20 steps.
 # Exit 1: all 212 models and all 20 steps were compared, and something mismatched.
 # Exit 0: every tally matched. That is the only acceptance.
-set -euo pipefail
+set -Eeuo pipefail
 export LC_ALL=C
+refuse_unexpected() {
+  local rc=$?
+  echo "refusing: unexpected abort at line ${BASH_LINENO[0]} status $rc" >&2
+  exit 2
+}
+trap refuse_unexpected ERR
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=limits.sh
 source "$SCRIPT_DIR/limits.sh"
@@ -46,7 +52,7 @@ if [[ -e "$OUT" ]]; then
   echo "refusing: $OUT already exists" >&2
   exit 2
 fi
-mkdir "$OUT"
+mkdir -p "$OUT"
 arm_oracle_write_ferromotion_tested "$FM" "$OUT/ferromotion-tested.txt"
 arm_oracle_cargo_target "$OUT"
 cd "$FM"

@@ -223,6 +223,23 @@ direct_pull_list_missing_vendor() {
   [[ "$missing" -eq 0 ]]
 }
 
+# The fidelity tip has no .cargo directory. Create it, then point cargo at the
+# existing vendor and keep the network off.
+direct_pull_install_offline_cargo_config() {
+  local dest="$1"
+  mkdir -p "$dest/.cargo"
+  cat >"$dest/.cargo/config.toml" <<'EOF'
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"
+
+[net]
+offline = true
+EOF
+}
+
 direct_pull_run_root() {
   local base="${FERROMOTION_ORACLE_HOME:-$HOME/ferromotion-oracle}"
   local stamp run
