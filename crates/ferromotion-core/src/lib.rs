@@ -351,6 +351,7 @@ mod transport;
 pub mod transport_geometry;
 mod mjcf;
 mod mjcf_tree;
+mod obj_earclip_oracle;
 pub mod qhull;
 pub(crate) mod fp_contract;
 pub(crate) mod mujoco_kinematics;

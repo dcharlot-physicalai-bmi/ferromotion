@@ -90,7 +90,10 @@ pub fn install_policy(id: &str, artifact_sha256: &str, sites: &str) -> Result<Bu
             match site {
                 "mul_quat" => policy.mul_quat = Contraction::Unfused,
                 "rot_vec_quat" => policy.rot_vec_quat = Contraction::Unfused,
-                "mul_mat_vec3" => policy.mul_mat_vec3 = Contraction::Unfused,
+                // Reverted after the post-mesh remeasure: unfusing this site moved
+                // `qacc` from 24/636 back to 23/636. The formula stays in
+                // `mul_mat_vec3_with` for the vector file. It is not selectable.
+                "mul_mat_vec3" => return Err(PolicyError::UnknownSite),
                 _ => return Err(PolicyError::UnknownSite),
             }
         }
@@ -269,6 +272,11 @@ mod tests {
         assert_eq!(
             install_policy(ORACLE_X86_CONTRACT_OFF_ID, ORACLE_X86_CONTRACT_OFF_SHA256, "solver"),
             Err(PolicyError::UnknownSite)
+        );
+        assert_eq!(
+            install_policy(ORACLE_X86_CONTRACT_OFF_ID, ORACLE_X86_CONTRACT_OFF_SHA256, "mul_mat_vec3"),
+            Err(PolicyError::UnknownSite),
+            "mul_mat_vec3 stays unselected after the qacc regression"
         );
         assert_eq!(active_policy(), DEFAULT_POLICY);
         let policy = install_policy(ORACLE_X86_CONTRACT_OFF_ID, ORACLE_X86_CONTRACT_OFF_SHA256, "mul_quat").unwrap();

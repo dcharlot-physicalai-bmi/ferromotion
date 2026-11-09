@@ -43,13 +43,19 @@ The 20-step trajectory against this same `.so`, with the published step seed, is
 | `mul_quat`, `rot_vec_quat` | 22/636 | 367/636 | 24/636 | 151/636 | 599/636 | 296/636 | 115/212 |
 | those plus `mul_mat_vec3` | 22/636 | 369/636 | 23/636 | 167/636 | 601/636 | 563/636 | 115/212 |
 
-`qacc` lost one match when `mul_mat_vec3` was added (24/636 back to 23/636). `body_inertia` did not move. Its worst absolute error is 3.53e-7 on `hello_robot_stretch_3/stretch.xml`, which is not an ulp and is not explained by these three products. `body_mass` stays 192/212; its worst error is 4.44e-16.
+`qacc` lost one match when `mul_mat_vec3` was added (24/636 back to 23/636). That row is the pre-earclip receipt. After the ear clip the same loss was measured again (24/636 to 23/636) and the site was removed from `install_policy`. See `docs/acceptance/oracles/mass-inertia-branch.md`. `body_inertia` in this table did not move. Its worst absolute error here is 3.53e-7 on `hello_robot_stretch_3/stretch.xml`. `body_mass` stays 192/212; its worst error is 4.44e-16.
 
 With `quat2mat` and `sincos` added to the qpos0 op comparison, the published default still has 53 models with no covered-op mismatch (`mul_quat` 103, `rot_vec_quat` 56). Those 53 next fail a listed native stage: `body_inertia` 21, `xpos` 27, `body_mass` 2, `qfrc_bias` 1, `xquat` 1, `qacc` 1. After all three sites are unfused, covered-op mismatches fall to `normalize4` on 6 models and 206 with no covered-op mismatch. Those 206 are not trajectory passes. `efc_J` still has length mismatches (a different contact row count), which are not ulp errors.
 
 The published default is what the arm64 golden tests run. That suite still fails the same three tests and passes the other 13 `bit_for_bit` tests. The contract-off sites are not selected by architecture. A wrong sha refuses the process.
 
-Compiled `body_inertia` / `body_mass` is a separate branch, written up in `docs/acceptance/oracles/mass-inertia-branch.md`. Unfusing the mesh face integral does not move Stretch3's 3.533517429953547e-7 error. No compiler fix was committed. The `qacc` 24/636 to 23/636 regression from adding `mul_mat_vec3` stands; it was not re-run, because the mass and contact-row defects are still open. Piper's `efc_J` 56 versus 80 is `nefc` 7 versus 10 at `nv = 8`, and both libraries report one condim-3 contact and `nefc = 10` at `qpos0`.
+The table above is the pre-earclip receipt against this source oracle. It is not rewritten. `conformance/menagerie_ledger.json` (sha256 `ca4761e6a3c6cfa022d283e5888acf8e6e196a5fa3946f9fde3b691fa159a776`) remains the PyPI-wheel baseline and was not edited.
+
+## OBJ faces: source ear clip versus the PyPI drop
+
+MuJoCo 3.13.0 tag `123347c0` pins tinyobj `2945a967` and builds it without `TINYOBJLOADER_USE_MAPBOX_EARCUT`. That builtin ear clip triangulates polygons with more than 100 vertices. The PyPI wheel's older tinyobj drops them: a regular 101-gon does not compile (volume too small), and `link_SG3_gripper_body` has 23575 faces. The source build has 23776. Ferromotion follows the source build. The Rust ear clip is an adaptation of that tinyobjloader algorithm (MIT, copyright 2012-Present Syoyo Fujita and contributors), not a claim that the algorithm is original. The wheel baseline ledger is a different artifact and is not silently updated to this policy.
+
+`docs/acceptance/oracles/mass-inertia-branch.md` records the diagnostic build (its own sha256, not `64156abe…`) and the post-earclip 212 against the same source-oracle dumps.
 
 ## Arm64 source oracle
 
