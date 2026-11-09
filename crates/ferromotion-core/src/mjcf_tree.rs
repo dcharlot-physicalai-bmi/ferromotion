@@ -7842,6 +7842,48 @@ mod tests {
         assert_eq!(st.qpos.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), [0x3fc0eb6ec5b1ea25, 0xbfcdc7309e13383c]);
     }
 
+    /// The same PID trajectory against the pinned contract-off library, not the dylib golden above.
+    ///
+    /// Oracle id `mujoco-3.13.0-x86_64-contract-off`, artifact
+    /// `64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc`.
+    /// Captured by loading `libactuator.so` from that build and stepping the model in this test:
+    /// `cc -O2 -I<mujoco>/include pid-step.c -L<build>/lib -lmujoco` then
+    /// `mj_loadPluginLibrary(<build>/lib/libactuator.so)`, `mj_loadXML`, ten `mj_step`s
+    /// from `qpos=[0.14,-0.3]`, `qvel=[0.17,-0.4]`, `act=[0.1,0.05]`, ctrl `[0.9,0.4]` then `[-0.5,0.4]`.
+    /// This is not the `libactuator.dylib` capture. Whether that golden is retired is a separate decision.
+    #[test]
+    fn a_pid_plugin_steps_as_the_contract_off_oracle_does_bit_for_bit() {
+        let xml = r#"<mujoco><option timestep="0.002" integrator="implicitfast"/>
+            <extension><plugin plugin="mujoco.pid"><instance name="pid1"><config key="kp" value="7.3"/><config key="ki" value="15"/><config key="kd" value="1.7"/><config key="imax" value="3"/><config key="slewmax" value="4"/></instance></plugin></extension>
+            <worldbody><body name="a" pos="0 0 1"><joint name="h1" type="hinge" axis="0 1 0" damping="0.05"/><geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.03"/>
+              <body name="b" pos="0.3 0 0"><joint name="h2" type="hinge" axis="0 1 0"/><geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.03"/></body></body></worldbody>
+            <actuator><plugin joint="h1" plugin="mujoco.pid" instance="pid1" actdim="2" ctrlrange="-1 1" forcerange="-20 20"/>
+              <position joint="h2" kp="10" kv="0.5"/></actuator></mujoco>"#;
+        let t = tree_from_mjcf_str(xml).unwrap();
+        let mut st = crate::MjNativeState { qpos: vec![0.14, -0.3], qvel: vec![0.17, -0.4], act: vec![0.1, 0.05], qacc_warmstart: vec![0.0; 2], ..Default::default() };
+        for k in 0..10 {
+            st = t.mujoco_native_step(&st, if k < 5 { &[0.9, 0.4] } else { &[-0.5, 0.4] }).unwrap();
+        }
+        let qvel = st.qvel.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        let oracle_qvel = [0xbfdd5ed456588f98, 0x4014f1cceb4c77f3];
+        assert_eq!(
+            qvel, oracle_qvel,
+            "qvel xor {:x} {:x}",
+            qvel[0] ^ oracle_qvel[0],
+            qvel[1] ^ oracle_qvel[1]
+        );
+        assert_eq!(
+            st.act.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            [0x3fbd71ae90c1ab78, 0x3feb851eb851eb85],
+            "act"
+        );
+        assert_eq!(
+            st.qpos.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            [0x3fc0eb6ec5b1ea25, 0xbfcdc7309e13383c],
+            "qpos"
+        );
+    }
+
     /// ⭐⭐ **RK4, a fluid and a site thruster, to the bit**: a free box in contact with the floor under
     /// `density` and `viscosity` (the inertia-box fluid model), pushed by a filtered `general` actuator on a
     /// rotated site (its six-component gear turned into the world each stage), next to a damped servo arm —

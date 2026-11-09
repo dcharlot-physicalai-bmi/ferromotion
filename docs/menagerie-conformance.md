@@ -90,6 +90,17 @@ Tendon fixture (`spatial_tendons_step_as_mujoco_does_bit_for_bit`), initial stat
 
 Golden arrays, equality, the default solver, initialization, the corpus sha, and the 212-model goal were not changed. Warp, Newton, Ferric, and ferromorphic event contracts were not executed. No measured energy and no GPU result is claimed.
 
+## PID trajectory tests
+
+`a_pid_plugin_steps_as_mujoco_does_bit_for_bit` pins the ten-step PID plus servo trajectory
+that commit `2eb1e3c` captured against `libactuator.dylib`'s contracted force
+(`fma(kp, e, kd*edot)`). That is not `libmujoco` `64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc`.
+
+`a_pid_plugin_steps_as_the_contract_off_oracle_does_bit_for_bit` pins the same model and controls
+against that contract-off library (`mujoco-3.13.0-x86_64-contract-off`), captured by
+`mj_loadPluginLibrary` of its `libactuator.so` and ten `mj_step`s. The dylib golden is unchanged.
+Retiring it is not decided here.
+
 ## CI
 
 Workflow `menagerie-conformance`, job `bit-exact`. GitHub reports the check as
