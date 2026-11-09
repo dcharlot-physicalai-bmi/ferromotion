@@ -42,11 +42,12 @@ if [[ "$run_rc" -ne 0 ]]; then
   echo "execution: mulquat exited $run_rc" >&2
   exit 3
 fi
-want="$(awk 'NF==4 {print; exit}' "$ROOT/fixtures/x86-contract-off-mulquat.txt")"
+want="$("$SCRIPT_DIR/read-mulquat-fixture.sh" "$ROOT/fixtures/x86-contract-off-mulquat.txt")"
 printf '%s\n' "$got" >"$OUT/mulquat-arm64.txt"
 printf '%s\n' "$want" >"$OUT/mulquat-x86.txt"
 echo "arm64_mulquat $got"
 echo "x86_contract_off $want"
+arm_oracle_write_role_identity "$OUT/identity.txt" probe "$BUILD"
 if [[ "$got" != "$want" ]]; then
   echo "mulquat_bits differ_from_x86_contract_off" | tee "$OUT/result.txt"
   export ARM_ORACLE_ROOT="$ROOT"

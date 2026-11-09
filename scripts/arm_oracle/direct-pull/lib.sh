@@ -24,6 +24,20 @@ gitc() {
   git -c credential.helper= -c core.askPass="${ASK:?}" -c advice.detachedHead=false "$@"
 }
 
+# build-20261109T213225Z (libmujoco 9164828bf04729b20b640bd09105baea98137a8749e262fc06fddc44ca869eb9)
+# already passed stage 3. Stage 4 accepts that directory and any later build-$STAMP.
+# It refuses only build-20261107T131346Z, whose libmujoco imports __muloti4.
+direct_pull_accept_stage3_build() {
+  local build="$1"
+  case "$build" in
+    *build-20261107T131346Z*)
+      echo "refusing: $build is the library with undefined __muloti4. Leave it untouched. Run 03-cbuild.sh for a new build directory." >&2
+      return 2
+      ;;
+  esac
+  return 0
+}
+
 direct_pull_need() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "refusing: $1 is not on PATH. This script does not install it." >&2

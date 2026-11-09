@@ -68,6 +68,44 @@ arm_oracle_compiler_rt_path() {
   printf '%s\n' "$path"
 }
 
+# Write identity.txt for a probe, corpus, or rust output directory.
+# The stage-3 build directory keeps its own identity.txt. This file records
+# that path, the role, and the compiler-rt archive the libraries were linked with.
+arm_oracle_write_role_identity() {
+  local dest="$1" role="$2" stage3="$3"
+  local rt="$stage3/compiler-rt.txt" ident="$stage3/identity.txt"
+  local path sha got
+  [[ -f "$ident" ]] || {
+    echo "refusing: $ident is missing" >&2
+    return 2
+  }
+  [[ -f "$rt" ]] || {
+    echo "refusing: $rt is missing" >&2
+    return 2
+  }
+  path="$(awk '/^compiler_rt_path /{print $2}' "$rt")"
+  sha="$(awk '/^compiler_rt_sha256 /{print $2}' "$rt")"
+  [[ -n "$path" && -f "$path" ]] || {
+    echo "refusing: compiler-rt path in $rt is not a file" >&2
+    return 2
+  }
+  got="$(sha256sum "$path" | awk '{print $1}')"
+  [[ "$got" == "$sha" ]] || {
+    echo "refusing: compiler-rt sha256 does not match $path" >&2
+    return 2
+  }
+  {
+    echo "identity_role $role"
+    echo "date_utc $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "hostname $(hostname)"
+    echo "uname $(uname -s) $(uname -m)"
+    echo "clang $(clang --version 2>/dev/null | head -n 1 || echo absent)"
+    echo "stage3_build $stage3"
+    echo "stage3_identity_sha256 $(sha256sum "$ident" | awk '{print $1}')"
+    cat "$rt"
+  } >"$dest"
+}
+
 arm_oracle_compiler_rt_record() {
   local dest="$1"
   local path sha

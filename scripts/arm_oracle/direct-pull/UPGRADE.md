@@ -1,12 +1,10 @@
 # Direct-pull receipt for the linked Thor2 build
 
-## Fresh stage 3, then 4 and 5
+## Stages 4 and 5 only
 
-`build-20261107T131346Z` (libmujoco `cefada9b5165a787e2c2695c9db172993c922f5533e19ed8108a181c53f85845`) imports `__muloti4`. That symbol is GLOBAL HIDDEN in `libclang_rt.builtins-aarch64.a` (sha `a38c82691dba41f2fc96e98786f0d9c7c4f1c42f7569b94ce3e9e822cd52427d` on Thor2), so appending the archive to the probe link cannot satisfy it. Leave that directory untouched.
+Stage 3 already passed. Do not run it again. `provenance/build-dir.txt` and `stage3-ok` point at `build-20261109T213225Z`. libmujoco is `9164828bf04729b20b640bd09105baea98137a8749e262fc06fddc44ca869eb9`. Leave `build-20261107T131346Z` untouched.
 
-On aarch64, clang lowers `__builtin_mul_overflow` of `__int128` to `__muloti4`. On x86_64 the same builtin is inlined. The shared-library link now passes `-rtlib=compiler-rt -unwindlib=libgcc`. Compile flags stay `-O3 -DNDEBUG -fno-fast-math -ffp-contract=off -fno-math-errno -march=armv8-a`. Stage 3 fails if `nm -D --undefined-only` on a built `.so` still lists `__muloti4` or another `__*ti*` compiler-rt helper. The new build directory is a new `build-$STAMP`. `build-dir.txt` and `stage3-ok` point at it. Probes do not append the archive.
-
-The Rust examples do not link `libmujoco`. Jobs stay at 2. Nothing here enables a GPU.
+The mulquat fixture's `#` lines are comments. The expected value is the one data line. The probe, corpus, and Rust output directories get their own `identity.txt` (role, stage-3 path, compiler-rt path and sha256). The stage-3 `identity.txt` check stays on the build receipt. The Rust examples do not link `libmujoco`. Jobs stay at 2. Nothing here enables a GPU.
 
 Replace `REPLACE_WITH_FULL_SHA` with the full SHA of the commit that contains these scripts. The sha256 lines below are the fetched file bytes. They do not cover this markdown file. Fetch with tokens unset. `sha256sum -c` is the check.
 
@@ -16,53 +14,65 @@ export LC_ALL=C
 unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN || true
 C=REPLACE_WITH_FULL_SHA
 BASE="https://raw.githubusercontent.com/dcharlot-physicalai-bmi/ferromotion/${C}"
-D="$HOME/ferromotion-oracle/stage3-${C}"
+D="$HOME/ferromotion-oracle/stage45-${C}"
 RUN=/home/cbio/ferromotion-oracle/e0557dd109151a02702dfb262ea0a8c2b9dd07db-20261107T131232Z
 mkdir -p "$D/runners"
-curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/03-cbuild.sh" "$BASE/scripts/arm_oracle/direct-pull/03-cbuild.sh"
 curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/04-corpus.sh" "$BASE/scripts/arm_oracle/direct-pull/04-corpus.sh"
 curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/05-rust.sh" "$BASE/scripts/arm_oracle/direct-pull/05-rust.sh"
 curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/compare-arm-x86.sh" "$BASE/scripts/arm_oracle/direct-pull/compare-arm-x86.sh"
 curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/direct-pull-receipt.sh" "$BASE/scripts/arm_oracle/direct-pull/direct-pull-receipt.sh"
 curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/lib.sh" "$BASE/scripts/arm_oracle/direct-pull/lib.sh"
 curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/pins.sh" "$BASE/scripts/arm_oracle/direct-pull/pins.sh"
-curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/runners/build-thor2.sh" "$BASE/scripts/arm_oracle/build-thor2.sh"
 curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/runners/compiler-rt.sh" "$BASE/scripts/arm_oracle/compiler-rt.sh"
 curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/runners/limits.sh" "$BASE/scripts/arm_oracle/limits.sh"
+curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/runners/read-mulquat-fixture.sh" "$BASE/scripts/arm_oracle/read-mulquat-fixture.sh"
 curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/runners/run-probes.sh" "$BASE/scripts/arm_oracle/run-probes.sh"
 curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/runners/run-212.sh" "$BASE/scripts/arm_oracle/run-212.sh"
+curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/runners/run-goldens.sh" "$BASE/scripts/arm_oracle/run-goldens.sh"
+curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/runners/run-rust-212.sh" "$BASE/scripts/arm_oracle/run-rust-212.sh"
 cd "$D"
 sha256sum -c - <<'EOF'
-f39728791ff3db2dd2b5a454364f67d65e061b5ae9c56661d2260fd142b0944f  03-cbuild.sh
-d8ceef20ca1b201efc9321c843aed9b633457a2d7a732e65215709c9e871d136  04-corpus.sh
-a3d4d5930ed83b044ca10942a882d5c04748536c20f299c24a52c0cc3875a289  05-rust.sh
-12363c3ff02ebb3dd7d85195682d390a4ee79acf4c6311bc3e6eeea6c99a4353  compare-arm-x86.sh
-4f5e974bf2fd1bbdb462ffc0e5f6c1c1368d61ddf498283f27143a6251124cd3  direct-pull-receipt.sh
-bcd48f1e7f777992d60bdde1a2a6793b9ee00f93462bbcc28f655feb9ef1cfb1  lib.sh
-397d3abc74fab2c6ec28776231829caac9052292d60588dabe5272350957d277  pins.sh
-6232f8d1221b92d6bfbedb66712c8f0d24be7ae87a56241f98314497454771c5  runners/build-thor2.sh
-9dc55efdf673f9a8496f6c3c72a311905e30dcb45a9107b59f9930236d80b835  runners/compiler-rt.sh
+50541eeae5424cbbcf42d48dca5cc4112f74fb08d3f8a32a519183b0f8024774  04-corpus.sh
+8b2408ee41f950dd329af8ad04a361fb449d186a1b10127f2f40599bfd2bbdd4  05-rust.sh
+5ea7fee85bf55cbe239df15abbb59123a027d275566c5903986acbb32b3a59ff  compare-arm-x86.sh
+a6aa4ab9b14b36bfa2f7aac0e49b3cc1ce799bb5d1ff1507dca5b56160e2cd45  direct-pull-receipt.sh
+2276697c6c8e2474b6bc42e7052c6f3ae31677d8fde8ef65f41cefc0de06ca32  lib.sh
+1bbe650fac082b8c01ba00ab2c2e1965fea7a5fb3ff75285d1086cb75b7e0f66  pins.sh
+61972b22b66be5b5de9b9b887d80505b2d8b3a2b9e77f0845b424b0cba34ba08  runners/compiler-rt.sh
 394990f2ca39eba1be353136fdb810bb0b269e892cc32f3b1ddf53b19735c049  runners/limits.sh
-c09fd221be6bc55c07566ee6d9c84d9d521381e6a44b04e5532680296fcaee83  runners/run-probes.sh
-eb2c88e5a0ce32e6a44d1a71586b76c868bc73fed31d5073cbdf2fe8dc9821bc  runners/run-212.sh
+64c139aec23de404820a41a3a8ce5f842d6c48a1432e446ab373a721b8c8b1d8  runners/read-mulquat-fixture.sh
+e9c5cf157fff0009c2530bf3da9885aa061e668cd458b4b26fb45fffda6bf8c9  runners/run-probes.sh
+e2cdf6e2532b599ce77b4fb4337bf602e32fa0ec77765b3b853044043786cacc  runners/run-212.sh
+414530c0c9f76377a610a754e20fd208fc1892e304aa56070d53dd5f8637e21a  runners/run-goldens.sh
+da3307c9025b5783e422207714d6b0ffed1587a80a78efd1ffa8f5ae6ba711ee  runners/run-rust-212.sh
 EOF
-chmod +x 03-cbuild.sh 04-corpus.sh 05-rust.sh compare-arm-x86.sh direct-pull-receipt.sh runners/*.sh
+chmod +x 04-corpus.sh 05-rust.sh compare-arm-x86.sh direct-pull-receipt.sh runners/*.sh
 # CPU only. The scripts force 2 jobs, OMP_NUM_THREADS=1, and no GPU cmake flag.
+# Exit 1 from stage 4 is a finished x86 comparison. Stage 5 still runs.
+# Exit 2 or 3 stops the driver.
 setsid nohup bash -c '
   set -euo pipefail
   export LC_ALL=C
   export OMP_NUM_THREADS=1
   unset CUDA_VISIBLE_DEVICES MUJOCO_GL || true
-  bash "$1/03-cbuild.sh" "$2" > "$1/stage3.log" 2>&1
-  bash "$1/04-corpus.sh" "$2" > "$1/stage4.log" 2>&1
+  bash "$1/04-corpus.sh" "$2" > "$1/stage4.log" 2>&1 || {
+    rc=$?
+    if [[ "$rc" -ne 1 ]]; then exit "$rc"; fi
+  }
   bash "$1/05-rust.sh" "$2" > "$1/stage5.log" 2>&1
 ' bash "$D" "$RUN" > "$D/driver.log" 2>&1 < /dev/null &
 echo $! > "$D/driver.pid"
 echo "driver pid $(cat "$D/driver.pid")"
-echo "tail -f $D/stage3.log"
+echo "tail -f $D/stage4.log"
 ```
 
-Stage 3 writes a new `build-$STAMP` and `provenance/stage3-ok`. Its receipt has `compiler_rt_path` and `compiler_rt_sha256`. Stage 4 exit 0 is ARM-versus-x86 full parity. Exit 1 is a finished divergence: `provenance/stage4-x86-verdict.txt` names the first field, and `stage4-ok` is already written. Exit 3 is still a compile or dump failure.
+Stage 4 exit 0 is ARM-versus-x86 full parity. Exit 1 is a finished divergence: `provenance/stage4-x86-verdict.txt` names the first field, and `stage4-ok` is already written. Exit 3 is still a compile or dump failure. Stage 5 exit 0 is Rust-versus-ARM-dump parity. It is not ARM-versus-x86.
+
+## Stage 3 that already passed
+
+`build-20261107T131346Z` (libmujoco `cefada9b5165a787e2c2695c9db172993c922f5533e19ed8108a181c53f85845`) imports `__muloti4`. That symbol is GLOBAL HIDDEN in `libclang_rt.builtins-aarch64.a` (sha `a38c82691dba41f2fc96e98786f0d9c7c4f1c42f7569b94ce3e9e822cd52427d` on Thor2), so appending the archive to the probe link cannot satisfy it. Leave that directory untouched.
+
+On aarch64, clang lowers `__builtin_mul_overflow` of `__int128` to `__muloti4`. On x86_64 the same builtin is inlined. The shared-library link passes `-rtlib=compiler-rt -unwindlib=libgcc`. Compile flags stay `-O3 -DNDEBUG -fno-fast-math -ffp-contract=off -fno-math-errno -march=armv8-a`. That recipe produced `build-20261109T213225Z`. Do not start `03-cbuild.sh` again.
 
 ## Earlier receipt recovery
 

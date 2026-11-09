@@ -3,6 +3,10 @@
 # Binds the files a direct-pull run actually has. archive_manifest_rebuilt is no.
 # Archive paths such as scripts/README.md, rust/OPTIONAL-RUSTUP.md, and
 # provenance/REVISIONS are not required and are not created by this script.
+# Every non-preflight role requires identity.txt. build and direct-pull-build
+# use the stage-3 file. probe, corpus, and rust use the identity the runner
+# writes in the output directory: role, stage-3 path, and compiler-rt path
+# and sha256. goldens writes identity_role goldens and does not bind libmujoco.
 set -euo pipefail
 export LC_ALL=C
 if [[ "${1:-}" == "--preflight" ]]; then
@@ -63,6 +67,8 @@ schedule_files=(
 )
 stage4_files=(
   probes/mulquat.c
+  scripts/compiler-rt.sh
+  scripts/read-mulquat-fixture.sh
 )
 repos=(
   "mujoco|src/mujoco|123347c0eeab7e13c8da0828ab593bbd95bcf335|c0408a44f164299fb200258a9226de55f508c59d"
@@ -91,7 +97,7 @@ for rel in "${stage4_files[@]}"; do
     fi
   fi
 done
-if [[ "$PREFLIGHT" -eq 0 || -n "$LIBDIR" ]]; then
+if [[ "$ROLE" != "goldens" && ( "$PREFLIGHT" -eq 0 || -n "$LIBDIR" ) ]]; then
   for lib in libmujoco.so.3.13.0 libactuator.so libelasticity.so libsensor.so libsdf_plugin.so; do
     [[ -n "$LIBDIR" && -f "$LIBDIR/$lib" ]] || note_missing "${LIBDIR:-LIBDIR}/$lib"
   done
@@ -112,13 +118,44 @@ if [[ "$PREFLIGHT" -eq 1 ]]; then
   exit 0
 fi
 
+# Layout tests set this on a machine that is not thor2. Thor2 always checks the pins.
+skip_pins=0
+if [[ "${FERROMOTION_RECEIPT_LAYOUT_TEST:-}" == "1" && "$(hostname -s)" != "thor2" ]]; then
+  skip_pins=1
+fi
+rt_path=""
+rt_sha=""
+bind_role_identity() {
+  local file="$BUILD/identity.txt"
+  case "$ROLE" in
+    probe|corpus|rust)
+      grep -F -x -q "identity_role $ROLE" "$file" || fail "$file is not a $ROLE identity"
+      rt_path="$(awk '/^compiler_rt_path /{print $2}' "$file")"
+      rt_sha="$(awk '/^compiler_rt_sha256 /{print $2}' "$file")"
+      [[ -n "$rt_path" && -f "$rt_path" ]] || fail "compiler-rt path in $file is not a file"
+      rt_got="$(sha_of "$rt_path")"
+      [[ "$rt_got" == "$rt_sha" ]] || fail "compiler-rt sha256 does not match $rt_path"
+      ;;
+    goldens)
+      grep -F -x -q "identity_role goldens" "$file" || fail "$file is not a goldens identity"
+      ;;
+    build|direct-pull-build) ;;
+    *) fail "unknown role $ROLE" ;;
+  esac
+}
+bind_role_identity
+
 for spec in "${repos[@]}"; do
   IFS='|' read -r name rel commit tree <<<"$spec"
   [[ -d "$RUN/$rel/.git" ]] || fail "$RUN/$rel has no .git"
   got="$(git -C "$RUN/$rel" rev-parse HEAD)"
   got_tree="$(git -C "$RUN/$rel" rev-parse 'HEAD^{tree}')"
-  [[ "$got" == "$commit" ]] || fail "$name HEAD $got is not $commit"
-  [[ "$got_tree" == "$tree" ]] || fail "$name tree $got_tree is not $tree"
+  if [[ "$skip_pins" -eq 0 ]]; then
+    [[ "$got" == "$commit" ]] || fail "$name HEAD $got is not $commit"
+    [[ "$got_tree" == "$tree" ]] || fail "$name tree $got_tree is not $tree"
+  else
+    [[ -n "$got" && -n "$got_tree" ]] || fail "$name has no HEAD"
+  fi
 done
 
 case "$ROLE" in
@@ -176,8 +213,13 @@ tmp="$(mktemp)"
     [[ "$rt_got" == "$rt_sha" ]] || fail "compiler-rt sha256 does not match $rt_path"
     echo "shared_link -rtlib=compiler-rt -unwindlib=libgcc"
     cat "$BUILD/compiler-rt.txt"
-  elif [[ "$ROLE" == "rust" ]]; then
-    echo "rust_links_libmujoco no"
+  elif [[ "$ROLE" == "probe" || "$ROLE" == "corpus" || "$ROLE" == "rust" ]]; then
+    echo "identity_role $ROLE"
+    echo "compiler_rt_path $rt_path"
+    echo "compiler_rt_sha256 $rt_sha"
+    if [[ "$ROLE" == "rust" ]]; then
+      echo "rust_links_libmujoco no"
+    fi
   fi
   echo "cmake $(cmake --version 2>/dev/null | head -n 1 || echo absent)"
   if command -v ninja >/dev/null 2>&1; then
@@ -198,11 +240,15 @@ tmp="$(mktemp)"
   done
   echo
   echo "# sha256  path"
-  for lib in libmujoco.so.3.13.0 libactuator.so libelasticity.so libsensor.so libsdf_plugin.so; do
-    sha256sum "$LIBDIR/$lib"
-  done
-  if [[ -f "$LIBDIR/libmujoco.so" ]]; then
-    sha256sum "$LIBDIR/libmujoco.so"
+  if [[ "$ROLE" == "goldens" ]]; then
+    echo "# goldens receipt does not bind libmujoco. The corpus receipt does."
+  else
+    for lib in libmujoco.so.3.13.0 libactuator.so libelasticity.so libsensor.so libsdf_plugin.so; do
+      sha256sum "$LIBDIR/$lib"
+    done
+    if [[ -f "$LIBDIR/libmujoco.so" ]]; then
+      sha256sum "$LIBDIR/libmujoco.so"
+    fi
   fi
   if [[ -n "${rt_path:-}" ]]; then
     sha256sum "$rt_path"

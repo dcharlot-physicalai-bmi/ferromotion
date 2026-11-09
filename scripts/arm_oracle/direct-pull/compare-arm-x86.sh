@@ -5,6 +5,8 @@
 # (libmujoco 64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc).
 # Exit 0: full parity. Exit 1: first divergence, after the full tally.
 # Exit 2: verdict not_run (a dump is missing or is not the pinned x86 bytes).
+# Dump lines are records. A line that begins with '#' is still a record.
+# This script does not read the mulquat fixture, whose '#' lines are comments.
 set -euo pipefail
 export LC_ALL=C
 ARM_NATIVE="${1:?arm native.txt}"

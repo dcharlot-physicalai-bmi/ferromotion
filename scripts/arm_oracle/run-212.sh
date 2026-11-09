@@ -96,6 +96,7 @@ if [[ "$step_rc" -ne 0 ]]; then
   exit 3
 fi
 export ARM_ORACLE_ROOT="$ROOT"
+arm_oracle_write_role_identity "$OUT/identity.txt" corpus "$BUILD"
 "$SCRIPT_DIR/write-receipt.sh" "$OUT" "$BUILD/cmake/lib" corpus
 echo "wrote $OUT/native.txt and $OUT/step.txt"
 echo "These are the Linux aarch64 CPU oracle. They are not the x86 files and not Darwin goldens."

@@ -17,6 +17,28 @@ export RUSTUP_AUTO_INSTALL=0
 export PATH="${HOME}/.cargo/bin:${PATH}"
 export CARGO_HOME="$RUN/cargo-home"
 unset CARGO_TARGET_DIR || true
+# Stage 1 copied the e0557dd runners. Those copies do not write identity.txt.
+# The receipt still requires it, so install the runners that do.
+runner_src=""
+if [[ -f "$DIRECT_PULL_DIR/runners/run-rust-212.sh" ]]; then
+  runner_src="$DIRECT_PULL_DIR/runners"
+elif [[ -f "$DIRECT_PULL_DIR/../run-rust-212.sh" ]]; then
+  runner_src="$DIRECT_PULL_DIR/.."
+else
+  echo "refusing: run-rust-212.sh is not beside this script or in scripts/arm_oracle" >&2
+  exit 2
+fi
+for f in compiler-rt.sh limits.sh run-goldens.sh run-rust-212.sh; do
+  [[ -f "$runner_src/$f" ]] || {
+    echo "refusing: $runner_src/$f is missing" >&2
+    exit 2
+  }
+  cp -f "$runner_src/$f" "$RUN/scripts/$f"
+done
+if [[ -f "$DIRECT_PULL_DIR/direct-pull-receipt.sh" ]]; then
+  cp -f "$DIRECT_PULL_DIR/direct-pull-receipt.sh" "$RUN/scripts/write-receipt.sh"
+fi
+chmod +x "$RUN/scripts/"*.sh
 # The runners set CARGO_NET_OFFLINE, --locked, --jobs 2, and an external target dir.
 # Exit 1 is a finished Darwin mismatch and is kept. Exit 2 or 3 stops this stage.
 set +e
@@ -27,7 +49,11 @@ if [[ "$goldens_rc" -ne 0 && "$goldens_rc" -ne 1 ]]; then
   echo "execution: golden wrapper exit $goldens_rc" >&2
   exit "$goldens_rc"
 fi
-corpus_run="$(awk '/^wrote /{print $2}' "$RUN/provenance/stage4-212.log" | tail -n 1)"
+# The dump line is `wrote <native.txt> and <step.txt>`. A '#' comment does not match.
+# `wrote <dir>/RECEIPT.txt` from the receipt is a different line and is not used.
+corpus_run="$(grep -E '^wrote .+\/native\.txt and .+\/step\.txt$' "$RUN/provenance/stage4-212.log" | tail -n 1)"
+corpus_run="${corpus_run#wrote }"
+corpus_run="${corpus_run%% and *}"
 corpus_run="$(dirname "$corpus_run")"
 echo "rust_links_libmujoco no"
 if [[ ! -f "$corpus_run/native.txt" || ! -f "$corpus_run/libdir.txt" ]]; then

@@ -47,7 +47,7 @@ else
   echo "refusing: compiler-rt.sh is not beside this script or in scripts/arm_oracle" >&2
   exit 2
 fi
-for f in compiler-rt.sh limits.sh run-probes.sh run-212.sh; do
+for f in compiler-rt.sh limits.sh read-mulquat-fixture.sh run-probes.sh run-212.sh; do
   [[ -f "$runner_src/$f" ]] || {
     echo "refusing: $runner_src/$f is missing" >&2
     exit 2
@@ -63,10 +63,7 @@ grep -q 'rtlib=compiler-rt' "$RUN/scripts/compiler-rt.sh" || {
   exit 2
 }
 BUILD="$(tr -d '[:space:]' <"$RUN/provenance/build-dir.txt")"
-if [[ "$BUILD" == *build-20261107T131346Z* ]]; then
-  echo "refusing: $BUILD is the library with undefined __muloti4. Leave it untouched. Run 03-cbuild.sh for a new build directory." >&2
-  exit 2
-fi
+direct_pull_accept_stage3_build "$BUILD"
 export RUSTUP_AUTO_INSTALL=0
 set +e
 "$RUN/scripts/run-probes.sh" "$BUILD" | tee "$RUN/provenance/stage4-probes.log"

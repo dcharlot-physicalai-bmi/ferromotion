@@ -64,6 +64,8 @@ if [[ -e "$ROOT/ferromotion/target" ]]; then
   exit 3
 fi
 export ARM_ORACLE_ROOT="$ROOT"
+stage3="$(cd "$LIBDIR/../.." && pwd)"
+arm_oracle_write_role_identity "$OUT/identity.txt" rust "$stage3"
 if [[ "$native_rc" -ne 0 || "$step_rc" -ne 0 ]]; then
   echo "not_run cargo_failed native=$native_rc step=$step_rc" | tee "$OUT/accept.txt" | tee -a "$OUT/result.txt" >&2
   "$SCRIPT_DIR/write-receipt.sh" "$OUT" "$LIBDIR" rust

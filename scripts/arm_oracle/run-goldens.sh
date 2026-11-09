@@ -50,6 +50,13 @@ if [[ "$ran" -ne 3 ]]; then
   echo "execution: $ran of the 3 Darwin golden tests ran (cargo exit $rc)" | tee -a "$OUT/result.txt" >&2
   exit 3
 fi
+{
+  echo "identity_role goldens"
+  echo "date_utc $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "hostname $(hostname)"
+  echo "uname $(uname -s) $(uname -m)"
+  echo "rust_links_libmujoco no"
+} >"$OUT/identity.txt"
 if [[ "$rc" -eq 0 ]]; then
   echo "darwin_golden_tests_exit 0" | tee -a "$OUT/result.txt"
   echo "The three Darwin tests passed on this host. That result is not the Linux aarch64 oracle." | tee -a "$OUT/result.txt"
