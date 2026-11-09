@@ -16,9 +16,13 @@
       "passes_212": false
     },
     "arm64": {
-      "executed": false,
-      "passes": null,
-      "note": "Not executed. An unexecuted ARM run is not zero passes and is not a pass."
+      "executed": true,
+      "oracle_id": "mujoco-3.13.0-aarch64-contract-off",
+      "record": "docs/acceptance/oracles/arm64-thor2-parity.md",
+      "corpus_versus_x86_contract_off": "full_parity",
+      "corpus_scope": "the Thor2 Menagerie corpus only",
+      "ferromotion_e0557dd_step_bit_exact": "1/212",
+      "passes_212": false
     },
     "x86_64_source_contract_off": {
       "executed": true,
@@ -162,6 +166,43 @@
       },
       "qpos0_geom_frames_versus_default_ferromotion": "0 of 14842 bit-exact",
       "op_bisect": "docs/acceptance/oracles/x86_64-contract-off-op-bisect.json",
+      "default_mul_quat_changed": false
+    },
+    {
+      "id": "mujoco-3.13.0-aarch64-contract-off",
+      "role": "Thor2 source build. Equivalent to mujoco-3.13.0-x86_64-contract-off on the measured Menagerie corpus only.",
+      "status": "measured_on_thor2",
+      "record": "docs/acceptance/oracles/arm64-thor2-parity.md",
+      "scripts": "e9e20184c954de478fe6bdbd57b503253d7e020b",
+      "replaces_wheel": false,
+      "replaces_arm64_goldens": false,
+      "replaces_baseline_ledger": false,
+      "replaces_x86_contract_off": false,
+      "mujoco_version": "3.13.0",
+      "mujoco_source_sha": "123347c0eeab7e13c8da0828ab593bbd95bcf335",
+      "host": "thor2.local",
+      "os": "Ubuntu 24.04",
+      "cpu_arch": "aarch64",
+      "compiler_version": "18.1.3",
+      "shared_link": "-rtlib=compiler-rt -unwindlib=libgcc",
+      "compiler_rt_sha256": "a38c82691dba41f2fc96e98786f0d9c7c4f1c42f7569b94ce3e9e822cd52427d",
+      "build_directory": "build-20261109T213225Z",
+      "artifact": "libmujoco.so.3.13.0",
+      "artifact_sha256": "9164828bf04729b20b640bd09105baea98137a8749e262fc06fddc44ca869eb9",
+      "plugin_sha256_prefixes": {
+        "actuator": "6858228a",
+        "elasticity": "6f9f5dda",
+        "sensor": "f37f9182",
+        "sdf": "5c860556"
+      },
+      "corpus_equivalence": {
+        "scope": "this corpus only",
+        "x86_oracle": "mujoco-3.13.0-x86_64-contract-off",
+        "verdict": "full_parity",
+        "native_sha256": "a3168d763bed63c9181275b6a908348c0c0609fde425be1ece840c75d110b5b7",
+        "step_sha256": "a039f949d938cefc0cf3633edec1415497f8400a776b88809adf9bb06f5678be",
+        "mulquat_bits": "3fe8000000000000 bfc5c28f5c28f5c2 3fc3333333333333 3fdc28f5c28f5c29"
+      },
       "default_mul_quat_changed": false
     }
   ],

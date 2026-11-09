@@ -57,6 +57,8 @@ MuJoCo 3.13.0 tag `123347c0` pins tinyobj `2945a967` and builds it without `TINY
 
 `docs/acceptance/oracles/mass-inertia-branch.md` records the diagnostic build (its own sha256, not `64156abe…`) and the post-earclip 212 against the same source-oracle dumps.
 
-## Arm64 source oracle
+## Named source build `mujoco-3.13.0-aarch64-contract-off`
 
-Not built and not run. No verified aarch64 route was supplied. A cross `libstdc++` for aarch64 is present on this machine and was not used. A Jetson name is not an architecture. The next requirement is a verified aarch64 host, then the same kind of recorded clang or gcc command with explicit `-ffp-contract` and the ISA flags that apply there. Until that run exists, arm64 passes stay unset.
+Measured on thor2.local. The record is `docs/acceptance/oracles/arm64-thor2-parity.md`. Artifact `libmujoco.so.3.13.0` sha256 `9164828bf04729b20b640bd09105baea98137a8749e262fc06fddc44ca869eb9`, build `build-20261109T213225Z`, MuJoCo `123347c0eeab7e13c8da0828ab593bbd95bcf335`, clang 18.1.3, shared link `-rtlib=compiler-rt -unwindlib=libgcc`.
+
+On that Menagerie corpus the ARM `native.txt` and `step.txt` were byte-identical to the pinned x86 contract-off schedules. That is the equivalence. It is this corpus only. The run's ferromotion `e0557dd109151a02702dfb262ea0a8c2b9dd07db` matched 20-step on 1 of 212 models against those dumps. The Darwin golden arrays were not reproduced, so `mujoco-3.13.0-arm64-pinned-build` stays unadopted and `MUL_QUAT` stays contracted.

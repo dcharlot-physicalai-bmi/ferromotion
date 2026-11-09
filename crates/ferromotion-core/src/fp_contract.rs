@@ -22,6 +22,12 @@ pub const MUL_QUAT: Contraction = Contraction::Contracted;
 pub const ORACLE_X86_CONTRACT_OFF_ID: &str = "mujoco-3.13.0-x86_64-contract-off";
 pub const ORACLE_X86_CONTRACT_OFF_SHA256: &str = "64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc";
 
+/// Thor2 library. Corpus equivalence with the x86 contract-off oracle is the parity record.
+/// This id is not a build policy. `install_policy` does not select it.
+pub const ORACLE_AARCH64_CONTRACT_OFF_ID: &str = "mujoco-3.13.0-aarch64-contract-off";
+pub const ORACLE_AARCH64_CONTRACT_OFF_SHA256: &str =
+    "9164828bf04729b20b640bd09105baea98137a8749e262fc06fddc44ca869eb9";
+
 /// Active contraction for the three opt-in sites. The published default leaves every site contracted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BuildPolicy {
@@ -239,6 +245,12 @@ mod tests {
         assert_eq!(active_policy(), DEFAULT_POLICY);
         let manifest = include_str!("../../../docs/acceptance/oracles/manifest.json");
         assert!(manifest.contains("\"mul_quat\": \"contracted\""));
+        assert!(manifest.contains(ORACLE_AARCH64_CONTRACT_OFF_ID));
+        assert!(manifest.contains(ORACLE_AARCH64_CONTRACT_OFF_SHA256));
+        assert_eq!(
+            install_policy(ORACLE_AARCH64_CONTRACT_OFF_ID, ORACLE_AARCH64_CONTRACT_OFF_SHA256, ""),
+            Err(PolicyError::UnknownIdentity)
+        );
         let a = [0.9, 0.1, -0.2, 0.3];
         let b = [0.8, -0.1, 0.4, 0.2];
         let contracted = mul_quat(&a, &b);
