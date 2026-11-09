@@ -1040,11 +1040,19 @@ impl SmoothModel {
                 }
             })
             .collect();
+        // Published path keeps the fused form. The contract-off identity uses
+        // `mj_referenceConstraint` with `shift = 0`: `-B*vel - K*I*(pos-margin)`.
+        let contract_off = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
         e.aref = (0..nefc)
             .map(|i| {
                 let k = &e.kbip[i];
-                let x = 0.0f64.mul_add(e.vel[i], e.pos[i] - e.margin[i]);
-                (-k[1]).mul_add(e.vel[i], -(k[0] * k[2] * x))
+                if contract_off {
+                    let x = e.pos[i] - e.margin[i];
+                    -k[1] * e.vel[i] - (k[0] * k[2]) * x
+                } else {
+                    let x = 0.0f64.mul_add(e.vel[i], e.pos[i] - e.margin[i]);
+                    (-k[1]).mul_add(e.vel[i], -(k[0] * k[2] * x))
+                }
             })
             .collect();
         // `mj_Jdotv`: a connect's reference loses its J̇·v
