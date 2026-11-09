@@ -44,4 +44,19 @@ The three Darwin goldens failed on Linux. The stage 5 script expects that failur
 
 Receipt sha256 prefixes: goldens `df0a1a98`, rust212 `5cfc11a4`.
 
-The rust212 receipt is the directory `rust212-20261109T215708Z` under the MuJoCo build home. It is a dated record of the e0557dd comparison. A later stage 05 re-run does not overwrite it.
+The rust212 receipt is the directory `rust212-20261109T215708Z` under the MuJoCo build home. It is a dated record of the e0557dd comparison. It is superseded by `rust212-20261109T225036Z` below. That directory was not overwritten.
+
+## Stage 05 re-run, 2026-11-09
+
+Exit 1 at `a1c0ae7ed17ecc715246534c9d63ba40d0ef94e3`. That is a finished mismatch: `parity_mismatch models=212 steps=20 unequal_tallies=54 stepped=1 of 212`.
+
+Ferromotion tested: commit `515a7dec4b4ed2fa7257f328c7c3f9b169b8d7ba`, tree `67e20a00014302498e9b350862549f9d705911a6`. That commit contains `7998624df8a4ac2591187540a59ddc9b13d51640`.
+
+* goldens `goldens-20261109T224857Z`, receipt sha256 `d84a2218d42f089874aca999fa24ad4d4ad60593450e74482ce2c63c13cc5b38`, `darwin_golden_tests_exit 1` (the 3 expected Darwin tests)
+* rust212 `rust212-20261109T225036Z`, receipt sha256 `8d5d0bf93e2e79c52941bc6fed1b9b034192560cac81a6ed59d2996eaeb27132`
+* Rust `native.txt` sha256 `6e1bb5cfe75be1f319de6d4b3f0ca3292629ca0aaab7b2657a2519da5791cc86`
+* Rust `step.txt` sha256 `f48c30517be7aaee4d5ff940700531d53bea99db530c54245ecf9d8457763656`
+
+Counts against the ARM dumps: 20-step 1/212, `qacc` 20/636, `body_inertia` 212/212, `body_mass` 212/212, `body_subtreemass` 212/212, `M` 20, `qLD` 20, `efc_J` 365, `efc_pos` 386, `qfrc_bias` 98, `xpos` 154, `xquat` 101, `qacc_smooth` 23, `efc_b` 116 (down from 117).
+
+These match the x86 counts at `7998624df8a4ac2591187540a59ddc9b13d51640` exactly. That is consistent with ARM equalling x86 on this corpus.
