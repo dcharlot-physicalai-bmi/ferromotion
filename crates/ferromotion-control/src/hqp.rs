@@ -12,20 +12,142 @@
 
 use nalgebra::{DMatrix, DVector};
 
+/// Scalar product. Dynamic `nalgebra` products above 5×5 go through `matrixmultiply`, whose
+/// accumulation order follows the host CPU. These tasks are small, and a host-dependent order
+/// changes which redundant IK fixed point the posture task reaches.
+fn gemm(a: &DMatrix<f64>, b: &DMatrix<f64>) -> DMatrix<f64> {
+    let (m, k) = (a.nrows(), a.ncols());
+    let n = b.ncols();
+    let mut c = DMatrix::zeros(m, n);
+    for i in 0..m {
+        for j in 0..n {
+            let mut s = 0.0;
+            for t in 0..k {
+                s += a[(i, t)] * b[(t, j)];
+            }
+            c[(i, j)] = s;
+        }
+    }
+    c
+}
+
+fn gemv(a: &DMatrix<f64>, x: &DVector<f64>) -> DVector<f64> {
+    let mut y = DVector::zeros(a.nrows());
+    for i in 0..a.nrows() {
+        let mut s = 0.0;
+        for t in 0..a.ncols() {
+            s += a[(i, t)] * x[t];
+        }
+        y[i] = s;
+    }
+    y
+}
+
+/// Eigenpairs of a symmetric matrix. Jacobi sweeps in index order, so the rotations do not
+/// depend on which SIMD width `matrixmultiply` would have picked.
+fn jacobi_sym(mut a: DMatrix<f64>) -> (Vec<f64>, DMatrix<f64>) {
+    let n = a.nrows();
+    let mut v = DMatrix::identity(n, n);
+    for _ in 0..80 {
+        let mut off = 0.0;
+        for p in 0..n {
+            for q in (p + 1)..n {
+                off += a[(p, q)] * a[(p, q)];
+            }
+        }
+        if off <= 1e-30 {
+            break;
+        }
+        for p in 0..n {
+            for q in (p + 1)..n {
+                let apq = a[(p, q)];
+                if apq.abs() <= 1e-18 {
+                    continue;
+                }
+                let app = a[(p, p)];
+                let aqq = a[(q, q)];
+                let tau = (aqq - app) / (2.0 * apq);
+                let t = if tau >= 0.0 {
+                    1.0 / (tau + (1.0 + tau * tau).sqrt())
+                } else {
+                    -1.0 / (-tau + (1.0 + tau * tau).sqrt())
+                };
+                let c = 1.0 / (1.0 + t * t).sqrt();
+                let s = t * c;
+                a[(p, p)] = app - t * apq;
+                a[(q, q)] = aqq + t * apq;
+                a[(p, q)] = 0.0;
+                a[(q, p)] = 0.0;
+                for r in 0..n {
+                    if r == p || r == q {
+                        continue;
+                    }
+                    let arp = a[(r, p)];
+                    let arq = a[(r, q)];
+                    let rp = c * arp - s * arq;
+                    let rq = s * arp + c * arq;
+                    a[(r, p)] = rp;
+                    a[(p, r)] = rp;
+                    a[(r, q)] = rq;
+                    a[(q, r)] = rq;
+                }
+                for r in 0..n {
+                    let vrp = v[(r, p)];
+                    let vrq = v[(r, q)];
+                    v[(r, p)] = c * vrp - s * vrq;
+                    v[(r, q)] = s * vrp + c * vrq;
+                }
+            }
+        }
+    }
+    ((0..n).map(|i| a[(i, i)]).collect(), v)
+}
+
+/// Moore-Penrose inverse with singular values below `eps` dropped. `A⁺ = Aᵀ U Λ⁻¹ Uᵀ`
+/// where `U` diagonalizes `AAᵀ` (or the transpose, when there are more rows than columns).
+fn pseudo_inverse(a: &DMatrix<f64>, eps: f64) -> DMatrix<f64> {
+    let (m, n) = a.shape();
+    if m == 0 || n == 0 {
+        return DMatrix::zeros(n, m);
+    }
+    if m > n {
+        return pseudo_inverse(&a.transpose(), eps).transpose();
+    }
+    let at = a.transpose();
+    let (evals, u) = jacobi_sym(gemm(a, &at));
+    let mut inv = DMatrix::zeros(m, m);
+    let scale = evals.iter().copied().fold(0.0, f64::max);
+    // Absolute `eps` is what callers pass. A Jacobi sweep also leaves cancelled eigenvalues a few
+    // ulps above zero; those are not task directions, and inverting them throws the higher
+    // priority out of its null space.
+    let floor = (eps * eps).max(scale * 1e-14);
+    for i in 0..m {
+        if evals[i] > floor {
+            inv[(i, i)] = 1.0 / evals[i];
+        }
+    }
+    gemm(&at, &gemm(&u, &gemm(&inv, &u.transpose())))
+}
+
 /// Solve a strictly-prioritized stack of equality tasks `[(A₁,b₁), (A₂,b₂), …]` (highest priority
 /// first) for a solution `x ∈ ℝⁿ`. Each level is realized only within the null space of the ones above.
 pub fn solve_hqp(tasks: &[(DMatrix<f64>, DVector<f64>)], n: usize) -> DVector<f64> {
     let mut x = DVector::zeros(n);
     let mut nmat = DMatrix::identity(n, n); // null-space projector of all higher-priority tasks
     for (a, b) in tasks {
-        let an = a * &nmat; // task Jacobian restricted to the remaining freedom
-        if an.norm() < 1e-12 {
+        let an = gemm(a, &nmat); // task Jacobian restricted to the remaining freedom
+        let mut an_norm = 0.0;
+        for v in an.iter() {
+            an_norm += v * v;
+        }
+        if an_norm.sqrt() < 1e-12 {
             continue; // no freedom left for this task
         }
-        let anp = an.clone().pseudo_inverse(1e-12).expect("pseudo-inverse");
-        let dx = &anp * (b - a * &x);
+        let anp = pseudo_inverse(&an, 1e-12);
+        let residual = b - gemv(a, &x);
+        let dx = gemv(&nmat, &gemv(&anp, &residual));
         x += dx;
-        nmat -= &anp * &an; // project the remaining freedom into this task's null space
+        nmat -= gemm(&anp, &an); // project the remaining freedom into this task's null space
     }
     x
 }
