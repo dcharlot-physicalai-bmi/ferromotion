@@ -78,10 +78,10 @@ pub fn install_policy(id: &str, artifact_sha256: &str, sites: &str) -> Result<Bu
             BuildPolicy {
                 id: ORACLE_X86_CONTRACT_OFF_ID,
                 artifact_sha256: ORACLE_X86_CONTRACT_OFF_SHA256,
-                // `mju_mulQuat` in that artifact is the unfused SSE schedule.
-                // `rot_vec_quat` stays contracted until the site is named.
+                // `mju_mulQuat` and `mju_rotVecQuat` in that artifact are the
+                // unfused SSE schedules transcribed below.
                 mul_quat: Contraction::Unfused,
-                rot_vec_quat: Contraction::Contracted,
+                rot_vec_quat: Contraction::Unfused,
                 mul_mat_vec3: Contraction::Contracted,
             }
         }
@@ -180,14 +180,22 @@ pub fn rot_vec_quat_with(policy: Contraction, v: &[f64; 3], q: &[f64; 4]) -> [f6
             ]
         }
         Contraction::Unfused => {
-            let t0 = (q[0] * v[0] + q[2] * v[2]) - q[3] * v[1];
-            let t1 = (q[0] * v[1] + q[3] * v[0]) - q[1] * v[2];
-            let t2 = (q[0] * v[2] + q[1] * v[1]) - q[2] * v[0];
-            [
-                v[0] + 2.0 * (q[2] * t2 - q[3] * t1),
-                v[1] + 2.0 * (q[3] * t0 - q[1] * t2),
-                v[2] + 2.0 * (q[1] * t1 - q[2] * t0),
-            ]
+            // `mju_rotVecQuat` in libmujoco 64156abe. A zero vector returns zero.
+            // An identity quaternion is copied by the caller. Otherwise the lanes are
+            // t0 = (q2*v2 + q0*v0) - q3*v1
+            // t1 = (q3*v0 + q0*v1) - q1*v2
+            // t2 = (q1*v1 + q0*v2) - q2*v0
+            // res = v + (d+d) with d = cross(q_xyz, t), the doubled term added first.
+            if v[0] == 0.0 && v[1] == 0.0 && v[2] == 0.0 {
+                return [0.0, 0.0, 0.0];
+            }
+            let t0 = (q[2] * v[2] + q[0] * v[0]) - q[3] * v[1];
+            let t1 = (q[3] * v[0] + q[0] * v[1]) - q[1] * v[2];
+            let t2 = (q[1] * v[1] + q[0] * v[2]) - q[2] * v[0];
+            let d0 = q[2] * t2 - q[3] * t1;
+            let d1 = q[3] * t0 - q[1] * t2;
+            let d2 = q[1] * t1 - q[2] * t0;
+            [d0 + d0 + v[0], d1 + d1 + v[1], d2 + d2 + v[2]]
         }
     }
 }
@@ -288,7 +296,7 @@ mod tests {
         assert_eq!(active_policy(), DEFAULT_POLICY);
         let policy = install_policy(ORACLE_X86_CONTRACT_OFF_ID, ORACLE_X86_CONTRACT_OFF_SHA256, "mul_quat").unwrap();
         assert_eq!(policy.mul_quat, Contraction::Unfused);
-        assert_eq!(policy.rot_vec_quat, Contraction::Contracted);
+        assert_eq!(policy.rot_vec_quat, Contraction::Unfused);
         assert_eq!(policy.mul_mat_vec3, Contraction::Contracted);
         let a = [0.9, 0.1, -0.2, 0.3];
         let b = [0.8, -0.1, 0.4, 0.2];
@@ -297,7 +305,7 @@ mod tests {
         let q = [0.5, 0.5, 0.5, 0.5];
         assert_eq!(
             rot_vec_quat_with(active_policy().rot_vec_quat, &v, &q).map(f64::to_bits),
-            rot_vec_quat_with(Contraction::Contracted, &v, &q).map(f64::to_bits)
+            rot_vec_quat_with(Contraction::Unfused, &v, &q).map(f64::to_bits)
         );
         reset_policy();
         assert_eq!(mul_quat(&a, &b).map(f64::to_bits), mul_quat_with(Contraction::Contracted, &a, &b).map(f64::to_bits));
