@@ -150,11 +150,13 @@ fn rot_vec_quat(v: &[f64; 3], q: &[f64; 4]) -> [f64; 3] {
     out
 }
 
-/// `mju_normalize4`: below `mjMINVAL` the unit quaternion; within `mjMINVAL` of 1 left alone; otherwise
-/// MULTIPLIED by the reciprocal of the norm.
+/// `mju_normalize4` as the contract-off compiler builds `mju_sqrt(v0*v0 + v1*v1 + v2*v2 + v3*v3)`.
+/// The sum is left-associated and not an FMA. Below `mjMINVAL` the unit quaternion; within
+/// `mjMINVAL` of 1 left alone; otherwise each component is multiplied by the reciprocal of the norm.
+/// This is not a contraction-policy site. `mul_quat` stays contracted.
 pub(crate) fn normalize4(q: &mut [f64; 4]) {
     let before = *q;
-    let norm = q[3].mul_add(q[3], q[2].mul_add(q[2], q[0].mul_add(q[0], q[1] * q[1]))).sqrt();
+    let norm = (((q[0] * q[0] + q[1] * q[1]) + q[2] * q[2]) + q[3] * q[3]).sqrt();
     if norm < 1e-15 {
         *q = [1.0, 0.0, 0.0, 0.0];
     } else if (norm - 1.0).abs() > 1e-15 {
@@ -334,6 +336,34 @@ pub(crate) struct KinState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One quaternion whose fused sum of squares is off by an ulp from
+    /// `libmujoco.so.3.13.0` sha256 `64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc`.
+    #[test]
+    fn normalize4_matches_the_contract_off_library_sum() {
+        let mut q = [
+            -0.6991825490104397,
+            1.4818849284346185,
+            -1.2357316339904378,
+            0.27004296248268744,
+        ];
+        normalize4(&mut q);
+        assert_eq!(
+            q.map(f64::to_bits),
+            [
+                0xbfd59e14acaee7c2,
+                0x3fe6e89d102b3a71,
+                0xbfe31a73f1c7f17b,
+                0x3fc0b2d1c454ae00,
+            ]
+        );
+        let mut unit = [1.0, 0.0, 0.0, 0.0];
+        normalize4(&mut unit);
+        assert_eq!(unit, [1.0, 0.0, 0.0, 0.0]);
+        let mut tiny = [1e-20, 0.0, 0.0, 0.0];
+        normalize4(&mut tiny);
+        assert_eq!(tiny, [1.0, 0.0, 0.0, 0.0]);
+    }
 
     /// Host `sincos` stays on libm. The Pythagorean reconstruction matches one arm64 fromto cosine
     /// (`0x3fe833ad8be0fb0b`) and disagrees with a small Euler half-angle whose host pair already
