@@ -56,6 +56,8 @@ mkdir -p "$OUT"
 arm_oracle_write_ferromotion_tested "$FM" "$OUT/ferromotion-tested.txt"
 arm_oracle_cargo_target "$OUT"
 cd "$FM"
+# set +e does not disarm an ERR trap. These cargo statuses are classified below.
+trap - ERR
 set +e
 arm_oracle_timeout "$ARM_ORACLE_WALL_TIMEOUT" \
   "${ARM_ORACLE_CARGO[@]}" run --offline --locked --jobs 2 --release -p ferromotion-core --example menagerie_native -- \
@@ -66,6 +68,7 @@ arm_oracle_timeout "$ARM_ORACLE_WALL_TIMEOUT" \
   "$ROOT/menagerie" "$RUN/step.txt" >"$OUT/step.txt" 2>&1
 step_rc=$?
 set -e
+trap refuse_unexpected ERR
 {
   echo "menagerie_native_exit $native_rc"
   echo "menagerie_native_step_exit $step_rc"
@@ -83,10 +86,16 @@ if [[ "$native_rc" -ne 0 || "$step_rc" -ne 0 ]]; then
   "$SCRIPT_DIR/write-receipt.sh" "$OUT" "$LIBDIR" rust
   exit 3
 fi
+trap - ERR
 set +e
 "$SCRIPT_DIR/accept-rust-212.sh" "$OUT/native.txt" "$OUT/step.txt" >"$OUT/accept.txt"
 accept_rc=$?
 set -e
-cat "$OUT/accept.txt" | tee -a "$OUT/result.txt"
+trap refuse_unexpected ERR
+tee -a "$OUT/result.txt" <"$OUT/accept.txt"
 "$SCRIPT_DIR/write-receipt.sh" "$OUT" "$LIBDIR" rust
-exit "$accept_rc"
+if [[ "$accept_rc" -eq 0 || "$accept_rc" -eq 1 ]]; then
+  exit "$accept_rc"
+fi
+echo "refusing: rust comparison exit $accept_rc" >&2
+exit 2

@@ -73,7 +73,7 @@ keep_superseded() {
 }
 
 fetch_codeload() {
-  local tar api_json top sha tree got
+  local tar api_json sha tree got
   command -v python3 >/dev/null 2>&1 || {
     echo "refusing: python3 is not on PATH. This script does not install it." >&2
     exit 2
@@ -177,16 +177,16 @@ export ARM_ORACLE_FERROMOTION="$dest"
 export PATH="${HOME}/.cargo/bin:${PATH}"
 export CARGO_HOME="$RUN/cargo-home"
 unset CARGO_TARGET_DIR || true
+# set +e does not disarm an ERR trap. Exit 1 here is the finished Darwin mismatch.
+trap - ERR
 set +e
 "$RUN/scripts/run-goldens.sh" | tee "$RUN/provenance/stage5-rereun-goldens.log"
 goldens_rc="${PIPESTATUS[0]}"
 set -e
+trap refuse_unexpected ERR
 if [[ "$goldens_rc" -ne 0 && "$goldens_rc" -ne 1 ]]; then
   keep_superseded
-  echo "execution: golden wrapper exit $goldens_rc" >&2
-  if [[ "$goldens_rc" -eq 3 ]]; then
-    exit 3
-  fi
+  echo "refusing: golden wrapper exit $goldens_rc" >&2
   exit 2
 fi
 corpus_run="$(grep -E '^wrote .+\/native\.txt and .+\/step\.txt$' "$RUN/provenance/stage4-212.log" | tail -n 1)"
@@ -197,10 +197,12 @@ if [[ ! -f "$corpus_run/native.txt" || ! -f "$corpus_run/libdir.txt" ]]; then
   echo "refusing: stage 4 log did not name a finished corpus directory" >&2
   exit 2
 fi
+trap - ERR
 set +e
 "$RUN/scripts/run-rust-212.sh" "$corpus_run" | tee "$RUN/provenance/stage5-rereun-rust.log"
 rust_rc="${PIPESTATUS[0]}"
 set -e
+trap refuse_unexpected ERR
 {
   echo "ferromotion_tested_commit $FERROMOTION_RERUN_COMMIT"
   echo "ferromotion_tested_tree $FERROMOTION_RERUN_TREE"

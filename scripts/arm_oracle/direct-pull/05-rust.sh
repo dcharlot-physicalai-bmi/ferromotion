@@ -42,6 +42,8 @@ fi
 chmod +x "$RUN/scripts/"*.sh
 # The runners set CARGO_NET_OFFLINE, --locked, --jobs 2, and an external target dir.
 # Exit 1 is a finished Darwin mismatch and is kept. Exit 2 or 3 stops this stage.
+# set +e does not disarm an ERR trap.
+trap - ERR
 set +e
 "$RUN/scripts/run-goldens.sh" | tee "$RUN/provenance/stage5-goldens.log"
 goldens_rc="${PIPESTATUS[0]}"
@@ -61,6 +63,7 @@ if [[ ! -f "$corpus_run/native.txt" || ! -f "$corpus_run/libdir.txt" ]]; then
   echo "refusing: stage 4 log did not name a finished corpus directory" >&2
   exit 3
 fi
+trap - ERR
 set +e
 "$RUN/scripts/run-rust-212.sh" "$corpus_run" | tee "$RUN/provenance/stage5-rust.log"
 rust_rc="${PIPESTATUS[0]}"

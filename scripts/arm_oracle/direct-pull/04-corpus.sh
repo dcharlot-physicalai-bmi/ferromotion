@@ -66,6 +66,8 @@ grep -q 'rtlib=compiler-rt' "$RUN/scripts/compiler-rt.sh" || {
 BUILD="$(tr -d '[:space:]' <"$RUN/provenance/build-dir.txt")"
 direct_pull_accept_stage3_build "$BUILD"
 export RUSTUP_AUTO_INSTALL=0
+# set +e does not disarm an ERR trap. Exit 1 is a finished probe mismatch.
+trap - ERR
 set +e
 "$RUN/scripts/run-probes.sh" "$BUILD" | tee "$RUN/provenance/stage4-probes.log"
 probe_rc="${PIPESTATUS[0]}"
@@ -83,6 +85,7 @@ if [[ ! -f "$arm_native" || ! -f "$arm_step" ]]; then
   echo "refusing: stage 4 log did not name native.txt and step.txt" >&2
   exit 3
 fi
+trap - ERR
 set +e
 bash "$DIRECT_PULL_DIR/compare-arm-x86.sh" "$arm_native" "$native" "$arm_step" "$step" \
   "$RUN/provenance/stage4-x86-verdict.txt"

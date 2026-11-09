@@ -50,6 +50,8 @@ fi
 # The build script enforces thor2, clang 18.1.3, cmake 3.28, ninja, 2 jobs,
 # per-process CPU and virtual-memory caps, and a wall-clock timeout.
 # It creates a new build-$STAMP directory. It does not delete an older one.
+# set +e does not disarm an ERR trap. The build status is classified below.
+trap - ERR
 set +e
 "$RUN/scripts/build-thor2.sh" | tee "$RUN/provenance/stage3.log"
 build_rc="${PIPESTATUS[0]}"
