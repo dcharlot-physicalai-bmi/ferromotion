@@ -575,7 +575,13 @@ pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2
                 if let (Some(a), 1) = (amb2, v2) {
                     cc[a] = -cc[a];
                 }
-                let c2 = mat_vec(&rot, &cc) + pos21;
+                // `mji_mulMatVec3` then `mji_addTo3`. `64156abe` (`-mno-fma`) sums a row as
+                // `(m2 v2) + (m1 v1 + m0 v0)`, then `pos +` that.
+                let c2 = if separate {
+                    Vector3::from_fn(|r, _| pos21[r] + ((rot[(r, 2)] * cc[2]) + (rot[(r, 1)] * cc[1] + rot[(r, 0)] * cc[0])))
+                } else {
+                    mat_vec(&rot, &cc) + pos21
+                };
                 let e = c2 - c1;
                 let d1e = e[i];
                 let d2e = dot3(&d2, &e);
