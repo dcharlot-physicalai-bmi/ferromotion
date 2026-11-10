@@ -10,6 +10,44 @@
 
 use crate::mujoco_smooth::dot_sparse;
 
+fn oracle_contract_off() -> bool {
+    crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID
+}
+
+/// Forward dot inside `mju_cholSolveSparse` (`64156abe`).
+///
+/// For four or more entries, pairs accumulate as `(p0, p1)` and `(p2, p3)`, then
+/// `high + low` of their sum. The tail is `acc + product`. Shorter dots are only that tail.
+fn chol_solve_dot(l: &[f64], res: &[f64], ind: &[usize]) -> f64 {
+    let n = l.len();
+    if n < 4 {
+        let mut acc = 0.0;
+        for i in 0..n {
+            acc += l[i] * res[ind[i]];
+        }
+        return acc;
+    }
+    let mut a01 = [0.0, 0.0];
+    let mut a23 = [0.0, 0.0];
+    let prefix = n & !3;
+    let mut i = 0;
+    while i < prefix {
+        a01[0] += l[i] * res[ind[i]];
+        a01[1] += l[i + 1] * res[ind[i + 1]];
+        a23[0] += l[i + 2] * res[ind[i + 2]];
+        a23[1] += l[i + 3] * res[ind[i + 3]];
+        i += 4;
+    }
+    let low = a01[0] + a23[0];
+    let high = a01[1] + a23[1];
+    let mut acc = high + low;
+    while i < n {
+        acc += l[i] * res[ind[i]];
+        i += 1;
+    }
+    acc
+}
+
 /// A sparse matrix, row by row.
 pub(crate) type Rows = Vec<(Vec<usize>, Vec<f64>)>;
 
@@ -191,7 +229,12 @@ impl Chol {
                 let lcr = self.l[c][idx];
                 for i in 0..=idx {
                     let col = self.l_colind[c][i];
-                    dense[col] = (-lcr).mul_add(self.l[c][i], dense[col]);
+                    // `64156abe`: `mulsd` then `subsd`, `dense - L·Lrow`.
+                    dense[col] = if oracle_contract_off() {
+                        dense[col] - lcr * self.l[c][i]
+                    } else {
+                        (-lcr).mul_add(self.l[c][i], dense[col])
+                    };
                 }
             }
             let mut diag = dense[r];
@@ -224,14 +267,24 @@ impl Chol {
                 let tmp = res[i];
                 for j in 0..nnz - 1 {
                     let c = self.l_colind[i][j];
-                    res[c] = (-self.l[i][j]).mul_add(tmp, res[c]);
+                    // `64156abe`: `res[c] - L·tmp`.
+                    res[c] = if oracle_contract_off() {
+                        res[c] - self.l[i][j] * tmp
+                    } else {
+                        (-self.l[i][j]).mul_add(tmp, res[c])
+                    };
                 }
             }
         }
         for i in 0..n {
             let nnz = self.l[i].len();
             if nnz > 1 {
-                res[i] -= dot_sparse(&self.l[i][..nnz - 1], &res, &self.l_colind[i][..nnz - 1]);
+                let dot = if oracle_contract_off() {
+                    chol_solve_dot(&self.l[i][..nnz - 1], &res, &self.l_colind[i][..nnz - 1])
+                } else {
+                    dot_sparse(&self.l[i][..nnz - 1], &res, &self.l_colind[i][..nnz - 1])
+                };
+                res[i] -= dot;
             }
             res[i] /= self.l[i][nnz - 1];
         }
