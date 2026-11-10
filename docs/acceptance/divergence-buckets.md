@@ -4,16 +4,18 @@ Oracle profile `mujoco-3.13.0-x86_64-contract-off`, library `64156abe`, Menageri
 
 149 models are exact for all 20 steps. 63 fail a step. `mju_dot3` in the primitive colliders is `(az bz) + (ax bx + ay by)`. Sphere-sphere distance is `(sqrt - r1) - r2`, and the witness offset is `(dist * 0.5) + r1`. Capsule-capsule numerators use the raw segment dots: `(dot12 * v - mc * u) / det`.
 
+`mj_advance` copies the step's final `qacc` into `qacc_warmstart`. A step miss that shows up there is that step's `qacc`. Comparing `qfrc_passive`, `qfrc_actuator`, `qacc_smooth`, `efc_force`, and `qacc` at the failing step's input splits the old 13-model `qacc_warmstart` bucket: 12 first miss `efc_force` (smooth acceleration already matches), and `bitcraze_crazyflie_2/cf2.xml` first missed `qfrc_passive`. That model has no constraints, so `qacc` is `qacc_smooth`. The site-transmission actuator matches. The 1 ulp was the inertia-box linear drag, `lfrc -= 0.5*rho*box[p]*box[q]*|v|*v`, multiplied from `0.5*rho` and subtracted. After that schedule, step-1 `qacc` matches and the remaining miss is `qpos`.
+
 | models | stage | first field | site |
 | ---: | --- | --- | --- |
 | 15 | collision | `efc_pos` | `mjraw primitive / mesh` |
-| 13 | solver | `qacc_warmstart` | `warmstart cost` |
+| 12 | solver | `efc_force` | `mj_fwdConstraint` |
 | 9 | constants | `tendon_invweight0` | `set0 tendon block` |
 | 7 | kinematics | `ten_length` | `mj_tendon` |
 | 5 | constraint rows | `efc_J` | `mj_instantiateContact` |
 | 4 | constraint rows | `efc_AR` | `mj_makeARNumeric` |
 | 3 | solver | `qacc` | `mj_fwdConstraint` |
-| 2 | integration | `qpos` | `mj_integratePos` |
+| 3 | integration | `qpos` | `mj_integratePos` |
 | 2 | smooth | `ten_velocity` | `mj_fwdVelocity` |
 | 2 | integration | `qvel` | `mj_advance` |
 | 1 | smooth | `qfrc_fluid` | `mj_passive` |
@@ -38,11 +40,12 @@ Where it first appears: 9 at state 1, 4 at state 2, 2 at state 0.
 - `wonik_allegro/scene_left.xml` (state 2)
 - `wonik_allegro/scene_right.xml` (state 1)
 
-## `qacc_warmstart` — 13
+## `efc_force` — 12
 
-Where it first appears: 6 at step 1, 2 at step 20, 2 at step 19, 1 at step 9, 1 at step 18, 1 at step 12.
+Where it first appears: 5 at step 1, 2 at step 20, 2 at step 19, 1 at step 9, 1 at step 18, 1 at step 12.
 
-- `bitcraze_crazyflie_2/cf2.xml` (step 1)
+`qfrc_passive`, `qfrc_actuator`, and `qacc_smooth` match at that step. The step log still names `qacc_warmstart`, because that is the copy of this step's `qacc` and the log does not store `efc_force`.
+
 - `boston_dynamics_spot/scene_arm.xml` (step 20)
 - `franka_emika_panda/scene.xml` (step 1)
 - `rainbow_robotics_rby1/rby1m_1.2.xml` (step 1)
@@ -109,10 +112,11 @@ Where it first appears: 3 at state 0.
 - `robot_soccer_kit/robot_soccer_kit.xml` (state 0)
 - `robot_soccer_kit/scene.xml` (state 0)
 
-## `qpos` — 2
+## `qpos` — 3
 
-Where it first appears: 2 at step 1.
+Where it first appears: 3 at step 1.
 
+- `bitcraze_crazyflie_2/cf2.xml` (step 1)
 - `bitcraze_crazyflie_2/scene.xml` (step 1)
 - `trossen_wxai/wxai_follower_biarm.xml` (step 1)
 

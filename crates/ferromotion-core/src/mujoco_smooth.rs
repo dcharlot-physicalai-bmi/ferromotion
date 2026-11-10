@@ -1196,7 +1196,14 @@ impl SmoothModel {
             let rho = self.density;
             for (k, (p, q)) in [(1, 2), (0, 2), (0, 1)].into_iter().enumerate() {
                 let v = lvel[3 + k];
-                lfrc[3 + k] = (-(0.5 * rho * bb[p] * bb[q] * v.abs())).mul_add(v, lfrc[3 + k]);
+                // `lfrc -= 0.5*rho*box[p]*box[q]*|v|*v`. `64156abe` multiplies from
+                // `0.5*rho` and subtracts the product.
+                if contract_off() {
+                    let prod = ((((0.5 * rho) * bb[p]) * bb[q]) * v.abs()) * v;
+                    lfrc[3 + k] -= prod;
+                } else {
+                    lfrc[3 + k] = (-(0.5 * rho * bb[p] * bb[q] * v.abs())).mul_add(v, lfrc[3 + k]);
+                }
             }
             for (k, (p, q)) in [(1, 2), (0, 2), (0, 1)].into_iter().enumerate() {
                 let s = (bb[p] * bb[p] * bb[p]).mul_add(bb[p], bb[q] * bb[q] * bb[q] * bb[q]);
