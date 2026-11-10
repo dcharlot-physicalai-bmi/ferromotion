@@ -73,7 +73,7 @@ fn axpy(acc: f64, a: f64, b: f64) -> f64 {
 /// prefix each lane is `res + scl*x`. The tail, and every lane of a short vector,
 /// is `scl*x + res`. `mju_addScl3` and `mju_addToScl3` are that short form for all
 /// three lanes. The published path contracts `scl*x + res`.
-fn add_to_scl(res: &mut [f64], x: &[f64], scl: f64, wide_at: usize) {
+pub(crate) fn add_to_scl(res: &mut [f64], x: &[f64], scl: f64, wide_at: usize) {
     let n = res.len();
     if !oracle_axpy() {
         for i in 0..n {
