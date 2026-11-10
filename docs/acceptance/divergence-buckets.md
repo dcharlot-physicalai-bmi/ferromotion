@@ -2,11 +2,11 @@
 
 Oracle profile `mujoco-3.13.0-x86_64-contract-off`, library `64156abe`, Menagerie pin `4d038b3`. 212 models, three forward states, 20 steps. Equality is `f64::to_bits`.
 
-149 models are exact for all 20 steps. 63 fail a step. `mju_dot3` in the primitive colliders is `(az bz) + (ax bx + ay by)`. Sphere-sphere distance is `(sqrt - r1) - r2`, and the witness offset is `(dist * 0.5) + r1`. Capsule-capsule numerators use the raw segment dots: `(dot12 * v - mc * u) / det`.
+151 models are exact for all 20 steps. 61 fail a step. `mju_dot3` in the primitive colliders is `(az bz) + (ax bx + ay by)`. Sphere-sphere distance is `(sqrt - r1) - r2`, and the witness offset is `(dist * 0.5) + r1`. Capsule-capsule numerators use the raw segment dots: `(dot12 * v - mc * u) / det`.
 
 Box-box edge witnesses use `denom = 1 - b*b`, `s = (d1e - b*d2e) / denom`, `t = b*s - d2e`, then `s = d1e + b*t`. That makes one leap-hand edge distance bit-exact; the 15-model `efc_pos` bucket is otherwise unchanged.
 
-`mj_advance` copies the step's final `qacc` into `qacc_warmstart`. A step miss that shows up there is that step's `qacc`. Comparing `qfrc_passive`, `qfrc_actuator`, `qacc_smooth`, `efc_force`, and `qacc` at the failing step's input splits the old 13-model `qacc_warmstart` bucket: 12 first miss `efc_force` (smooth acceleration already matches), and `bitcraze_crazyflie_2/cf2.xml` first missed `qfrc_passive`. That model has no constraints, so `qacc` is `qacc_smooth`. The site-transmission actuator matches. The 1 ulp was the inertia-box linear drag, `lfrc -= 0.5*rho*box[p]*box[q]*|v|*v`, multiplied from `0.5*rho` and subtracted. After that schedule, step-1 `qacc` matches and the remaining miss is `qpos`.
+`mj_advance` copies the step's final `qacc` into `qacc_warmstart`. A step miss that shows up there is that step's `qacc`. Comparing `qfrc_passive`, `qfrc_actuator`, `qacc_smooth`, `efc_force`, and `qacc` at the failing step's input splits the old 13-model `qacc_warmstart` bucket: 12 first miss `efc_force` (smooth acceleration already matches), and `bitcraze_crazyflie_2/cf2.xml` first missed `qfrc_passive`. That model has no constraints, so `qacc` is `qacc_smooth`. The site-transmission actuator matches. The 1 ulp was the inertia-box linear drag, `lfrc -= 0.5*rho*box[p]*box[q]*|v|*v`, multiplied from `0.5*rho` and subtracted. After that schedule, step-1 `qacc` matches. The remaining `qpos` miss was `mj_RungeKutta`: each tableau weight is one `mju_addToScl` (`nv` for velocity, then `nv+na` for acceleration and `act_dot` together), and `mj_advance` integrates position with that weighted velocity. Both Crazyflie files are now exact for 20 steps.
 
 | models | stage | first field | site |
 | ---: | --- | --- | --- |
@@ -17,7 +17,7 @@ Box-box edge witnesses use `denom = 1 - b*b`, `s = (d1e - b*d2e) / denom`, `t = 
 | 5 | constraint rows | `efc_J` | `mj_instantiateContact` |
 | 4 | constraint rows | `efc_AR` | `mj_makeARNumeric` |
 | 3 | solver | `qacc` | `mj_fwdConstraint` |
-| 3 | integration | `qpos` | `mj_integratePos` |
+| 1 | integration | `qpos` | `mj_integratePos` |
 | 2 | smooth | `ten_velocity` | `mj_fwdVelocity` |
 | 2 | integration | `qvel` | `mj_advance` |
 | 1 | smooth | `qfrc_fluid` | `mj_passive` |
@@ -114,12 +114,10 @@ Where it first appears: 3 at state 0.
 - `robot_soccer_kit/robot_soccer_kit.xml` (state 0)
 - `robot_soccer_kit/scene.xml` (state 0)
 
-## `qpos` — 3
+## `qpos` — 1
 
-Where it first appears: 3 at step 1.
+Where it first appears: 1 at step 1.
 
-- `bitcraze_crazyflie_2/cf2.xml` (step 1)
-- `bitcraze_crazyflie_2/scene.xml` (step 1)
 - `trossen_wxai/wxai_follower_biarm.xml` (step 1)
 
 ## `ten_velocity` — 2
