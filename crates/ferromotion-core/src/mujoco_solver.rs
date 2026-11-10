@@ -66,6 +66,12 @@ fn axpy(acc: f64, a: f64, b: f64) -> f64 {
     if oracle_axpy() { acc + a * b } else { a.mul_add(b, acc) }
 }
 
+/// `s += 0.5*D*jar*jar` in `mj_constraintUpdate_impl`. `64156abe` multiplies
+/// `(D * 0.5) * jar * jar`, then adds that term to `s`.
+fn quad_cost(s: f64, d: f64, jar: f64) -> f64 {
+    if oracle_axpy() { s + (d * 0.5) * jar * jar } else { (0.5 * d * jar).mul_add(jar, s) }
+}
+
 /// `64156abe` inlined `res += scl * x`.
 ///
 /// The out-of-line `mju_addToScl` vectorises at `n >= 6`. `mju_sqrMatTD_impl` and
@@ -126,22 +132,32 @@ fn constraint_update(ne: usize, nf: usize, d: &[f64], r: &[f64], floss: &[f64], 
     let mut i = 0;
     while i < nefc {
         if i < ne {
-            s = (0.5 * d[i] * jar[i]).mul_add(jar[i], s);
+            s = quad_cost(s, d[i], jar[i]);
             state[i] = QUADRATIC;
             i += 1;
             continue;
         }
         if i < ne + nf {
             if jar[i] <= -r[i] * floss[i] {
-                s += (-0.5 * r[i] * floss[i]).mul_add(floss[i], -(floss[i] * jar[i]));
+                // `((R*-0.5)*floss)*floss - jar*floss`, then `s + term`.
+                s = if oracle_axpy() {
+                    s + (((r[i] * -0.5) * floss[i]) * floss[i] - jar[i] * floss[i])
+                } else {
+                    s + (-0.5 * r[i] * floss[i]).mul_add(floss[i], -(floss[i] * jar[i]))
+                };
                 force[i] = floss[i];
                 state[i] = LINEARNEG;
             } else if jar[i] >= r[i] * floss[i] {
-                s += (-0.5 * r[i] * floss[i]).mul_add(floss[i], floss[i] * jar[i]);
+                // `(jar*floss) + ((R*-0.5)*floss)*floss`, then `s + term`.
+                s = if oracle_axpy() {
+                    s + (jar[i] * floss[i] + ((r[i] * -0.5) * floss[i]) * floss[i])
+                } else {
+                    s + (-0.5 * r[i] * floss[i]).mul_add(floss[i], floss[i] * jar[i])
+                };
                 force[i] = -floss[i];
                 state[i] = LINEARPOS;
             } else {
-                s = (0.5 * d[i] * jar[i]).mul_add(jar[i], s);
+                s = quad_cost(s, d[i], jar[i]);
                 state[i] = QUADRATIC;
             }
             i += 1;
@@ -152,7 +168,7 @@ fn constraint_update(ne: usize, nf: usize, d: &[f64], r: &[f64], floss: &[f64], 
                 force[i] = 0.0;
                 state[i] = SATISFIED;
             } else {
-                s = (0.5 * d[i] * jar[i]).mul_add(jar[i], s);
+                s = quad_cost(s, d[i], jar[i]);
                 state[i] = QUADRATIC;
             }
             i += 1;
@@ -175,7 +191,7 @@ fn constraint_update(ne: usize, nf: usize, d: &[f64], r: &[f64], floss: &[f64], 
             state[i] = SATISFIED;
         } else if prod_add(mu, n, t) <= 0.0 || (t <= 0.0 && n < 0.0) {
             for j in 0..dim {
-                s = (0.5 * d[i + j] * jar[i + j]).mul_add(jar[i + j], s);
+                s = quad_cost(s, d[i + j], jar[i + j]);
             }
             state[i] = QUADRATIC;
         } else {
@@ -183,7 +199,7 @@ fn constraint_update(ne: usize, nf: usize, d: &[f64], r: &[f64], floss: &[f64], 
             let one_mu = if oracle_axpy() { 1.0 + mu * mu } else { mu.mul_add(mu, 1.0) };
             let dm = d[i] / (mu * mu * one_mu);
             let nmt = axpy(n, -mu, t);
-            s = (0.5 * dm * nmt).mul_add(nmt, s);
+            s = quad_cost(s, dm, nmt);
             force[i] = -dm * nmt * mu;
             for j in 1..dim {
                 force[i + j] = -force[i] / t * u[j] * fr[j - 1];
@@ -1124,10 +1140,12 @@ impl SmoothModel {
         for i in 0..nefc {
             jar[i] -= e.aref[i];
         }
-        let mut cost_ws = constraint_update(ne, nf, &e.d, &e.r, &e.frictionloss, &jar, &e.typ, &e.id, &cones, &mut state, &mut force, None);
+        let cost_con = constraint_update(ne, nf, &e.d, &e.r, &e.frictionloss, &jar, &e.typ, &e.id, &cones, &mut state, &mut force, None);
         let da: Vec<f64> = (0..nv).map(|i| qacc_warmstart[i] - sd.qacc_smooth[i]).collect();
         let mda = mul_sym_vec(&sd.m, &self.m_rownnz, &self.m_rowadr, &self.m_colind, &da);
-        cost_ws = axpy(cost_ws, 0.5, dot(&da, &mda));
+        let gauss = 0.5 * dot(&da, &mda);
+        // `cost += 0.5 * dot(da, M da)`.
+        let mut cost_ws = if oracle_axpy() { cost_con + gauss } else { axpy(cost_con, 0.5, dot(&da, &mda)) };
         let cost_smooth = constraint_update(ne, nf, &e.d, &e.r, &e.frictionloss, &out.efc_b, &e.typ, &e.id, &cones, &mut state, &mut force, None);
         out.qfrc_constraint = if sparse {
             // `mju_mulMatTVecSparse`
