@@ -1199,10 +1199,15 @@ fn impedance(s: &[f64; 5], pos: f64, margin: f64) -> (f64, f64) {
         yp = s[4] * a * power(x, s[4] - 1.0);
     } else {
         let b = 1.0 / power(1.0 - s[3], s[4] - 1.0);
-        y = (-b).mul_add(power(1.0 - x, s[4]), 1.0);
+        let p = power(1.0 - x, s[4]);
+        // `y = 1 - b*(1-x)^p`. Negating `b` first is a different product.
+        y = if oracle_identity() { 1.0 - b * p } else { (-b).mul_add(p, 1.0) };
         yp = s[4] * b * power(1.0 - x, s[4] - 1.0);
     }
-    (y.mul_add(s[1] - s[0], s[0]), yp * sgn * (s[1] - s[0]) / s[2])
+    let width = s[1] - s[0];
+    // `imp = solimp[0] + y*(solimp[1]-solimp[0])`.
+    let imp = if oracle_identity() { s[0] + y * width } else { y.mul_add(width, s[0]) };
+    (imp, yp * sgn * width / s[2])
 }
 
 /// `mju_dot` as clang compiled it into libmujoco `64156abe` (`mulpd`/`addpd`, no FMA).

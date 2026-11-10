@@ -2,19 +2,19 @@
 
 Oracle profile `mujoco-3.13.0-x86_64-contract-off`, library `64156abe`, Menagerie pin `4d038b3`. 212 models, three forward states, 20 steps. Equality is `f64::to_bits`.
 
-151 models are exact for all 20 steps. 61 fail a step. `mju_dot3` in the primitive colliders is `(az bz) + (ax bx + ay by)`. Sphere-sphere distance is `(sqrt - r1) - r2`, and the witness offset is `(dist * 0.5) + r1`. Capsule-capsule numerators use the raw segment dots: `(dot12 * v - mc * u) / det`.
+160 models are exact for all 20 steps. 52 fail a step. `mju_dot3` in the primitive colliders is `(az bz) + (ax bx + ay by)`. Sphere-sphere distance is `(sqrt - r1) - r2`, and the witness offset is `(dist * 0.5) + r1`. Capsule-capsule numerators use the raw segment dots: `(dot12 * v - mc * u) / det`.
 
-Box-box edge witnesses use `denom = 1 - b*b`, `s = (d1e - b*d2e) / denom`, `t = b*s - d2e`, then `s = d1e + b*t`. The edge corner `mji_mulMatVec3` is `(m2 v2) + (m1 v1 + m0 v0)`, then `pos +` that. Leap hand `efc_pos` is exact on all three forward states. The 20-step set is unchanged: those models still miss `efc_J`.
+Box-box edge witnesses use `denom = 1 - b*b`, `s = (d1e - b*d2e) / denom`, `t = b*s - d2e`, then `s = d1e + b*t`. The edge corner `mji_mulMatVec3` is `(m2 v2) + (m1 v1 + m0 v0)`, then `pos +` that. Leap hand `efc_pos` is exact on all three forward states. Those four models still miss a step; the next forward field is `efc_J`.
 
 `mj_advance` copies the step's final `qacc` into `qacc_warmstart`. A step miss that shows up there is that step's `qacc`. Comparing `qfrc_passive`, `qfrc_actuator`, `qacc_smooth`, `efc_force`, and `qacc` at the failing step's input splits the old 13-model `qacc_warmstart` bucket: 12 first miss `efc_force` (smooth acceleration already matches), and `bitcraze_crazyflie_2/cf2.xml` first missed `qfrc_passive`. That model has no constraints, so `qacc` is `qacc_smooth`. The site-transmission actuator matches. The 1 ulp was the inertia-box linear drag, `lfrc -= 0.5*rho*box[p]*box[q]*|v|*v`, multiplied from `0.5*rho` and subtracted. After that schedule, step-1 `qacc` matches. The remaining `qpos` miss was `mj_RungeKutta`: each tableau weight is one `mju_addToScl` (`nv` for velocity, then `nv+na` for acceleration and `act_dot` together), and `mj_advance` integrates position with that weighted velocity. Both Crazyflie files are now exact for 20 steps.
 
 | models | stage | first field | site |
 | ---: | --- | --- | --- |
-| 15 | collision | `efc_pos` | `mjraw primitive / mesh` |
-| 12 | solver | `efc_force` | `mj_fwdConstraint` |
+| 12 | collision | `efc_pos` | `mjraw primitive / mesh` |
+| 7 | solver | `efc_force` | `mj_fwdConstraint` |
 | 9 | constants | `tendon_invweight0` | `set0 tendon block` |
 | 7 | kinematics | `ten_length` | `mj_tendon` |
-| 5 | constraint rows | `efc_J` | `mj_instantiateContact` |
+| 4 | constraint rows | `efc_J` | `mj_instantiateContact` |
 | 4 | constraint rows | `efc_AR` | `mj_makeARNumeric` |
 | 3 | solver | `qacc` | `mj_fwdConstraint` |
 | 1 | integration | `qpos` | `mj_integratePos` |
@@ -22,19 +22,16 @@ Box-box edge witnesses use `denom = 1 - b*b`, `s = (d1e - b*d2e) / denom`, `t = 
 | 2 | integration | `qvel` | `mj_advance` |
 | 1 | smooth | `qfrc_fluid` | `mj_passive` |
 
-## `efc_pos` — 15
+## `efc_pos` — 12
 
-Where it first appears: 9 at state 1, 4 at state 2, 2 at state 0.
+Where it first appears: 6 at state 1, 4 at state 2, 2 at state 0.
 
-- `anybotics_anymal_b/scene.xml` (state 1)
-- `anybotics_anymal_c/scene.xml` (state 1)
 - `apptronik_apollo/scene.xml` (state 2)
 - `google_barkour_vb/scene_hfield_mjx.xml` (state 0)
 - `leap_hand/left_hand.xml` (state 1)
 - `leap_hand/right_hand.xml` (state 2)
 - `leap_hand/scene_left.xml` (state 1)
 - `leap_hand/scene_right.xml` (state 1)
-- `shadow_hand/left_hand.xml` (state 1)
 - `stanford_tidybot/scene.xml` (state 2)
 - `toddlerbot_2xm/scene.xml` (state 1)
 - `toddlerbot_2xm/toddlerbot_2xm.xml` (state 1)
@@ -42,32 +39,23 @@ Where it first appears: 9 at state 1, 4 at state 2, 2 at state 0.
 - `wonik_allegro/scene_left.xml` (state 2)
 - `wonik_allegro/scene_right.xml` (state 1)
 
-## `efc_force` — 12
+## `efc_force` — 7
 
-Where it first appears: 5 at step 1, 2 at step 20, 2 at step 19, 1 at step 9, 1 at step 18, 1 at step 12.
+Where it first appears: 5 at step 1, 1 at step 9, 1 at step 18.
 
-`qfrc_passive`, `qfrc_actuator`, and `qacc_smooth` match at that step. The step log still names `qacc_warmstart`, because that is the copy of this step's `qacc` and the log does not store `efc_force`.
+`qfrc_passive`, `qfrc_actuator`, and `qacc_smooth` match at that step. The step log still names `qacc_warmstart`, because that is the copy of this step's `qacc`.
 
-All 12 use Newton, and every `nv` is below 60, so the factorization is the dense `mju_cholUpdate`. None use CG, PGS, or `mju_cholUpdateSparse`.
+All seven are Newton and dense (`nv` below 60). Spot's elliptic miss was not the cone force. `J` and `qacc` matched and `efc_aref` was one ulp off, from `getimpedance`: `imp = solimp[0] + y*(solimp[1]-solimp[0])`. With that product separated, Spot and eight other models are exact for 20 steps.
 
-Elliptic contacts at that step (8): `boston_dynamics_spot/scene_arm.xml`, both `rainbow_robotics_rby1/scene_rby1a_1.2` files, `robotiq_2f85/2f85.xml`, `robotstudio_so101/scene_box.xml`, `shadow_hand/scene_right.xml`, `sharpa_wave/scene_left.xml`, `unitree_go1/go1.xml`. On Spot, one Newton step reproduces `qacc` and the elliptic `efc_force[0]` still differs. The middle-zone normal is `N - mu*T`.
+`toddlerbot_2xc_mjx` has one island, so the solver scale is `1/sum(diag M)`, bits `0x3fb7c7cbbacf81d1`, not `1/(meaninertia*nv)`. Iteration 1's improvement matches (`0x41b6b1b1798c8003`). The scaled gradient is three ulps off (`0x3fd3e6b0315133e4` vs `0x3fd3e6b0315133e7`) because `mju_norm(grad)` is four ulps off. The next linesearch then returns `alpha = 0`.
 
-Pyramidal contacts (3): `franka_emika_panda/scene.xml`, `rainbow_robotics_rby1/rby1m_1.2.xml`, `toddlerbot_2xc/toddlerbot_2xc.xml`. Franka's `efc_force[0]` and `qacc[0]` match through iteration 3.
-
-No contacts (1): `toddlerbot_2xc/toddlerbot_2xc_mjx.xml` (equality, dof friction, tendon limit). Iterations 0 and 1 match; the next iteration is where it parts.
-
-- `boston_dynamics_spot/scene_arm.xml` (step 20)
 - `franka_emika_panda/scene.xml` (step 1)
 - `rainbow_robotics_rby1/rby1m_1.2.xml` (step 1)
-- `rainbow_robotics_rby1/scene_rby1a_1.2.xml` (step 20)
-- `rainbow_robotics_rby1/scene_rby1a_1.2_no_gripper.xml` (step 19)
 - `robotiq_2f85/2f85.xml` (step 9)
 - `robotstudio_so101/scene_box.xml` (step 18)
 - `shadow_hand/scene_right.xml` (step 1)
-- `sharpa_wave/scene_left.xml` (step 12)
 - `toddlerbot_2xc/toddlerbot_2xc.xml` (step 1)
 - `toddlerbot_2xc/toddlerbot_2xc_mjx.xml` (step 1)
-- `unitree_go1/go1.xml` (step 19)
 
 ## `tendon_invweight0` — 9
 
@@ -95,12 +83,11 @@ Where it first appears: 4 at state 1, 3 at state 2.
 - `toddlerbot_2xm/scene_pos.xml` (state 1)
 - `toddlerbot_2xm/toddlerbot_2xm_mjx.xml` (state 1)
 
-## `efc_J` — 5
+## `efc_J` — 4
 
-Where it first appears: 3 at state 1, 2 at state 0.
+Where it first appears: 2 at state 1, 2 at state 0.
 
 - `franka_emika_panda/mjx_single_cube.xml` (state 1)
-- `pndbotics_adam_lite/scene.xml` (state 1)
 - `robotiq_2f85/scene.xml` (state 0)
 - `robotiq_2f85_v4/scene.xml` (state 0)
 - `toddlerbot_2xm/toddlerbot_2xm_pos.xml` (state 1)
