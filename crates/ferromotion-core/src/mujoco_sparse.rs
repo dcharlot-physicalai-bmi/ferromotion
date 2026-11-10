@@ -311,21 +311,34 @@ impl Chol {
             let nnz = self.l[row].len() - 1;
             let diag = self.l[row][nnz];
             let xr = dense[row];
-            let mut tmp = diag.mul_add(diag, if plus { xr * xr } else { -xr * xr });
+            let xx = xr * xr;
+            let mut tmp = if oracle_contract_off() {
+                let ll = diag * diag;
+                // plus: `x x + diag diag`. minus: `(-x x) + diag diag`.
+                if plus { xx + ll } else { -xx + ll }
+            } else {
+                diag.mul_add(diag, if plus { xx } else { -xx })
+            };
             if tmp < 1e-15 {
                 tmp = 1e-15;
                 rank -= 1;
             }
             let r = tmp.sqrt();
             self.l[row][nnz] = r;
+            // `(c, s) = (diag, -x) / (r, r)`, then `s_signed = -s` on an update.
             let c = diag / r;
             let s = -xr / r;
             let ss = if plus { -s } else { s };
             for i in 0..nnz {
                 let j = self.l_colind[row][i];
                 let (dj, mv) = (dense[j], self.l[row][i]);
-                self.l[row][i] = c.mul_add(mv, ss * dj);
-                dense[j] = s.mul_add(mv, c * dj);
+                if oracle_contract_off() {
+                    self.l[row][i] = ss * dj + c * mv;
+                    dense[j] = s * mv + c * dj;
+                } else {
+                    self.l[row][i] = c.mul_add(mv, ss * dj);
+                    dense[j] = s.mul_add(mv, c * dj);
+                }
             }
         }
         rank

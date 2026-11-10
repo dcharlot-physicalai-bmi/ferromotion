@@ -315,22 +315,46 @@ pub(crate) fn chol_solve(mat: &[f64], vec: &[f64], n: usize) -> Vec<f64> {
 }
 
 /// `mju_cholUpdate`: `L·L' ± x·x'`; returns the rank.
+///
+/// `64156abe` does not use `hypot`. The diagonal is `sqrt` of `(x x + L L)` on an
+/// update and `(L L - x x)` on a downdate, clamped at `mjMINVAL`. `c = r/L` and
+/// `s = x/L` are one packed division, `cinv = 1/c`. An update writes
+/// `(s x + L) cinv`; a downdate writes `(L - s x) cinv`. The vector is then
+/// `(c x) - (s Lnew)`. The published path fuses those products.
 fn chol_update(mat: &mut [f64], x: &mut [f64], n: usize, plus: bool) -> usize {
     let mut rank = n;
     for k in 0..n {
-        if x[k] != 0.0 {
-            let lkk = mat[k * (n + 1)];
-            let xx = if plus { x[k] * x[k] } else { -(x[k] * x[k]) };
-            let mut tmp = lkk.mul_add(lkk, xx);
-            if tmp < MJ_MINVAL {
-                tmp = MJ_MINVAL;
-                rank -= 1;
+        if x[k] == 0.0 {
+            continue;
+        }
+        let lkk = mat[k * (n + 1)];
+        let xx = x[k] * x[k];
+        let mut tmp = if oracle_axpy() {
+            let ll = lkk * lkk;
+            if plus { xx + ll } else { ll - xx }
+        } else if plus {
+            lkk.mul_add(lkk, xx)
+        } else {
+            lkk.mul_add(lkk, -xx)
+        };
+        if tmp < MJ_MINVAL {
+            tmp = MJ_MINVAL;
+            rank -= 1;
+        }
+        let r = tmp.sqrt();
+        let c = r / lkk;
+        let cinv = 1.0 / c;
+        let s = x[k] / lkk;
+        mat[k * (n + 1)] = r;
+        if oracle_axpy() {
+            for i in k + 1..n {
+                let v = mat[i * n + k];
+                mat[i * n + k] = if plus { (s * x[i] + v) * cinv } else { (v - s * x[i]) * cinv };
             }
-            let r = tmp.sqrt();
-            let c = r / lkk;
-            let cinv = 1.0 / c;
-            let s = x[k] / lkk;
-            mat[k * (n + 1)] = r;
+            for i in k + 1..n {
+                x[i] = c * x[i] - s * mat[i * n + k];
+            }
+        } else {
             for i in k + 1..n {
                 let v = mat[i * n + k];
                 mat[i * n + k] = if plus { s.mul_add(x[i], v) } else { (-s).mul_add(x[i], v) } * cinv;
