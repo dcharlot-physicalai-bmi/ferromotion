@@ -866,9 +866,19 @@ pub fn capsule_box(margin: f64, p1: &GeomPose, size1: [f64; 2], p2: &GeomPose, s
 /// `mju_makeFrame`: complete `[normal, tangent]` into an orthonormal frame; a zero tangent is replaced by
 /// `y` unless the normal is mostly `y`, in which case `z`.
 pub fn make_frame(normal: Vector3<f64>, tangent: Vector3<f64>) -> [Vector3<f64>; 3] {
-    // as clang contracts `mju_makeFrame` (`mju_normalize3`, `mju_dot3`, `mji_cross` each fuse their products)
-    let dot = |a: &Vector3<f64>, b: &Vector3<f64>| a.z.mul_add(b.z, a.x.mul_add(b.x, a.y * b.y));
-    let norm = |v: &Vector3<f64>| dot(v, v).sqrt();
+    // Published path: clang fuses `mju_normalize3`, `mju_dot3` and `mji_cross`.
+    // `64156abe` is the source: `(x*x + y*y) + z*z`, `(a0*b0 + a1*b1) + a2*b2`, and `a1*b2 - a2*b1`.
+    let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
+    let dot = |a: &Vector3<f64>, b: &Vector3<f64>| {
+        if separate {
+            (a.x * b.x + a.y * b.y) + a.z * b.z
+        } else {
+            a.z.mul_add(b.z, a.x.mul_add(b.x, a.y * b.y))
+        }
+    };
+    let norm = |v: &Vector3<f64>| {
+        if separate { (v.x * v.x + v.y * v.y + v.z * v.z).sqrt() } else { dot(v, v).sqrt() }
+    };
     let n = normal * (1.0 / norm(&normal));
     let mut t = tangent;
     if dot(&t, &t) < 0.25 {
@@ -876,7 +886,11 @@ pub fn make_frame(normal: Vector3<f64>, tangent: Vector3<f64>) -> [Vector3<f64>;
     }
     t -= n * dot(&n, &t);
     t *= 1.0 / norm(&t);
-    let z = Vector3::new(n.y.mul_add(t.z, -(n.z * t.y)), n.z.mul_add(t.x, -(n.x * t.z)), n.x.mul_add(t.y, -(n.y * t.x)));
+    let z = if separate {
+        Vector3::new(n.y * t.z - n.z * t.y, n.z * t.x - n.x * t.z, n.x * t.y - n.y * t.x)
+    } else {
+        Vector3::new(n.y.mul_add(t.z, -(n.z * t.y)), n.z.mul_add(t.x, -(n.x * t.z)), n.x.mul_add(t.y, -(n.y * t.x)))
+    };
     [n, t, z]
 }
 

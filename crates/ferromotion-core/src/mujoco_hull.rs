@@ -25,10 +25,11 @@
 //! to [`crate::try_convex_hull_3d`]: the same polytope, not the same order.
 //!
 //! ⭐ And the polygons come out in MuJoCo's ORDER, which is not the faces' order: `MakePolygons` gathers them
-//! in a `std::unordered_map` keyed by the rounded normal angles and walks it, so the order is libc++'s
-//! (`libcpp_unordered_order`, with MuJoCo's `PairHash`). The collider reads polygons by index — a vertex's
-//! polygons are listed in index order and the first of equal candidates wins — so on Menagerie this order
-//! alone moved mesh–mesh contacts from 897 to 1,291 of 1,293.
+//! in a `std::unordered_map` keyed by the rounded normal angles and walks it. The published path is libc++
+//! (`libcpp_unordered_order`, with MuJoCo's `PairHash`). The contract-off oracle `64156abe` links libstdc++,
+//! so that identity walks `libstdcpp_unordered_order` instead. The collider reads polygons by index — a
+//! vertex's polygons are listed in index order and the first of equal candidates wins — so on Menagerie this
+//! order alone moved mesh–mesh contacts from 897 to 1,291 of 1,293.
 
 use crate::TriMesh3;
 use nalgebra::Vector3;

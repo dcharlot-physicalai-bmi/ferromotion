@@ -93,10 +93,12 @@ pub(crate) fn dot_sparse(v: &[f64], x: &[f64], ind: &[usize]) -> f64 {
 /// zero coefficient skipped, each fused into the running column.
 fn mul_mat_t_vec3(j: &[[f64; 3]], v: &[f64; 3]) -> Vec<f64> {
     let mut res = vec![0.0f64; j.len()];
+    // `mju_mulMatTVec` → `mju_addToScl`: `res += jac_row * wrench`. `64156abe` adds the product.
+    let separate = contract_off();
     for r in 0..3 {
         if v[r] != 0.0 {
             for (x, row) in res.iter_mut().zip(j) {
-                *x = row[r].mul_add(v[r], *x);
+                *x = if separate { *x + row[r] * v[r] } else { row[r].mul_add(v[r], *x) };
             }
         }
     }
