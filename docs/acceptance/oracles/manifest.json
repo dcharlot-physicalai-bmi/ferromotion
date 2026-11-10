@@ -148,6 +148,15 @@
       "library_path": "/usr/lib/gcc/x86_64-linux-gnu/14",
       "artifact": "libmujoco.so.3.13.0",
       "artifact_sha256": "64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc",
+      "source_path": "/tmp/mujoco-3.13.0-src",
+      "build_path": "/tmp/oracle-x86-contract-off/build",
+      "path_note": "The same flags at a different source path produce a different library hash. The other recorded value is 64c5451f. This entry is the /tmp/mujoco-3.13.0-src build. Reproduced on this host.",
+      "plugins": {
+        "libactuator.so": "d4e8a8c9f09cc48ea0d6c93e173f5ac84df6010108a9d1c05b14c2f9e3b19e6b",
+        "libelasticity.so": "f66481f7eb39e41d693acfa592329d08f04d931cf03a77cc24ed4690032cc504",
+        "libsensor.so": "1c95a7186e02d390e38308fa836ba8bf7a7c0b916d428e01926d89f95ba4b0fc",
+        "libsdf_plugin.so": "f04e5207c5f7080ef4564f7425b8b583d5aaa24da5181fcf8ff843a1beca70b9"
+      },
       "build_script": "scripts/build_mujoco_3130_x86_contract_off.sh",
       "mju_mulQuat_instructions": "SSE mulpd/addpd, no FMA",
       "mju_mulQuat_probe_bits": "3fe8000000000000 bfc5c28f5c28f5c2 3fc3333333333333 3fdc28f5c28f5c29",
@@ -163,6 +172,113 @@
       "qpos0_geom_frames_versus_default_ferromotion": "0 of 14842 bit-exact",
       "op_bisect": "docs/acceptance/oracles/x86_64-contract-off-op-bisect.json",
       "default_mul_quat_changed": false
+    },
+    {
+      "id": "mujoco-3.14.0-x86_64-contract-off",
+      "role": "source build of tag 3.14.0, same recipe as mujoco-3.13.0-x86_64-contract-off",
+      "status": "built_on_this_x86_64_host",
+      "replaces_3130": false,
+      "mujoco_version": "3.14.0",
+      "mujoco_source_sha": "9ecbb9d7b5ee623f54745638d36799ff90e6f7cd",
+      "mujoco_tree": "cece271bb60f5b3b07273f98ce71a6675b76444b",
+      "source_path": "/tmp/mujoco-3.14.0-src",
+      "build_path": "/tmp/oracle-x86-contract-off-3.14.0/build",
+      "artifact": "libmujoco.so.3.14.0",
+      "artifact_sha256": "8e9e455408b43e76929bfc199ce0be98ee38daaab8b048ed824ce47f559cc9e3",
+      "plugins": {
+        "libactuator.so": "6fff3a3d838d21596ba3ff56cab3845b4f737ff7565d49b2b078bf25ed084f87",
+        "libelasticity.so": "c83798351c475a49b442a6d34bc98061cbee5e3f695cfdab5f54381a276cafb1",
+        "libsensor.so": "723fb75f3fb0bff2c49f10eaf2da48eaa57612fb48cb16f963ebab8d5d7b0a7a",
+        "libsdf_plugin.so": "ad43f08655257c67749d5dfb2d917bc8ce624701a0203ea76eddf47f2ef98161"
+      },
+      "build_script": "scripts/build_mujoco_x86_contract_off.sh"
+    },
+    {
+      "id": "mujoco-3.15.0-x86_64-contract-off",
+      "role": "source build of tag 3.15.0, same recipe as mujoco-3.13.0-x86_64-contract-off",
+      "status": "built_on_this_x86_64_host",
+      "replaces_3130": false,
+      "mujoco_version": "3.15.0",
+      "mujoco_source_sha": "9ea3cdfcae93bf2cc4dc0e1a1627c5a39a1e06e5",
+      "mujoco_tree": "9dc96300a8b94fccb96f94c3c79aca6edcb0d80a",
+      "source_path": "/tmp/mujoco-3.15.0-src",
+      "build_path": "/tmp/oracle-x86-contract-off-3.15.0/build",
+      "artifact": "libmujoco.so.3.15.0",
+      "artifact_sha256": "bdafe2e11ea0c3044a5d4db9b40b4f1ab21aa7bf9e8484b2955a4f9a22480ca4",
+      "plugins": {
+        "libactuator.so": "9bd90583de7781a33d15b1be3177c0be172f30e0da5024496ef754a2e2c2720e",
+        "libelasticity.so": "e874f1fa1c8489c91e79c7804d920b00d4a91b0f3c196fa64302eb0d23c64170",
+        "libsensor.so": "c95b308f27358146c6a9dd880f98ae379a3cdabfbb9aad7a29d56b8e40ccbcb0",
+        "libsdf_plugin.so": "e5b7b467d78e0c8e7b6db1d61b0bea36546c59aa1d2daeb020fa9c1b70542dbb"
+      },
+      "build_script": "scripts/build_mujoco_x86_contract_off.sh"
+    },
+    {
+      "id": "mujoco-3.16.0-x86_64-contract-off",
+      "role": "source build of tag 3.16.0, same recipe as mujoco-3.13.0-x86_64-contract-off",
+      "status": "built_on_this_x86_64_host",
+      "replaces_3130": false,
+      "mujoco_version": "3.16.0",
+      "mujoco_source_sha": "a892750516336d8358949f4518fcc4fbbd85beae",
+      "mujoco_tree": "ad5b62f51a8ad9ed87439de2a87bbc51ba5f9159",
+      "source_path": "/tmp/mujoco-3.16.0-src",
+      "build_path": "/tmp/oracle-x86-contract-off-3.16.0/build",
+      "artifact": "libmujoco.so.3.16.0",
+      "artifact_sha256": "14511e7c311e7af755f67586450faafda04c0a57809d4df58bb36790fae5e1c6",
+      "plugins": {
+        "libactuator.so": "1b2b1a3a74f3f8102493994d81ac66f9fa503bfd6ecbcf0d129c7cadcceb75b7",
+        "libelasticity.so": "0975f62a301db83266866c353b9fd15590c1661bde1d9847b7d6e3e59bb50554",
+        "libsensor.so": "318bdb16c3c05333f84f713c843557399528f1d7613b84ceec2e550eb6f04b70",
+        "libsdf_plugin.so": "1777cde99c57ef4af5c4a42b9995df789071fc4ada89e07df3594c77d71f28ac"
+      },
+      "build_script": "scripts/build_mujoco_x86_contract_off.sh"
+    },
+    {
+      "id": "mujoco-3.17.0-x86_64-contract-off",
+      "role": "source build of tag 3.17.0, same recipe as mujoco-3.13.0-x86_64-contract-off",
+      "status": "built_on_this_x86_64_host",
+      "replaces_3130": false,
+      "mujoco_version": "3.17.0",
+      "mujoco_source_sha": "800a109a4bdd02cb60404d565db4ae16fb04a53b",
+      "mujoco_tree": "dea445731888479258ad1c34dcfbcab9ef75a832",
+      "source_path": "/tmp/mujoco-3.17.0-src",
+      "build_path": "/tmp/oracle-x86-contract-off-3.17.0/build",
+      "artifact": "libmujoco.so.3.17.0",
+      "artifact_sha256": "5932d34c5c8cca5b862e4ae7234d915b6f99ad546fdf0011010b860a67db874a",
+      "plugins": {
+        "libactuator.so": "a058052445f00bd7ec2d20f2dac50ef997b75ff971fcca5553af9bcfc4ae1198",
+        "libelasticity.so": "a0627566098e2debec22b84adfdd11d2ee8957869dae596ad840755113c44b3e",
+        "libsensor.so": "c972f36f7038bcf6f5b6b8c60012678d38026f930e0dc97797396859ac405fa7",
+        "libsdf_plugin.so": "f0d155e80e03d8b6542f6add853fbcba15156ecff18cf50e178fc9b671860306"
+      },
+      "neqdata": 12,
+      "build_script": "scripts/build_mujoco_x86_contract_off.sh"
+    },
+    {
+      "id": "mujoco-4.0.0-x86_64-contract-off",
+      "role": "source build of tag 4.0.0, same recipe as mujoco-3.13.0-x86_64-contract-off",
+      "status": "built_on_this_x86_64_host",
+      "replaces_3130": false,
+      "aarch64_counts": false,
+      "aarch64_reason": "x86-versus-aarch64 bitwise parity is not proved. scripts/arm_oracle/direct-pull is prepared and was not run.",
+      "mujoco_version": "4.0.0",
+      "mujoco_source_sha": "ac60eae30fa7e0d31315c38d9476752fb81be67e",
+      "mujoco_tree": "6008e06cb48f7836818364cb808fe033e72d88e6",
+      "tag_commit_date": "2026-11-06T12:10:48Z",
+      "source_path": "/tmp/mujoco-4.0.0-src",
+      "build_path": "/tmp/oracle-x86-contract-off-4.0.0/build",
+      "artifact": "libmujoco.so.4.0.0",
+      "artifact_sha256": "4849b2dd05ce3c57d75098ca47a10373866e048fbdf9b57cb7073c0be2210a86",
+      "plugins": {
+        "libactuator.so": "b28d650cac564d472122f28a1276210cc02ddaea217fb6d3ebfd4223e1f5dd3e",
+        "libelasticity.so": null,
+        "libsensor.so": "5153cfe3a20015977850c93d10f2a0e23568c1ffc297ee56582c470f74c2b54f",
+        "libsdf_plugin.so": "3af541e2317bc882e5e4743371b3e23bd64e610adf66fa0dd0e164314fc20e31"
+      },
+      "plugin_directory": "lib/mujoco_plugin",
+      "elasticity_plugin": "removed in 4.0.0",
+      "neqdata": 12,
+      "build_script": "scripts/build_mujoco_x86_contract_off.sh"
     }
   ],
   "proposal_awaiting_foreman": {
