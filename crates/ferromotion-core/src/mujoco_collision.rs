@@ -410,14 +410,14 @@ fn mat_t_mat(a: &Matrix3<f64>, b: &Matrix3<f64>) -> Matrix3<f64> {
     Matrix3::from_fn(|i, j| a[(2, i)].mul_add(b[(2, j)], a[(0, i)].mul_add(b[(0, j)], a[(1, i)] * b[(1, j)])))
 }
 
-/// `mji_mulMatTVec3` with separate products: `(m0*v0 + m1*v1) + m2*v2`.
+/// `mji_mulMatTVec3` as inlined in `mjc_BoxBox` (`64156abe`): `(m2 v2) + (m1 v1 + m0 v0)`.
 fn mat_t_vec_sep(m: &Matrix3<f64>, v: &Vector3<f64>) -> Vector3<f64> {
-    Vector3::from_fn(|c, _| (m[(0, c)] * v.x + m[(1, c)] * v.y) + m[(2, c)] * v.z)
+    Vector3::from_fn(|c, _| (m[(2, c)] * v.z) + (m[(1, c)] * v.y + m[(0, c)] * v.x))
 }
 
-/// `mji_mulMatTMat3` with separate products, left-associated.
+/// `mju_mulMatTMat3` (`0x14d9f0`): `(a2 b2) + (a1 b1 + a0 b0)` per element of `aᵀ b`.
 fn mat_t_mat_sep(a: &Matrix3<f64>, b: &Matrix3<f64>) -> Matrix3<f64> {
-    Matrix3::from_fn(|i, j| (a[(0, i)] * b[(0, j)] + a[(1, i)] * b[(1, j)]) + a[(2, i)] * b[(2, j)])
+    Matrix3::from_fn(|i, j| (a[(2, i)] * b[(2, j)]) + (a[(1, i)] * b[(1, j)] + a[(0, i)] * b[(0, j)]))
 }
 
 /// `mju_normalize3`: below `mjMINVAL` the x axis; otherwise multiplied by the reciprocal of the norm.
@@ -452,7 +452,8 @@ pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2
     for i in 0..3 {
         // `radius2 = |R_i0|*s0 + |R_i1|*s1 + |R_i2|*s2`, then `sep = |p| - size - radius2`.
         let radius2 = if separate {
-            (rotabs[(i, 0)] * size2[0] + rotabs[(i, 1)] * size2[1]) + rotabs[(i, 2)] * size2[2]
+            // `(s2 |R_i2|) + (s0 |R_i0| + s1 |R_i1|)`
+            (rotabs[(i, 2)] * size2[2]) + (rotabs[(i, 0)] * size2[0] + rotabs[(i, 1)] * size2[1])
         } else {
             rotabs[(i, 2)].mul_add(size2[2], rotabs[(i, 0)].mul_add(size2[0], rotabs[(i, 1)] * size2[1]))
         };
@@ -467,7 +468,8 @@ pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2
     }
     for j in 0..3 {
         let radius1 = if separate {
-            (rotabs[(0, j)] * size1[0] + rotabs[(1, j)] * size1[1]) + rotabs[(2, j)] * size1[2]
+            // `(s2 |R_2j|) + (s1 |R_1j| + s0 |R_0j|)`
+            (rotabs[(2, j)] * size1[2]) + (rotabs[(1, j)] * size1[1] + rotabs[(0, j)] * size1[0])
         } else {
             rotabs[(2, j)].mul_add(size1[2], rotabs[(0, j)].mul_add(size1[0], rotabs[(1, j)] * size1[1]))
         };
@@ -487,23 +489,25 @@ pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2
             let (i1, i2) = ((i + 1) % 3, (i + 2) % 3);
             let mut ax1 = -r(i2, j);
             let mut ax2 = r(i1, j);
-            let norm2 = ax1.mul_add(ax1, ax2 * ax2);
+            // `64156abe` squares the unnegated component second: `(ax2 ax2) + (ax1 ax1)`.
+            let norm2 = if separate { ax2 * ax2 + ax1 * ax1 } else { ax1.mul_add(ax1, ax2 * ax2) };
             if norm2 < BOXBOX_PAREPS {
                 continue;
             }
             let inv = 1.0 / norm2.sqrt();
             ax1 *= inv;
             ax2 *= inv;
-            let radius1 = size1[i1].mul_add(ax1.abs(), size1[i2] * ax2.abs());
+            let radius1 = if separate { size1[i2] * ax2.abs() + size1[i1] * ax1.abs() } else { size1[i1].mul_add(ax1.abs(), size1[i2] * ax2.abs()) };
             let (j1, j2) = ((j + 1) % 3, (j + 2) % 3);
-            let a2_1 = ax1.mul_add(r(i1, j1), ax2 * r(i2, j1));
-            let a2_2 = ax1.mul_add(r(i1, j2), ax2 * r(i2, j2));
-            let radius2 = size2[j1].mul_add(a2_1.abs(), size2[j2] * a2_2.abs());
-            let sep = ax1.mul_add(pos21[i1], ax2 * pos21[i2]).abs() - radius1 - radius2;
+            let a2_1 = if separate { ax2 * r(i2, j1) + ax1 * r(i1, j1) } else { ax1.mul_add(r(i1, j1), ax2 * r(i2, j1)) };
+            let a2_2 = if separate { ax2 * r(i2, j2) + ax1 * r(i1, j2) } else { ax1.mul_add(r(i1, j2), ax2 * r(i2, j2)) };
+            let radius2 = if separate { size2[j2] * a2_2.abs() + size2[j1] * a2_1.abs() } else { size2[j1].mul_add(a2_1.abs(), size2[j2] * a2_2.abs()) };
+            let sep = if separate { (ax2 * pos21[i2] + ax1 * pos21[i1]).abs() - radius1 - radius2 } else { ax1.mul_add(pos21[i1], ax2 * pos21[i2]).abs() - radius1 - radius2 };
             if sep > septol {
                 return Vec::new();
             }
-            if (-BOXBOX_EDGEBIAS).mul_add(sep.abs(), sep) > sep_best && sep > sep_face {
+            let biased = if separate { (-BOXBOX_EDGEBIAS) * sep.abs() + sep } else { (-BOXBOX_EDGEBIAS).mul_add(sep.abs(), sep) };
+            if biased > sep_best && sep > sep_face {
                 sep_best = sep;
                 code = 6 + 3 * i as i32 + j as i32;
             }
@@ -543,13 +547,18 @@ pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2
         if dot3(&axis, &pos21) < 0.0 {
             axis = -axis;
         }
-        let a2 = Vector3::from_fn(|c, _| axis[2].mul_add(r(2, c), axis[0].mul_add(r(0, c), axis[1] * r(1, c))));
+        let a2 = if separate {
+            Vector3::from_fn(|c, _| (axis[2] * r(2, c)) + (axis[1] * r(1, c) + axis[0] * r(0, c)))
+        } else {
+            Vector3::from_fn(|c, _| axis[2].mul_add(r(2, c), axis[0].mul_add(r(0, c), axis[1] * r(1, c))))
+        };
         let ambig = BOXBOX_SGNEPS;
         let amb1: Option<usize> = if axis[i1].abs() < ambig { Some(i1) } else if axis[i2].abs() < ambig { Some(i2) } else { None };
         let amb2: Option<usize> = if a2[j1].abs() < ambig { Some(j1) } else if a2[j2].abs() < ambig { Some(j2) } else { None };
         let d2 = Vector3::new(r(0, j), r(1, j), r(2, j));
         let b = d2[i];
-        let denom = (-b).mul_add(b, 1.0);
+        // `denom = 1 - b*b`, `s = (d1e - b*d2e) / denom`, `t = b*s - d2e`, then `s = d1e + b*t`.
+        let denom = if separate { 1.0 - b * b } else { (-b).mul_add(b, 1.0) };
         let (mut w1, mut w2) = (Vector3::zeros(), Vector3::zeros());
         let mut best_d2 = MAXVAL;
         for v1 in 0..if amb1.is_some() { 2 } else { 1 } {
@@ -570,13 +579,21 @@ pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2
                 let e = c2 - c1;
                 let d1e = e[i];
                 let d2e = dot3(&d2, &e);
-                let mut s = if denom < MINVAL { 0.0 } else { (-b).mul_add(d2e, d1e) / denom };
+                let mut s = if denom < MINVAL {
+                    0.0
+                } else if separate {
+                    (d1e - b * d2e) / denom
+                } else {
+                    (-b).mul_add(d2e, d1e) / denom
+                };
                 s = s.clamp(-size1[i], size1[i]);
-                let t = b.mul_add(s, -d2e).clamp(-size2[j], size2[j]);
-                s = b.mul_add(t, d1e).clamp(-size1[i], size1[i]);
+                let t_raw = if separate { b * s - d2e } else { b.mul_add(s, -d2e) };
+                let t = t_raw.clamp(-size2[j], size2[j]);
+                s = if separate { d1e + b * t } else { b.mul_add(t, d1e) };
+                s = s.clamp(-size1[i], size1[i]);
                 let mut p1c = c1;
                 p1c[i] += s;
-                let p2c = Vector3::from_fn(|k, _| d2[k].mul_add(t, c2[k]));
+                let p2c = if separate { Vector3::from_fn(|k, _| c2[k] + d2[k] * t) } else { Vector3::from_fn(|k, _| d2[k].mul_add(t, c2[k])) };
                 let gap = p2c - p1c;
                 let gap2 = dot3(&gap, &gap);
                 if gap2 < best_d2 {
@@ -635,7 +652,7 @@ pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2
     clip_half_plane(&mut poly, 0, -1.0, sizeref[ax]);
     clip_half_plane(&mut poly, 1, 1.0, sizeref[ay]);
     clip_half_plane(&mut poly, 1, -1.0, sizeref[ay]);
-    let dupe2 = BOXBOX_DUPEPS * sizeref[ax].mul_add(sizeref[ax], sizeref[ay] * sizeref[ay]);
+    let dupe2 = if separate { ((sizeref[ax] * sizeref[ax]) + (sizeref[ay] * sizeref[ay])) * BOXBOX_DUPEPS } else { BOXBOX_DUPEPS * sizeref[ax].mul_add(sizeref[ax], sizeref[ay] * sizeref[ay]) };
     let mut accepted: Vec<[f64; 3]> = Vec::new();
     for v in &poly {
         if v[2] > margin {
@@ -643,7 +660,7 @@ pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2
         }
         if accepted.iter().any(|q| {
             let (dx, dy) = (q[0] - v[0], q[1] - v[1]);
-            dx.mul_add(dx, dy * dy) < dupe2
+            (if separate { dy * dy + dx * dx } else { dx.mul_add(dx, dy * dy) }) < dupe2
         }) {
             continue;
         }
