@@ -66,6 +66,36 @@ fn axpy(acc: f64, a: f64, b: f64) -> f64 {
     if oracle_axpy() { acc + a * b } else { a.mul_add(b, acc) }
 }
 
+/// `64156abe` inlined `res += scl * x`.
+///
+/// The out-of-line `mju_addToScl` vectorises at `n >= 6`. `mju_sqrMatTD_impl` and
+/// `mju_mulMatTVec` inline their own copies and vectorise at `n >= 4`. In the wide
+/// prefix each lane is `res + scl*x`. The tail, and every lane of a short vector,
+/// is `scl*x + res`. `mju_addScl3` and `mju_addToScl3` are that short form for all
+/// three lanes. The published path contracts `scl*x + res`.
+fn add_to_scl(res: &mut [f64], x: &[f64], scl: f64, wide_at: usize) {
+    let n = res.len();
+    if !oracle_axpy() {
+        for i in 0..n {
+            res[i] = x[i].mul_add(scl, res[i]);
+        }
+        return;
+    }
+    if n >= wide_at {
+        let prefix = n & !3;
+        for i in 0..prefix {
+            res[i] = res[i] + x[i] * scl;
+        }
+        for i in prefix..n {
+            res[i] = x[i] * scl + res[i];
+        }
+    } else {
+        for i in 0..n {
+            res[i] = x[i] * scl + res[i];
+        }
+    }
+}
+
 /// An expression `a*b + c` (product on the left), as the contract-off source writes it.
 fn prod_add(a: f64, b: f64, c: f64) -> f64 {
     if oracle_axpy() { a * b + c } else { a.mul_add(b, c) }
@@ -222,10 +252,8 @@ fn mul_mat_t_vec(mat: &[f64], vec: &[f64], nr: usize, nc: usize) -> Vec<f64> {
     for r in 0..nr {
         let t = vec[r];
         if t != 0.0 {
-            for c in 0..nc {
-                // `mju_addToScl` inside `mju_mulMatTVec`: `res += row * coeff`.
-                res[c] = axpy(res[c], mat[r * nc + c], t);
-            }
+            // `mju_mulMatTVec` inlines the scale-add and vectorises at `nc >= 4`.
+            add_to_scl(&mut res, &mat[r * nc..(r + 1) * nc], t, 4);
         }
     }
     res
@@ -479,9 +507,8 @@ impl Ctx {
                     let t = self.j[jr * nv + i];
                     if t != 0.0 {
                         let scl = t * self.dvec[jr];
-                        for k in 0..=i {
-                            l[i * nv + k] = axpy(l[i * nv + k], self.j[jr * nv + k], scl);
-                        }
+                        // Inlined `mju_addToScl` inside `mju_sqrMatTD_impl`, length `i + 1`, wide at 4.
+                        add_to_scl(&mut l[i * nv..i * nv + i + 1], &self.j[jr * nv..jr * nv + i + 1], scl, 4);
                     }
                 }
             }
