@@ -89,21 +89,33 @@ pub fn plane_sphere(margin: f64, p1: &GeomPose, p2: &GeomPose, r2: f64) -> Optio
 pub fn sphere_sphere(margin: f64, p1: &GeomPose, r1: f64, p2: &GeomPose, r2: f64) -> Option<PreContact> {
     let dif = p1.pos - p2.pos;
     let cdist_sqr = dot3(&dif, &dif);
-    let min_dist = margin + r1 + r2;
+    // `64156abe`: `(margin + r1) + r2`, then `dist = (sqrt - r1) - r2`.
+    let min_dist = if contract_off() { (margin + r1) + r2 } else { margin + r1 + r2 };
     if cdist_sqr > min_dist * min_dist {
         return None;
     }
-    let dist = cdist_sqr.sqrt() - r1 - r2;
+    let dist = if contract_off() { (cdist_sqr.sqrt() - r1) - r2 } else { cdist_sqr.sqrt() - r1 - r2 };
     let mut normal = p2.pos - p1.pos;
-    let len = dot3(&normal, &normal).sqrt();
+    let len = if contract_off() { ((normal.x * normal.x + normal.y * normal.y) + normal.z * normal.z).sqrt() } else { dot3(&normal, &normal).sqrt() };
     normalize3_mj(&mut normal);
     if len < MINVAL {
         // coincident centres: the cross product of the two z axes, or +x when they are parallel too
         let (a1, a2) = (p1.axis(), p2.axis());
-        normal = Vector3::new(a1.y.mul_add(a2.z, -(a1.z * a2.y)), a1.z.mul_add(a2.x, -(a1.x * a2.z)), a1.x.mul_add(a2.y, -(a1.y * a2.x)));
+        normal = if contract_off() {
+            Vector3::new(a1.y * a2.z - a1.z * a2.y, a1.z * a2.x - a1.x * a2.z, a1.x * a2.y - a1.y * a2.x)
+        } else {
+            Vector3::new(a1.y.mul_add(a2.z, -(a1.z * a2.y)), a1.z.mul_add(a2.x, -(a1.x * a2.z)), a1.x.mul_add(a2.y, -(a1.y * a2.x)))
+        };
         normalize3_mj(&mut normal);
     }
-    Some(pre(dist, normal * (r1 + dist / 2.0) + p1.pos, normal, Vector3::zeros()))
+    // witness: `normal * ((dist * 0.5) + r1) + pos1`
+    let pos = if contract_off() {
+        let s = dist * 0.5 + r1;
+        normal * s + p1.pos
+    } else {
+        normal * (r1 + dist / 2.0) + p1.pos
+    };
+    Some(pre(dist, pos, normal, Vector3::zeros()))
 }
 
 /// `mjc_PlaneCapsule`: `size2 = (radius, half-length)`; each end cap is a plane–sphere test and the
@@ -135,16 +147,19 @@ pub fn capsule_capsule(margin: f64, p1: &GeomPose, size1: [f64; 2], p2: &GeomPos
     let axis1 = p1.axis() * size1[1];
     let axis2 = p2.axis() * size2[1];
     let dif = p1.pos - p2.pos;
+    let raw12 = dot3(&axis1, &axis2);
+    let raw_u = dot3(&axis1, &dif);
     let ma = dot3(&axis1, &axis1);
-    let mb = -dot3(&axis1, &axis2);
+    let mb = -raw12;
     let mc = dot3(&axis2, &axis2);
-    let u = -dot3(&axis1, &dif);
+    let u = -raw_u;
     let v = dot3(&axis2, &dif);
-    let det = ma.mul_add(mc, -(mb * mb));
+    // `64156abe`: `det = (ma mc) - (mb mb)`, then the numerators from the raw dots.
+    let det = if contract_off() { ma * mc - mb * mb } else { ma.mul_add(mc, -(mb * mb)) };
     let ss = |p: Vector3<f64>, q: Vector3<f64>| sphere_sphere(margin, &GeomPose { pos: p, mat: p1.mat }, size1[0], &GeomPose { pos: q, mat: p2.mat }, size2[0]);
     if det.abs() >= MINVAL {
-        let mut x1 = mc.mul_add(u, -(mb * v)) / det;
-        let mut x2 = ma.mul_add(v, -(mb * u)) / det;
+        let mut x1 = if contract_off() { (raw12 * v - mc * raw_u) / det } else { mc.mul_add(u, -(mb * v)) / det };
+        let mut x2 = if contract_off() { (v * ma - raw12 * raw_u) / det } else { ma.mul_add(v, -(mb * u)) / det };
         if x1 > 1.0 {
             x1 = 1.0;
             x2 = (v - mb) / mc;
@@ -367,9 +382,17 @@ fn clip_half_plane(poly: &mut Vec<[f64; 3]>, coord: usize, sign: f64, limit: f64
 // The primitive colliders' arithmetic, contracted as clang contracts MuJoCo's C on arm64 (see
 // `mujoco_ccd`): the LEFT product of `a*b + c*d` fused, each later product of a chain fused into the sum.
 
-/// `mju_dot3` / `mji_dot3`.
+fn contract_off() -> bool {
+    crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID
+}
+
+/// `mju_dot3`: `(az bz) + (ax bx + ay by)`.
 fn dot3(a: &Vector3<f64>, b: &Vector3<f64>) -> f64 {
-    a.z.mul_add(b.z, a.x.mul_add(b.x, a.y * b.y))
+    if contract_off() {
+        (a.z * b.z) + (a.x * b.x + a.y * b.y)
+    } else {
+        a.z.mul_add(b.z, a.x.mul_add(b.x, a.y * b.y))
+    }
 }
 
 /// `mji_mulMatVec3`: `mat · v`.
@@ -399,7 +422,8 @@ fn mat_t_mat_sep(a: &Matrix3<f64>, b: &Matrix3<f64>) -> Matrix3<f64> {
 
 /// `mju_normalize3`: below `mjMINVAL` the x axis; otherwise multiplied by the reciprocal of the norm.
 fn normalize3_mj(v: &mut Vector3<f64>) {
-    let norm = dot3(v, v).sqrt();
+    // `mju_normalize3` sums `(y y + x x) + z z`, not `mju_dot3`.
+    let norm = if contract_off() { ((v.y * v.y + v.x * v.x) + v.z * v.z).sqrt() } else { dot3(v, v).sqrt() };
     if norm < MINVAL {
         *v = Vector3::x();
     } else {
