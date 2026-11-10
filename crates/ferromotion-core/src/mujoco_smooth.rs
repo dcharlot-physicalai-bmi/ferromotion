@@ -1237,7 +1237,8 @@ impl SmoothModel {
             }
             let mut row = vec![0.0f64; t.colind.len()];
             for &(qadr, dof, prm) in &t.path {
-                len[i] = prm.mul_add(qpos[qadr], len[i]);
+                // `L += prm * qpos`. `64156abe` `mj_tendon` multiplies, then adds the product onto `L`.
+                len[i] = if contract_off() { prm * qpos[qadr] + len[i] } else { prm.mul_add(qpos[qadr], len[i]) };
                 if let Some(k) = t.colind.iter().position(|&c| c == dof) {
                     row[k] = prm.mul_add(1.0, row[k]);
                 }
