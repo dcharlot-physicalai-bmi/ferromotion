@@ -88,11 +88,12 @@ fn cross3(a: &V3, b: &V3) -> V3 {
     }
 }
 
-/// `addScl3` / `mji_addToScl3`: `v1 + s·v2`, fused.
+/// `mju_addScl3` / `mju_addToScl3`. `64156abe` multiplies, then adds the base
+/// onto the product: `(s*v2) + v1`. The published path fuses that.
 #[inline]
 fn add_scl3(v1: &V3, v2: &V3, s: f64) -> V3 {
     if contract_off() {
-        V3::new(v1.x + s * v2.x, v1.y + s * v2.y, v1.z + s * v2.z)
+        V3::new(s * v2.x + v1.x, s * v2.y + v1.y, s * v2.z + v1.z)
     } else {
         V3::new(s.mul_add(v2.x, v1.x), s.mul_add(v2.y, v1.y), s.mul_add(v2.z, v1.z))
     }
