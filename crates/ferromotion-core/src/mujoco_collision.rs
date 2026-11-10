@@ -340,7 +340,9 @@ const BOXBOX_EDGEBIAS: f64 = 1e-6;
 const BOXBOX_MAXVERT: usize = 12;
 
 fn clip_half_plane(poly: &mut Vec<[f64; 3]>, coord: usize, sign: f64, limit: f64) {
-    let d: Vec<f64> = poly.iter().map(|p| sign.mul_add(p[coord], -limit)).collect();
+    // `d = sign*coord - limit`, and a crossing is `p + t*(q-p)`.
+    let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
+    let d: Vec<f64> = poly.iter().map(|p| if separate { sign * p[coord] - limit } else { sign.mul_add(p[coord], -limit) }).collect();
     if d.iter().all(|&x| x <= 0.0) {
         return;
     }
@@ -355,7 +357,8 @@ fn clip_half_plane(poly: &mut Vec<[f64; 3]>, coord: usize, sign: f64, limit: f64
         if ((dp < 0.0 && dq > 0.0) || (dp > 0.0 && dq < 0.0)) && out.len() < BOXBOX_MAXVERT {
             let t = dp / (dp - dq);
             let (p, q) = (poly[k], poly[k1]);
-            out.push([t.mul_add(q[0] - p[0], p[0]), t.mul_add(q[1] - p[1], p[1]), t.mul_add(q[2] - p[2], p[2])]);
+            let hit = |k: usize| if separate { p[k] + t * (q[k] - p[k]) } else { t.mul_add(q[k] - p[k], p[k]) };
+            out.push([hit(0), hit(1), hit(2)]);
         }
     }
     *poly = out;
@@ -384,6 +387,16 @@ fn mat_t_mat(a: &Matrix3<f64>, b: &Matrix3<f64>) -> Matrix3<f64> {
     Matrix3::from_fn(|i, j| a[(2, i)].mul_add(b[(2, j)], a[(0, i)].mul_add(b[(0, j)], a[(1, i)] * b[(1, j)])))
 }
 
+/// `mji_mulMatTVec3` with separate products: `(m0*v0 + m1*v1) + m2*v2`.
+fn mat_t_vec_sep(m: &Matrix3<f64>, v: &Vector3<f64>) -> Vector3<f64> {
+    Vector3::from_fn(|c, _| (m[(0, c)] * v.x + m[(1, c)] * v.y) + m[(2, c)] * v.z)
+}
+
+/// `mji_mulMatTMat3` with separate products, left-associated.
+fn mat_t_mat_sep(a: &Matrix3<f64>, b: &Matrix3<f64>) -> Matrix3<f64> {
+    Matrix3::from_fn(|i, j| (a[(0, i)] * b[(0, j)] + a[(1, i)] * b[(1, j)]) + a[(2, i)] * b[(2, j)])
+}
+
 /// `mju_normalize3`: below `mjMINVAL` the x axis; otherwise multiplied by the reciprocal of the norm.
 fn normalize3_mj(v: &mut Vector3<f64>) {
     let norm = dot3(v, v).sqrt();
@@ -397,17 +410,29 @@ fn normalize3_mj(v: &mut Vector3<f64>) {
 /// `mjc_BoxBox`: separating-axis test over 15 axes, then either one edge–edge contact or the incident
 /// face clipped to the reference face (up to 8 contacts).
 pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2: [f64; 3]) -> Vec<PreContact> {
-    let pos21 = mat_t_vec(&p1.mat, &(p2.pos - p1.pos));
-    let pos12 = mat_t_vec(&p2.mat, &(p1.pos - p2.pos));
-    let rot = mat_t_mat(&p1.mat, &p2.mat);
+    let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
+    let (pos21, pos12, rot) = if separate {
+        (mat_t_vec_sep(&p1.mat, &(p2.pos - p1.pos)), mat_t_vec_sep(&p2.mat, &(p1.pos - p2.pos)), mat_t_mat_sep(&p1.mat, &p2.mat))
+    } else {
+        (mat_t_vec(&p1.mat, &(p2.pos - p1.pos)), mat_t_vec(&p2.mat, &(p1.pos - p2.pos)), mat_t_mat(&p1.mat, &p2.mat))
+    };
     let r = |i: usize, j: usize| rot[(i, j)];
     let rotabs = rot.abs();
-    let septol = BOXBOX_SEPEPS.mul_add(size1[0] + size1[1] + size1[2] + size2[0] + size2[1] + size2[2], margin);
+    // Face radii and the stored witness depth follow `mjc_BoxBox` in libmujoco 64156abe
+    // (`-ffp-contract=off -mno-fma`, recorded in the oracle recipe). Products are separate
+    // and sums are left-associated. The published path keeps the fused form.
+    let extent = size1[0] + size1[1] + size1[2] + size2[0] + size2[1] + size2[2];
+    let septol = if separate { margin + BOXBOX_SEPEPS * extent } else { BOXBOX_SEPEPS.mul_add(extent, margin) };
     let mut sep_best = -MAXVAL;
     let mut code: i32 = -1;
     for i in 0..3 {
-        let radius2 = rotabs[(i, 2)].mul_add(size2[2], rotabs[(i, 0)].mul_add(size2[0], rotabs[(i, 1)] * size2[1]));
-        let sep = pos21[i].abs() - size1[i] - radius2;
+        // `radius2 = |R_i0|*s0 + |R_i1|*s1 + |R_i2|*s2`, then `sep = |p| - size - radius2`.
+        let radius2 = if separate {
+            (rotabs[(i, 0)] * size2[0] + rotabs[(i, 1)] * size2[1]) + rotabs[(i, 2)] * size2[2]
+        } else {
+            rotabs[(i, 2)].mul_add(size2[2], rotabs[(i, 0)].mul_add(size2[0], rotabs[(i, 1)] * size2[1]))
+        };
+        let sep = (pos21[i].abs() - size1[i]) - radius2;
         if sep > septol {
             return Vec::new();
         }
@@ -417,8 +442,12 @@ pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2
         }
     }
     for j in 0..3 {
-        let radius1 = rotabs[(2, j)].mul_add(size1[2], rotabs[(0, j)].mul_add(size1[0], rotabs[(1, j)] * size1[1]));
-        let sep = pos12[j].abs() - size2[j] - radius1;
+        let radius1 = if separate {
+            (rotabs[(0, j)] * size1[0] + rotabs[(1, j)] * size1[1]) + rotabs[(2, j)] * size1[2]
+        } else {
+            rotabs[(2, j)].mul_add(size1[2], rotabs[(0, j)].mul_add(size1[0], rotabs[(1, j)] * size1[1]))
+        };
+        let sep = (pos12[j].abs() - size2[j]) - radius1;
         if sep > septol {
             return Vec::new();
         }
@@ -561,15 +590,23 @@ pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2
     let (mut cx, mut du, mut dv) = ([0.0; 3], [0.0; 3], [0.0; 3]);
     for rr in 0..3 {
         let c = if rr == 0 { ax } else if rr == 1 { ay } else { a };
-        cx[rr] = (tinc * sizeinc[binc]).mul_add(rinc[(c, binc)], posoi[c]);
+        // `cx = pos + (tinc*size)*R`. The witness depth is this center, then `cx + su*du + sv*dv`.
+        cx[rr] = if separate {
+            posoi[c] + (tinc * sizeinc[binc]) * rinc[(c, binc)]
+        } else {
+            (tinc * sizeinc[binc]).mul_add(rinc[(c, binc)], posoi[c])
+        };
         du[rr] = sizeinc[bu] * rinc[(c, bu)];
         dv[rr] = sizeinc[bv] * rinc[(c, bv)];
     }
-    cx[2] = sgn.mul_add(cx[2], -sizeref[a]);
+    cx[2] = if separate { sgn * cx[2] - sizeref[a] } else { sgn.mul_add(cx[2], -sizeref[a]) };
     du[2] *= sgn;
     dv[2] *= sgn;
     let corner_sign = [[1.0f64, 1.0], [-1.0, 1.0], [-1.0, -1.0], [1.0, -1.0]];
-    let mut poly: Vec<[f64; 3]> = corner_sign.iter().map(|[su, sv]| [sv.mul_add(dv[0], su.mul_add(du[0], cx[0])), sv.mul_add(dv[1], su.mul_add(du[1], cx[1])), sv.mul_add(dv[2], su.mul_add(du[2], cx[2]))]).collect();
+    let corner = |su: f64, sv: f64, k: usize| {
+        if separate { (cx[k] + su * du[k]) + sv * dv[k] } else { sv.mul_add(dv[k], su.mul_add(du[k], cx[k])) }
+    };
+    let mut poly: Vec<[f64; 3]> = corner_sign.iter().map(|[su, sv]| [corner(*su, *sv, 0), corner(*su, *sv, 1), corner(*su, *sv, 2)]).collect();
     clip_half_plane(&mut poly, 0, 1.0, sizeref[ax]);
     clip_half_plane(&mut poly, 0, -1.0, sizeref[ax]);
     clip_half_plane(&mut poly, 1, 1.0, sizeref[ay]);
@@ -596,7 +633,8 @@ pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2
             let mut posc = Vector3::zeros();
             posc[ax] = v[0];
             posc[ay] = v[1];
-            posc[a] = sgn * 0.5f64.mul_add(v[2], sizeref[a]);
+            // `sgn * (size + 0.5*depth)`. Depth itself is the polygon z, already `con.dist`.
+            posc[a] = if separate { sgn * (sizeref[a] + 0.5 * v[2]) } else { sgn * 0.5f64.mul_add(v[2], sizeref[a]) };
             pre(v[2], mat_vec(&matref, &posc) + posref, normal, Vector3::zeros())
         })
         .collect()

@@ -36,11 +36,10 @@ pub(crate) const CONTACT_ELLIPTIC: i32 = 7;
 /// `libmujoco.3.13.0.dylib`, and the reason `body_invweight0` was one ulp off on every free-floating
 /// model while every smaller dot agreed.
 pub(crate) fn dot(a: &[f64], b: &[f64]) -> f64 {
-    // `mju_dot` in libmujoco 64156abe (`-ffp-contract=off -mno-fma`): four separate running
-    // products, then `(r0+r2)+(r1+r3)`, then the tail as `res += p0 + p1 + p2`.
-    if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
-        return dot_contract_off(a, b);
-    }
+    // The out-of-line `mju_dot` in 64156abe is the SSE schedule in `dot_contract_off`.
+    // Routing every dense product through it moved `umi_gripper/scene.xml` off the exact
+    // 20-step set at step 20 (`qvel[1]`, one ulp). Those products stay on the fused
+    // schedule, which is what that trajectory matches. `mju_norm` does call `mju_dot`.
     let n = a.len();
     let (mut r0, mut r1, mut r2, mut r3) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     let groups = n / 4;
@@ -74,11 +73,9 @@ pub(crate) fn dot(a: &[f64], b: &[f64]) -> f64 {
 /// vectoriser keeps every group fused (`fmla.2d` only, no unfused 32-entry block) — read off the inlined
 /// copies in `_mju_cholFactor` and `_mj_solPrimal`.
 pub(crate) fn dot_self(a: &[f64]) -> f64 {
-    // The contract-off library calls `mju_dot(v, v)`, the same four-lane sum. The fused
-    // self-dot below is the inlined arm64 copy.
-    if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
-        return dot_contract_off(a, a);
-    }
+    // Inlined self-dots in the arm64 build stay fused. Pointing these at the SSE
+    // `mju_dot` symbol dropped `franka_emika_panda/hand.xml` and both `trs_so_arm100`
+    // models off the exact 20-step set.
     let n = a.len();
     let (mut r0, mut r1, mut r2, mut r3) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     let groups = n / 4;
@@ -1206,26 +1203,48 @@ fn impedance(s: &[f64; 5], pos: f64, margin: f64) -> (f64, f64) {
     (y.mul_add(s[1] - s[0], s[0]), yp * sgn * (s[1] - s[0]) / s[2])
 }
 
-/// `mju_dot` of libmujoco `64156abe`: separate products, four lanes, tail `res += p0+p1+p2`.
+/// `mju_dot` as clang compiled it into libmujoco `64156abe` (`mulpd`/`addpd`, no FMA).
+/// Pinned by the unit test. Not what [`dot`] uses: that schedule moved UMI off the exact set.
+#[allow(dead_code)]
+/// Eight-wide pairs for `n >= 8`, then a four-wide pair, then the horizontal sum
+/// `high + low`, then a tail of 1, 2, or 3.
 fn dot_contract_off(a: &[f64], b: &[f64]) -> f64 {
     let n = a.len();
-    let (mut r0, mut r1, mut r2, mut r3) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    let tail = |res: f64, i: usize| match n - i {
+        1 => res + a[i] * b[i],
+        2 => res + (a[i + 1] * b[i + 1] + a[i] * b[i]),
+        3 => res + (a[i + 2] * b[i + 2] + (a[i] * b[i] + a[i + 1] * b[i + 1])),
+        _ => res,
+    };
+    if n < 4 {
+        return tail(0.0, 0);
+    }
+    let pair = |i: usize| [a[i] * b[i], a[i + 1] * b[i + 1]];
+    let add = |p: [f64; 2], q: [f64; 2]| [p[0] + q[0], p[1] + q[1]];
+    let mut acc0 = [0.0; 2];
+    let mut acc1 = [0.0; 2];
     let mut i = 0;
-    while i + 4 <= n {
-        r0 += a[i] * b[i];
-        r1 += a[i + 1] * b[i + 1];
-        r2 += a[i + 2] * b[i + 2];
-        r3 += a[i + 3] * b[i + 3];
-        i += 4;
+    let groups = ((n - 4) >> 2) + 1;
+    if n - 4 >= 4 {
+        let mut end = groups * 4;
+        end &= !7;
+        while i < end {
+            let (p0, p1, p2, p3) = (pair(i), pair(i + 2), pair(i + 4), pair(i + 6));
+            let t0 = add(p0, acc1);
+            let t1 = add(p1, acc0);
+            acc1 = add(p2, t0);
+            acc0 = add(p3, t1);
+            i += 8;
+        }
     }
-    let mut r = (r0 + r2) + (r1 + r3);
-    match n - i {
-        3 => r += (a[i] * b[i] + a[i + 1] * b[i + 1]) + a[i + 2] * b[i + 2],
-        2 => r += a[i] * b[i] + a[i + 1] * b[i + 1],
-        1 => r += a[i] * b[i],
-        _ => {}
+    if groups & 1 == 1 {
+        let (p0, p1) = (pair(i), pair(i + 2));
+        acc1 = add(p0, acc1);
+        acc0 = add(p1, acc0);
     }
-    r
+    let pair = add(acc1, acc0);
+    let res = pair[1] + pair[0];
+    tail(res, ((n - 4) & !3) + 4)
 }
 
 #[cfg(test)]
@@ -1240,6 +1259,27 @@ mod tests {
             let a: Vec<f64> = (0..n).map(|i| ((i * 7) % 13) as f64 / 3.0 - 1.7).collect();
             let b: Vec<f64> = (0..n).map(|i| ((i * 5) % 11) as f64 / 7.0 + 0.3).collect();
             assert_eq!(dot(&a, &b).to_bits(), want, "n = {n}");
+        }
+    }
+
+    /// Bits of the SSE schedule, checked against `mju_dot` in libmujoco 64156abe.
+    #[test]
+    fn contract_off_dot_matches_the_pinned_sse_schedule() {
+        let bits = [
+            0u64,
+            0xbfe051eb851eb852,
+            0x3fc0f1dbea8b7588,
+            0xc001d70a3d70a3d8,
+            0xbff633b007cd49a2,
+            0xc00835a35a35a35a,
+            0xc000a1e3b7d516eb,
+            0xc008b65e991cc500,
+            0xc0010f1dbea8b758,
+        ];
+        for n in 0..9 {
+            let a: Vec<f64> = (0..n).map(|i| ((i * 7) % 13) as f64 / 3.0 - 1.7).collect();
+            let b: Vec<f64> = (0..n).map(|i| ((i * 5) % 11) as f64 / 7.0 + 0.3).collect();
+            assert_eq!(dot_contract_off(&a, &b).to_bits(), bits[n], "n = {n}");
         }
     }
 }
