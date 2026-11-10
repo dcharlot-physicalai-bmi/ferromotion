@@ -48,6 +48,14 @@ Where it first appears: 5 at step 1, 2 at step 20, 2 at step 19, 1 at step 9, 1 
 
 `qfrc_passive`, `qfrc_actuator`, and `qacc_smooth` match at that step. The step log still names `qacc_warmstart`, because that is the copy of this step's `qacc` and the log does not store `efc_force`.
 
+All 12 use Newton, and every `nv` is below 60, so the factorization is the dense `mju_cholUpdate`. None use CG, PGS, or `mju_cholUpdateSparse`.
+
+Elliptic contacts at that step (8): `boston_dynamics_spot/scene_arm.xml`, both `rainbow_robotics_rby1/scene_rby1a_1.2` files, `robotiq_2f85/2f85.xml`, `robotstudio_so101/scene_box.xml`, `shadow_hand/scene_right.xml`, `sharpa_wave/scene_left.xml`, `unitree_go1/go1.xml`. On Spot, one Newton step reproduces `qacc` and the elliptic `efc_force[0]` still differs. The middle-zone normal is `N - mu*T`.
+
+Pyramidal contacts (3): `franka_emika_panda/scene.xml`, `rainbow_robotics_rby1/rby1m_1.2.xml`, `toddlerbot_2xc/toddlerbot_2xc.xml`. Franka's `efc_force[0]` and `qacc[0]` match through iteration 3.
+
+No contacts (1): `toddlerbot_2xc/toddlerbot_2xc_mjx.xml` (equality, dof friction, tendon limit). Iterations 0 and 1 match; the next iteration is where it parts.
+
 - `boston_dynamics_spot/scene_arm.xml` (step 20)
 - `franka_emika_panda/scene.xml` (step 1)
 - `rainbow_robotics_rby1/rby1m_1.2.xml` (step 1)

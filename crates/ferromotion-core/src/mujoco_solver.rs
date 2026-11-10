@@ -198,7 +198,8 @@ fn constraint_update(ne: usize, nf: usize, d: &[f64], r: &[f64], floss: &[f64], 
             // `D/(mu*mu*(1+mu*mu))`: the `1+mu*mu` is one fused multiply-add (`_mj_constraintUpdate_impl`)
             let one_mu = if oracle_axpy() { 1.0 + mu * mu } else { mu.mul_add(mu, 1.0) };
             let dm = d[i] / (mu * mu * one_mu);
-            let nmt = axpy(n, -mu, t);
+            // `N - mu*T`. Negating `mu` first is a different product.
+            let nmt = if oracle_axpy() { n - mu * t } else { axpy(n, -mu, t) };
             s = quad_cost(s, dm, nmt);
             force[i] = -dm * nmt * mu;
             for j in 1..dim {
