@@ -1,0 +1,72 @@
+name: oracle-313-profile
+
+# The 3.13.0 contract-off counts. This job builds that oracle and compares
+# ferromotion under its identity. It does not read a checked-in ledger.
+on:
+  push:
+    branches:
+      - cursor/mujoco-versioned-oracles-f013
+  pull_request:
+    branches:
+      - cursor/mujoco-versioned-oracles-f013
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  profile:
+    name: 3.13 contract-off counts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Compiler and archiver
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y clang-18 cmake ninja-build python3-numpy g++-14 binutils
+          /usr/lib/llvm-18/bin/clang --version
+          test -x /usr/bin/ar
+          test -x /usr/bin/ld.gold
+      - name: MuJoCo 3.13.0 source at the pinned commit
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch 3.13.0 https://github.com/google-deepmind/mujoco.git /tmp/mujoco-3.13.0-src
+          test "$(git -C /tmp/mujoco-3.13.0-src rev-parse HEAD)" = "123347c0eeab7e13c8da0828ab593bbd95bcf335"
+      - name: Contract-off library
+        run: bash scripts/build_mujoco_x86_contract_off.sh 3.13.0 /tmp/mujoco-3.13.0-src /tmp/oracle-x86-contract-off
+      - name: Menagerie pin
+        run: |
+          set -euo pipefail
+          sha=$(python3 -c 'import json; print(json.load(open("conformance/menagerie_pin.json"))["menagerie_sha"])')
+          git clone https://github.com/google-deepmind/mujoco_menagerie.git /tmp/mujoco_menagerie
+          git -C /tmp/mujoco_menagerie checkout --detach "$sha"
+      - name: Dumps
+        run: |
+          set -euo pipefail
+          cc -O2 -I/tmp/mujoco-3.13.0-src/include scripts/oracle_schema_dump.c \
+            /tmp/oracle-x86-contract-off/build/lib/libmujoco.so.3.13.0 \
+            -o /tmp/oracle_schema_dump \
+            -Wl,-rpath,/tmp/oracle-x86-contract-off/build/lib -lm
+          /tmp/oracle_schema_dump schema | tee /tmp/schema.txt
+          grep -q 'ferromotion.mujoco-dump.v1' /tmp/schema.txt
+          mkdir -p /tmp/oracle-dumps
+          /tmp/oracle_schema_dump props /tmp/mujoco_menagerie /tmp/oracle-x86-contract-off/build/lib /tmp/oracle-dumps/props.txt
+          python3 scripts/oracle_schema_schedule.py /tmp/oracle-dumps/props.txt native /tmp/oracle-dumps/native-schedule.txt
+          python3 scripts/oracle_schema_schedule.py /tmp/oracle-dumps/props.txt step /tmp/oracle-dumps/step-schedule.txt
+          /tmp/oracle_schema_dump native /tmp/mujoco_menagerie /tmp/oracle-x86-contract-off/build/lib /tmp/oracle-dumps/native-schedule.txt /tmp/oracle-dumps/native.txt
+          /tmp/oracle_schema_dump step /tmp/mujoco_menagerie /tmp/oracle-x86-contract-off/build/lib /tmp/oracle-dumps/step-schedule.txt /tmp/oracle-dumps/step.txt
+      - name: Profile
+        env:
+          FERROMOTION_BUILD_POLICY: mujoco-3.13.0-x86_64-contract-off
+          FERROMOTION_ORACLE_SHA256: 64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc
+        run: |
+          set -euo pipefail
+          cargo build --release -p ferromotion-core --example menagerie_native --example menagerie_native_step
+          ./target/release/examples/menagerie_native /tmp/mujoco_menagerie /tmp/oracle-dumps/native.txt > /tmp/oracle-dumps/profile-native.txt
+          ./target/release/examples/menagerie_native_step /tmp/mujoco_menagerie /tmp/oracle-dumps/step.txt > /tmp/oracle-dumps/profile-step.txt
+          python3 scripts/oracle_313_profile_check.py /tmp/oracle-dumps/profile-native.txt /tmp/oracle-dumps/profile-step.txt

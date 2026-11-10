@@ -31,7 +31,11 @@ def run(cmd, cwd=None, check=True):
 
 
 def src_commits(old, new):
-    p = run(["git", "-C", FULL, "rev-list", "--reverse", f"{old}..{new}", "--", "src", "include", "plugin"])
+    # First-parent only. A full rev-list includes side-branch trees from months
+    # earlier (one between 3.14 and 3.15 still has no m->nout), which the
+    # dumper cannot compile. The mainline tree at each first-parent commit is
+    # the state that reached the next tag.
+    p = run(["git", "-C", FULL, "rev-list", "--first-parent", "--reverse", f"{old}..{new}", "--", "src", "include", "plugin"])
     commits = [c for c in p.stdout.split() if c]
     # The old tag is the baseline even if it is not in the range.
     base = run(["git", "-C", FULL, "rev-parse", old]).stdout.strip()
@@ -43,78 +47,19 @@ def checkout(commit):
 
 
 def build(commit):
-    checkout(commit)
-    build_dir = os.path.join(WORK, "build")
-    if not os.path.exists(os.path.join(build_dir, "build.ninja")) and not os.path.exists(os.path.join(build_dir, "Makefile")):
-        raise SystemExit(f"missing configured build at {build_dir}")
-    libdir = os.path.join(build_dir, "lib")
-    if os.path.isdir(libdir):
-        for name in os.listdir(libdir):
-            if name.startswith("libmujoco.so"):
-                os.remove(os.path.join(libdir, name))
-    targets = ["mujoco"]
-    for name, path in (
-        ("actuator", "plugin/actuator/CMakeLists.txt"),
-        ("elasticity", "plugin/elasticity/CMakeLists.txt"),
-        ("sensor", "plugin/sensor/CMakeLists.txt"),
-        ("sdf_plugin", "plugin/sdf/CMakeLists.txt"),
-    ):
-        if os.path.exists(os.path.join(FULL, path)):
-            targets.append(name)
-    p = run(["cmake", "--build", build_dir, "--target", *targets, "-j", os.environ.get("JOBS", "4")], check=False)
-    if p.returncode != 0:
-        import shutil
-        shutil.rmtree(os.path.join(build_dir, "_deps"), ignore_errors=True)
-        cache = os.path.join(build_dir, "CMakeCache.txt")
-        if os.path.exists(cache):
-            os.remove(cache)
-        # A CMake change needs a reconfigure. Keep the same prefix and flags.
-        flags = "-O3 -DNDEBUG -fno-fast-math -ffp-contract=off -fno-math-errno -march=x86-64-v2 -mno-fma -mno-avx"
-        env = os.environ.copy()
-        env["LDFLAGS"] = "-fuse-ld=gold"
-        env["LIBRARY_PATH"] = "/usr/lib/gcc/x86_64-linux-gnu/14" + (
-            ":" + env["LIBRARY_PATH"] if env.get("LIBRARY_PATH") else ""
-        )
-        cfg = [
-            "cmake", "-S", FULL, "-B", build_dir,
-            "-DCMAKE_BUILD_TYPE=Release",
-            "-DCMAKE_C_COMPILER=/usr/lib/llvm-18/bin/clang",
-            "-DCMAKE_CXX_COMPILER=/usr/lib/llvm-18/bin/clang++",
-            f"-DCMAKE_C_FLAGS_RELEASE={flags}",
-            f"-DCMAKE_CXX_FLAGS_RELEASE={flags}",
-            f"-DCMAKE_C_FLAGS_DEBUG={flags}",
-            f"-DCMAKE_CXX_FLAGS_DEBUG={flags}",
-            "-DMUJOCO_BUILD_EXAMPLES=OFF",
-            "-DMUJOCO_BUILD_SIMULATE=OFF",
-            "-DMUJOCO_BUILD_TESTS=OFF",
-            "-DMUJOCO_ENABLE_AVX=OFF",
-            "-DMUJOCO_ENABLE_AVX_INTRINSICS=OFF",
-            "-DMUJOCO_ENABLE_LTO=OFF",
-            "-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF",
-        ]
-        c = subprocess.run(cfg, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        if c.returncode != 0:
-            sys.stderr.write(c.stdout[-4000:])
-            raise SystemExit(f"reconfigure failed at {commit}")
-        p = run(["cmake", "--build", build_dir, "--target", *targets, "-j", os.environ.get("JOBS", "4")])
-    lib = None
-    for dirpath, _, files in os.walk(libdir):
-        for name in files:
-            if name.startswith("libmujoco.so.") and not os.path.islink(os.path.join(dirpath, name)):
-                lib = os.path.join(dirpath, name)
-    if lib is None:
-        raise SystemExit(f"no libmujoco at {commit}")
-    plug = os.path.join(build_dir, "lib", "mujoco_plugin")
-    if not os.path.isdir(plug):
-        plug = os.path.join(build_dir, "lib")
-    return lib, plug
+    # Clean tree per commit. The shared incremental tree archived lodepng with
+    # CMAKE_C_COMPILER_AR-NOTFOUND. See oracle_commit_build.py.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from oracle_commit_build import build as clean_build
+    _sha, src, lib, plug = clean_build(commit)
+    return src, lib, plug
 
 
 def dump_signature(commit, schedule, fields):
-    lib, plug = build(commit)
+    src, lib, plug = build(commit)
     out = f"/tmp/bisect-{commit[:12]}.txt"
     exe = f"/tmp/bisect-dump-{commit[:12]}"
-    inc = os.path.join(FULL, "include")
+    inc = os.path.join(src, "include")
     subprocess.run(
         ["cc", "-O2", f"-I{inc}", DUMP_SRC, lib, "-o", exe, f"-Wl,-rpath,{os.path.dirname(lib)}", "-lm"],
         check=True,

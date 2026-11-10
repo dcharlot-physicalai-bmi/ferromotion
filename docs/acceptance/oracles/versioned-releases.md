@@ -83,9 +83,15 @@ Those are the bits pinned by `a_pid_plugin_steps_as_the_contract_off_oracle_does
 * `efc_J` 382 of 636
 * 212 models compared, 0 refused
 
+`.github/workflows/oracle-313-profile.yml` rebuilds that oracle on this branch and fails unless those counts are unchanged. It does not select a later oracle.
+
+## Incremental rebuild
+
+Clang 18.1.3 on this image has no `llvm-ar` beside it. An incremental CMake reconfigure recorded `CMAKE_C_COMPILER_AR-NOTFOUND`, and `cmake_link_script` then failed with `Error running link command: No such file or directory` while archiving `liblodepng.a` (the same failure hits `libccd.a`, `libqhullstatic_r.a`, and `libtinyxml2.a`). The first 3.13.0 configure had used `/usr/bin/ar`. `scripts/build_mujoco_x86_contract_off.sh` and `scripts/oracle_commit_build.py` pass `-DCMAKE_C_COMPILER_AR:FILEPATH=/usr/bin/ar` and the C++ and ranlib counterparts. Commit searches use a clean worktree and build directory per commit, so a later configure cannot rewrite an earlier link script. A link script that still contains `NOTFOUND` is rejected.
+
 ## Release diffs and commits
 
-States are the 3.13.0 native schedule (seed 20260927) and step schedule (seed 20260928), replayed on each later library. Search commits are those that touch `src/`, `include/`, or `plugin/`. A full-corpus dump at each surviving 3.13→3.14 boundary is what the model counts below use. The 3.14.0 tag's native dump and step dump are byte-identical to the tree at `4c33a8355`.
+States are the 3.13.0 native schedule (seed 20260927) and step schedule (seed 20260928), replayed on each later library. Search commits are the first-parent commits that touch `src/`, `include/`, or `plugin/`. A full rev-list pulls side-branch trees from months earlier; one of those, between 3.14 and 3.15, still has no `m->nout`, and the dumper does not compile there. Counts below are parent-versus-commit dumps of the whole 212-model corpus. A model count is the number of models whose field text differs in any native state, or at that step. The union of those model sets equals the tag-versus-tag set for every numeric field in the range. Overlap is expected: one model can move at more than one commit. The 3.14.0 tag's native dump and step dump are byte-identical to the tree at `4c33a8355`.
 
 ### 3.13.0 → 3.14.0
 
@@ -105,16 +111,100 @@ Step `qpos` / `qvel` / `qacc_warmstart` at the 3.14.0 tag match `4c33a8355` on a
 
 #### 3.14.0 → 3.15.0
 
-Native fields that differ, state-aggregated: `efc_type` 28, `efc_pos` 42, `efc_aref` 42, `efc_J` 42, `qacc` 55, `actuator_force` 22, `qacc_smooth` 22, `solver_niter` 16. Step 1 `qpos` and `qvel` differ on 33 models. No compiled `body_inertia` change. The commit was not isolated. The incremental rebuild died while archiving `lodepng` (`Error running link command: No such file or directory`) after the 3.15.0 endpoint had already matched the release dump on the sentinels. Changelog candidates were not promoted to a result.
+Tag versus tag: `qacc` 55, `efc_J` 42, `efc_pos` 42, `actuator_force` 22, `qacc_smooth` 22, `solver_niter` 16. Step 1 `qpos` and `qvel` differ on 33 models. No compiled `body_inertia` change. Four commits, and every native field and every step field is inside their union.
+
+| commit | fields | models | mechanism |
+| --- | --- | --- | --- |
+| `7419720426d1037c5e984b3dc22a9aa464a051af` | `qacc`, `efc_J`, `efc_aref`, `efc_pos`, `efc_force` | 34 | Multicontact keeps the best face instead of the first face inside `mjFACE_TOL`. Step 1 `qpos` 9. |
+| `b47e70849e9ca488dc0f8a80dc4310dbea472daf` | `qacc`, `efc_J`, `efc_pos` | 8 | Polygon winding follows a negative mesh scale. Step 1 `qpos` 2. |
+| `6224e95f6264b99790341f505f8528ece2b866ac` | `efc_J`, `efc_pos`, `efc_aref` | 8; `qacc` 7 | Nativeccd multicontact for capsules. Step 1 `qpos` 3. |
+| `b3dd9e6172a4d5c2bebe523efb43921939e29eb0` | `actuator_force`, `qfrc_actuator`, `qacc_smooth`, `qacc` | 22 | `dampratio` mass is `1 / (J inv(M) J')`, not `dof_M0 / transmission²`. Step 1 `qpos` 23. |
 
 ### 3.15.0 → 3.16.0
 
-`ten_length` 9, `actuator_length` 9, `actuator_force` 19, `qacc` 32, `qacc_smooth` 19, `tendon_invweight0` 6, `efc_aref` 16. Step 1 `qpos` differs on 20 models and `qvel` on 22. Commit not isolated, same rebuild failure.
+Tag versus tag: `qacc` 32, `actuator_force` 19, `qacc_smooth` 19, `ten_length` 9, `tendon_invweight0` 6, `efc_aref` 16. Step 1 `qpos` differs on 20 models and `qvel` on 22. Six commits. `qacc` on `boston_dynamics_spot/spot_arm.xml` and `scene_arm.xml` differs only at native state 2, so a search that watches states 0 and 1 does not see it.
+
+| commit | fields | models | mechanism |
+| --- | --- | --- | --- |
+| `3bc4b769af3f1cbfea1b3bc36cca4f19991aca13` | `ten_length`, `actuator_length` | 9; `tendon_invweight0` 6; `qacc` 9; `actuator_force` 9 | Sphere and cylinder wrap: `atan2` arc length, intersection test from the tangent separation, Newton angle `phi = asin(z)`. Step 1 `qpos` 6. |
+| `9fd6ee025fede513a93007722dd22faa4a814557` | `qacc`, `efc_J` | 2 | An element quaternion replaces the orientation it inherited from its default class. No step change. |
+| `ed357ff8c887dd92caeb46829ea2b1c4d8092f68` | `qacc`, `efc_J` | 8 | Distance queries below `ccd_tolerance` keep the GJK witnesses. Step 1 `qpos` 2. |
+| `ab7f005c91fc8798a05d18a9a0a6664f37ebbef1` | `actuator_force`, `qacc_smooth`, `qacc` | 10 | A shortcut inherits gain and bias from a default written with the same shortcut or with `general`, not from another shortcut. The ten models are the Rainbow RB-Y1 position files. Step 1 `qpos` 10. The ferromotion pid fixture is unchanged. |
+| `efffd3a5fb96659c320224ee20db3e17e3650218` | `qacc`, `efc_J` | 5 | Capsule-capsule `det` is the squared cross of the axes, with a relative parallel test. Step 1 `qpos` 3. |
+| `dcdfe84a48ed14394df36ad17828b85a45a55eaf` | `qacc`, `efc_J` | 2 | When `polygonClip` writes no witness, the edge-contact path does not swap EPA's pair. State 2 only, on the Spot arm. Step 1 `qpos` is `robotis_omy_3m/scene.xml`. Step 20 also moves `pal_talos/talos_position.xml`. |
 
 ### 3.16.0 → 3.17.0
 
-`m eq_data` is absent in the 3.16.0 schema and present, 12 wide, on all 212 models in 3.17.0. `include/mujoco/mjmodel.h` changes `mjNEQDATA` from 11 to 12 in `abddec5b9` (2026-10-21, "Compute the relative pose of welds in mj_setConst, as marked in eq_data[11]"). That is the schema line. Numeric fields that also differ: `qacc` 72, `efc_aref` 74, `efc_J` 74, `efc_pos` 71, `solver_niter` 13. Those numeric fields were not isolated to `abddec5b9` or to `c8362756d`. Step 1 `qpos` differs on 35 models and `qvel` on 37.
+`m eq_data` is absent in the 3.16.0 schema and present, 12 wide, on all 212 models in 3.17.0. Numeric tag-versus-tag counts: `qacc` 72, `efc_aref` 74, `efc_J` 74, `efc_pos` 71, `solver_niter` 13. Step 1 `qpos` differs on 35 models and `qvel` on 37.
+
+`abddec5b9193a56fe6a41833e30206b6a0c4ce61` is the schema line and nothing else on this corpus. Parent versus commit adds `m eq_data` on all 212 models and changes no numeric native field and no step field. The 72-model `qacc` change is the other five commits.
+
+| commit | fields | models | mechanism |
+| --- | --- | --- | --- |
+| `b9243297550a5ead15249e8d4f99d6b07dc377fb` | `qacc`, `efc_J`, `efc_aref` | 16; `efc_pos` 13 | Segment-segment weights moved into `mjc_segWeights`. The dots are reassociated. |
+| `f640345f72b773e7ec52cd9426a57335cf9c6c28` | `qacc`, `efc_J`, `efc_force` | 54; `efc_pos` 56; `solver_niter` 11 | Witness recovery on a non-parallel face projects onto the plane, then along the search direction. |
+| `e15ecd842a086fbddacba3f75a2efb34bef13068` | `qacc`, `efc_J`, `efc_aref` | 4 | Multicontact keeps a clipped vertex out to `margin`, not only on the negative side of the face. |
+| `9f035384db1a0f023c68fb8388e736f8ff811f73` | `qacc`, `efc_force` | 57; `efc_J` 58; `efc_pos` 57 | Polygon normals use Newell's method instead of the first three vertices. |
+| `c8362756d06408a772f42f893234de1bf138d228` | `qacc`, `efc_force`, `solver_niter` | 1 (`hello_robot_stretch_3/scene.xml`) | Solver termination scale is `1 / trace(M)` of the current inertia, not `1 / (stat.meaninertia · nv)`. |
+
+`7394a8672c3e050dbd032e406fef98ac5e59b37d` (boxQP Cholesky, single-precision accuracy) changes 0 native fields and 0 step fields on the 212 models. Refuted for this corpus.
 
 ### 3.17.0 → 4.0.0
 
-Schema lines added on all 212 models: `tendon_type`, `xiquat`, `geom_xquat`, `site_xquat`, `contact_surfacevel`. Values that differ inside the v1 field names: `xpos` 193, `xmat` 206, `ximat` 210, `M` 196, `qacc` 203, `qacc_smooth` 197, `dof_M0` 54, `ten_length` 11. Step 1 `qpos` differs on 155 models and `qvel` on 190. `dynamixel_2r/dynamixel_2r.xml` keeps the same `body_pos`, `body_quat`, `xpos`, `xmat`, and `xquat` at state 0, so this is not a dumper shift. The commit was not isolated. `a206daa42` (`mju_mat2Rot`), `a65050166` (tendon side site), `9a7f240f0` (RK4 orientation), and `3bbf510d4` (NativeCCD) are the changelog entries in this range. They were not confirmed by a dump at the parent and the commit.
+Schema lines added on all 212 models: `tendon_type`, `xiquat`, `geom_xquat`, `site_xquat`, `contact_surfacevel`. Values that differ inside the earlier field names: `xpos` 193, `xmat` 206, `ximat` 210, `M` 196, `qacc` 203, `qacc_smooth` 197, `dof_M0` 54, `ten_length` 11. Step 1 `qpos` differs on 155 models and `qvel` on 190. `dynamixel_2r/dynamixel_2r.xml` keeps the same `body_pos`, `body_quat`, `xpos`, `xmat`, and `xquat` at state 0.
+
+| commit | fields | models | mechanism |
+| --- | --- | --- | --- |
+| `3ab3f0f0c9f3472d982de29402efdd1b74a62b50` | `qacc` | 50; `efc_force` 51 | Elliptic-cone linesearch stores the tangential norm and cancels in the difference, not in `T²`. Step 1 `qpos` 23. |
+| `6f3db612a7304128fe9946b66a401a077f6c4928` | `qacc` | 166; `efc_force` 153 | Dense `mju_cholSolve` backward substitution updates a contiguous row with `mju_addToScl` after the diagonal divide. Step 1 `qpos` 77. |
+| `e161611dd09021337350c025a6c69d375ddcfc16` | `qacc`, `efc_aref`, `efc_J`, `efc_pos` | 20 | Flex stiffness cache key hashes every node, vertex, and element, not a stride sample. Step 1 `qpos` 12. |
+| `a650501666a708920d4e2eec7cf43e7c5925203e` | `ten_length`, `actuator_length` | 9; `qacc` 8; `tendon_invweight0` 6 | `sidesite` picks the wrap by the winding of `end → side → end`, not by a dot product with the tangent midpoint. Step 1 `qpos` 6. |
+| `9a7f240f0336bca1a61720f83eaf1874c92d2b14` | step `qpos`, `qvel`, `qacc_warmstart` | 2 (`bitcraze_crazyflie_2/cf2.xml`, `scene.xml`), all 20 steps | RK4 integrates ball and free orientations through `dexp⁻¹`. No native field changes. |
+| `a63f59172407da77376edb6ab9583f159b8ae73c` | `qacc`, `efc_force` | 54 | Elliptic-cone Hessian and linesearch divide the tangent by `T` before the cubic term. Step 1 `qpos` 28. |
+| `d9972b337c9846b4924ad32c2dae85cbbe08dd3c` | `xpos` 193, `xmat` 206, `ximat` 210, `M` 196, `qacc_smooth` 197, `qacc` 200, `dof_M0` 54, `ten_length` 11 | see counts | Scalar 4-vector sums match a 256-bit reduction: `(a+b)+(c+d)` in normalize and `mulQuat`, `(q00−q22)+(q11−q33)` in `quat2Mat`. Step 1 `qpos` 140. |
+| `3bbf510d477a8ea10c67c8d6fcca808c9f5b4082` | `efc_J` | 71; `qacc` 69; `efc_aref` 65 | Nativeccd drops the legacy `gjkIntersect` fallback and hardens EPA barycentric coordinates and multicontact. Step 1 `qpos` 35. `contact_surfacevel` values differ on 18 models. |
+| `aeb871ba174200a76d61e72487b8f84c788239e2` | step `qpos`, `qvel` | 36 from step 1 | Implicit actuator derivatives are skipped when the joint force is outside `actfrcrange`. No native field changes. |
+
+`a206daa42ea982dd00214255578415459e196450` (`mju_mat2Rot` at 180 degrees) changes 0 native fields and 0 step fields. Refuted for this corpus.
+
+Schema, separate from those numeric commits:
+
+* `64af6504f9af66958e4147c83796b2014b2bd0d8` adds `mjModel.tendon_type`.
+* `629feb74b5a1325d99bcb61aacc79a73bf408817` adds `xiquat`, `geom_xquat`, and `site_xquat`. Parent versus commit, on the v2 line layout, changes 0 native fields and 0 step fields.
+* `9916cc5f7cd89c12193582f3b938153444df5f47` moves contact surface velocity onto `mjContact`.
+* `3190fbbdf4938a9fa70a7805cd7f42f184d999c8` sets the version header to 4.0.0. That header is what makes the dumper emit the five new lines. The engine edit is the version string in `engine_support.c`.
+
+## What ferromotion would have to match
+
+Not implemented. The 3.13.0 identity stays on the code it has. Each row is a later oracle identity. Counts are the parent-versus-commit corpus counts above.
+
+| release | commit | ferromotion change | fields and counts |
+| --- | --- | --- | --- |
+| 3.15 | `7419720426d1` | In `mujoco_ccd` multicontact, keep the best face inside the face tolerance, not the first. | `qacc`/`efc_J` 34; step 1 `qpos` 9 |
+| 3.15 | `b47e70849e9c` | In the mesh compiler, reverse polygon winding when the scale determinant is negative. | `qacc` 8; step 1 `qpos` 2 |
+| 3.15 | `6224e95f6264` | Run capsule pairs through the nativeccd multicontact path. | `efc_J` 8, `qacc` 7; step 1 `qpos` 3 |
+| 3.15 | `b3dd9e6172a4` | `resolve_dampratio` in `mujoco_actuator.rs` divides by the operational-space inertia `J inv(M) J'`, not by `dof_M0 / transmission²`. | `actuator_force`/`qacc`/`qacc_smooth` 22; step 1 `qpos` 23 |
+| 3.16 | `3bc4b769af3f` | `wrap_circle`, `length_circle`, and `wrap_inside` in `mjcf_tree.rs`: `atan2` arc, separation-vector intersection, Newton in the incidence angle. | `ten_length` 9, `qacc` 9, `tendon_invweight0` 6 |
+| 3.16 | `9fd6ee025fed` | A quaternion on an element replaces the class orientation it inherited. | `qacc`/`efc_J` 2 |
+| 3.16 | `ed357ff8c887` | A distance query below `ccd_tolerance` returns the GJK witnesses. | `qacc`/`efc_J` 8; step 1 `qpos` 2 |
+| 3.16 | `ab7f005c91fc` | `ActRecord` inherits gain and bias only from the same shortcut or from `general`. The pid fixture's explicit `kp`/`ki`/`kd` stay. | `actuator_force`/`qacc` 10; step 1 `qpos` 10 |
+| 3.16 | `efffd3a5fb96` | `capsule_capsule` in `mujoco_collision.rs` builds `det` from the axis cross, with a relative parallel threshold and a sequential solve. | `qacc`/`efc_J` 5; step 1 `qpos` 3 |
+| 3.16 | `dcdfe84a48ed` | In `mujoco_ccd.rs`, do not swap the witness pair when `polygon_clip` writes nothing. The current port swaps EPA's pair, which is the 3.13 behavior. | `qacc` 2 at state 2; step 1 `qpos` 1; step 20 `qpos` 2 |
+| 3.17 | `b9243297550a` | Segment-segment closest-point weights use the factored `mjc_segWeights` association. | `qacc`/`efc_J` 16 |
+| 3.17 | `f640345f72b7` | `witness_on_face` projects onto the face plane, then along the direction. | `qacc`/`efc_J` 54, `efc_pos` 56 |
+| 3.17 | `e15ecd842a08` | `polygon_clip` keeps vertices out to the margin. | `qacc`/`efc_J` 4 |
+| 3.17 | `9f035384db1a` | `make_normal` in `mujoco_hull.rs` sums Newell's cross around the polygon. | `qacc` 57, `efc_J` 58 |
+| 3.17 | `c8362756d064` | The Newton and noslip scales in `mujoco_solver.rs` and `mujoco_contact.rs` use `1 / trace(M)`. | `qacc` 1, `hello_robot_stretch_3/scene.xml` |
+| 3.17 | `abddec5b9193a` | Emit `m eq_data` at width 12, with the weld relative pose in the last column. No other field on this corpus. | `eq_data` added on 212; numeric `qacc` 0 |
+| 4.0 | `3ab3f0f0c9f3` | `elliptic_cost_dif` stores the tangential norm and differences it. | `qacc` 50; step 1 `qpos` 23 |
+| 4.0 | `6f3db612a730` | `chol_solve` divides the diagonal, then updates the row in order. | `qacc` 166, `efc_force` 153; step 1 `qpos` 77 |
+| 4.0 | `e161611dd090` | Flex stiffness cache identity covers every node and element. Ferromotion refuses `<flexcomp>` today, so this waits on a flex compiler. | `qacc`/`efc_aref` 20 |
+| 4.0 | `a650501666a7` | `wrap_circle` chooses the side-site homotopy by winding angle. | `ten_length` 9, `qacc` 8 |
+| 4.0 | `9a7f240f0336` | RK4 maps ball and free rates through `dexp⁻¹` before the stage sum. | step only, 2 Crazyflie models |
+| 4.0 | `a63f59172407` | Elliptic-cone tangent is `U/T` before the Hessian's cubic term. | `qacc` 54; step 1 `qpos` 28 |
+| 4.0 | `d9972b337c98` | `normalize4`, `mul_quat`, and `quat2mat` pair the sums the way the 256-bit reduction does. This is the kinematics and `M` change. | `xpos` 193, `xmat` 206, `M` 196, `qacc` 200, `dof_M0` 54; step 1 `qpos` 140 |
+| 4.0 | `3bbf510d477a` | Nativeccd precision pass: no legacy GJK-intersect fallback, hardened EPA barycentrics and multicontact. | `efc_J` 71, `qacc` 69; `contact_surfacevel` 18 |
+| 4.0 | `aeb871ba1742` | The implicit step skips an actuator derivative when `qfrc_actuator` is outside the joint `actfrcrange`. | step `qpos` 36; native fields 0 |
+| 4.0 | `64af6504f`, `629feb74b`, `9916cc5f7` | Emit `tendon_type`, `xiquat`, `geom_xquat`, `site_xquat`, and `contact_surfacevel` under the 4.0 dump schema. | added on 212 |
+
+`7394a8672c3e` and `a206daa42ea9` are not in that list. Each one left the 212-model native dump and the 20-step dump unchanged.

@@ -34,10 +34,19 @@ if [[ ! -d "$SRC" ]]; then
 fi
 mkdir -p "$WORK"
 rm -rf "$WORK/build"
+# Clang looks for llvm-ar beside itself. This image has clang 18.1.3 and no
+# llvm-ar, so an incremental reconfigure wrote CMAKE_C_COMPILER_AR-NOTFOUND
+# into dep link.txt and cmake_link_script failed with
+# "Error running link command: No such file or directory" on liblodepng.a.
+# FILEPATH forces the same /usr/bin/ar the first 3.13.0 configure used.
 cmake -S "$SRC" -B "$WORK/build" \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_C_COMPILER="$CC_BIN" \
   -DCMAKE_CXX_COMPILER="$CXX_BIN" \
+  -DCMAKE_C_COMPILER_AR:FILEPATH=/usr/bin/ar \
+  -DCMAKE_CXX_COMPILER_AR:FILEPATH=/usr/bin/ar \
+  -DCMAKE_C_COMPILER_RANLIB:FILEPATH=/usr/bin/ranlib \
+  -DCMAKE_CXX_COMPILER_RANLIB:FILEPATH=/usr/bin/ranlib \
   -DCMAKE_C_FLAGS_RELEASE="$FLAGS" \
   -DCMAKE_CXX_FLAGS_RELEASE="$FLAGS" \
   -DCMAKE_C_FLAGS_DEBUG="$FLAGS" \
