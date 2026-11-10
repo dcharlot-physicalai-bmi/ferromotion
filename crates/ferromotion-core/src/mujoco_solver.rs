@@ -272,7 +272,14 @@ pub(crate) fn chol_solve(mat: &[f64], vec: &[f64], n: usize) -> Vec<f64> {
     }
     for i in (0..n).rev() {
         for j in i + 1..n {
-            res[i] = (-mat[j * n + i]).mul_add(res[j], res[i]);
+            // `64156abe` `mju_cholSolve` back-substitution: `mulsd` then `subsd`,
+            // `res[i] - L[j, i] * res[j]`. The pair unroll keeps that left-to-right
+            // accumulator. The published path contracts `(-L)*res[j] + res[i]`.
+            res[i] = if oracle_axpy() {
+                res[i] - mat[j * n + i] * res[j]
+            } else {
+                (-mat[j * n + i]).mul_add(res[j], res[i])
+            };
         }
         res[i] /= mat[i * (n + 1)];
     }

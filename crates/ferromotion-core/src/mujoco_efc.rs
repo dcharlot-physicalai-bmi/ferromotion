@@ -36,10 +36,11 @@ pub(crate) const CONTACT_ELLIPTIC: i32 = 7;
 /// `libmujoco.3.13.0.dylib`, and the reason `body_invweight0` was one ulp off on every free-floating
 /// model while every smaller dot agreed.
 pub(crate) fn dot(a: &[f64], b: &[f64]) -> f64 {
-    // The out-of-line `mju_dot` in 64156abe is the SSE schedule in `dot_contract_off`.
-    // Routing every dense product through it moved `umi_gripper/scene.xml` off the exact
-    // 20-step set at step 20 (`qvel[1]`, one ulp). Those products stay on the fused
-    // schedule, which is what that trajectory matches. `mju_norm` does call `mju_dot`.
+    // `mju_mulMatVec` and `mju_cholFactor` call the out-of-line `mju_dot` in 64156abe.
+    // That symbol is the SSE schedule in `dot_contract_off` (`mulpd`/`addpd`, no FMA).
+    if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+        return dot_contract_off(a, b);
+    }
     let n = a.len();
     let (mut r0, mut r1, mut r2, mut r3) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     let groups = n / 4;
@@ -73,9 +74,10 @@ pub(crate) fn dot(a: &[f64], b: &[f64]) -> f64 {
 /// vectoriser keeps every group fused (`fmla.2d` only, no unfused 32-entry block) — read off the inlined
 /// copies in `_mju_cholFactor` and `_mj_solPrimal`.
 pub(crate) fn dot_self(a: &[f64]) -> f64 {
-    // Inlined self-dots in the arm64 build stay fused. Pointing these at the SSE
-    // `mju_dot` symbol dropped `franka_emika_panda/hand.xml` and both `trs_so_arm100`
-    // models off the exact 20-step set.
+    // `mju_norm` and the Cholesky diagonal call `mju_dot(v, v)`, the same SSE symbol.
+    if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+        return dot_contract_off(a, a);
+    }
     let n = a.len();
     let (mut r0, mut r1, mut r2, mut r3) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     let groups = n / 4;
@@ -1204,10 +1206,13 @@ fn impedance(s: &[f64; 5], pos: f64, margin: f64) -> (f64, f64) {
 }
 
 /// `mju_dot` as clang compiled it into libmujoco `64156abe` (`mulpd`/`addpd`, no FMA).
-/// Pinned by the unit test. Not what [`dot`] uses: that schedule moved UMI off the exact set.
-#[allow(dead_code)]
-/// Eight-wide pairs for `n >= 8`, then a four-wide pair, then the horizontal sum
-/// `high + low`, then a tail of 1, 2, or 3.
+///
+/// For `n >= 8`, pairs of doubles accumulate eight at a time:
+/// `acc_odd = p2 + (p0 + acc_odd)`, `acc_even = p3 + (p1 + acc_even)`, then
+/// `high + low` of `acc_odd + acc_even`. A leftover group of four uses the same pair
+/// add. The tail is `res + p0` (`n%4 == 1`), `res + (p1 + p0)` (`n%4 == 2`), or
+/// `res + (p2 + (p0 + p1))` (`n%4 == 3`). Lengths below 4 are only that tail.
+/// `mju_mulMatVec` calls this once per row; it does not have a second reduction.
 fn dot_contract_off(a: &[f64], b: &[f64]) -> f64 {
     let n = a.len();
     let tail = |res: f64, i: usize| match n - i {
