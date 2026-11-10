@@ -693,8 +693,19 @@ fn libstdcpp_unordered_order(hashes: &[u64]) -> Vec<usize> {
 /// `mjuu_makenormal`: the unit normal of `(b − a) × (c − a)`, or `(1, 0, 0)` below `mjEPS` = 1e-14. The
 /// winding is whatever the three vertices carry; nothing here reorients it.
 fn make_normal(a: &Vector3<f64>, b: &Vector3<f64>, c: &Vector3<f64>) -> Vector3<f64> {
-    let n = crossvec(&(b - a), &(c - a));
-    let nrm = dot3(&n, &n).sqrt();
+    let (ab, ac) = (b - a, c - a);
+    // `mjuu_makenormal` in 64156abe: separate products, then `normal[i] /= nrm`.
+    // `mjuu_dot3` is `nz*nz + (nx*nx + ny*ny)`. The published path stays fused.
+    let n = if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+        Vector3::new(ab.y * ac.z - ab.z * ac.y, ab.z * ac.x - ab.x * ac.z, ab.x * ac.y - ab.y * ac.x)
+    } else {
+        crossvec(&ab, &ac)
+    };
+    let nrm = if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+        (n.z * n.z + (n.x * n.x + n.y * n.y)).sqrt()
+    } else {
+        dot3(&n, &n).sqrt()
+    };
     if nrm < 1e-14 {
         return Vector3::x();
     }
