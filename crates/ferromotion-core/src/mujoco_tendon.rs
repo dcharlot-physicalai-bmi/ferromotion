@@ -124,21 +124,24 @@ fn length_circle(p0: &[f64; 2], p1: &[f64; 2], ind: usize, radius: f64) -> f64 {
 
 /// `wrap_circle`: the two tangent points and the arc's length, or `None` (MuJoCo's −1).
 fn wrap_circle(end: &[f64; 4], side: Option<&[f64; 2]>, radius: f64) -> Option<([f64; 4], f64)> {
-    let sqlen0 = end[0].mul_add(end[0], end[1] * end[1]);
-    let sqlen1 = end[2].mul_add(end[2], end[3] * end[3]);
+    let off = contract_off();
+    let sqlen0 = if off { end[0] * end[0] + end[1] * end[1] } else { end[0].mul_add(end[0], end[1] * end[1]) };
+    let sqlen1 = if off { end[2] * end[2] + end[3] * end[3] } else { end[2].mul_add(end[2], end[3] * end[3]) };
     let sqrad = radius * radius;
     if sqlen0 < sqrad || sqlen1 < sqrad || radius < MJ_MINVAL {
         return None;
     }
     let dif = [end[2] - end[0], end[3] - end[1]];
-    let dd = dif[0].mul_add(dif[0], dif[1] * dif[1]);
+    let dd = if off { dif[0] * dif[0] + dif[1] * dif[1] } else { dif[0].mul_add(dif[0], dif[1] * dif[1]) };
     if dd < MJ_MINVAL {
         return None;
     }
     // clamped to the segment (`clamp` is MuJoCo's if-chain, NaN through as NaN)
-    let a = (-dif[0].mul_add(end[0], dif[1] * end[1]) / dd).clamp(0.0, 1.0);
-    let tmp = [a.mul_add(dif[0], end[0]), a.mul_add(dif[1], end[1])];
-    if tmp[0].mul_add(tmp[0], tmp[1] * tmp[1]) > sqrad && side.is_none_or(|s| dot2(s, &tmp) >= 0.0) {
+    let adot = if off { dif[0] * end[0] + dif[1] * end[1] } else { dif[0].mul_add(end[0], dif[1] * end[1]) };
+    let a = (-adot / dd).clamp(0.0, 1.0);
+    let tmp = if off { [a * dif[0] + end[0], a * dif[1] + end[1]] } else { [a.mul_add(dif[0], end[0]), a.mul_add(dif[1], end[1])] };
+    let tmp_sq = if off { tmp[0] * tmp[0] + tmp[1] * tmp[1] } else { tmp[0].mul_add(tmp[0], tmp[1] * tmp[1]) };
+    if tmp_sq > sqrad && side.is_none_or(|s| dot2(s, &tmp) >= 0.0) {
         return None;
     }
     let sqrt0 = (sqlen0 - sqrad).sqrt();
@@ -147,10 +150,14 @@ fn wrap_circle(end: &[f64; 4], side: Option<&[f64; 2]>, radius: f64) -> Option<(
     let mut good = [0.0f64; 2];
     for i in 0..2 {
         let sgn = if i == 0 { 1.0 } else { -1.0 };
-        sol[i][0][0] = end[0].mul_add(sqrad, sgn * radius * end[1] * sqrt0) / sqlen0;
-        sol[i][0][1] = end[1].mul_add(sqrad, -(sgn * radius * end[0] * sqrt0)) / sqlen0;
-        sol[i][1][0] = end[2].mul_add(sqrad, -(sgn * radius * end[3] * sqrt1)) / sqlen1;
-        sol[i][1][1] = end[3].mul_add(sqrad, sgn * radius * end[2] * sqrt1) / sqlen1;
+        // `(end*sqrad + sgn*radius*end_other*sqrt) / sqlen`, products separate.
+        let arm = |e0: f64, e1: f64, sq: f64, srad: f64| {
+            if off { (e0 * sqrad + sgn * radius * e1 * srad) / sq } else { e0.mul_add(sqrad, sgn * radius * e1 * srad) / sq }
+        };
+        sol[i][0][0] = arm(end[0], end[1], sqlen0, sqrt0);
+        sol[i][0][1] = arm(end[1], -end[0], sqlen0, sqrt0);
+        sol[i][1][0] = arm(end[2], -end[3], sqlen1, sqrt1);
+        sol[i][1][1] = arm(end[3], end[2], sqlen1, sqrt1);
         good[i] = match side {
             Some(s) => {
                 let mut t = [sol[i][0][0] + sol[i][1][0], sol[i][0][1] + sol[i][1][1]];
