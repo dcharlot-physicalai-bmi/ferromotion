@@ -20,13 +20,26 @@ pub(crate) enum TendonObj {
     Wrap { geom: KinGeom, radius: f64, cylinder: bool, side: Option<KinGeom> },
 }
 
-fn dot3(a: &[f64; 3], b: &[f64; 3]) -> f64 {
-    a[2].mul_add(b[2], a[0].mul_add(b[0], a[1] * b[1]))
+fn contract_off() -> bool {
+    crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID
 }
 
-/// `mju_norm3`
+/// `mju_dot3`: `(a2 b2) + (a0 b0 + a1 b1)`.
+fn dot3(a: &[f64; 3], b: &[f64; 3]) -> f64 {
+    if contract_off() {
+        (a[2] * b[2]) + (a[0] * b[0] + a[1] * b[1])
+    } else {
+        a[2].mul_add(b[2], a[0].mul_add(b[0], a[1] * b[1]))
+    }
+}
+
+/// `mju_norm3`: `sqrt((x x + y y) + z z)`.
 fn norm3(v: &[f64; 3]) -> f64 {
-    v[2].mul_add(v[2], v[0].mul_add(v[0], v[1] * v[1])).sqrt()
+    if contract_off() {
+        ((v[0] * v[0] + v[1] * v[1]) + v[2] * v[2]).sqrt()
+    } else {
+        v[2].mul_add(v[2], v[0].mul_add(v[0], v[1] * v[1])).sqrt()
+    }
 }
 
 /// `mju_normalize3`: shorter than `mjMINVAL` becomes the x axis.
@@ -44,8 +57,13 @@ fn normalize3(v: &mut [f64; 3]) -> f64 {
 }
 
 /// `mju_dot` of two 2-vectors: `0 + (a0·b0 + a1·b1)`, the tail of the four-sum loop
+/// `mju_dot` at length 2: `(a1 b1) + (a0 b0)`.
 fn dot2(a: &[f64], b: &[f64]) -> f64 {
-    0.0 + a[0].mul_add(b[0], a[1] * b[1])
+    if contract_off() {
+        a[1] * b[1] + a[0] * b[0]
+    } else {
+        0.0 + a[0].mul_add(b[0], a[1] * b[1])
+    }
 }
 
 /// `mju_normalize` in two dimensions
@@ -61,13 +79,23 @@ fn normalize2(v: &mut [f64; 2]) {
 }
 
 /// `mji_cross`
+/// `mju_cross`: each component is one product minus the other, unfused.
 fn cross(a: &[f64; 3], b: &[f64; 3]) -> [f64; 3] {
-    [a[1].mul_add(b[2], -(a[2] * b[1])), a[2].mul_add(b[0], -(a[0] * b[2])), a[0].mul_add(b[1], -(a[1] * b[0]))]
+    if contract_off() {
+        [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+    } else {
+        [a[1].mul_add(b[2], -(a[2] * b[1])), a[2].mul_add(b[0], -(a[0] * b[2])), a[0].mul_add(b[1], -(a[1] * b[0]))]
+    }
 }
 
-/// `mju_dist3`
+/// `mju_dist3`: `sqrt((dz dz) + (dy dy + dx dx))`.
 fn dist3(a: &[f64; 3], b: &[f64; 3]) -> f64 {
-    norm3(&[a[0] - b[0], a[1] - b[1], a[2] - b[2]])
+    let (dx, dy, dz) = (a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+    if contract_off() {
+        ((dz * dz) + (dy * dy + dx * dx)).sqrt()
+    } else {
+        norm3(&[dx, dy, dz])
+    }
 }
 
 /// `is_intersect`: do the 2-D segments p1→p2 and p3→p4 cross?
