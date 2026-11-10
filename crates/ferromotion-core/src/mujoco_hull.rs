@@ -205,7 +205,16 @@ impl MeshHull {
             Some(g) if self.verts.len() >= HILLCLIMB_MIN => {
                 let c = |x: f64| (x > 0.4) as usize + 1 - (x < -0.4) as usize;
                 let grid_idx = g.extrema[c(local_dir.x) * 9 + c(local_dir.y) * 3 + c(local_dir.z)];
-                let at = |local: usize| dot3f(local_dir, &self.verts[g.vert_globalid[local]]);
+                // `dot3f` in `mjc_hillclimbSupport` (`64156abe`): `(x*dx + y*dy) + z*dz`,
+                // separate multiplies. The published path stays fused.
+                let at = |local: usize| {
+                    let v = &self.verts[g.vert_globalid[local]];
+                    if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+                        (local_dir.x * v.x + local_dir.y * v.y) + local_dir.z * v.z
+                    } else {
+                        dot3f(local_dir, v)
+                    }
+                };
                 let mut imax = if *meshindex >= 0 {
                     let cached = at(*meshindex as usize);
                     let seed = at(grid_idx);
@@ -241,10 +250,19 @@ impl MeshHull {
                 let mut imax = 0usize;
                 if *vertindex >= 0 {
                     imax = *vertindex as usize;
-                    max = dot3f(local_dir, &self.verts[imax]);
+                    let v = &self.verts[imax];
+                    max = if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+                        (local_dir.x * v.x + local_dir.y * v.y) + local_dir.z * v.z
+                    } else {
+                        dot3f(local_dir, v)
+                    };
                 }
                 for (i, v) in self.verts.iter().enumerate() {
-                    let vdot = dot3f(local_dir, v);
+                    let vdot = if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+                        (local_dir.x * v.x + local_dir.y * v.y) + local_dir.z * v.z
+                    } else {
+                        dot3f(local_dir, v)
+                    };
                     if vdot > max {
                         max = vdot;
                         imax = i;
