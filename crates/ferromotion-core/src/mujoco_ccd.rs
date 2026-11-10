@@ -288,11 +288,30 @@ impl<'a> CcdObj<'a> {
                 local_to_global(&mat, &ls, &pos)
             }
             GeomType::Cylinder => {
-                let n2 = if contract_off() { local_dir.x * local_dir.x + local_dir.y * local_dir.y } else { local_dir.x.mul_add(local_dir.x, local_dir.y * local_dir.y) };
+                // `mjc_cylinderSupport` in 64156abe. x and y of `matᵀ·dir` match `row3`.
+                // z is `p2 + (p1 + p0)`. The cap radius is `sqrt(y·y + x·x)`. The world
+                // transform is `p2 + (p1 + p0)`, then `+ pos`.
+                let (lx, ly, lz) = if contract_off() {
+                    let p0 = mat[(0, 2)] * dir.x;
+                    let p1 = mat[(1, 2)] * dir.y;
+                    let p2 = mat[(2, 2)] * dir.z;
+                    (local_dir.x, local_dir.y, p2 + (p1 + p0))
+                } else {
+                    (local_dir.x, local_dir.y, local_dir.z)
+                };
+                let n2 = if contract_off() { ly * ly + lx * lx } else { lx.mul_add(lx, ly * ly) };
                 let scl = if n2 >= MINVAL2 { self.size[0] / n2.sqrt() } else { 0.0 };
-                let ls = Vector3::new(scl * local_dir.x, scl * local_dir.y, if local_dir.z >= 0.0 { self.size[1] } else { -self.size[1] });
-                self.vertindex = if local_dir.z >= 0.0 { 0 } else { 1 };
-                local_to_global(&mat, &ls, &pos)
+                let ls = Vector3::new(scl * lx, scl * ly, if lz >= 0.0 { self.size[1] } else { -self.size[1] });
+                self.vertindex = if lz >= 0.0 { 0 } else { 1 };
+                if contract_off() {
+                    let row = |a: f64, b: f64, c: f64| {
+                        let (q0, q1, q2) = (a * ls.x, b * ls.y, c * ls.z);
+                        q2 + (q1 + q0)
+                    };
+                    V3::new(row(mat[(0, 0)], mat[(0, 1)], mat[(0, 2)]) + pos.x, row(mat[(1, 0)], mat[(1, 1)], mat[(1, 2)]) + pos.y, row(mat[(2, 0)], mat[(2, 1)], mat[(2, 2)]) + pos.z)
+                } else {
+                    local_to_global(&mat, &ls, &pos)
+                }
             }
             GeomType::Box => {
                 let ls = Vector3::new(
