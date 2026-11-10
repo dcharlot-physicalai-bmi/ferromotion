@@ -24,17 +24,19 @@ fn contract_off() -> bool {
 
 /// `mju_mulInertVec`: a 6-D motion vector through a com-based inertia (`i` = the 10 numbers of `cinert`).
 fn mul_inert_vec(i: &[f64; 10], v: &[f64; 6]) -> [f64; 6] {
-    // `mju_mulInertVec` in the contract-off library, left to right, one product at a time.
+    // Out-of-line `mju_mulInertVec` in `64156abe`. Lanes 0 and 1 share one `addpd`/`subpd`
+    // chain; lane 2 is scalar; lanes 3 and 4 share one `subpd` then `+ i9*v`. Swapping the
+    // two operands of a single add does not change the bits.
     if contract_off() {
-        return [
-            (((i[0] * v[0] + i[3] * v[1]) + i[4] * v[2]) - i[8] * v[4]) + i[7] * v[5],
-            (((i[3] * v[0] + i[1] * v[1]) + i[5] * v[2]) + i[8] * v[3]) - i[6] * v[5],
-            (((i[4] * v[0] + i[5] * v[1]) + i[2] * v[2]) - i[7] * v[3]) + i[6] * v[4],
-            (i[8] * v[1] - i[7] * v[2]) + i[9] * v[3],
-            (i[6] * v[2] - i[8] * v[0]) + i[9] * v[4],
-            (i[7] * v[0] - i[6] * v[1]) + i[9] * v[5],
-        ];
-    }
+            return [
+                (((i[0] * v[0] + i[3] * v[1]) + i[4] * v[2]) - i[8] * v[4]) + i[7] * v[5],
+                (((i[1] * v[1] + i[3] * v[0]) + i[5] * v[2]) + i[8] * v[3]) - i[6] * v[5],
+                (((i[5] * v[1] + i[4] * v[0]) + i[2] * v[2]) - i[7] * v[3]) + i[6] * v[4],
+                (i[8] * v[1] - i[7] * v[2]) + i[9] * v[3],
+                (i[6] * v[2] - i[8] * v[0]) + i[9] * v[4],
+                i[9] * v[5] + (i[7] * v[0] - i[6] * v[1]),
+            ];
+        }
     [
         i[7].mul_add(v[5], (-i[8]).mul_add(v[4], i[4].mul_add(v[2], i[0].mul_add(v[0], i[3] * v[1])))),
         (-i[6]).mul_add(v[5], i[8].mul_add(v[3], i[5].mul_add(v[2], i[3].mul_add(v[0], i[1] * v[1])))),
@@ -640,11 +642,21 @@ impl SmoothModel {
             m.m_rownnz.push(row.len());
             m.m_colind.extend(row);
         }
-        // `mj_setM0`: at qpos0, the composite inertia seen by each dof, plus its armature
+        // `mj_setM0` (`engine_setconst.c`), at qpos0. The composite pass is `mju_addTo` of
+        // length 10: each parent entry is `crb[parent] + crb[child]`. Then the out-of-line
+        // `mju_mulInertVec` and `mju_dot(..., 6)`. In `64156abe` that dot is unfused:
+        // `((a1 b1 + a3 b3) + (a0 b0 + a2 b2)) + (a5 b5 + a4 b4)`. The published path keeps
+        // the fused four-accumulator `dot_n6`, whose tail is `fma(a4, b4, a5 b5)`.
         let kin0 = kin.state(qpos0);
         let (cinert, cdof, _) = m.com_pos(&kin0);
         let crb = m.composite(&cinert);
-        m.dof_m0 = (0..nv).map(|i| m.dof_armature[i] + dot_n6(&cdof[i], &mul_inert_vec(&crb[m.dof_bodyid[i]], &cdof[i]))).collect();
+        m.dof_m0 = (0..nv)
+            .map(|i| {
+                let buf = mul_inert_vec(&crb[m.dof_bodyid[i]], &cdof[i]);
+                let kinetic = if contract_off() { dot6(&cdof[i], &buf) } else { dot_n6(&cdof[i], &buf) };
+                m.dof_armature[i] + kinetic
+            })
+            .collect();
         // springs on a ball or free joint are not ported yet
         for (j, &k) in m.jnt_type.iter().enumerate() {
             if matches!(k, KinJointKind::Ball | KinJointKind::Free) && m.jnt_stiffness[j] != 0.0 {
