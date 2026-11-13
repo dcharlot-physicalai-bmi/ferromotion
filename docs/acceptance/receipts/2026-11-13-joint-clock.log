@@ -1,0 +1,2699 @@
+command rustc 1.98.0 (88d9e12ae 2026-08-18)
+command cargo 1.98.0 (797e8a9bc 2026-08-05)
+command cargo test --locked -p ferromotion-core --lib ferromorphic_clock::
+ Downloading crates ...
+  Downloaded dyn-stack v0.13.2
+  Downloaded zmij v1.0.21
+  Downloaded pulp-wasm-simd-flag v0.1.1
+  Downloaded zerocopy-derive v0.8.54
+  Downloaded once_cell v1.21.4
+  Downloaded serde_json v1.0.150
+  Downloaded RustyXML v0.3.0
+  Downloaded nano-gemm-c64 v0.2.1
+  Downloaded darling_core v0.14.4
+  Downloaded itoa v1.0.18
+  Downloaded nalgebra v0.35.0
+  Downloaded quick-xml v0.36.2
+  Downloaded log v0.4.33
+  Downloaded interpol v0.2.1
+  Downloaded fnv v1.0.7
+  Downloaded equator-macro v0.2.1
+  Downloaded gemm-c32 v0.19.0
+  Downloaded rawpointer v0.2.1
+  Downloaded num-integer v0.1.46
+  Downloaded equator v0.6.0
+  Downloaded enum_dispatch v0.3.13
+  Downloaded version_check v0.9.5
+  Downloaded unicode-ident v1.0.24
+  Downloaded derive_builder_core v0.11.2
+  Downloaded nano-gemm-c32 v0.2.1
+  Downloaded bitflags v2.13.0
+  Downloaded reborrow v0.5.5
+  Downloaded gemm-f16 v0.19.0
+  Downloaded libm v0.2.16
+  Downloaded darling v0.14.4
+  Downloaded proc-macro2 v1.0.106
+  Downloaded xml-rs v0.8.28
+  Downloaded equator v0.2.2
+  Downloaded glam v0.31.1
+  Downloaded wide v1.5.0
+  Downloaded either v1.16.0
+  Downloaded nano-gemm-f64 v0.2.1
+  Downloaded gemm-common v0.19.0
+  Downloaded serde_derive v1.0.228
+  Downloaded cfg-if v1.0.4
+  Downloaded nano-gemm v0.2.2
+  Downloaded equator-macro v0.6.0
+  Downloaded lazy_static v1.5.0
+  Downloaded bytemuck v1.25.1
+  Downloaded thiserror v1.0.69
+  Downloaded dyn-stack-macros v0.1.3
+  Downloaded faer-traits v0.24.0
+  Downloaded gemm-c64 v0.19.0
+  Downloaded nano-gemm-codegen v0.2.1
+  Downloaded gemm v0.19.0
+  Downloaded quote v1.0.46
+  Downloaded thiserror-impl v1.0.69
+  Downloaded urdf-rs v0.9.0
+  Downloaded gemm-f32 v0.19.0
+  Downloaded approx v0.5.1
+  Downloaded derive_builder v0.11.2
+  Downloaded strsim v0.10.0
+  Downloaded amd v0.2.2
+  Downloaded autocfg v1.5.1
+  Downloaded serde-xml-rs v0.6.0
+  Downloaded darling_macro v0.14.4
+  Downloaded generativity v1.2.1
+  Downloaded nano-gemm-f32 v0.2.1
+  Downloaded itertools v0.11.0
+  Downloaded serde_core v1.0.228
+  Downloaded safe_arch v1.0.0
+  Downloaded private-gemm-x86 v0.1.20
+  Downloaded typenum v1.20.1
+  Downloaded serde v1.0.228
+  Downloaded raw-cpuid v11.6.0
+  Downloaded clarabel v0.11.1
+  Downloaded paste v1.0.15
+  Downloaded regex v1.13.0
+  Downloaded matrixmultiply v0.3.10
+  Downloaded regex-automata v0.4.15
+  Downloaded derive_builder_macro v0.11.2
+  Downloaded num-rational v0.4.2
+  Downloaded syn v1.0.109
+  Downloaded seq-macro v0.3.6
+  Downloaded syn v2.0.118
+  Downloaded ident_case v1.0.1
+  Downloaded num-traits v0.2.19
+  Downloaded glam v0.33.2
+  Downloaded glam v0.32.1
+  Downloaded aho-corasick v1.1.4
+  Downloaded defer v0.2.1
+  Downloaded pulp v0.22.3
+  Downloaded memchr v2.8.3
+  Downloaded glam v0.30.10
+  Downloaded nano-gemm-core v0.2.1
+  Downloaded regex-syntax v0.8.11
+  Downloaded num-complex v0.4.6
+  Downloaded half v2.7.1
+  Downloaded simba v0.10.0
+  Downloaded bytemuck_derive v1.11.0
+  Downloaded serde-big-array v0.5.1
+  Downloaded qd v0.8.0
+  Downloaded num-bigint v0.4.8
+  Downloaded num_cpus v1.17.0
+  Downloaded gemm-f64 v0.19.0
+  Downloaded libc v0.2.186
+  Downloaded faer v0.24.4
+  Downloaded zerocopy v0.8.54
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.46
+   Compiling autocfg v1.5.1
+   Compiling bytemuck v1.25.1
+   Compiling syn v1.0.109
+   Compiling num-traits v0.2.19
+   Compiling nano-gemm-codegen v0.2.1
+   Compiling libm v0.2.16
+   Compiling version_check v0.9.5
+   Compiling bitflags v2.13.0
+   Compiling paste v1.0.15
+   Compiling num-complex v0.4.6
+   Compiling syn v2.0.118
+   Compiling raw-cpuid v11.6.0
+   Compiling pulp v0.22.3
+   Compiling cfg-if v1.0.4
+   Compiling pulp-wasm-simd-flag v0.1.1
+   Compiling reborrow v0.5.5
+   Compiling serde_core v1.0.228
+   Compiling dyn-stack-macros v0.1.3
+   Compiling dyn-stack v0.13.2
+   Compiling ident_case v1.0.1
+   Compiling once_cell v1.21.4
+   Compiling strsim v0.10.0
+   Compiling seq-macro v0.3.6
+   Compiling serde v1.0.228
+   Compiling fnv v1.0.7
+   Compiling memchr v2.8.3
+   Compiling darling_core v0.14.4
+   Compiling serde_derive v1.0.228
+   Compiling gemm-common v0.19.0
+   Compiling nano-gemm-core v0.2.1
+   Compiling libc v0.2.186
+   Compiling thiserror v1.0.69
+   Compiling interpol v0.2.1
+   Compiling thiserror-impl v1.0.69
+   Compiling nano-gemm-c32 v0.2.1
+   Compiling nano-gemm-f64 v0.2.1
+   Compiling nano-gemm-c64 v0.2.1
+   Compiling darling_macro v0.14.4
+   Compiling nano-gemm-f32 v0.2.1
+   Compiling darling v0.14.4
+   Compiling defer v0.2.1
+   Compiling zmij v1.0.21
+   Compiling private-gemm-x86 v0.1.20
+   Compiling derive_builder_core v0.11.2
+   Compiling aho-corasick v1.1.4
+   Compiling equator-macro v0.2.1
+   Compiling matrixmultiply v0.3.10
+   Compiling safe_arch v1.0.0
+   Compiling regex-syntax v0.8.11
+   Compiling serde_json v1.0.150
+   Compiling wide v1.5.0
+   Compiling equator v0.2.2
+   Compiling num_cpus v1.17.0
+   Compiling derive_builder_macro v0.11.2
+   Compiling regex-automata v0.4.15
+   Compiling gemm-f64 v0.19.0
+   Compiling gemm-f32 v0.19.0
+   Compiling gemm-c64 v0.19.0
+   Compiling gemm-c32 v0.19.0
+   Compiling qd v0.8.0
+   Compiling approx v0.5.1
+   Compiling num-integer v0.1.46
+   Compiling generativity v1.2.1
+   Compiling equator-macro v0.6.0
+   Compiling itoa v1.0.18
+   Compiling rawpointer v0.2.1
+   Compiling xml-rs v0.8.28
+   Compiling either v1.16.0
+   Compiling clarabel v0.11.1
+   Compiling log v0.4.33
+   Compiling enum_dispatch v0.3.13
+   Compiling serde-xml-rs v0.6.0
+   Compiling itertools v0.11.0
+   Compiling equator v0.6.0
+   Compiling nano-gemm v0.2.2
+   Compiling faer-traits v0.24.0
+   Compiling num-rational v0.4.2
+   Compiling simba v0.10.0
+   Compiling gemm v0.19.0
+   Compiling regex v1.13.0
+   Compiling derive_builder v0.11.2
+   Compiling serde-big-array v0.5.1
+   Compiling quick-xml v0.36.2
+   Compiling amd v0.2.2
+   Compiling lazy_static v1.5.0
+   Compiling RustyXML v0.3.0
+   Compiling typenum v1.20.1
+   Compiling urdf-rs v0.9.0
+   Compiling faer v0.24.4
+   Compiling nalgebra v0.35.0
+   Compiling ferromorphic v0.23.2 (https://github.com/dcharlot-physicalai-bmi/ferromorphic.git?rev=a6722b49ff7dc770b1cb062adac21aa5c7155401#a6722b49)
+   Compiling ferromotion-core v0.73.0 (/agent/repos/ferromotion/crates/ferromotion-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 49.15s
+     Running unittests src/lib.rs (target/debug/deps/ferromotion_core-6127dccec3eff722)
+
+running 13 tests
+test ferromorphic_clock::tests::delay_zero_is_the_next_tick_and_overflow_is_checked ... ok
+test ferromorphic_clock::tests::proposed_joint_step_is_not_executed_and_spikes_wait_one_tick_plus_delay ... ok
+test ferromorphic_clock::tests::dt_matches_only_on_bits_and_point_one_is_the_receipt_constant ... ok
+test ferromorphic_clock::tests::a_period_above_2_pow_53_is_inexact_at_construction_start_and_bind ... ok
+test ferromorphic_clock::tests::forward_product_mapping_rejects_mismatched_dt_and_accepts_1000ns ... ok
+test ferromorphic_clock::tests::a_public_clock_mutation_is_rejected_on_the_next_bind ... ok
+test ferromorphic_clock::tests::refractory_is_ceil_of_t_ref_over_dt ... ok
+test ferromorphic_clock::tests::shared_seconds_are_one_multiply_and_the_accumulator_can_differ ... ok
+test ferromorphic_clock::tests::reset_keeps_tick_ledger_and_the_opening_epoch ... ok
+test ferromorphic_clock::tests::past_and_beyond_horizon_events_are_rejected ... ok
+test ferromorphic_clock::tests::spike_order_is_tick_then_source_and_ties_keep_emission_order ... ok
+test ferromorphic_clock::tests::the_pinned_receipt_v2_parses_and_version_1_is_refused ... ok
+test ferromorphic_clock::tests::episode_start_sets_tick_zero_advances_epoch_and_keeps_the_ledger ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 986 filtered out; finished in 0.00s
+
+
+command cargo test --locked -p ferromotion-core --lib smolvla_receiver::
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.27s
+     Running unittests src/lib.rs (target/debug/deps/ferromotion_core-6127dccec3eff722)
+
+running 10 tests
+test smolvla_receiver::tests::chunk_index_does_not_become_a_ferromorphic_tick_without_an_epoch ... ok
+test smolvla_receiver::tests::empty_horizon_negative_cases_stay_on_their_own_layers ... ok
+test smolvla_receiver::tests::empty_noise_is_missing_noise_provenance_and_incomplete_hashes_refuse ... ok
+test smolvla_receiver::tests::mutated_shape_limits_and_time_are_refused ... ok
+test smolvla_receiver::tests::normalization_pad_and_bounds_follow_the_contract_and_are_not_inference ... ok
+test smolvla_receiver::tests::nonempty_golden_is_unchanged_and_matches_the_empty_identity ... ok
+test smolvla_receiver::tests::sha256_of_abc_matches_the_known_vector ... ok
+test smolvla_receiver::tests::timestamps_are_checked_and_a_digest_match_still_refuses_actuation_and_select_action ... ok
+test smolvla_receiver::tests::published_empty_horizon_matches_canonical_bytes_and_refuses_index_zero ... ok
+test smolvla_receiver::tests::pinned_fixture_bytes_match_the_golden_digest_and_do_not_authorize_a_rollout ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 989 filtered out; finished in 0.00s
+
+
+command cargo test --locked -p ferromotion-core --test ferromorphic_receipt_v2
+   Compiling ferromotion-core v0.73.0 (/agent/repos/ferromotion/crates/ferromotion-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.52s
+     Running tests/ferromorphic_receipt_v2.rs (target/debug/deps/ferromorphic_receipt_v2-7b4cfa2d7c360cd6)
+
+running 1 test
+test ferromorphic_receipt_v2_round_trips_both_ways ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+command cargo test --workspace --locked --no-fail-fast
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.74s
+     Running unittests src/lib.rs (target/debug/deps/ferromotion-6b11111e93a8315d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/ferromotion_bench-55048310c389ecc3)
+
+running 5 tests
+test tests::formatting_picks_sensible_units ... ok
+test tests::a_noisy_measurement_says_so ... ok
+test tests::one_stalled_sample_moves_the_mean_and_not_the_median ... ok
+test tests::quantiles_and_mad_are_right_on_a_known_sample ... ok
+test tests::calibration_reaches_the_target_sample_duration ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.72s
+
+     Running unittests src/lib.rs (target/debug/deps/ferromotion_circuit-7c4ebb6535696dff)
+
+running 14 tests
+test verification::diode_series_r_dc_is_self_consistent ... ok
+test morpho::tests::growth_is_width_agnostic ... ok
+test verification::nmos_inverter_inverts ... ok
+test verification::kcl_holds_at_every_node ... ok
+test verification::half_wave_rectifier_clips_the_negative_half ... ok
+test verification::rc_step_matches_analytic ... ok
+test verification::vcvs_amplifies ... ok
+test verification::voltage_divider_dc ... ok
+test verification::lc_tank_conserves_energy_and_frequency ... ok
+test verification::series_rlc_is_underdamped_and_decays ... ok
+test verification::nonlinear_transient_reduces_to_linear_rc ... ok
+test morpho::tests::logic_low_matches_the_analytic_divider ... ok
+test morpho::tests::grown_adder_computes_through_the_transistors ... ok
+test morpho::tests::source_stepping_is_what_makes_it_converge ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.45s
+
+     Running unittests src/lib.rs (target/debug/deps/ferromotion_cloth-ce4164b33f8b9192)
+
+running 17 tests
+test tests::point_triangle_distance_matches_analytic ... ok
+test vbd::tests::a_diverged_state_gives_a_nan_residual_not_a_zero_one ... ok
+test tests::material_gradient_matches_finite_difference ... ok
+test tests::membrane_force_is_the_exact_energy_gradient ... ok
+test vbd::tests::avbd_handles_a_stiffness_ratio_that_slows_plain_vbd ... ok
+test vbd::tests::the_projected_hessian_is_psd_in_compression_extension_and_at_rest ... ok
+test vbd::tests::the_projection_fires_exactly_in_compression ... ok
+test tests::self_collision_broadphase_finds_every_true_contact ... ok
+test tests::self_collision_force_is_the_exact_energy_gradient ... ok
+test tests::self_collision_stops_a_vertex_hitting_a_triangle ... ok
+test vbd::tests::the_variational_objective_falls_as_sweeps_rise ... ok
+test vbd::tests::more_sweeps_converge_to_the_implicit_euler_solution ... ok
+test vbd::tests::the_avbd_multipliers_stay_inside_their_clamp ... ok
+test tests::pinned_cloth_drapes_to_equilibrium ... ok
+test vbd::tests::damping_is_a_rate_not_a_per_step_fraction ... ok
+test vbd::tests::the_soft_links_are_driven_nearly_rigid ... ok
+test vbd::tests::vbd_is_stable_at_one_iteration_where_explicit_euler_explodes ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.12s
+
+     Running unittests src/lib.rs (target/debug/deps/ferromotion_control-e35f84e9c2e56378)
+
+running 517 tests
+test abfilter::tests::alpha_beta_gamma_tracks_acceleration_without_lag ... ok
+test abfilter::tests::a_steady_measurement_converges_to_that_position ... ok
+test abfilter::tests::alpha_beta_recovers_velocity_and_smooths_noise ... ok
+test actuator::tests::cogging_is_periodic_and_zero_mean ... ok
+test admittance::tests::admittance_is_conditionally_stable_and_reports_its_own_limit ... ok
+test actuator::tests::dc_motor_electrical_dynamics_are_exact ... ok
+test actuator::tests::transport_delay_is_an_exact_shift ... ok
+test admittance::tests::hybrid_command_selects_cleanly ... ok
+test actuator::tests::blocked_output_oscillates_at_the_spring_natural_frequency ... ok
+test actuator::tests::gearbox_reflects_inertia_as_the_square_of_the_ratio ... ok
+test actuator::tests::spring_deflection_measures_the_transmitted_torque ... ok
+test admittance::tests::admittance_zero_force_holds_reference ... ok
+test admittance::tests::admittance_relaxes_to_spring_law ... ok
+test alip::tests::angular_momentum_is_continuous_across_the_step ... ok
+test actuator::tests::torque_control_tracks_a_setpoint_and_friction_dissipates ... ok
+test alip::tests::the_deadbeat_gain_makes_the_s2s_dynamics_nilpotent ... ok
+test alip::tests::deadbeat_stepping_recovers_balance_in_two_steps ... ok
+test alip::tests::the_uncontrolled_pendulum_diverges_at_the_natural_rate ... ok
+test assignment::tests::it_minimizes_total_travel_for_robots_to_goals ... ok
+test assignment::tests::it_picks_the_obvious_diagonal ... ok
+test assignment::tests::no_pairwise_swap_improves_the_optimum ... ok
+test backlash::tests::a_full_cycle_returns_the_output_with_lost_motion_equal_to_the_width ... ok
+test backlash::tests::a_reversal_costs_exactly_the_full_backlash_width ... ok
+test backlash::tests::monotone_travel_shows_a_constant_offset_and_no_lost_motion ... ok
+test backlash::tests::nothing_is_transmitted_inside_the_gap ... ok
+test backlash::tests::the_remaining_gap_is_what_a_compensator_needs ... ok
+test backlash::tests::zero_backlash_is_a_bit_identical_pass_through ... ok
+test batch::verification::batched_matches_scalar_per_instance ... ok
+test assignment::tests::it_matches_brute_force_on_random_matrices ... ok
+test admittance::tests::admittance_is_stable_and_monotone_enough ... ok
+test battery::tests::delivered_power_peaks_then_falls ... ok
+test battery::tests::removed_energy_splits_exactly_into_delivered_and_dissipated ... ok
+test battery::tests::terminal_voltage_sags_linearly_with_current ... ok
+test battery::tests::the_ocv_curve_is_interpolated_and_clamped ... ok
+test battery::tests::the_same_current_delivers_less_power_as_the_pack_empties ... ok
+test algames::tests::no_conflict_players_reach_goals_independently ... ok
+test batch::verification::batched_random_shooting_swings_up ... ok
+test boxddp::tests::a_tight_limit_forces_saturation_and_still_converges ... ok
+test algames::tests::augmented_cost_matches_the_zeroed_gradient_potential ... ok
+test algames::tests::two_players_swap_and_avoid_collision ... ok
+test c3::tests::contact_only_transmits_a_push_when_touching ... ok
+test c3::tests::the_lcp_step_satisfies_complementarity ... ok
+test c3::tests::the_projection_lands_on_the_complementarity_set ... ok
+test capturability::tests::placing_the_foot_on_the_capture_point_brings_the_pendulum_to_rest ... ok
+test capturability::tests::simulating_a_greedy_stepper_reproduces_the_predicted_step_counts ... ok
+test capturability::tests::the_capture_region_responds_to_hardware_the_way_it_should ... ok
+test capturability::tests::the_capture_regions_nest_and_saturate ... ok
+test capturability::tests::the_closed_form_matches_the_recursion_it_came_from ... ok
+test capturability::tests::the_saturation_boundary_is_the_supremum_in_both_regimes ... ok
+test cbf::tests::a_mismatched_actuator_box_is_refused ... ok
+test cbf::tests::an_infeasible_instance_is_never_certified ... ok
+test cbf::tests::box_bounds_are_respected ... ok
+test battery::tests::coulomb_counting_is_exact_and_clamped ... ok
+test cbf::tests::double_integrator_never_crosses_the_wall ... ok
+test cbf::tests::projection_matches_qp ... ok
+test cbf::tests::safe_nominal_is_unchanged ... ok
+test cbf::tests::the_slack_formulation_still_returns_the_exact_minimiser ... ok
+test cbf::tests::two_opposing_halfspaces_never_certify ... ok
+test ccm::tests::the_metric_certifies_the_contraction_lmi ... ok
+test ccm::tests::the_riemannian_error_contracts_at_the_certified_rate ... ok
+test ccm::tests::too_fast_a_rate_is_infeasible ... ok
+test cdpr::tests::a_centered_platform_holds_gravity_with_positive_symmetric_tensions ... ok
+test cdpr::tests::an_out_of_range_wrench_is_flagged_infeasible ... ok
+test cdpr::tests::the_centred_symmetric_config_is_torque_singular ... ok
+test cdpr::tests::the_distribution_balances_the_wrench_exactly ... ok
+test cdpr::tests::the_solution_sits_nearest_the_mid_tension ... ok
+test algames::tests::solve_is_deterministic ... ok
+test admittance::tests::hybrid_partitions_position_and_force ... ok
+test boxddp::tests::it_respects_the_control_limits ... ok
+test boxddp::tests::it_reduces_to_unconstrained_ddp_when_the_box_is_slack ... ok
+test cem::tests::elite_mean_cost_is_monotonically_non_increasing ... ok
+test cem::tests::refined_plan_beats_the_zero_plan_when_motion_helps ... ok
+test cem::tests::is_deterministic_in_its_seed ... ok
+test compass_gait::tests::hybrid_invariance_is_solvable_exactly_and_is_measure_zero ... ok
+test centroidal_mpc::tests::zero_reference_keeps_the_cart_table_at_rest ... ok
+test compass_gait::tests::the_gravity_vector_is_the_gradient_of_the_potential_in_the_energy ... ok
+test compass_gait::tests::the_impact_conserves_angular_momentum_and_never_adds_energy ... ok
+test compass_gait::tests::the_impact_gain_is_independent_of_speed ... ok
+test compass_gait::tests::the_post_impact_state_satisfies_the_new_pin_exactly ... ok
+test compass_gait::tests::the_quadrature_restricted_map_matches_the_full_simulation ... ok
+test complementary_filter::tests::a_roll_crossing_pi_does_not_report_the_body_as_level ... ok
+test complementary_filter::tests::alpha_one_is_pure_integration_alpha_zero_is_pure_accel ... ok
+test complementary_filter::tests::fuses_biased_gyro_and_noisy_accel_beating_both ... ok
+test complementary_filter::tests::roll_pitch_variant_tracks_a_tumbling_attitude ... ok
+test covariance_steering::tests::a_monte_carlo_ensemble_matches_the_target_distribution ... ok
+test covariance_steering::tests::it_can_inflate_as_well_as_shrink_uncertainty ... ok
+test covariance_steering::tests::the_terminal_mean_and_covariance_are_hit_exactly ... ok
+test coverage::tests::a_converged_configuration_is_a_centroidal_voronoi_fixed_point ... ok
+test compass_gait::tests::the_continuous_phase_conserves_energy_without_torque ... ok
+test coverage::tests::robots_spread_out_under_uniform_density ... ok
+test cpg::tests::a_coupled_pair_phase_locks_to_the_commanded_offset ... ok
+test cpg::tests::a_single_oscillator_reaches_the_analytic_limit_cycle ... ok
+test cpg::tests::frequency_sets_the_rhythm ... ok
+test cpg::tests::the_limit_cycle_is_a_global_attractor ... ok
+test ctr::tests::contact_transmits_a_push_only_when_engaged ... ok
+test ctr::tests::ctr_planning_pushes_the_slider_to_the_target ... ok
+test ctr::tests::the_contact_force_gradient_matches_finite_differences ... ok
+test ctr::tests::the_contact_trust_region_keeps_the_linearization_valid_where_an_ellipsoidal_step_does_not ... ok
+test ctr::tests::the_smoothed_force_approaches_rigid_contact_as_kappa_grows ... ok
+test cw::tests::from_orbit_recovers_the_expected_mean_motion ... ok
+test cw::tests::the_cross_track_channel_is_simple_harmonic ... ok
+test cw::tests::the_stm_is_identity_at_zero ... ok
+test coverage::tests::the_coverage_cost_decreases_monotonically ... ok
+test cw::tests::two_impulse_rendezvous_reaches_the_target_with_zero_relative_velocity ... ok
+test dcm::tests::backward_plan_is_continuous_and_ends_at_rest ... ok
+test cw::tests::the_stm_matches_numerical_integration ... ok
+test dcm::tests::closed_loop_dcm_control_walks_and_comes_to_rest ... ok
+test decomposition::tests::a_monitor_shifts_the_optimum_finer_and_charges_retries ... ok
+test decomposition::tests::decomposition_alone_changes_nothing ... ok
+test decomposition::tests::recovery_is_the_benefit_and_it_saturates ... ok
+test decomposition::tests::the_optimum_is_set_by_the_measurement_budget ... ok
+test dial_mpc::tests::annealing_escapes_a_local_minimum_where_fixed_noise_gets_stuck ... ok
+test dcm::tests::dcm_matches_the_capture_point_and_its_first_order_dynamics ... ok
+test dial_mpc::tests::the_noise_anneals_from_max_to_min ... ok
+test diff_drive::tests::equal_wheels_go_straight_and_opposite_wheels_spin_in_place ... ok
+test diff_drive::tests::the_polar_controller_drives_to_the_goal_pose ... ok
+test diff_drive::tests::the_wheel_body_map_round_trips ... ok
+test diff_mpc::tests::the_mpc_drives_the_state_toward_the_reference ... ok
+test diff_mpc::tests::the_reference_gradient_matches_finite_differences ... ok
+test dial_mpc::tests::the_cost_falls_substantially_across_the_annealing_schedule ... ok
+test diff_qp::tests::the_gradients_match_finite_differences ... ok
+test diff_qp::tests::the_qp_solution_satisfies_the_kkt_conditions ... ok
+test diff_qp::tests::unconstrained_reduces_to_the_normal_equations_gradient ... ok
+test dircon::tests::double_integrator_matches_the_analytic_min_effort_solution ... ok
+test dmp::tests::always_converges_to_the_goal_even_a_new_one ... ok
+test dmp::tests::reproduces_the_demonstration ... ok
+test dmp::tests::spatial_scaling_scales_the_shape ... ok
+test dmp::tests::temporal_scaling_preserves_the_shape ... ok
+test dpilqr::tests::distributed_converges_to_the_centralized_potential_minimizer ... ok
+test dpilqr::tests::it_is_an_exact_potential_game ... ok
+test dpilqr::tests::the_condensation_matches_a_forward_rollout ... ok
+test dpilqr::tests::the_potential_decreases_monotonically ... ok
+test dpilqr::tests::the_solution_is_a_nash_equilibrium ... ok
+test embodied::tests::a_dominating_design_has_no_crossover_and_says_so ... ok
+test embodied::tests::an_unused_sensor_still_costs_three_ways_and_the_chassis_decides_which_dominates ... ok
+test embodied::tests::build_share_falls_with_mission_duration_and_spans_the_biological_regimes ... ok
+test embodied::tests::it_refuses_what_it_cannot_answer_for ... ok
+test embodied::tests::ownership_refuses_what_it_cannot_answer_for ... ok
+test embodied::tests::the_ownership_bill_is_sunk_at_manufacture_so_deletion_beats_duty_cycling ... ok
+test embodied::tests::the_ranking_inverts_across_the_crossover_and_a_rate_cannot_say_so ... ok
+test envelope::tests::a_split_that_eats_the_contraction_is_reported_not_hidden ... ok
+test envelope::tests::refining_the_grid_tightens_the_enclosure ... ok
+test envelope::tests::refused_points_are_reported_rather_than_absorbed ... ok
+test envelope::tests::the_design_rule_is_exact_at_the_boundary ... ok
+test envelope::tests::the_discrepancy_budget_grows_with_the_gaits_contraction ... ok
+test envelope::tests::the_enclosure_contains_a_maximum_the_grid_misses ... ok
+test envelope::tests::the_funnel_rule_is_exact_at_the_stall_boundary ... ok
+test envelope::tests::the_optimal_split_makes_the_eiss_bound_exact ... ok
+test es_mpc::tests::regulates_from_a_large_attitude_error_without_singularity ... ok
+test es_mpc::tests::the_error_is_the_short_way_around ... ok
+test es_mpc::tests::the_error_state_linearization_is_xidot_equals_omega ... ok
+test es_mpc::tests::tracks_a_spinning_reference ... ok
+test es_mpc::tests::zero_error_gives_zero_regulation_torque ... ok
+test estimation::tests::ekf_tracks_pendulum_angle_better_than_raw ... ok
+test estimation::tests::kalman_tracks_double_integrator_better_than_raw ... ok
+test estimation::tests::numerical_jacobian_matches_analytic ... ok
+test estimation::tests::ukf_tracks_pendulum_through_nonlinear_measurement ... ok
+test fatigue::tests::a_chattering_policy_costs_one_to_two_orders_of_magnitude_more_life ... ok
+test fatigue::tests::a_constant_amplitude_history_counts_exactly_its_cycles ... ok
+test fatigue::tests::a_small_oscillation_on_a_large_one_belongs_to_the_large_cycle ... ok
+test fatigue::tests::a_tensile_mean_shortens_life_and_the_corrections_order_as_expected ... ok
+test fatigue::tests::an_endurance_limit_can_make_a_duty_cycle_free ... ok
+test fatigue::tests::damage_follows_the_sn_exponent_in_amplitude ... ok
+test fatigue::tests::dither_damage_grows_sub_linearly_in_frequency_because_slow_drift_inflates_each_cycle ... ok
+test fatigue::tests::miner_predicts_failure_at_exactly_the_curves_life ... ok
+test fatigue::tests::rainflow_conserves_total_variation_on_random_histories ... ok
+test fatigue::tests::reversals_keeps_turning_points_and_drops_the_rest ... ok
+test fatigue::tests::the_equivalent_amplitude_depends_on_the_material_which_is_why_rms_is_not_a_substitute ... ok
+test fatigue::tests::the_largest_cycle_always_spans_the_whole_history ... ok
+test fatigue::tests::the_residue_is_counted_and_matters_most_for_short_records ... ok
+test fatigue::tests::the_sn_curve_inverts_itself_and_reports_infinite_life_as_none ... ok
+test fddp::tests::it_converges_a_pendulum_swing_up_from_an_infeasible_guess ... ok
+test fddp::tests::on_a_linear_quadratic_problem_the_feedforward_vanishes ... ok
+test fddp::tests::the_gaps_decay_monotonically_toward_feasibility ... ok
+test foc::tests::a_salient_machine_produces_more_torque_than_its_magnet_alone_explains ... ok
+test foc::tests::base_speed_is_where_the_voltage_limit_is_exactly_reached ... ok
+test foc::tests::clarke_and_park_round_trip_exactly ... ok
+test foc::tests::copper_loss_in_dq_equals_the_three_phase_sum ... ok
+test foc::tests::electrical_power_balances_mechanical_output_plus_copper_loss ... ok
+test foc::tests::field_weakening_buys_speed_at_the_cost_of_torqueless_current ... ok
+test foc::tests::mtpa_beats_every_alternative_on_a_brute_force_sweep ... ok
+test foc::tests::mtpa_is_exactly_id_zero_on_a_surface_machine_and_negative_id_on_a_salient_one ... ok
+test foc::tests::park_turns_a_rotating_sinusoid_into_a_constant ... ok
+test foc::tests::svpwm_reaches_v_dc_over_sqrt3_and_spwm_only_half ... ok
+test foc::tests::the_clarke_transform_is_amplitude_invariant_not_power_invariant ... ok
+test dircon::tests::pendulum_swings_up ... ok
+test foc::tests::the_common_mode_offset_does_not_change_any_line_to_line_voltage ... ok
+test foc::tests::the_current_loop_reaches_its_reference_and_the_step_is_stable_below_the_bound ... ok
+test foc::tests::the_electrical_angle_carries_the_pole_pair_count_and_stays_wrapped ... ok
+test foc::tests::the_integral_clamp_prevents_windup ... ok
+test foc::tests::the_open_loop_bound_tracks_speed_and_the_machine_diverges_just_past_it ... ok
+test foc::tests::the_thermal_equivalent_current_matches_the_single_r_model ... ok
+test foc::tests::the_tuned_gains_give_the_first_order_response_they_claim ... ok
+test foc::tests::the_zero_sequence_is_discarded_because_a_star_winding_cannot_carry_it ... ok
+test frenet::tests::the_planner_returns_to_lane_centre_around_an_obstacle ... ok
+test frenet::tests::the_quartic_keeps_its_terminal_velocity_exactly ... ok
+test frenet::tests::the_quintic_hits_its_boundary_conditions_exactly ... ok
+test foc::tests::the_closed_loop_stability_bound_is_the_one_that_binds ... ok
+test frenet::tests::the_quintic_is_the_minimum_jerk_trajectory ... ok
+test friction::tests::friction_opposes_motion_and_is_odd_in_velocity ... ok
+test friction::tests::max_stable_dt_is_the_largest_stable_step_not_the_time_constant ... ok
+test friction::tests::presliding_behaves_as_a_spring_of_stiffness_sigma_0 ... ok
+test friction::tests::reversal_produces_hysteresis_rather_than_a_jump ... ok
+test friction::tests::the_curve_has_breakaway_a_dip_and_a_viscous_rise ... ok
+test friction::tests::the_stable_step_is_reported_and_unbounded_at_rest ... ok
+test funnel_algebra::tests::a_broken_chain_names_the_break_and_the_repair ... ok
+test funnel_algebra::tests::a_containment_monitor_pays_for_itself ... ok
+test funnel_algebra::tests::a_sampled_funnel_escapes_at_two_d_over_n ... ok
+test funnel_algebra::tests::detection_is_what_makes_a_learned_funnel_algebra_work ... ok
+test funnel_algebra::tests::preimage_ordering_is_containment ... ok
+test funnel_algebra::tests::the_two_failure_modes_stay_separate ... ok
+test geometric_fabric::tests::energization_conserves_energy ... ok
+test geometric_fabric::tests::the_closest_approach_is_invariant_to_traversal_speed ... ok
+test friction::tests::lugre_reduces_to_the_stribeck_curve_in_steady_sliding ... ok
+test geometric_fabric::tests::the_geometry_is_homogeneous_of_degree_two ... ok
+test geometric_se3::tests::hover_is_an_exact_equilibrium ... ok
+test geometric_se3::tests::the_attitude_error_vanishes_at_alignment_and_grows_with_offset ... ok
+test geometric_fabric::tests::the_forced_fabric_reaches_the_goal_while_avoiding_the_obstacle ... ok
+test hierarchy::tests::the_cost_is_not_monotone_in_the_slow_rate_and_the_optimum_is_interior ... ok
+test hierarchy::tests::the_dominant_term_switches_across_the_optimum ... ok
+test geometric_se3::tests::the_closed_loop_converges_from_a_perturbed_pose ... ok
+test hinf::tests::closed_loop_attenuates_disturbance_below_gamma ... ok
+test centroidal_mpc::tests::tight_support_polygon_saturates_the_zmp ... ok
+test hinf::tests::infeasible_gamma_returns_none ... ok
+test hinf::tests::synthesizes_stabilizing_psd_solution ... ok
+test hinf::tests::gamma_bisection_brackets_the_threshold ... ok
+test hj::tests::single_integrator_brt_matches_the_analytic_set ... ok
+test hj::tests::the_tube_only_grows_with_time ... ok
+test hqp::tests::lower_priority_change_never_perturbs_higher ... ok
+test hqp::tests::prioritized_ik_reaches_exactly_and_posture_uses_the_null_space ... ok
+test hqp::tests::strict_priority_is_exact_and_lower_tasks_defer ... ok
+test hybrid_terminal::tests::a_plastic_impact_is_non_expansive_in_the_kinetic_metric ... ok
+test hybrid_terminal::tests::an_lqr_cost_is_expansive_under_the_same_impact ... ok
+test hybrid_terminal::tests::an_unstable_closed_loop_is_reported_infeasible ... ok
+test hybrid_terminal::tests::both_conditions_can_hold_at_once ... ok
+test hybrid_terminal::tests::mismatched_shapes_are_refused ... ok
+test hybrid_terminal::tests::the_two_conditions_trade_and_the_boundary_is_measurable ... ok
+test hzd::rd2_tests::relative_degree_two_zero_dynamics_matches_a_hand_computable_case ... ok
+test hzd::rd2_tests::the_order_two_prediction_matches_a_simulation ... ok
+test hzd::tests::a_contracting_restricted_block_with_an_expanding_transverse_one_is_not_certified ... ok
+test hzd::tests::a_stable_restricted_block_does_not_imply_a_stable_full_map ... ok
+test hzd::tests::output_held_at_zero_diverges_when_the_zero_dynamics_is_unstable ... ok
+test hzd::tests::the_invariance_residual_detects_a_reset_that_leaves_the_manifold ... ok
+test hzd::tests::the_reduction_is_exact_under_hybrid_invariance ... ok
+test hzd::tests::the_restricted_return_map_matches_its_closed_form ... ok
+test hzd::tests::zero_dynamics_eigenvalues_are_the_transmission_zeros ... ok
+test icem::tests::a_non_finite_cost_is_ranked_worst_instead_of_panicking ... ok
+test icem::tests::an_everywhere_non_finite_cost_still_returns_a_finite_plan ... ok
+test icem::tests::it_drives_the_cost_down_toward_the_optimum ... ok
+test icem::tests::the_colored_noise_has_the_one_over_f_beta_spectrum ... ok
+test cbf::tests::every_certified_control_passes_an_independent_check ... ok
+test icem::tests::white_noise_is_flat_but_colored_noise_is_smooth ... ok
+test ilqr::tests::ilqr_swings_arm_to_goal ... ok
+test imu_preint::tests::bias_jacobians_match_reintegration ... ok
+test ilqr::tests::planned_torques_are_dynamically_consistent ... ok
+test imu_preint::tests::leg_odometry_corrects_accelerometer_bias_drift ... ok
+test inekf::tests::a_matrix_is_state_independent_unlike_a_standard_ekf ... ok
+test imu_preint::tests::preintegration_reconstructs_direct_integration ... ok
+test inekf::tests::right_invariant_error_is_exactly_log_linear ... ok
+test inekf::tests::se23_group_operations_are_consistent ... ok
+test iss::tests::stochastic_contraction_matches_a_monte_carlo_measurement ... ok
+test iss::tests::the_chunked_multiplier_is_horizon_free_and_improves_with_chunk_length ... ok
+test iss::tests::the_deviation_does_not_grow_with_the_horizon ... ok
+test iss::tests::the_disturbance_tube_is_the_deviation_a_contraction_settles_into ... ok
+test iss::tests::the_eiss_recursion_settles_in_proportion_to_the_discrepancy ... ok
+test koopman::tests::edmd_recovers_the_exact_koopman_operator ... ok
+test koopman::tests::edmdc_fits_a_controlled_lifted_model ... ok
+test koopman::tests::koopman_prediction_matches_the_true_trajectory ... ok
+test latency::tests::a_plants_delay_margin_sets_a_sensing_power_floor ... ok
+test latency::tests::sensing_power_floor_refuses_unusable_input ... ok
+test inekf::tests::filter_converges_from_a_wrong_initial_estimate ... ok
+test latency::tests::the_event_triggered_floor_bounds_measured_inter_event_times ... ok
+test latency::tests::the_delay_margin_is_exact_and_the_loop_fails_one_sample_past_it ... ok
+test latency::tests::the_optimal_compute_budget_is_interior_not_the_largest_that_fits ... ok
+test learned_vc::tests::positive_foot_clearance_is_geometrically_impossible_here ... ok
+test learned_vc::tests::the_analytic_derivatives_match_finite_differences ... ok
+test learned_vc::tests::the_endpoint_geometry_survives_any_weights ... ok
+test learned_vc::tests::the_learned_family_contains_the_hand_tuned_one ... ok
+test learned_vc::tests::the_network_derivatives_match_finite_differences ... ok
+test hierarchy::tests::the_predicted_cost_matches_a_simulated_dual_rate_stack ... ok
+test lq_regret::tests::a_defective_closed_loop_inflates_the_exponents ... ok
+test lq_regret::tests::a_systematic_bias_costs_a_further_factor_of_one_over_lambda ... ok
+test hj::tests::double_integrator_brt_matches_the_bang_bang_reach_extent ... ok
+test lq_regret::tests::the_exact_regret_reproduces_the_reference_value ... ok
+test lq_regret::tests::the_one_over_lambda_growth_appears_only_when_the_error_excites_the_slow_mode ... ok
+test lq_regret::tests::the_regret_exponent_in_the_action_error_is_two ... ok
+test lq_regret::tests::the_stability_margin_reproduces_the_reference_and_predicts_destabilisation ... ok
+test lqr::tests::lqr_stabilizes_a_double_integrator ... ok
+test madgwick::tests::a_level_static_accelerometer_drives_the_estimate_level ... ok
+test madgwick::tests::a_tilted_static_accelerometer_converges_to_the_true_roll ... ok
+test madgwick::tests::the_accelerometer_correction_arrests_gyro_drift ... ok
+test marine::tests::coriolis_is_skew_symmetric_and_does_no_work ... ok
+test marine::tests::damping_is_dissipative ... ok
+test marine::tests::decoupled_surge_matches_the_first_order_analytic_response ... ok
+test marine::tests::energy_dissipates_to_rest_with_no_input ... ok
+test centroidal_mpc::tests::zmp_stays_in_support_and_com_shifts_over_the_new_footstep ... ok
+test marine::tests::mass_matrix_is_symmetric_positive_definite ... ok
+test marine::tests::los_guidance_drives_cross_track_error_to_zero ... ok
+test mckibben::tests::a_braid_past_the_magic_angle_extends_instead_of_contracting ... ok
+test mckibben::tests::an_antagonistic_pair_separates_torque_from_stiffness ... ok
+test mckibben::tests::force_falls_monotonically_with_contraction_so_it_is_a_spring_not_a_source ... ok
+test mckibben::tests::force_is_proportional_to_pressure_and_to_the_square_of_diameter ... ok
+test mckibben::tests::malformed_geometry_is_rejected_rather_than_producing_infinities ... ok
+test mckibben::tests::the_closed_form_force_is_the_pressure_times_the_volume_gradient ... ok
+test mckibben::tests::the_free_contraction_closed_form_matches_a_root_find_on_the_force ... ok
+test mckibben::tests::the_magic_angle_is_where_the_force_vanishes ... ok
+test mckibben::tests::the_volume_peaks_at_the_magic_angle_which_is_why_the_force_vanishes_there ... ok
+test marine::tests::restoring_rights_a_bottom_heavy_vehicle ... ok
+test metrology::tests::improving_the_skill_makes_detection_harder_to_certify ... ok
+test mckibben::tests::the_work_integral_matches_quadrature_of_the_force ... ok
+test metrology::tests::the_normal_quantiles_are_right ... ok
+test metrology::tests::the_propagation_matches_direct_evaluation_at_the_endpoints ... ok
+test metrology::tests::the_task_interval_is_limited_by_the_detector_not_the_skill ... ok
+test metrology::tests::wilson_does_not_claim_certainty_from_nine_samples ... ok
+test mhe::verification::mhe_matches_kalman_filter_linear_gaussian ... ok
+test metrology::tests::the_interval_covers_at_about_its_nominal_rate ... ok
+test miqp_footstep::tests::an_unreachable_step_is_infeasible ... ok
+test miqp_footstep::tests::an_assignment_places_each_footstep_in_its_region ... ok
+test miqp_footstep::tests::perception_changes_the_plan ... ok
+test miqp_footstep::tests::reachability_between_consecutive_steps_is_respected ... ok
+test momentum_observer::tests::coriolis_transpose_matches_skew_identity ... ok
+test miqp_footstep::tests::branch_and_bound_matches_exhaustive_search ... ok
+test momentum_observer::tests::observer_stays_near_zero_without_contact ... ok
+test momentum_observer::tests::observer_recovers_constant_external_torque ... ok
+test motor_thermal::tests::beyond_a_critical_current_there_is_no_steady_state ... ok
+test motor_thermal::tests::heating_is_superlinear_because_resistance_rises_with_temperature ... ok
+test motor_thermal::tests::overload_is_survivable_for_a_bounded_time ... ok
+test motor_thermal::tests::the_continuous_rating_round_trips_against_the_equilibrium ... ok
+test motor_thermal::tests::the_equilibrium_matches_a_long_integration ... ok
+test motor_thermal::tests::the_winding_is_fast_and_the_housing_is_slow ... ok
+test mpc::tests::mpc_regulates_within_input_bounds ... ok
+test momentum_observer::tests::reset_reanchors_the_observer ... ok
+test c3::tests::a_contact_blind_planner_never_moves_the_slider has been running for over 60 seconds
+test c3::tests::c3_drives_the_slider_to_the_target_through_contact has been running for over 60 seconds
+test learned_vc::tests::training_reduces_the_scuff_depth_the_hand_tuned_family_is_stuck_with ... ok
+test msckf::tests::the_measurement_jacobian_matches_finite_differences ... ok
+test msckf::tests::the_nullspace_projection_removes_the_landmark ... ok
+test msckf::tests::the_update_corrects_perturbed_poses ... ok
+test msckf::tests::triangulation_recovers_the_landmark ... ok
+test muscle::tests::activation_dynamics_track_the_neural_drive ... ok
+test cem::tests::closed_loop_reduces_goal_error has been running for over 60 seconds
+test muscle::tests::constant_activation_self_stabilizes_morphological_computation ... ok
+test muscle::tests::force_length_peaks_at_the_optimal_fiber_length ... ok
+test muscle::tests::force_velocity_has_the_right_limits_and_is_c1_at_zero ... ok
+test muscle::tests::shortening_branch_satisfies_hills_hyperbola_exactly ... ok
+test muscle::tests::the_force_velocity_relation_is_intrinsic_damping_a_preflex ... ok
+test orca::tests::a_dense_group_stays_collision_free ... ok
+test orca::tests::an_uncrowded_agent_gets_its_preferred_velocity ... ok
+test orca::tests::two_head_on_agents_deflect_and_avoid_collision ... ok
+test c3::tests::a_contact_blind_planner_never_moves_the_slider ... ok
+test path_tracking::tests::constant_steering_traces_a_circle_of_the_expected_radius ... ok
+test path_tracking::tests::pure_pursuit_converges_to_a_straight_path ... ok
+test c3::tests::c3_drives_the_slider_to_the_target_through_contact ... ok
+test path_tracking::tests::stanley_converges_to_a_straight_path ... ok
+test pf::verification::particle_filter_tracks_gordon_model ... ok
+test piezo::tests::a_coefficient_set_implying_more_energy_out_than_in_is_rejected ... ok
+test piezo::tests::a_stack_reaches_its_field_at_a_fraction_of_the_voltage ... ok
+test piezo::tests::delivered_work_peaks_at_the_matched_load_and_the_two_quarter_power_figures_differ ... ok
+test piezo::tests::harvested_power_vanishes_at_both_load_extremes ... ok
+test piezo::tests::reciprocity_holds_as_an_energy_identity ... ok
+test piezo::tests::the_drive_current_is_reactive_and_sets_the_real_bandwidth ... ok
+test piezo::tests::the_load_line_is_straight_between_free_displacement_and_blocked_force ... ok
+test piezo::tests::the_optimal_harvesting_resistance_is_the_capacitive_reactance ... ok
+test piezo::tests::the_resonance_scales_as_the_inverse_of_length ... ok
+test piezo::tests::the_two_routes_to_the_coupling_coefficient_agree ... ok
+test osc::tests::osc_regulates_tool_to_target ... ok
+test path_tracking::tests::pure_pursuit_tracks_a_circular_path_with_bounded_error ... ok
+test placo::tests::hard_limit_never_violated_when_target_demands_it ... ok
+test proxddp::tests::constrained_ddp_matches_the_box_qp_oracle ... ok
+test proxddp::tests::unconstrained_bounds_recover_plain_lqr_and_constraints_cost_more ... ok
+test qp::tests::a_feasible_problem_is_unaffected ... ok
+test qp::tests::an_infeasible_box_is_refused ... ok
+test qp::tests::opposing_halfspaces_are_refused ... ok
+test placo::tests::reaches_a_reachable_target_within_loose_limits ... ok
+test qp_certificate::tests::a_stack_on_a_stable_plant_gets_a_common_lyapunov_function ... ok
+test qp_certificate::tests::empty_or_mismatched_input_is_refused ... ok
+test qp_certificate::tests::individually_stable_modes_can_switch_into_instability ... ok
+test qp_certificate::tests::saturation_hands_the_loop_back_to_the_open_loop ... ok
+test qp_certificate::tests::the_qp_controller_is_piecewise_affine ... ok
+test quadrotor::tests::hover_is_level_thrust_equals_weight ... ok
+test quadrotor::tests::jerk_determines_angular_velocity ... ok
+test quadrotor::tests::min_snap_hits_waypoints_is_c3_continuous_and_starts_and_ends_at_rest ... ok
+test quadrotor::tests::min_snap_is_optimal_among_feasible_trajectories ... ok
+test quadrotor::tests::thrust_and_attitude_reproduce_the_commanded_acceleration_and_yaw ... ok
+test regret::tests::a_diverged_run_is_reported_not_scored ... ok
+test regret::tests::the_error_types_are_kept_distinct ... ok
+test qp_certificate::tests::a_saturating_stack_on_a_marginal_plant_is_refuted_at_every_gain ... ok
+test reliability::tests::a_common_cause_caps_reliability_however_good_the_detection ... ok
+test reliability::tests::a_hundred_step_chain_of_ninety_nine_percent_skills ... ok
+test reliability::tests::detection_is_worth_more_than_skill_at_a_long_horizon ... ok
+test reliability::tests::the_closed_form_matches_a_simulated_markov_chain ... ok
+test reliability::tests::the_required_skill_falls_steeply_with_detection_quality ... ok
+test reluqp::tests::is_deterministic ... ok
+test reluqp::tests::matches_clarabel_and_is_feasible ... ok
+test reluqp::tests::recovers_unconstrained_optimum_when_bounds_are_slack ... ok
+test placo::tests::six_dof_pose_task_and_posture_stack_stay_feasible ... ok
+test resclf::tests::the_clf_qp_is_the_minimum_norm_input_that_achieves_descent ... ok
+test resclf::tests::the_resclf_rate_is_the_constant_the_hybrid_certificate_needs ... ok
+test resclf::tests::the_riccati_solution_has_a_vanishing_residual ... ok
+test resclf::tests::the_sandwich_bounds_hold_at_every_eps ... ok
+test rmpflow::tests::reaches_goal_while_avoiding_obstacle ... ok
+test rotordynamics::tests::a_disc_rotor_has_no_conical_critical_speed_and_a_slender_one_does ... ok
+test rotordynamics::tests::a_gyroscopic_moment_vanishes_when_the_precession_is_along_the_spin ... ok
+test rotordynamics::tests::a_motors_gyroscopic_reaction_is_a_real_disturbance_at_robot_scale ... ok
+test rotordynamics::tests::max_stable_dt_accounts_for_the_damper_and_is_never_optimistic ... ok
+test rotordynamics::tests::the_amplitude_peak_sits_above_the_natural_frequency_and_disappears_when_overdamped ... ok
+test rotordynamics::tests::the_bearing_force_is_bounded_above_resonance_even_though_speed_keeps_rising ... ok
+test rotordynamics::tests::the_gyroscopic_moment_has_the_right_hand_sense ... ok
+test rotordynamics::tests::the_gyroscopic_moment_is_exactly_workless ... ok
+test rotordynamics::tests::the_time_domain_response_reproduces_the_closed_form_in_amplitude_and_phase ... ok
+test rotordynamics::tests::the_translational_critical_speed_is_unaffected_by_the_inertia_ratio ... ok
+test rotordynamics::tests::the_whirl_amplitude_hits_its_closed_form_landmarks ... ok
+test rotordynamics::tests::the_whirl_frequencies_satisfy_their_own_characteristic_polynomial ... ok
+test rts::tests::smoothing_beats_filtering_on_a_noisy_track ... ok
+test rts::tests::smoothing_tightens_the_covariance_at_interior_steps ... ok
+test rts::tests::the_last_step_is_unchanged_by_smoothing ... ok
+test scvx::tests::a_linear_system_converges_in_one_step_with_zero_defect ... ok
+test scvx::tests::scvx_lands_the_rocket_from_an_infeasible_guess ... ok
+test scvx::tests::the_analytic_jacobian_matches_finite_differences ... ok
+test mppi::tests::mppi_is_deterministic_in_its_seed ... ok
+test latency::tests::the_margin_is_a_physical_time_not_a_sample_count ... ok
+test scvx::tests::the_defect_decreases_over_the_iterations ... ok
+test scvx::tests::the_virtual_controls_vanish_at_convergence ... ok
+test mppi::tests::mppi_drives_each_joint_to_its_goal ... ok
+test sensorimotor::verification::perception_recovers_target_from_the_raytraced_image ... ok
+test cem::tests::closed_loop_reduces_goal_error ... ok
+test sliding_mode::tests::regulates_to_setpoint_no_disturbance ... ok
+test sliding_mode::tests::boundary_layer_trades_accuracy_for_smoothness ... ok
+test sliding_mode::tests::sat_is_a_clamped_ramp ... ok
+test slip::orbit_certificate::slip_running_gait_is_a_certified_limit_cycle ... ok
+test sliding_mode::tests::rejects_unmodeled_disturbance ... ok
+test slip::tests::energy_is_conserved_across_flight_stance_and_the_events ... ok
+test slip::tests::raibert_foot_placement_regulates_forward_speed ... ok
+test slip::tests::the_apex_return_map_preserves_energy ... ok
+test sma::tests::a_full_cycle_closes_and_the_two_branches_are_genuinely_apart ... ok
+test sma::tests::a_partial_cycle_lands_strictly_inside_the_loop ... ok
+test sma::tests::cooling_dominates_the_cycle_time_and_no_current_can_change_that ... ok
+test sma::tests::holding_temperature_constant_holds_the_state ... ok
+test sma::tests::stress_raises_the_transformation_temperatures_linearly ... ok
+test sma::tests::the_cooling_branch_interior_matches_its_analytic_form ... ok
+test sma::tests::the_cosine_endpoints_are_exact ... ok
+test sma::tests::the_modulus_changes_by_about_three_times_across_the_stroke ... ok
+test sma::tests::the_parameter_set_is_ordered_and_the_ordering_is_checked ... ok
+test sma::tests::the_work_density_is_the_reason_to_accept_all_of_this ... ok
+test sma::tests::xi_stays_in_range_under_arbitrary_input_sequences ... ok
+test smoothing_tube::tests::a_nan_residual_is_refused_not_maxed_away ... ok
+test smoothing_tube::tests::a_nominal_that_violates_is_refuted_on_any_evidence ... ok
+test smoothing_tube::tests::a_proved_gap_on_a_contracting_loop_certifies ... ok
+test smoothing_tube::tests::a_sampled_gap_can_never_certify ... ok
+test smoothing_tube::tests::a_tube_over_no_steps_certifies_nothing ... ok
+test smoothing_tube::tests::a_vacuous_certificate_is_visible_in_the_activity_check ... ok
+test smoothing_tube::tests::an_envelope_that_reaches_a_constraint_does_not_refute_it ... ok
+test smoothing_tube::tests::containment_catches_a_trajectory_that_leaves ... ok
+test smoothing_tube::tests::containment_passes_when_the_tube_is_wide_enough ... ok
+test smoothing_tube::tests::mismatched_dimensions_are_refused ... ok
+test smoothing_tube::tests::soundness_is_derived_from_the_evidence_not_a_trusted_flag ... ok
+test smoothing_tube::tests::the_constraint_test_is_exact_on_a_box ... ok
+test smoothing_tube::tests::tube_growth_tracks_the_closed_loop ... ok
+test slip::orbit_certificate::the_certificate_responds_to_foot_placement ... ok
+test srbd_mpc::tests::swing_feet_carry_no_force ... ok
+test swarm::tests::consensus_requires_connectivity ... ok
+test swarm::tests::disagreement_decays_at_exactly_the_fiedler_rate ... ok
+test swarm::tests::fiedler_value_reports_nan_when_there_is_no_second_eigenvalue ... ok
+test swarm::tests::formation_converges_to_the_shape_about_the_conserved_centroid ... ok
+test swarm::tests::laplacian_has_the_defining_properties ... ok
+test swarm::tests::the_average_is_exactly_conserved ... ok
+test task_suite::tests::a_small_seed_count_produces_uninformative_scores ... ok
+test task_suite::tests::a_thirty_one_task_suite_expects_false_rankings ... ok
+test task_suite::tests::ranking_two_rates_needs_far_more_seeds_than_are_usually_run ... ok
+test task_suite::tests::seeds_are_reproducible_and_distinct ... ok
+test task_suite::tests::spectral_radius_below_one_does_not_keep_the_walker_up ... ok
+test task_suite::tests::the_angular_momentum_gain_is_not_optional ... ok
+test task_suite::tests::the_suite_discriminates_with_a_spread_of_gaps ... ok
+test task_suite::tests::this_suite_needs_hundreds_of_seeds_for_its_own_rankings ... ok
+test terminal::tests::a_non_stabilising_terminal_controller_breaks_invariance ... ok
+test terminal::tests::an_expansive_reset_ejects_every_terminal_set ... ok
+test terminal::tests::an_input_bound_that_bites_is_reported_as_the_failing_condition ... ok
+test terminal::tests::lqr_terminal_ingredients_satisfy_all_four_conditions ... ok
+test resclf::tests::the_closed_loop_stays_inside_the_envelope_and_speeds_up_as_eps_shrinks ... ok
+test tests::cartesian_impedance_pulls_tool_to_target ... ok
+test tests::computed_torque_ratio_refuses_unusable_dt ... ok
+test lq_regret::tests::monte_carlo_with_common_random_numbers_confirms_the_closed_form has been running for over 60 seconds
+test tests::computed_torque_regulates_to_a_setpoint ... ok
+test tests::damping_zoh_ratio_refuses_unusable_input ... ok
+test tests::max_stable_dt_brackets_the_measured_boundary_for_both_controllers ... ok
+test tests::pid_regulates_a_double_integrator ... ok
+test tests::computed_torque_holds_its_posture_at_a_far_coarser_tick_than_impedance ... ok
+test tinympc::tests::regulates_a_double_integrator_within_bounds ... ok
+test topp::tests::matches_the_analytic_trapezoidal_optimum ... ok
+test topp::tests::matches_the_analytic_triangular_optimum ... ok
+test topp::tests::respects_limits_and_saturates_a_constraint_everywhere ... ok
+test topp::tests::tighter_limits_take_longer ... ok
+test lq_regret::tests::monte_carlo_with_common_random_numbers_confirms_the_closed_form ... ok
+test tests::the_arm_holds_its_own_posture_and_a_coarse_tick_proves_the_probe_can_fail ... ok
+test trajectory_bundles::tests::regulates_a_double_integrator ... ok
+test tube_mpc::tests::the_constraint_tightening_keeps_the_real_state_feasible ... ok
+test tube_mpc::tests::the_error_matrix_is_stable_and_alpha_is_contractive ... ok
+test trajectory_bundles::tests::rollout_cost_matches_optimized_plan ... ok
+test tube_mpc::tests::the_tube_is_robustly_positively_invariant ... ok
+test visual_servo::tests::feature_error_decays_exponentially_at_the_gain_rate ... ok
+test trajectory_bundles::tests::is_deterministic_in_its_seed ... ok
+test visual_servo::tests::interaction_matrix_matches_finite_differences ... ok
+test wahba::tests::the_multivector_q_method_beats_two_vector_triad_under_noise ... ok
+test wahba::tests::the_q_method_recovers_a_known_rotation_exactly ... ok
+test wahba::tests::the_q_method_solution_minimizes_the_wahba_cost ... ok
+test wahba::tests::triad_recovers_a_known_rotation_exactly ... ok
+test visual_servo::tests::ibvs_converges_to_the_desired_view_and_pose ... ok
+test zmp::tests::capture_point_at_rest_is_the_com ... ok
+test zmp::tests::capture_point_matches_closed_form ... ok
+test zmp::tests::preview_tracks_a_step_zmp_reference ... ok
+test zonotope::tests::minkowski_sum_and_linear_map_transform_the_support_correctly ... ok
+test zonotope::tests::the_interval_hull_bounds_the_box_zonotope_exactly ... ok
+test zonotope::tests::the_reachable_set_contains_every_admissible_trajectory ... ok
+test zonotope::tests::the_support_function_matches_brute_force_vertices ... ok
+test tube_mpc::tests::the_true_state_stays_in_the_tube_under_adversarial_disturbances ... ok
+test sensorimotor::verification::eye_in_hand_reaches_and_faces_the_seen_target ... ok
+test wbc::tests::wbc_regulates_tool_and_respects_accel_limit ... ok
+test regret::tests::the_instrument_reproduces_the_closed_form_on_a_linear_loop ... ok
+test srbd_mpc::tests::stabilizes_standing_balance_with_physical_forces ... ok
+test sensorimotor::verification::free_eye_centers_true_target_and_reaches_standoff ... ok
+test sensorimotor::verification::free_eye_tracks_a_moving_target ... ok
+
+test result: ok. 517 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 115.12s
+
+     Running unittests src/lib.rs (target/debug/deps/ferromotion_core-1b1dbeaf250c2977)
+
+running 999 tests
+test aba::tests::floating_base_free_falls_at_g ... ok
+test aba::tests::aba_matches_the_mass_matrix_solve ... ok
+test aba::tests::floating_base_conserves_momentum ... ok
+test acd::tests::the_channel_opens_where_the_single_hull_is_solid ... ok
+test acd::tests::the_corner_reduction_discards_nothing_the_hull_depends_on ... ok
+test adaptive_contact::tests::a_rebound_that_cannot_be_measured_is_refused_not_invented ... ok
+test acd::tests::an_unsealed_mesh_is_refused_rather_than_returned_as_its_bounding_box ... ok
+test adaptive_contact::tests::adaptive_and_fixed_agree_on_the_trajectory ... ok
+test adaptive_contact::tests::adaptive_reproduces_the_integration_free_jacobian ... ok
+test adaptive_contact::tests::decomposition_obeys_the_triangle_inequality ... ok
+test adaptive_contact::tests::discretisation_dominates_the_model_error ... ok
+test adaptive_contact::tests::free_flight_is_exact ... ok
+test acd::tests::the_parts_are_tighter_than_the_single_hull_they_replace ... ok
+test adaptive_contact::tests::reference_converges_under_tightening ... ok
+test adaptive_contact::tests::the_fixed_step_and_continuous_restitution_shift_is_a_large_fraction_of_the_margin ... ok
+test acd::tests::empty_and_absurd_inputs_are_refused ... ok
+test adaptive_contact::tests::unreachable_tolerance_is_reported ... ok
+test affine_contact::tests::broken_hypotheses_are_refused ... ok
+test affine_contact::tests::contact_duration_scales_as_one_over_root_k ... ok
+test affine_contact::tests::restitution_is_a_smooth_function_of_impact_speed ... ok
+test affine_contact::tests::the_clamp_shuts_before_the_body_leaves ... ok
+test affine_contact::tests::the_closed_form_matches_the_tolerance_driven_integrator ... ok
+test apriltag::tests::a_known_id_round_trips_and_survives_correctable_corruption ... ok
+test apriltag::tests::decode_recovers_the_rotation ... ok
+test apriltag::tests::tag_pose_is_recovered_from_projected_corners ... ok
+test adaptive_contact::tests::adaptive_is_probe_stable_and_uniform_is_not ... ok
+test bit_star::tests::in_free_space_the_cost_converges_to_the_straight_line ... ok
+test adaptive_contact::tests::reachable_fraction_is_bounded ... ok
+test bspline::tests::the_analytic_velocity_matches_a_finite_difference ... ok
+test bspline::tests::the_basis_is_a_partition_of_unity ... ok
+test bspline::tests::the_curve_stays_in_the_convex_hull_of_the_local_control_points ... ok
+test bspline::tests::the_trajectory_is_c2_continuous_across_segment_boundaries ... ok
+test bug2::tests::b1_bug2_is_no_shorter_than_astar_and_here_strictly_longer ... ok
+test bug2::tests::b1_turn_left_executes_the_traced_16_step_path ... ok
+test bug2::tests::b1_turn_right_executes_14_and_differs_from_left ... ok
+test bug2::tests::b2_sealed_goal_is_unreachable_after_17_moves ... ok
+test bug2::tests::b3_open_grid_walks_the_m_line ... ok
+test bug2::tests::b4_turn_left_rounds_the_map_edge_in_22_and_ignores_the_start_cell ... ok
+test bug2::tests::b4_turn_right_threads_the_gap_in_12_equal_to_optimal ... ok
+test bug2::tests::b5_passing_the_hit_point_with_another_heading_is_not_a_circuit ... ok
+test bug2::tests::degenerate_inputs ... ok
+test bug2::tests::diagonal_m_line_is_four_connected ... ok
+test bug2::tests::diagonal_m_line_with_a_blocked_cell_hits_and_leaves ... ok
+test bug2::tests::every_map_query_is_adjacent_to_the_executed_path ... ok
+test bug2::tests::executed_cost_is_at_least_the_astar_optimum_on_every_reachable_fixture ... ok
+test bug2::tests::m_line_is_edge_connected_monotone_and_hugs_the_segment ... ok
+test bug2::tests::max_steps_bounds_the_executed_moves_exactly ... ok
+test bug2::tests::two_obstacles_one_cell_apart_on_the_m_line_are_both_passed ... ok
+test acd::tests::the_parts_stand_exactly_where_the_voxel_solid_does ... ok
+test adaptive_contact::tests::the_restitution_is_measured_at_every_stiffness_not_only_the_lucky_ones ... ok
+test bvh::verification::bvh_pairs_match_brute_force ... ok
+test bvh::verification::bvh_queries_match_brute_force ... ok
+test camera::tests::a_known_point_projects_to_the_expected_pixel ... ok
+test camera::tests::an_axial_point_lands_on_the_principal_point ... ok
+test camera::tests::distortion_and_undistortion_are_inverse_to_tolerance ... ok
+test camera::tests::project_then_unproject_round_trips_without_distortion ... ok
+test camera::tests::the_projection_jacobian_matches_a_finite_difference ... ok
+test camera::tests::zhang_calibration_recovers_known_intrinsics ... ok
+test catmull_rom::tests::collinear_waypoints_give_a_straight_line ... ok
+test catmull_rom::tests::it_is_c1_continuous_across_segments ... ok
+test catmull_rom::tests::it_passes_through_every_waypoint ... ok
+test catmull_rom::tests::the_interior_tangent_is_the_centered_difference ... ok
+test causal::tests::adjusting_on_a_descendant_is_rejected ... ok
+test causal::tests::backdoor_adjustment_recovers_the_causal_effect ... ok
+test causal::tests::intervention_cuts_incoming_edges_rather_than_conditioning ... ok
+test causal::tests::observational_fit_recovers_the_wrong_effect_under_confounding ... ok
+test causal::tests::without_confounding_the_observational_fit_is_correct ... ok
+test cfd_contact::tests::cfd_gradient_escapes_the_stall ... ok
+test cfd_contact::tests::cfd_gradient_has_the_correct_sign_and_converges_to_truth_in_contact ... ok
+test cfd_contact::tests::forward_pass_is_exact_hard_contact ... ok
+test cfd_contact::tests::naive_gradient_vanishes_but_cfd_reaches ... ok
+test bundle::tests::it_drives_the_reprojection_error_down_under_noise ... ok
+test chained_form::tests::a_degenerate_amplitude_is_refused_rather_than_dividing_by_zero ... ok
+test chained_form::tests::one_period_moves_only_the_target_variable_and_returns_the_earlier_ones ... ok
+test bundle::tests::it_recovers_exact_structure_and_motion_from_clean_data ... ok
+test bit_star::tests::the_cost_is_monotonically_non_increasing_across_batches ... ok
+test chained_form::tests::the_displacement_is_linear_in_b_which_is_what_makes_one_probe_enough ... ok
+test chained_form::tests::the_chain_is_controllable_in_practice_not_just_in_principle ... ok
+test chomp::tests::it_bows_the_path_around_an_obstacle ... ok
+test chomp::tests::with_no_obstacles_it_recovers_the_straight_line ... ok
+test chomp::tests::the_cost_descends_and_converges ... ok
+test collision::tests::capsule_collision_jacobian_matches_finite_difference ... ok
+test collision::tests::collision_jacobian_matches_finite_difference ... ok
+test chained_form::tests::the_measured_gain_matches_the_books_closed_form_exactly ... ok
+test compound::tests::a_compound_of_one_part_reduces_to_plain_gjk ... ok
+test compound::tests::a_generated_mesh_becomes_collidable_and_matches_the_analytic_box ... ok
+test collision::tests::trajectory_routes_around_an_obstacle ... ok
+test compound::tests::a_penetrating_pair_reports_a_negative_gap_and_a_normal_that_separates_it ... ok
+test compound::tests::a_plate_on_two_blocks_yields_two_contacts_not_one ... ok
+test compound::tests::a_separated_pair_reports_a_positive_gap_and_the_two_branches_meet_at_touching ... ok
+test compound::tests::degenerate_and_empty_compounds_are_refused ... ok
+test compound::tests::hull_support_over_estimates_and_is_not_reachable_as_the_compound ... ok
+test compound::tests::moving_both_bodies_together_changes_nothing ... ok
+test compound::tests::the_convex_hull_fills_the_concavity_a_compound_keeps_open ... ok
+test compound::tests::the_deepest_penetration_outranks_a_shallower_one_and_both_outrank_separation ... ok
+test compound::tests::the_fixture_weaknesses_six_mutations_exposed ... ok
+test compound_pgs::tests::a_body_resting_exactly_on_a_surface_is_never_a_deep_penetration ... ok
+test closed_loop::tests::four_bar_conserves_energy_and_holds_the_loop_closed ... ok
+test compound_pgs::tests::a_mismatched_generalized_velocity_and_a_bad_friction_coefficient_are_refused ... ok
+test compound_pgs::tests::a_revolute_lever_reads_its_arm_off_the_contact_point ... ok
+test compound_pgs::tests::a_v_groove_needs_both_constraints_and_one_alone_lets_the_body_slide ... ok
+test compound_pgs::tests::the_block_on_an_incline_slides_exactly_when_mu_falls_below_tan_theta ... ok
+test compound_pgs::tests::the_constraint_is_on_relative_motion_so_the_two_jacobians_subtract ... ok
+test compound_pgs::tests::the_contact_frame_is_orthonormal_and_row_two_is_the_separating_direction ... ok
+test acd::tests::a_convex_solid_decomposes_to_a_single_part ... ok
+test compound_pgs::tests::the_gap_drives_the_push_out_velocity_at_depth_over_dt ... ok
+test compound_pgs::tests::the_tangent_pair_is_orthonormal_for_every_normal_including_the_world_axes ... ok
+test constraint::tests::anchor_kills_the_point_velocity ... ok
+test constraint::tests::coulomb_block_stick_slip_both_solvers ... ok
+test constraint::tests::dry_friction_stick_slip_is_exact ... ok
+test constraint::tests::four_bar_cut_joint_matches_the_kkt_path_to_first_order ... ok
+test constraint::tests::joint_limit_complementarity_is_exact ... ok
+test constraint::tests::mimic_couples_velocities_and_transmits_torque ... ok
+test constraint::tests::mixed_constraints_coexist ... ok
+test constraint::tests::pgs_and_admm_agree_on_mixed_problems ... ok
+test constraint::tests::sphere_contacts_generate_and_support_the_weight ... ok
+test compound::tests::a_link_declared_as_one_concave_mesh_gets_its_channel_back ... ok
+test contact::tests::a_contact_solve_reports_whether_it_converged ... ok
+test contact::tests::contact_gradient_matches_finite_difference ... ok
+test contact::tests::no_impulse_while_separated ... ok
+test constraints::tests::hard_constraint_holds_where_a_soft_penalty_would_not ... ok
+test contact::tests::separated_contact_gradient_is_identity ... ok
+test contact::tests::sliding_block_decelerates_under_coulomb_friction ... ok
+test contact::tests::static_friction_holds_a_light_push ... ok
+test contact::tests::two_masses_on_a_shared_floor ... ok
+test closed_loop::tests::four_bar_stays_closed_under_gravity_and_torque ... ok
+test contact_gradient::tests::the_penalty_gradient_has_the_wrong_sign_at_realistic_stiffness ... ok
+test contact::tests::point_mass_drops_and_rests_without_penetrating ... ok
+test compound_pgs::tests::a_body_rests_on_the_floor_of_a_decomposed_channel_where_the_hull_shoves_it_sideways ... ok
+test contact_gradient::tests::the_saltation_jacobian_is_the_true_jacobian ... ok
+test contact_gradient::tests::the_timing_term_blows_up_at_a_grazing_impact ... ok
+test contact_ipm::tests::a_fixed_kappa_degrades_with_timestep_and_scaling_it_does_not ... ok
+test contact_ipm::tests::frictional_step_gradient_matches_finite_difference_3d ... ok
+test contact_ipm::tests::ipm_friction_decelerates_a_planar_sliding_block ... ok
+test contact_ipm::tests::the_faceted_cone_shows_up_in_the_law_residual_on_a_diagonal_slide ... ok
+test contact_ipm::tests::the_health_readouts_report_a_failed_solve_instead_of_a_perfect_one ... ok
+test contact_laws::tests::a_lawful_solve_reports_nothing ... ok
+test contact_laws::tests::each_law_is_detected_separately ... ok
+test contact_laws::tests::every_residual_is_invariant_under_a_change_of_length_unit ... ok
+test contact_ipm::tests::ipm_friction_stops_a_3d_block_sliding_diagonally ... ok
+test contact_laws::tests::no_contacts_is_not_a_violation ... ok
+test contact_laws::tests::the_pyramidal_cone_sits_outside_the_true_one_at_its_corners ... ok
+test contact_laws::tests::worst_reports_a_friction_impulse_that_points_the_wrong_way ... ok
+test contact_pgs::tests::contact_never_increases_kinetic_energy ... ok
+test contact_pgs::tests::friction_decelerates_a_sliding_block ... ok
+test contact_pgs::tests::redundant_contacts_stay_bounded ... ok
+test contact_pgs::tests::the_gap_bias_is_continuous_and_zero_while_resting ... ok
+test contact_pgs::tests::the_law_pgs_does_not_check_is_the_one_that_dominates_before_it_converges ... ok
+test contacts_from_distance::tests::a_profile_that_cannot_see_the_object_does_not_help ... ok
+test contacts_from_distance::tests::bad_profiles_are_refused ... ok
+test contact_laws::tests::ill_conditioning_breaks_per_contact_pgs_and_the_laws_say_so ... ok
+test contacts_from_distance::tests::in_contact_the_two_gradients_agree ... ok
+test contacts_from_distance::tests::the_analytic_gradient_is_stable_under_timestep_refinement ... ok
+test contacts_from_distance::tests::the_finite_difference_oracle_is_not_probe_stable ... ok
+test contacts_from_distance::tests::the_pre_contact_gradient_points_at_the_object ... ok
+test contacts_from_distance::tests::the_profile_never_changes_the_trajectory ... ok
+test contacts_from_distance::tests::descent_succeeds_from_out_of_reach_only_with_a_pre_contact_gradient ... ok
+test contacts_from_distance::tests::the_true_gradient_is_exactly_zero_out_of_reach ... ok
+test cosserat::tests::a_tip_moment_bends_to_a_uniform_circular_arc ... ok
+test contacts_from_distance::tests::the_reach_must_exceed_the_closest_approach ... ok
+test compound_pgs::tests::the_decomposed_collider_feeds_the_solver_a_physically_lawful_answer ... ok
+test cosserat::tests::the_analytic_gradient_matches_finite_differences ... ok
+test contact_gradient::tests::the_penalty_gradient_diverges_as_root_stiffness ... ok
+test cosserat::tests::zero_load_stays_straight ... ok
+test crba::verification::crba_matches_mass_matrix ... ok
+test cspace_sdf::tests::gradient_ascent_pulls_the_arm_out_of_collision ... ok
+test cspace_sdf::tests::the_composite_tracks_the_nearest_obstacle ... ok
+test cspace_sdf::tests::the_cspace_gradient_matches_finite_differences ... ok
+test cspace_sdf::tests::the_soft_min_approaches_the_true_min_clearance ... ok
+test cspace_sdf::tests::the_sphere_jacobian_matches_finite_differences ... ok
+test dcol::tests::sphere_box_collision_detection ... ok
+test dcol::tests::sphere_gradient_matches_finite_difference ... ok
+test dcol::tests::sphere_sphere_proximity_matches_closed_form ... ok
+test despike::tests::a_constant_passes_through_unchanged ... ok
+test despike::tests::a_non_finite_sample_is_despiked_like_any_other_fault ... ok
+test despike::tests::hampel_corrects_outliers_and_leaves_inliers ... ok
+test despike::tests::the_median_filter_preserves_a_step_edge ... ok
+test despike::tests::the_median_filter_removes_an_isolated_spike ... ok
+test dex_retarget::tests::dexpilot_reproduces_its_vectors ... ok
+test dex_retarget::tests::dexpilot_weight_rises_as_target_shortens ... ok
+test dex_retarget::tests::position_retarget_reconstructs_keypoints_over_trajectory ... ok
+test dex_retarget::tests::retargeting_is_deterministic ... ok
+test dex_retarget::tests::vector_retarget_reproduces_keypoint_vectors ... ok
+test dh::tests::a_base_transform_prepends_to_the_chain ... ok
+test dh::tests::a_dh_arm_passes_the_hessian_finite_difference_check ... ok
+test dh::tests::a_planar_2r_arm_matches_the_textbook_forward_kinematics_in_both_conventions ... ok
+test dh::tests::a_prismatic_joint_extends_along_its_axis_in_both_conventions ... ok
+test dh::tests::a_spatial_rrr_arm_puts_its_tip_where_the_geometry_says ... ok
+test dh::tests::degenerate_tables_are_refused ... ok
+test dh::tests::effort_and_velocity_carry_into_the_joint_or_stay_none ... ok
+test dh::tests::modified_dh_with_twist_and_theta_offset_matches_the_hand_chain ... ok
+test dh::tests::offsets_add_to_the_joint_variable ... ok
+test diffik::tests::diffik_converges_to_a_reachable_point ... ok
+test diffik::tests::diffik_respects_velocity_limits ... ok
+test contact_ipm::tests::kappa_has_an_interior_optimum_that_convergence_cannot_find ... ok
+test distance_transform::tests::a_field_from_the_other_connectivity_is_refused ... ok
+test distance_transform::tests::a_fifo_wavefront_would_be_wrong_here_and_the_heap_is_not ... ok
+test distance_transform::tests::a_first_push_wins_heap_would_be_wrong_here ... ok
+test distance_transform::tests::a_sealed_goal_leaves_the_outside_infinite ... ok
+test distance_transform::tests::cost_equals_astar_grid_conn_on_every_fixture ... ok
+test distance_transform::tests::degenerate_goals_and_starts ... ok
+test distance_transform::tests::descending_by_the_field_alone_would_be_longer ... ok
+test distance_transform::tests::every_fixture_matches_its_hand_computed_cost ... ok
+test distance_transform::tests::four_and_eight_connectivity_differ ... ok
+test distance_transform::tests::the_constant_table_matches_the_specification_decimals ... ok
+test distance_transform::tests::the_corner_rule_seals_a_diagonal_gap ... ok
+test distance_transform::tests::the_field_is_the_astar_cost_at_every_free_cell ... ok
+test dstar_lite::tests::a_stale_g_whose_key_ties_the_start_on_k1_is_still_expanded ... ok
+test dstar_lite::tests::a_tied_k1_one_ulp_high_still_sorts_ahead_of_a_stale_entry_with_larger_k2 ... ok
+test dstar_lite::tests::construction_and_degenerate_queries ... ok
+test dstar_lite::tests::dl1a_open_grid_costs_six_diagonals ... ok
+test dstar_lite::tests::dl1b_blocking_the_diagonal_cell_replans_around_its_corners ... ok
+test dstar_lite::tests::dl2a_four_connected_through_the_gap ... ok
+test dstar_lite::tests::dl2b_i_blocking_the_gap_from_a_standing_robot ... ok
+test dstar_lite::tests::dl2b_ii_robot_moves_then_senses_the_block ... ok
+test dstar_lite::tests::dl2b_reverse_freeing_the_gap_restores_the_straight_path ... ok
+test dstar_lite::tests::dl3_sealed_wall_returns_none_and_terminates ... ok
+test dstar_lite::tests::from_grid_inherits_the_maps_unknown_cell_policy ... ok
+test diffik::tests::placo_posture_task_regularizes ... ok
+test dstar_lite::tests::replanning_without_changes_expands_nothing ... ok
+test dstar_lite::tests::scripted_walk_matches_astar_at_every_replan ... ok
+test dubins::tests::aligned_far_poses_give_essentially_a_straight_line ... ok
+test dubins::tests::it_returns_the_minimum_over_all_feasible_words ... ok
+test dubins::tests::the_length_is_at_least_the_straight_line_distance ... ok
+test dubins::tests::the_shortest_path_actually_reaches_the_goal ... ok
+test dyn_derivatives::tests::forward_dynamics_derivatives_match_finite_difference ... ok
+test dyn_derivatives::tests::id_derivatives_match_finite_difference ... ok
+test dynamics::tests::a_declared_effort_can_be_physically_impossible ... ok
+test dynamics::tests::a_geared_rotor_can_dominate_the_link_it_drives ... ok
+test dynamics::tests::actuator_plausibility_reports_linear_acceleration_for_a_prismatic_joint ... ok
+test dynamics::tests::an_unstated_actuator_term_changes_nothing_at_all ... ok
+test dynamics::tests::an_unstated_effort_yields_no_implied_acceleration ... ok
+test dynamics::tests::armature_is_diagonal ... ok
+test cosserat::tests::the_equilibrium_gradient_vanishes ... ok
+test dynamics::tests::forward_dynamics_matches_released_pendulum ... ok
+test dynamics::tests::mass_matrix_is_symmetric_and_positive_definite ... ok
+test dynamics::tests::pendulum_gravity_and_inertia ... ok
+test dynamics::tests::the_actuator_terms_apply_to_a_prismatic_joint_in_linear_units ... ok
+test dynamics::tests::the_mass_matrix_and_bias_still_reconstruct_inverse_dynamics ... ok
+test dynamics_workspace::tests::a_mis_sized_workspace_resizes_itself ... ok
+test dynamics_workspace::tests::a_singular_mass_matrix_returns_zeros ... ok
+test dynamics_workspace::tests::the_workspace_handles_a_dof_change_correctly_even_though_it_reallocates ... ok
+test dynamics_workspace::tests::the_workspace_results_are_bit_identical ... ok
+test dynamics_workspace::tests::the_workspace_stops_growing ... ok
+test epa::tests::an_exactly_touching_pair_never_reports_a_penetration ... ok
+test epa::tests::analytic_sphere_penetration_matches_the_closed_form ... ok
+test epa::tests::epa_box_penetration_matches_the_overlap_axis ... ok
+test epa::tests::epa_handles_overlapping_convex_polytopes ... ok
+test epa::tests::epa_returns_none_for_disjoint_shapes ... ok
+test epa::tests::the_separating_translation_is_plus_depth_times_normal_on_both_paths ... ok
+test esdf::tests::above_a_planar_wall_the_distance_is_the_height ... ok
+test esdf::tests::the_field_is_zero_on_an_obstacle_and_grows_away ... ok
+test esdf::tests::the_field_matches_brute_force_nearest_occupied ... ok
+test esdf::tests::truncation_clamps_far_distances ... ok
+test essential::tests::all_four_decompositions_are_valid_rotations ... ok
+test essential::tests::recover_pose_matches_the_ground_truth_motion ... ok
+test essential::tests::the_essential_matrix_satisfies_the_epipolar_constraint ... ok
+test essential::tests::the_recovered_points_lie_in_front_of_both_cameras ... ok
+test ets::tests::constant_decomposition_recomposes_to_rounding_including_gimbal_lock ... ok
+test ets::tests::ets_jacobian_and_hessian_equal_the_robots_on_the_panda ... ok
+test ets::tests::ets_oracle_covers_prismatic_and_negative_sense_translation_factors ... ok
+test ets::tests::from_dh_round_trips_the_dh_module_arms_in_both_conventions ... ok
+test ets::tests::from_robot_then_to_robot_preserves_forward_kinematics ... ok
+test ets::tests::malformed_and_structurally_invalid_sequences_are_refused ... ok
+test ets::tests::negative_sense_factors_are_the_negated_axis_and_the_negated_variable ... ok
+test ets::tests::the_panda_ets_parses_prints_back_and_matches_the_modified_dh_table ... ok
+test ets::tests::the_panda_from_dh_expansion_agrees_with_the_hand_written_string ... ok
+test external_oracles::tests::a_gpu_forward_without_a_gradient_is_still_blocked ... ok
+test external_oracles::tests::nonfinite_stale_and_out_of_range_actions_are_rejected ... ok
+test external_oracles::tests::pins_are_hex_revisions_and_named_owners ... ok
+test external_oracles::tests::scoped_smolvla_is_not_integrated_and_does_not_actuate ... ok
+test external_oracles::tests::this_host_warp_and_newton_probe_is_blocked_not_a_pass ... ok
+test ferromorphic_clock::tests::a_period_above_2_pow_53_is_inexact_at_construction_start_and_bind ... ok
+test ferromorphic_clock::tests::a_public_clock_mutation_is_rejected_on_the_next_bind ... ok
+test ferromorphic_clock::tests::delay_zero_is_the_next_tick_and_overflow_is_checked ... ok
+test ferromorphic_clock::tests::dt_matches_only_on_bits_and_point_one_is_the_receipt_constant ... ok
+test ferromorphic_clock::tests::episode_start_sets_tick_zero_advances_epoch_and_keeps_the_ledger ... ok
+test ferromorphic_clock::tests::forward_product_mapping_rejects_mismatched_dt_and_accepts_1000ns ... ok
+test ferromorphic_clock::tests::past_and_beyond_horizon_events_are_rejected ... ok
+test ferromorphic_clock::tests::proposed_joint_step_is_not_executed_and_spikes_wait_one_tick_plus_delay ... ok
+test ferromorphic_clock::tests::refractory_is_ceil_of_t_ref_over_dt ... ok
+test ferromorphic_clock::tests::reset_keeps_tick_ledger_and_the_opening_epoch ... ok
+test ferromorphic_clock::tests::shared_seconds_are_one_multiply_and_the_accumulator_can_differ ... ok
+test ferromorphic_clock::tests::spike_order_is_tick_then_source_and_ties_keep_emission_order ... ok
+test ferromorphic_clock::tests::the_pinned_receipt_v2_parses_and_version_1_is_refused ... ok
+test fft::tests::a_pure_sinusoid_lands_in_one_bin ... ok
+test fft::tests::ifft_inverts_fft ... ok
+test fft::tests::parsevals_identity_holds_and_it_matches_the_naive_dft ... ok
+test fft::tests::the_impulse_transforms_to_a_flat_spectrum ... ok
+test fitting::tests::it_recovers_a_known_circle ... ok
+test fitting::tests::it_recovers_a_known_sphere_and_the_hard_iron_bias ... ok
+test fitting::tests::the_fit_is_accurate_under_noise ... ok
+test fitting::tests::too_few_points_return_none ... ok
+test floating_contact::tests::a_penetrating_foot_that_is_separating_leaves_the_body_in_free_flight ... ok
+test floating_contact::tests::a_separating_foot_on_the_branched_path_is_also_not_felt ... ok
+test cosserat::tests::cantilever_tip_load_matches_euler_bernoulli ... ok
+test dstar_lite::tests::replanning_agrees_with_astar_on_random_grids_and_flips ... ok
+test cosserat::tests::deflection_is_inversely_proportional_to_stiffness ... ok
+test floating_contact::tests::the_shipped_contact_parameters_stay_inside_the_explicit_integration_limit ... ok
+test floating_contact::tests::floating_base_drops_and_settles ... ok
+test foci::tests::rotating_an_elongated_robot_lets_it_fit_through_a_slot ... ok
+test foci::tests::the_closed_form_overlap_matches_monte_carlo_integration ... ok
+test foci::tests::the_collision_kernel_is_one_at_full_overlap_and_decays_with_separation ... ok
+test foci::tests::the_kernel_gradient_matches_finite_differences ... ok
+test foci::tests::the_overlap_is_symmetric ... ok
+test fourier_steering::tests::a_linear_f_reproduces_the_chained_form_gain ... ok
+test fourier_steering::tests::the_displacement_scales_as_the_structure_requires ... ok
+test fourier_steering::tests::the_even_part_of_f_contributes_nothing ... ok
+test fourier_steering::tests::the_first_harmonic_predicts_the_exact_net_motion ... ok
+test fourier_steering::tests::the_harmonic_quadrature_converges ... ok
+test gcs::tests::a_disconnected_goal_has_no_plan ... ok
+test gcs::tests::a_single_region_gives_the_straight_line ... ok
+test gcs::tests::it_routes_through_an_l_shaped_corridor ... ok
+test gcs::tests::overlapping_regions_are_detected ... ok
+test gendyn::tests::armature_and_damping_are_not_free ... ok
+test gendyn::tests::f64_fk_matches_robot_fk ... ok
+test gendyn::tests::f64_instantiation_matches_the_reference_dynamics ... ok
+test gendyn::tests::the_armature_carries_a_derivative ... ok
+test geodetic::tests::a_point_due_east_has_enu_along_east ... ok
+test geodetic::tests::cardinal_points_map_to_the_expected_ecef ... ok
+test geodetic::tests::enu_round_trips_through_ecef ... ok
+test geodetic::tests::lla_ecef_round_trips_to_sub_millimetre ... ok
+test geometric_phase::tests::a_closed_loop_reorients_the_contact_by_the_enclosed_area_modulo_two_pi ... ok
+test geometric_phase::tests::a_path_enclosing_no_area_produces_no_phase ... ok
+test geometric_phase::tests::rolling_at_the_equator_gives_no_phase_and_at_the_pole_the_most ... ok
+test geometric_phase::tests::the_phase_is_independent_of_the_sphere_radius ... ok
+test geometric_phase::tests::winding_accumulates_rather_than_folding ... ok
+test geometry2d::tests::convex_hull_drops_non_finite_points_instead_of_panicking ... ok
+test geometry2d::tests::point_in_polygon_separates_inside_from_outside ... ok
+test geometry2d::tests::shoelace_area_and_centroid_match_closed_forms ... ok
+test geometry2d::tests::the_convex_hull_contains_every_point_and_is_extreme ... ok
+test geometry2d::tests::the_minimum_enclosing_circle_is_smallest_and_covers_all ... ok
+test gjk::tests::ccd_reports_no_impact_when_they_pass_clear ... ok
+test gjk::tests::ccd_time_of_impact_matches_the_analytic_value ... ok
+test gjk::tests::gjk_distance_between_two_balls_is_exact ... ok
+test gjk::tests::gjk_distance_between_two_boxes_is_exact ... ok
+test gjk::tests::overlap_is_detected_and_disjoint_is_not ... ok
+test gnc::tests::gnc_recovers_the_line_through_forty_percent_outliers ... ok
+test gnc::tests::inliers_keep_weight_one_and_outliers_are_rejected ... ok
+test gnc::tests::with_no_outliers_gnc_equals_least_squares ... ok
+test gpmp2::tests::an_obstacle_bows_the_trajectory_around_it ... ok
+test gpmp2::tests::interpolation_is_exact_at_the_support_nodes ... ok
+test gpmp2::tests::the_obstacle_free_map_is_the_cubic_hermite ... ok
+test grasp::tests::a_rank_deficient_grasp_scores_exactly_zero_not_a_sampling_artifact ... ok
+test grasp::tests::antipodal_grasp_is_force_closure_but_same_side_is_not ... ok
+test grasp::tests::more_friction_improves_the_quality ... ok
+test grasp::tests::soft_quality_is_differentiable_and_tracks_q1 ... ok
+test grasp::tests::the_exact_decision_agrees_with_the_sampled_metric_and_settles_what_it_cannot ... ok
+test grasp_bounds::tests::friction_lowers_the_floor_and_the_table_is_not_extrapolated ... ok
+test grasp_bounds::tests::the_circle_is_an_exceptional_surface_which_is_the_rank_gate_restated ... ok
+test grasp_bounds::tests::the_two_classical_bounds_reproduce_the_brackets_mls_states ... ok
+test grasp_spatial::tests::a_non_coplanar_contact_raises_the_quality ... ok
+test grasp_spatial::tests::degenerate_input_is_handled ... ok
+test floating_contact::tests::quadruped_stands_stably ... ok
+test grasp_spatial::tests::friction_gives_coplanar_contacts_out_of_plane_capacity ... ok
+test foci::tests::foci_plans_a_collision_free_path_to_the_goal ... ok
+test dynamics::tests::damping_dissipates ... ok
+test grasp_spatial::tests::soft_finger_torsion_adds_rank_without_rescuing_a_flat_grasp ... ok
+test grasp_spatial::tests::the_cone_edge_normal_force_is_not_unit_and_the_torsion_is_scaled_by_it ... ok
+test grasp_spatial::tests::the_internal_squeeze_subspace_produces_no_net_wrench ... ok
+test grasp_spatial::tests::q1_responds_to_the_torsional_scaling_once_torsion_actually_binds ... ok
+test acd::tests::the_discretisation_floor_on_concavity_is_first_order_in_the_cell_size ... ok
+test grasp_spatial::tests::facet_monotonicity_needs_nesting ... ok
+test grasp_spatial::tests::monotonicity_in_friction_needs_enough_directions ... ok
+test grasp_spatial::tests::the_rank_gate_catches_what_sampling_cannot ... ok
+test great_circle::tests::a_point_on_the_course_has_zero_cross_track ... ok
+test great_circle::tests::bearings_point_the_right_way ... ok
+test great_circle::tests::destination_inverts_distance_and_bearing ... ok
+test great_circle::tests::distances_match_known_arcs ... ok
+test grid_astar::tests::a_blocked_goal_returns_none ... ok
+test grid_astar::tests::can_step_refuses_corner_cuts_and_the_map_edge ... ok
+test grid_astar::tests::four_connected_costs_manhattan_and_differs_from_eight ... ok
+test grid_astar::tests::it_routes_around_a_wall ... ok
+test grid_astar::tests::manhattan_under_eight_is_caught_on_a_grid_where_it_matters ... ok
+test grid_astar::tests::open_space_gives_the_optimal_octile_path ... ok
+test grid_astar::tests::spec_a1_4_empty_grid_four_connected_costs_manhattan ... ok
+test grid_astar::tests::spec_a1_8_empty_grid_eight_connected_costs_octile ... ok
+test grid_astar::tests::spec_a2_4_wall_with_a_gap_four_connected ... ok
+test grid_astar::tests::spec_a2_8_wall_with_a_gap_eight_connected_respects_the_corner_rule ... ok
+test grid_astar::tests::spec_a3_full_wall_is_unreachable_under_both_connectivities ... ok
+test grid_astar::tests::spec_a4_degenerate_queries ... ok
+test grid_astar::tests::start_equals_goal_is_a_single_cell ... ok
+test grid_astar::tests::the_diagonal_step_cost_is_pinned_on_a_grid_where_it_changes_the_path ... ok
+test hall_basis::tests::it_reproduces_mls_example_7_12 ... ok
+test hall_basis::tests::skew_symmetry_is_never_double_counted ... ok
+test hall_basis::tests::the_basis_matches_witts_formula_at_every_length ... ok
+test hall_basis::tests::the_order_refines_length_and_degenerate_input_is_empty ... ok
+test hall_basis::tests::witt_reproduces_the_values_the_theory_fixes ... ok
+test hand_eye::tests::it_recovers_a_known_hand_eye_transform ... ok
+test hand_eye::tests::two_motions_suffice ... ok
+test hand_object::tests::a_coupled_step_resolves_without_penetration ... ok
+test hand_object::tests::a_symmetric_squeeze_produces_no_object_motion ... ok
+test hand_object::tests::bad_input_is_refused ... ok
+test hand_object::tests::the_fingertips_reach_the_object ... ok
+test grasp_spatial::tests::the_smoothed_metric_is_continuous_where_the_gated_one_steps ... ok
+test homography::tests::four_points_are_enough ... ok
+test homography::tests::it_maps_planar_correspondences_exactly ... ok
+test homography::tests::pure_rotation_recovers_the_rotation_homography ... ok
+test homography::tests::ransac_makes_it_robust_to_mismatches ... ok
+test hybrid::robot_tests::foot_strike_on_the_quadruped_stops_the_foot_and_dissipates ... ok
+test hybrid::saltation_composition_tests::an_elastic_bounce_is_exactly_marginal ... ok
+test hybrid::saltation_composition_tests::composed_monodromy_matches_the_analytic_bouncing_ball ... ok
+test hybrid::saltation_composition_tests::grazing_contact_has_no_monodromy ... ok
+test hybrid::tests::a_contracting_reset_needs_no_rate_bound ... ok
+test hybrid::tests::certificate_design_rule_is_the_threshold ... ok
+test hybrid::tests::plastic_impact_stops_the_contact_and_dissipates ... ok
+test hybrid::tests::poincare_stability_reads_the_spectral_radius ... ok
+test hybrid::tests::reset_jacobian_matches_the_impact_and_is_idempotent ... ok
+test hybrid::tests::saltation_matrix_satisfies_the_event_map_composition ... ok
+test hybrid::transverse_tests::an_unstable_orbit_has_no_transverse_metric ... ok
+test hybrid::transverse_tests::transverse_basis_is_orthonormal_and_orthogonal_to_the_flow ... ok
+test hybrid::transverse_tests::transverse_metric_certifies_and_bounds_the_rate ... ok
+test hybrid::transverse_tests::transverse_restriction_removes_the_trivial_eigenvalue ... ok
+test hybrid_astar::tests::it_finds_a_drivable_path_in_free_space ... ok
+test hybrid_astar::tests::it_routes_around_a_wall_through_the_gap ... ok
+test hybrid_gradient::tests::a_flow_with_memory_is_refused ... ok
+test hand_object::tests::the_grasp_metric_predicts_whether_the_object_is_held ... ok
+test hybrid_gradient::tests::a_grazing_event_is_refused ... ok
+test grasp_spatial::tests::the_planar_metric_overstates_the_spatial_quality ... ok
+test hydroelastic::tests::equal_spheres_reduce_to_the_rigid_plane_oracle ... ok
+test hydroelastic::tests::force_is_continuous_and_vanishes_at_first_contact ... ok
+test hydroelastic::tests::numerical_integration_matches_the_closed_form ... ok
+test hydroelastic::tests::pressure_is_zero_at_the_surface_and_peaks_at_the_center ... ok
+test hydroelastic::tests::the_pressure_centroid_lies_on_the_contact_axis ... ok
+test icp::tests::a_perfect_alignment_is_a_fixed_point ... ok
+test icp::tests::gicp_recovers_a_transform_with_plane_covariances ... ok
+test icp::tests::gicp_with_isotropic_covariances_matches_point_to_point ... ok
+test icp::tests::point_to_plane_icp_recovers_the_transform ... ok
+test icp::tests::point_to_point_icp_recovers_a_small_transform ... ok
+test icp::tests::umeyama_recovers_a_known_transform_exactly ... ok
+test icp::tests::umeyama_refuses_correspondences_it_cannot_solve ... ok
+test grasp_spatial::tests::the_two_approximations_err_in_known_directions ... ok
+test identification::tests::a_gravity_decoupled_joint_cannot_separate_the_gain ... ok
+test identification::tests::an_already_physical_fit_is_left_alone ... ok
+test identification::tests::an_existing_estimate_does_not_bias_the_fit ... ok
+test identification::tests::a_term_outside_the_basis_shows_up_in_the_residual ... ok
+test identification::tests::confounding_names_the_pair_a_scalar_cannot ... ok
+test identification::tests::degenerate_input_is_refused ... ok
+test identification::tests::degenerate_input_reports_zero_conditioning_not_one ... ok
+test identification::tests::fitting_the_gain_removes_the_torque_scale_bias ... ok
+test hybrid_gradient::tests::probe_stability_is_measured ... ok
+test identification::tests::identify_actuator_recovers_known_terms ... ok
+test identification::tests::identify_actuator_with_gain_recovers_the_torque_constant_too ... ok
+test identification::tests::proportional_excitation_is_reported_as_unidentifiable ... ok
+test identification::tests::most_parameters_are_not_identifiable_and_the_result_says_so ... ok
+test identification::tests::the_pseudo_inertia_round_trip_is_exact ... ok
+test identification::tests::the_screening_agrees_with_the_fit_it_screens_for ... ok
+test identification::tests::constrained_identification_returns_physical_parameters ... ok
+test identification::tests::the_unconstrained_fit_is_non_physical_at_zero_noise ... ok
+test grasp_spatial::tests::the_planar_subspace_recovers_the_planar_metric ... ok
+test iir::tests::a_step_settles_to_the_step_value ... ok
+test iir::tests::the_high_pass_blocks_low_and_passes_high ... ok
+test iir::tests::the_low_pass_has_unity_dc_gain ... ok
+test iir::tests::the_low_pass_passes_low_and_blocks_high ... ok
+test infothermo::tests::a_joule_buys_an_astronomical_number_of_bits ... ok
+test infothermo::tests::an_unstable_pole_makes_the_integral_positive ... ok
+test infothermo::tests::bode_integral_is_zero_for_a_stable_rolled_off_loop ... ok
+test infothermo::tests::dissipation_produces_entropy ... ok
+test infothermo::tests::information_and_work_convert_at_the_same_rate ... ok
+test infothermo::tests::landauer_bound_at_room_temperature ... ok
+test ipc::tests::barrier_derivatives_match_finite_difference ... ok
+test ipc::tests::mass_settles_above_the_floor_without_penetrating ... ok
+test ipc::tests::stiff_fast_impact_stays_intersection_free ... ok
+test ipm::tests::interior_point_recovers_the_lcp_solution ... ok
+test ipm::tests::smoothed_gradient_matches_finite_difference ... ok
+test ipm::tests::smoothing_stays_differentiable_at_the_contact_boundary ... ok
+test iris::tests::interior_points_are_collision_free ... ok
+test iris::tests::the_region_elongates_along_a_corridor ... ok
+test iris::tests::the_region_grows_monotonically ... ok
+test iris::tests::the_region_is_obstacle_free_and_contains_the_seed ... ok
+test isam::tests::r_is_the_cholesky_factor_of_the_information_matrix ... ok
+test isam::tests::the_estimate_stays_correct_after_every_new_measurement ... ok
+test isam::tests::the_incremental_estimate_matches_the_batch_solve ... ok
+test isam::tests::the_residual_matches_the_least_squares_optimum ... ok
+test joint_acceptance::tests::a_complete_instrumented_record_is_the_only_acceptance ... ok
+test joint_acceptance::tests::a_synthetic_energy_trace_does_not_count_as_joint_acceptance ... ok
+test joint_acceptance::tests::an_execution_without_an_instrument_is_not_a_measurement ... ok
+test joint_acceptance::tests::reference_disagreement_and_a_divergent_replay_are_rejected ... ok
+test joint_acceptance::tests::sibling_pins_are_forty_hex_digits ... ok
+test joint_acceptance::tests::the_pinned_task_is_not_a_measured_acceptance ... ok
+test kdl::tests::nullspace_secondary_preserves_the_task ... ok
+test kdl::tests::resolved_rate_realizes_the_twist ... ok
+test kinematic_tree::tests::a_branched_hand_loads_with_its_topology ... ok
+test kinematic_tree::tests::bad_input_is_refused ... ok
+test kinematic_tree::tests::independent_per_finger_solves_fight_over_the_shared_joint ... ok
+test kinematic_tree::tests::multi_target_ik_places_every_fingertip ... ok
+test kinematic_tree::tests::the_loaded_tree_drives_the_existing_tree_dynamics ... ok
+test kinematic_tree::tests::the_tree_loader_agrees_with_the_serial_loader_on_a_chain ... ok
+test kiss_icp::tests::invalid_returns_are_dropped_instead_of_contaminating_the_map ... ok
+test kiss_icp::tests::it_recovers_a_known_sensor_trajectory ... ok
+test hybrid_gradient::tests::the_driver_reproduces_the_closed_form_jacobian ... ok
+test kmeans::tests::inertia_decreases_monotonically ... ok
+test kmeans::tests::it_is_deterministic ... ok
+test kmeans::tests::it_recovers_well_separated_clusters ... ok
+test kmeans::tests::kpp_seeding_beats_a_bad_initialization ... ok
+test kiss_icp::tests::the_local_map_grows_but_stays_downsampled ... ok
+test leg_smoother::tests::a_late_factor_corrects_the_past_a_smoother_not_a_filter ... ok
+test leg_smoother::tests::recovers_the_ground_truth_from_perfect_factors ... ok
+test leg_smoother::tests::the_relative_pose_jacobian_matches_finite_differences ... ok
+test leg_smoother::tests::contact_factors_cut_the_drift ... ok
+test lgvi::tests::symmetric_top_rotates_steadily_about_its_axis ... ok
+test link_geometry::tests::a_degenerate_primitive_is_refused_rather_than_generated ... ok
+test link_geometry::tests::a_generated_box_is_exact_against_its_closed_form ... ok
+test link_geometry::tests::a_primitive_description_yields_a_body_with_no_asset_at_all ... ok
+test link_geometry::tests::the_curved_primitives_converge_to_their_closed_forms_at_second_order ... ok
+test link_geometry::tests::the_geometry_urdf_rs_already_parsed_is_now_reachable ... ok
+test link_geometry::tests::two_cubes_compose_into_the_box_they_form ... ok
+test link_geometry::tests::uri_resolution_expands_what_it_can_and_refuses_what_it_cannot ... ok
+test lmi::tests::it_certifies_a_marginally_stable_spiral ... ok
+test lmi::tests::the_continuous_certificate_proves_a_stable_system ... ok
+test lmi::tests::the_continuous_certificate_rejects_an_unstable_system ... ok
+test lmi::tests::the_discrete_certificate_matches_schur_stability ... ok
+test lmi::tests::the_lyapunov_solution_is_symmetric_and_solves_the_equation ... ok
+test manipulability::tests::jacobian_dot_matches_differencing_along_the_velocity ... ok
+test manipulability::tests::manipulability_vanishes_at_the_stretched_singularity ... ok
+test manipulability::tests::the_analytic_manipulability_gradient_agrees_with_finite_differences ... ok
+test manipulability::tests::the_force_ellipsoid_is_the_dual_of_the_velocity_ellipsoid ... ok
+test manipulability::tests::the_gradient_points_away_from_a_singularity ... ok
+test manipulability::tests::the_kinematic_hessian_matches_finite_differences ... ok
+test manipulability::tests::yoshikawa_matches_the_closed_form_2r_arm ... ok
+test marginalize::tests::fixed_lag_smoothing_equals_the_full_batch_map ... ok
+test marginalize::tests::marginalizing_all_but_one_gives_its_scalar_marginal ... ok
+test marginalize::tests::the_marginal_matches_the_kept_blocks_of_the_full_solve ... ok
+test floating_contact::tests::quadruped_walks_forward ... ok
+test mesh3::verification::convex_hull_contains_points_and_measures ... ok
+test mesh3::verification::cube_area_volume_centroid ... ok
+test mesh3::verification::a_capped_hull_stops_at_its_budget_and_still_covers_the_shape ... ok
+test mesh3::verification::the_hull_of_a_tessellated_box_has_eight_vertices_and_contains_every_point ... ok
+test bit_star::tests::it_routes_around_a_wall_through_the_gap ... ok
+test mesh3::verification::the_same_points_give_the_same_hull_every_time ... ok
+test mesh_io::tests::a_unit_cube_integrates_to_its_closed_form ... ok
+test mesh_io::tests::malformed_input_is_refused_rather_than_read_short ... ok
+test mesh_io::tests::obj_ascii_stl_and_binary_stl_describe_the_same_solid ... ok
+test mesh_io::tests::scaling_the_geometry_scales_the_solid_the_way_the_integral_says ... ok
+test mesh_io::tests::the_obj_forms_real_exporters_emit_all_parse_to_the_same_triangle ... ok
+test mesh_io::tests::volume_and_inertia_eigenvalues_survive_a_rigid_transform ... ok
+test mesh_io::tests::winding_is_signed_and_a_single_flipped_facet_is_visible ... ok
+test mestimator::tests::barron_reproduces_the_named_kernels_at_its_special_alpha ... ok
+test mestimator::tests::irls_recovers_the_inlier_mean_under_heavy_contamination ... ok
+test mestimator::tests::small_residuals_reduce_to_least_squares_and_large_ones_are_robust ... ok
+test mestimator::tests::the_influence_is_the_derivative_of_the_loss ... ok
+test mestimator::tests::the_weight_is_the_influence_over_the_residual ... ok
+test mjcf::tests::a_geom_only_body_is_massless_and_now_says_so ... ok
+test mjcf::tests::a_hostile_model_name_still_produces_parseable_xml ... ok
+test mjcf::tests::a_wrong_inertia_count_is_an_error ... ok
+test mjcf::tests::arm_loads_with_joint_offsets_and_inertias ... ok
+test mjcf::tests::conventions_quat_and_fixed_body_folding ... ok
+test mjcf::tests::degrees_are_the_default ... ok
+test mjcf::tests::equality_connect_and_joint_become_working_constraints ... ok
+test mjcf::tests::equality_out_of_subset_fails_loudly ... ok
+test mjcf::tests::mjcf_armature_and_damping_survive_the_loader ... ok
+test mjcf::tests::mjcf_box_size_is_a_half_extent ... ok
+test mjcf::tests::mjcf_geom_forms_convert_to_urdf_conventions ... ok
+test mjcf::tests::mjcf_mesh_geoms_resolve_through_the_asset_table ... ok
+test mjcf::tests::mjcf_roles_and_refusals ... ok
+test mjcf::tests::mjcf_round_trips_through_the_dynamics ... ok
+test mjcf::tests::out_of_subset_is_a_loud_error ... ok
+test mjcf::tests::the_exported_text_carries_armature_only_when_the_model_states_it ... ok
+test mjcf::tests::the_shipped_servo_mjcf_is_current_and_plausible ... ok
+test mesh_io::tests::a_refined_sphere_approaches_its_analytic_form_at_the_predicted_rate ... ok
+test mjcf_tree::tests::a_ball_joint_is_three_hinges_that_reproduce_the_quaternion ... ok
+test mjcf_tree::tests::a_ball_joints_mass_matrix_is_mujocos_through_the_basis ... ok
+test mjcf_tree::tests::a_body_mujoco_cannot_weigh_keeps_its_own_placement_as_its_inertial_frame ... ok
+test mjcf_tree::tests::a_body_with_two_joints_is_still_its_parents_child ... ok
+test mjcf_tree::tests::a_body_without_inertial_is_weighed_from_its_geoms_as_mujoco_weighs_it ... ok
+test mjcf_tree::tests::a_classs_alternative_orientation_beats_an_elements_own_quat ... ok
+test mjcf_tree::tests::a_connect_equalitys_rows_are_mujocos ... ok
+test mjcf_tree::tests::a_connect_on_a_moving_free_base_matches_mujoco ... ok
+test mjcf_tree::tests::a_fixed_tendons_limit_row_is_mujocos ... ok
+test mjcf_tree::tests::a_frame_is_a_transform_and_a_jointless_body_welds_into_its_ancestor ... ok
+test mjcf_sensor::tests::sensordata_matches_mujoco_for_every_carried_type ... ok
+test mjcf_tree::tests::a_free_joints_mass_matrix_is_mujocos_through_the_basis ... ok
+test mjcf_tree::tests::a_fromto_geoms_axis_runs_from_the_second_endpoint_to_the_first ... ok
+test mjcf_tree::tests::a_free_root_is_placed_at_qpos_and_its_own_pose_is_ignored ... ok
+test mjcf_tree::tests::a_fullinertia_is_stored_as_mujoco_stores_it_which_is_its_eigendecomposition ... ok
+test mjcf_tree::tests::a_joint_limit_makes_a_row_per_side_and_both_at_once_when_the_range_is_narrow ... ok
+test mjcf_tree::tests::a_muscle_is_carried_through_the_tag_and_through_a_class ... ok
+test mjcf_tree::tests::a_pid_plugin_steps_as_mujoco_does_bit_for_bit ... ok
+test mjcf_tree::tests::a_polygon_is_ear_clipped_and_the_pieces_stay_inside_it ... ok
+test mjcf_tree::tests::a_serial_chain_agrees_with_the_serial_loader_to_machine_precision ... ok
+test mjcf_tree::tests::a_shorter_size_overrides_only_the_entries_it_states ... ok
+test mjcf_tree::tests::a_site_transmission_is_a_wrench_in_the_sites_frame ... ok
+test mjcf_tree::tests::a_pid_plugin_steps_like_mujoco ... ok
+test mjcf_tree::tests::a_spatial_tendon_is_the_length_of_its_path ... ok
+test mjcf_tree::tests::a_spatial_tendon_wraps_a_sphere_and_a_cylinder ... ok
+test mjcf_tree::tests::a_springdamper_joint_gets_the_stiffness_and_damping_mujoco_computes ... ok
+test mjcf_tree::tests::a_tendon_actuator_pulls_every_joint_the_tendon_names ... ok
+test mjcf_tree::tests::a_tendon_limit_on_a_spinning_free_body_matches_mujoco ... ok
+test mjcf_tree::tests::a_tendon_spring_is_slack_inside_its_band ... ok
+test mjcf_tree::tests::a_welded_body_has_its_own_inverse_weight ... ok
+test mjcf_tree::tests::activation_ranges_and_counts_compile_by_mujocos_rules ... ok
+test mjcf_tree::tests::an_adhesion_actuator_averages_every_contact_on_its_body_active_or_in_the_gap ... ok
+test mjcf_tree::tests::an_attached_model_keeps_its_own_compiler_and_defaults_under_the_prefix ... ok
+test mjcf_tree::tests::an_include_falls_back_to_the_directory_of_the_file_it_is_written_in ... ok
+test mjcf_tree::tests::an_obj_contributes_only_its_first_shapes_faces_and_all_of_its_vertices ... ok
+test mjcf_tree::tests::an_obj_face_with_more_than_a_hundred_vertices_is_dropped_as_mujoco_drops_it ... ok
+test mjcf_tree::tests::a_sliding_stack_folds_its_cones_as_mujoco_does_bit_for_bit ... ok
+test mjcf_tree::tests::armature_reaches_every_dof_of_a_free_joint ... ok
+test mjcf_tree::tests::body_inertia_and_frames_match_mujocos_compiler_bit_for_bit ... ok
+test mjcf_tree::tests::composite_joints_in_one_body_compose_in_file_order_about_their_anchors ... ok
+test mjcf_tree::tests::connect_equalities_step_as_mujoco_does_bit_for_bit ... ok
+test mjcf_tree::tests::contacts_are_labelled_and_ordered_as_mj_collision_makes_them ... ok
+test mjcf_tree::tests::damping_and_frictionloss_stay_out_of_the_bias_and_show_up_where_mujoco_puts_them ... ok
+test mjcf_tree::tests::default_classes_resolve_element_class_then_childclass_then_main ... ok
+test mjcf_tree::tests::degrees_are_the_default_and_uppercase_eulerseq_is_extrinsic ... ok
+test mjcf_tree::tests::elliptic_cones_in_the_sparse_hessian_are_mujocos_to_the_bit ... ok
+test mjcf_tree::tests::elliptic_cones_step_as_mujoco_does_bit_for_bit ... ok
+test mjcf_tree::tests::fixed_tendons_step_as_mujoco_does_bit_for_bit ... ok
+test mjcf_tree::tests::forward_mujoco_matches_mujocos_converged_qacc_under_both_cones ... ok
+test mjcf_tree::tests::geom_frames_match_mujocos_kinematics_bit_for_bit ... FAILED
+test mjcf_tree::tests::geom_inference_matches_mujoco_on_primitives ... ok
+test mjcf_tree::tests::gravcomp_one_holds_the_arm_up_by_itself ... ok
+test mjcf_tree::tests::height_field_contacts_match_mujoco_bit_for_bit ... ok
+test mjcf_tree::tests::implicitfast_with_a_tumbling_free_body_is_mujocos_to_the_bit ... ok
+test mjcf_tree::tests::includes_are_textual_and_every_path_is_relative_to_the_main_model ... ok
+test mjcf_tree::tests::keyframes_are_completed_the_way_mujoco_completes_them ... ok
+test mjcf_tree::tests::mesh_polygons_follow_mujocos_frames_including_mirrored_meshes ... ok
+test mjcf_tree::tests::mujocos_wrap_rules_inside_across_and_along_the_axis ... ok
+test mjcf_tree::tests::noslip_matches_mujoco_on_every_cone_branch ... ok
+test mjcf_tree::tests::applied_forces_match_mujoco ... ok
+test mjcf_tree::tests::ref_shifts_the_zero_and_autolimits_false_refuses_an_unlabelled_range ... ok
+test mjcf_tree::tests::refusals_are_loud ... ok
+test mjcf_tree::tests::rk4_with_a_fluid_and_a_site_thruster_is_mujocos_to_the_bit ... ok
+test mjcf_tree::tests::noslip_steps_as_mujoco_does_bit_for_bit ... ok
+test mjcf_tree::tests::spatial_tendons_step_as_mujoco_does_bit_for_bit ... FAILED
+test mjcf_tree::tests::sixty_dofs_step_through_the_sparse_newton_as_mujoco_does_bit_for_bit ... ok
+test mjcf_tree::tests::step_mujoco_follows_mujocos_euler_trajectory_with_and_without_damping ... ok
+test mjcf_tree::tests::step_mujoco_follows_mujocos_implicitfast_trajectory ... ok
+test identification::tests::the_variance_scales_correctly ... ok
+test mjcf_tree::tests::step_mujoco_follows_mujocos_rk4_trajectory ... ok
+test mjcf_tree::tests::step_mujoco_integrates_every_activation_law_like_mujoco ... ok
+test identification::tests::the_standard_error_covers_the_truth_at_the_rate_it_claims ... ok
+test mjcf_tree::tests::ten_native_steps_are_mujocos_trajectory_bit_for_bit ... ok
+test mjcf_tree::tests::step_mujoco_resets_the_way_mj_step_does ... ok
+test mjcf_tree::tests::tendon_equalities_match_mujoco ... ok
+test mjcf_tree::tests::the_inertia_box_fluid_model_is_mujocos ... ok
+test mjcf_tree::tests::the_midphase_rejects_frankas_touching_pads_as_mujoco_does ... ok
+test mjcf_tree::tests::the_native_mass_matrix_and_bias_are_mujocos_bit_for_bit ... FAILED
+test mjcf_tree::tests::the_native_solver_lands_on_mujocos_qacc_bit_for_bit ... ok
+test mjcf_tree::tests::the_mesh_compiler_stores_mujocos_frame_and_vertices_bit_for_bit ... ok
+test mjcf_tree::tests::the_top_level_default_class_is_named_main_however_it_is_written ... ok
+test mjcf_tree::tests::xyaxes_and_zaxis_orientations ... ok
+test modal::tests::full_basis_reproduces_the_full_simulation_and_a_few_modes_capture_low_frequency_motion ... ok
+test modal::tests::max_stable_dt_brackets_the_modal_stability_boundary ... ok
+test modal::tests::modes_solve_the_generalized_eigenproblem_and_match_the_analytic_chain ... ok
+test mujoco_actuator::tests::a_motor_a_position_servo_and_a_velocity_servo_are_one_equation ... ok
+test mujoco_actuator::tests::dampratio_becomes_a_damping_once_the_mass_is_known ... ok
+test mujoco_actuator::tests::the_activation_filter_clamps_the_control_and_not_the_activation ... ok
+test mujoco_actuator::tests::the_control_is_clamped_going_in_and_the_force_going_out ... ok
+test mujoco_actuator::tests::the_joint_caps_the_total_actuator_force_on_its_dof ... ok
+test mujoco_actuator::tests::the_muscle_curves_are_mujocos_own ... ok
+test mujoco_ccd::tests::a_capsule_lying_on_a_box_yields_mujocos_perturbation_contacts ... ok
+test mujoco_ccd::tests::a_clip_that_produces_nothing_reports_it ... ok
+test mujoco_ccd::tests::a_cylinder_standing_on_a_box_yields_mujocos_four_sixteen_gon_contacts ... ok
+test mujoco_ccd::tests::a_sphere_on_a_box_mesh_takes_the_point_shortcut_and_inflates ... ok
+test mujoco_ccd::tests::a_tilted_box_mesh_on_a_plane_yields_mujocos_two_face_corners ... ok
+test mujoco_ccd::tests::a_tilted_box_mesh_resting_on_a_box_yields_mujocos_four_clipped_corners ... ok
+test mujoco_ccd::tests::a_tilted_octahedron_edge_on_a_box_mesh_yields_mujocos_two_edge_contacts ... ok
+test mujoco_ccd::tests::an_ellipsoid_on_a_box_yields_mujocos_iterated_epa_answer ... ok
+test mujoco_ccd::tests::an_octahedron_vertex_into_a_box_face_yields_mujocos_single_contact ... ok
+test mujoco_ccd::tests::crossed_cylinders_yield_mujocos_iterated_epa_answer ... ok
+test mujoco_ccd::tests::fourier_n1s_overlapping_cylinders_match_the_contracted_build_bit_for_bit ... ok
+test mujoco_ccd::tests::with_multiccd_disabled_the_same_pair_yields_mujocos_single_epa_witness ... ok
+test mujoco_collision::tests::box_box_matches_mujoco_face_and_edge ... ok
+test mujoco_collision::tests::capsule_box_matches_mujoco_on_face_edge_and_corner ... ok
+test mujoco_collision::tests::capsule_capsule_matches_mujoco_skew_and_parallel ... ok
+test mujoco_collision::tests::filters_are_mujocos ... ok
+test mujoco_collision::tests::frame_completion_is_mujocos ... ok
+test mujoco_collision::tests::pair_parameters_mix_as_mujoco_mixes_them ... ok
+test mujoco_collision::tests::plane_pairs_match_mujoco ... ok
+test mujoco_collision::tests::sphere_pairs_match_mujoco ... ok
+test mujoco_collision::tests::the_dispatcher_orders_types_and_flips_a_swapped_normal ... ok
+test mujoco_contact::block_tests::a_friction_row_saturates_at_plus_and_minus_its_loss ... ok
+test mujoco_contact::block_tests::a_reference_time_constant_is_floored_at_two_timesteps ... ok
+test mujoco_contact::block_tests::an_equality_row_is_never_satisfied_and_never_saturates ... ok
+test mujoco_contact::block_tests::an_impedance_past_the_limit_is_clipped_in_the_stiffness_as_well_as_the_sigmoid ... ok
+test mujoco_contact::block_tests::the_same_row_means_three_different_things_at_three_positions ... ok
+test mujoco_contact::cone_tests::a_contact_the_solver_has_satisfied_exerts_nothing ... ok
+test mujoco_contact::cone_tests::a_pyramidal_contact_clamps_each_row_at_zero ... ok
+test mujoco_contact::cone_tests::a_sliding_elliptic_contact_stays_in_the_quadratic_zone_when_the_cone_is_not_reached ... ok
+test mujoco_contact::cone_tests::an_elliptic_contact_with_no_tangential_drive_is_quadratic ... ok
+test mujoco_contact::cone_tests::condim_six_with_anisotropic_friction_lands_on_mujocos_ellipse ... ok
+test mujoco_contact::cone_tests::the_cone_hessian_is_the_costs_second_derivative ... ok
+test mujoco_contact::cone_tests::the_cones_regularisation_and_mu_are_mujocos ... ok
+test mujoco_contact::cone_tests::the_primal_solve_reaches_mujocos_qacc_on_every_probed_case ... ok
+test mujoco_contact::cone_tests::the_row_count_follows_the_cone_and_the_condim ... ok
+test mujoco_contact::tests::an_elliptic_contacts_friction_rows_carry_no_depth ... ok
+test mujoco_contact::tests::closing_and_opening_velocities_enter_through_the_reference ... ok
+test mujoco_contact::tests::custom_and_direct_solref_match_mujoco ... ok
+test mujoco_contact::tests::diag_approx_is_mujocos_two_side_sum ... ok
+test mujoco_contact::tests::frictionless_sphere_on_plane_matches_mujoco_across_a_penetration_ladder ... ok
+test mujoco_contact::tests::impedance_and_kbip_are_mujocos ... ok
+test mujoco_contact::tests::pyramidal_cone_at_rest_and_sliding_matches_mujoco ... ok
+test mujoco_efc::tests::dot_is_mujocos_on_both_sides_of_the_vectorised_block ... ok
+test mujoco_hull::tests::a_box_mesh_merges_into_six_quads_with_outward_normals ... ok
+test mujoco_hull::tests::a_flat_mesh_is_refused ... ok
+test mujoco_hull::tests::an_octahedron_keeps_its_eight_triangles ... ok
+test mujoco_hull::tests::polygon_order_is_libcpps_unordered_map_order ... ok
+test mujoco_kinematics::tests::host_sincos_is_libm_not_a_pythagorean_repair ... ok
+test mujoco_midphase::tests::mjsort_is_stable ... ok
+test mujoco_midphase::tests::the_sweep_compares_in_float_and_keeps_ties_in_order ... ok
+test numerics::tests::the_wrappers_refuse_a_non_finite_matrix_instead_of_spinning ... ok
+test occupancy::tests::a_beam_frees_its_ray_and_occupies_the_endpoint ... ok
+test occupancy::tests::a_diagonal_beam_traces_a_connected_ray ... ok
+test occupancy::tests::a_drawing_builds_the_grid_it_shows_and_the_outside_is_blocked ... ok
+test occupancy::tests::a_max_range_beam_frees_the_endpoint_too ... ok
+test occupancy::tests::repeated_beams_converge_toward_certainty ... ok
+test occupancy::tests::unknown_policy_decides_only_unobserved_cells ... ok
+test ode::tests::a_tighter_tolerance_gives_a_smaller_error ... ok
+test ode::tests::it_matches_exponential_decay_to_tolerance ... ok
+test ode::tests::it_tracks_the_harmonic_oscillator_and_conserves_energy ... ok
+test ode::tests::the_step_size_adapts_to_the_dynamics ... ok
+test orb::tests::a_descriptor_matches_itself_at_hamming_zero ... ok
+test orb::tests::brief_distinguishes_different_patches ... ok
+test orb::tests::fast_fires_on_the_corners_of_a_square ... ok
+test orb::tests::fast_stays_silent_on_a_flat_field ... ok
+test orb::tests::fast_stays_silent_on_a_straight_edge ... ok
+test orb::tests::matching_recovers_correspondences_under_translation ... ok
+test orb::tests::orientation_tracks_the_brightness_centroid ... ok
+test paden_kahan::tests::subproblem1_recovers_the_angle_that_generated_the_point ... ok
+test paden_kahan::tests::subproblem1_refuses_an_unreachable_point ... ok
+test paden_kahan::tests::subproblem2_rejects_parallel_axes_rather_than_returning_nonsense ... ok
+test paden_kahan::tests::subproblem2_reports_no_solution_when_the_circles_miss ... ok
+test paden_kahan::tests::subproblem2_solves_two_intersecting_axes_by_substitution ... ok
+test paden_kahan::tests::subproblem3_handles_an_axis_offset_along_omega ... ok
+test paden_kahan::tests::subproblem3_returns_two_one_or_zero_solutions_and_each_hits_the_distance ... ok
+test pca::tests::contains_rejects_a_far_exterior_point ... ok
+test pca::tests::pca_recovers_the_cloud_axes_and_variances ... ok
+test pca::tests::the_obb_contains_every_point ... ok
+test pca::tests::the_obb_is_tighter_than_the_axis_aligned_box ... ok
+test mjcf_tree::tests::step_mujoco_goes_through_gimbal_lock_like_mujoco ... ok
+test mjcf_tree::tests::step_mujoco_follows_mujocos_implicit_trajectory ... ok
+test pink::tests::reaches_full_6dof_pose ... ok
+test pink::tests::position_only_task_equals_diffik ... ok
+test pink::tests::posture_biases_redundant_solution ... ok
+test mesh3::verification::no_point_lies_outside_the_hull_and_no_face_fails_to_support_it ... ok
+test png::tests::rgb_decodes_to_the_red_channel ... ok
+test pnp::tests::dlt_recovers_the_exact_pose_from_clean_projections ... ok
+test pnp::tests::gauss_newton_refines_a_perturbed_pose_back_to_truth ... ok
+test pnp::tests::refinement_beats_dlt_under_pixel_noise ... ok
+test pnp::tests::the_reprojection_error_is_zero_at_the_solution ... ok
+test polyline::tests::a_straight_run_simplifies_to_its_endpoints ... ok
+test polyline::tests::polyline_length_sums_the_segments ... ok
+test polyline::tests::rdp_keeps_a_corner_and_bounds_the_error ... ok
+test polyline::tests::resampling_gives_uniform_spacing_and_preserves_length ... ok
+test polyroots::tests::it_agrees_with_the_quadratic_formula ... ok
+test polyroots::tests::it_handles_roots_at_zero_and_leading_zeros ... ok
+test polyroots::tests::it_recovers_complex_conjugate_roots ... ok
+test polyroots::tests::it_recovers_known_real_roots ... ok
+test pomdp::tests::a_perfect_sensor_collapses_the_belief ... ok
+test pomdp::tests::active_perception_picks_the_action_that_resolves_this_ambiguity ... ok
+test pomdp::tests::an_impossible_observation_is_refused ... ok
+test pomdp::tests::gain_spans_from_a_useless_to_a_perfect_sensor ... ok
+test pomdp::tests::information_gain_is_never_negative ... ok
+test pomdp::tests::prediction_without_observation_loses_information ... ok
+test pose_graph::tests::a_loop_closure_corrects_open_chain_drift ... ok
+test pose_graph::tests::it_recovers_ground_truth_from_consistent_measurements ... ok
+test pose_graph::tests::it_reduces_trajectory_error_under_noisy_measurements ... ok
+test prm::verification::build_refuses_malformed_bounds ... ok
+test planar_contact::tests::flat_box_drops_and_rests_on_the_floor ... ok
+test mjcf_tree::tests::welds_match_mujoco_in_every_form ... ok
+test qhull::tests::a_cube_has_eight_vertices_and_twelve_triangles ... ok
+test qhull::tests::apple_qsort_sorts_and_keeps_libc_tie_order ... ok
+test qhull::tests::menagerie_meshes_whose_hull_depends_on_fma_match_mujoco ... ok
+test quadrature::tests::accuracy_improves_with_more_points ... ok
+test quadrature::tests::an_n_point_rule_is_exact_up_to_degree_2n_minus_1 ... ok
+test quadrature::tests::it_matches_closed_form_transcendental_integrals ... ok
+test quadrature::tests::the_weights_sum_to_the_interval_length ... ok
+test quat_mean::tests::it_is_invariant_to_quaternion_sign ... ok
+test quat_mean::tests::it_recovers_the_mean_of_symmetric_rotations ... ok
+test quat_mean::tests::the_average_of_identical_rotations_is_that_rotation ... ok
+test quat_mean::tests::weighting_biases_toward_the_heavier_rotation ... ok
+test radar_velocity::tests::a_stationary_sensor_reads_zero ... ok
+test radar_velocity::tests::least_squares_recovers_the_ego_velocity_exactly ... ok
+test radar_velocity::tests::ransac_rejects_moving_targets ... ok
+test prm::verification::query_refuses_a_non_finite_or_wrong_length_endpoint ... ok
+test prm::verification::prm_multi_query_finds_free_paths ... ok
+test randomization::tests::degenerate_input_is_refused ... ok
+test randomization::tests::log_volume_is_monotone_in_scale ... ok
+test randomization::tests::the_actuator_support_guard_separates_torque_noise_from_regressor_noise ... ok
+test randomization::tests::declared_model_error_composes_with_estimation_uncertainty ... ok
+test randomization::tests::the_schedule_settles_at_its_target ... ok
+test ransac::tests::it_makes_the_eight_point_algorithm_robust_to_mismatches ... ok
+test ransac::tests::it_recovers_a_line_from_data_with_many_outliers ... ok
+test ransac::tests::it_recovers_a_plane_from_data_with_outliers ... ok
+test reciprocal::tests::a_revolute_axis_is_reciprocal_to_a_force_through_it ... ok
+test reciprocal::tests::reciprocity_is_frame_invariant ... ok
+test reciprocal::tests::swapping_halves_is_what_makes_a_grasp_wrench_pairable ... ok
+test reciprocal::tests::the_geometric_form_agrees_with_the_algebraic_one ... ok
+test reciprocal::tests::the_reciprocal_basis_has_the_complementary_dimension ... ok
+test reeds_shepp::tests::a_straight_move_is_a_single_forward_segment ... ok
+test reeds_shepp::tests::reverse_beats_dubins_for_a_goal_behind ... ok
+test reeds_shepp::tests::the_returned_path_reaches_the_goal ... ok
+test planar_contact::tests::tilted_box_settles_without_penetrating ... ok
+test retarget::tests::vector_cost_matches_a_direction ... ok
+test retarget::tests::vector_retargeting_reproduces_keypoint_vectors ... ok
+test rigidbody::tests::free_tumble_conserves_energy_and_angular_momentum ... ok
+test rigidbody::tests::torque_about_a_principal_axis_spins_up_linearly ... ok
+test retarget::tests::retargets_a_trajectory_from_keypoints ... ok
+test robot_contact::tests::contact_control_gradient_matches_finite_difference ... ok
+test randomization::tests::the_null_space_is_structurally_unobservable_not_merely_unfitted ... ok
+test robust::tests::robust_ik_reaches_target_within_limits ... ok
+test rolling_contact::tests::a_matched_convex_concave_pair_is_refused ... ok
+test rolling_contact::tests::a_non_zero_normal_velocity_is_refused ... ok
+test rolling_contact::tests::a_sphere_rolling_on_a_plane_traverses_at_r_omega ... ok
+test rolling_contact::tests::contact_speed_is_linear_in_both_rate_and_radius ... ok
+test rolling_contact::tests::plane_on_plane_cannot_roll ... ok
+test rolling_contact::tests::pure_sliding_still_moves_the_contact ... ok
+test rolling_contact::tests::r_psi_is_a_reflection_not_a_rotation ... ok
+test rotation_avg::tests::a_single_relative_measurement_is_consistent ... ok
+test rotation_avg::tests::it_recovers_ground_truth_from_consistent_measurements ... ok
+test rotation_avg::tests::refinement_beats_the_spanning_tree_under_noise ... ok
+test robot_contact::tests::arm_falls_onto_the_floor_without_penetrating ... ok
+test rrt::tests::plan_refuses_non_finite_or_wrong_length_inputs ... ok
+test lgvi::tests::free_body_conserves_energy_and_momentum_without_drift ... ok
+test running_stats::tests::it_beats_the_naive_sum_of_squares_at_a_huge_offset ... ok
+test running_stats::tests::merging_accumulators_equals_one_combined_stream ... ok
+test running_stats::tests::the_online_stats_match_the_batch_computation ... ok
+test sampler_bounds::tests::consistency_error_is_floored_by_training_and_falls_with_steps ... ok
+test sampler_bounds::tests::sampler_error_grows_linearly_in_the_score_error ... ok
+test sampler_bounds::tests::the_amplification_grows_with_the_diffusion_horizon_not_exponentially_in_it ... ok
+test sampler_bounds::tests::the_flow_matching_bound_is_linear_in_error_and_exponential_in_stiffness ... ok
+test sampler_bounds::tests::the_minimax_rate_follows_the_intrinsic_dimension_not_the_ambient_one ... ok
+test sampler_bounds::tests::the_three_error_terms_respond_to_their_own_levers ... ok
+test savgol::tests::a_constant_signal_passes_through_unchanged ... ok
+test savgol::tests::it_reduces_noise_while_preserving_the_signal ... ok
+test savgol::tests::it_reproduces_a_low_order_polynomial_exactly ... ok
+test savgol::tests::its_derivative_filter_is_exact_on_polynomials ... ok
+test screw::tests::exp_log_round_trip_on_se3 ... ok
+test screw::tests::exp_so3_matches_nalgebra_rotation ... ok
+test screw::tests::log_so3_holds_up_through_the_pi_branch_and_keeps_the_axis_sign ... ok
+test screw::tests::log_so3_recovers_a_half_turn_instead_of_reporting_the_identity ... ok
+test screw::tests::poe_forward_kinematics_matches_an_explicit_planar_arm ... ok
+test screw::tests::sclerp_hits_both_endpoints ... ok
+test screw::tests::sclerp_moves_at_a_constant_screw_velocity ... ok
+test screw::tests::sclerp_pure_translation_is_a_straight_line ... ok
+test screw::tests::the_adjoint_conjugates_the_twist ... ok
+test screw::tests::the_little_adjoint_is_the_lie_bracket ... ok
+test screw::tests::the_wrench_twist_pairing_is_frame_invariant ... ok
+test sdf::tests::known_distances ... ok
+test sdf::tests::primitive_distances_and_gradients_are_exact ... ok
+test sdf::tests::scene_union_and_robot_sphere_clearance ... ok
+test sdf::tests::smooth_union_bounds_and_limits_to_the_hard_union ... ok
+test sdf::tests::the_csg_operators_combine_shapes_correctly ... ok
+test sdf::tests::the_torus_distance_and_gradient_are_exact ... ok
+test sdformat::verification::both_silent_paths_to_a_massless_link_are_reported ... ok
+test sdformat::verification::sdf_geometry_refusals ... ok
+test sdformat::verification::sdf_limits_effort_velocity_and_damping_survive_the_loader ... ok
+test sdformat::verification::sdf_mesh_uris_carry_their_scale_and_resolve ... ok
+test sdformat::verification::sdf_pendulum_dynamics ... ok
+test sdformat::verification::sdf_says_nothing_when_the_file_says_nothing ... ok
+test sdformat::verification::sdf_sizes_are_full_extents_and_every_shape_converts ... ok
+test sdformat::verification::sdf_two_dof_chain ... ok
+test sdp::tests::it_finds_a_feasible_lmi_point ... ok
+test sdp::tests::it_solves_the_min_eigenvalue_sdp ... ok
+test sdp::tests::psd_projection_zeros_negative_eigenvalues ... ok
+test sensor_render::verification::depth_camera_matches_analytic_ray_sphere ... ok
+test sensor_render::verification::lidar_ranges_match_analytic_plane ... ok
+test sensor_render::verification::segmentation_separates_objects ... ok
+test sgm::tests::census_cost_is_minimized_at_the_true_shift ... ok
+test sgm::tests::census_is_illumination_robust ... ok
+test sgm::tests::sgm_recovers_a_constant_disparity_plane ... ok
+test sgm::tests::sgm_recovers_a_two_plane_scene_with_a_step ... ok
+test smolvla_receiver::tests::chunk_index_does_not_become_a_ferromorphic_tick_without_an_epoch ... ok
+test smolvla_receiver::tests::empty_horizon_negative_cases_stay_on_their_own_layers ... ok
+test smolvla_receiver::tests::empty_noise_is_missing_noise_provenance_and_incomplete_hashes_refuse ... ok
+test smolvla_receiver::tests::mutated_shape_limits_and_time_are_refused ... ok
+test smolvla_receiver::tests::nonempty_golden_is_unchanged_and_matches_the_empty_identity ... ok
+test smolvla_receiver::tests::normalization_pad_and_bounds_follow_the_contract_and_are_not_inference ... ok
+test smolvla_receiver::tests::pinned_fixture_bytes_match_the_golden_digest_and_do_not_authorize_a_rollout ... ok
+test smolvla_receiver::tests::published_empty_horizon_matches_canonical_bytes_and_refuses_index_zero ... ok
+test smolvla_receiver::tests::sha256_of_abc_matches_the_known_vector ... ok
+test smolvla_receiver::tests::timestamps_are_checked_and_a_digest_match_still_refuses_actuation_and_select_action ... ok
+test sparse::tests::two_arms_loop_closure ... ok
+test spatial::tests::kd_k_nearest_matches_the_brute_force_top_k ... ok
+test spatial::tests::kd_nearest_matches_brute_force ... ok
+test spatial::tests::kd_radius_query_matches_brute_force ... ok
+test spatial::tests::voxel_hash_radius_query_matches_brute_force ... ok
+test spline_se3::tests::control_poses_along_one_screw_reproduce_it_at_constant_twist ... ok
+test spline_se3::tests::the_analytic_body_velocity_matches_a_finite_difference ... ok
+test spline_se3::tests::the_trajectory_is_c1_across_segment_joins ... ok
+test state_lattice::tests::a_corridor_forces_the_one_primitive_sequence_that_fits ... ok
+test state_lattice::tests::a_goal_heading_no_primitive_can_produce_returns_none ... ok
+test state_lattice::tests::a_pocket_nearer_the_goal_does_not_lure_the_search_off_the_optimum ... ok
+test state_lattice::tests::arc_endpoint_matches_the_hand_values_including_reverse_signs ... ok
+test state_lattice::tests::degenerate_queries_return_as_documented ... ok
+test state_lattice::tests::dstar_lite_first_search_equals_astar ... ok
+test state_lattice::tests::dstar_lite_repairs_the_plan_when_a_cell_on_it_becomes_blocked ... ok
+test state_lattice::tests::dstar_lite_replans_with_a_moving_start ... ok
+test state_lattice::tests::dstar_lite_reports_no_known_path_after_the_corridor_closes ... ok
+test state_lattice::tests::every_four_heading_primitive_ends_exactly_on_a_node ... ok
+test state_lattice::tests::lattice_astar_inherits_the_maps_unknown_cell_policy ... ok
+test state_lattice::tests::open_grid_optimum_is_l_r_l_at_three_half_pi ... ok
+test state_lattice::tests::point_robot_swaths_match_the_hand_computation ... ok
+test state_lattice::tests::replanning_agrees_with_lattice_astar_on_random_grids_flips_and_moves ... ok
+test state_lattice::tests::reverse_straights_carry_the_reverse_weight ... ok
+test state_lattice::tests::samples_form_a_continuous_trajectory_between_the_node_centres ... ok
+test state_lattice::tests::straights_with_free_turns_reproduce_four_connected_grid_astar ... ok
+test state_lattice::tests::the_generator_refuses_a_primitive_that_misses_the_lattice ... ok
+test stl::tests::a_window_past_the_end_is_not_credited ... ok
+test stl::tests::always_is_decided_by_the_worst_instant ... ok
+test stl::tests::boolean_operators_compose_the_margins ... ok
+test stl::tests::eventually_is_decided_by_the_best_instant ... ok
+test stl::tests::predicate_robustness_is_the_margin ... ok
+test stl::tests::robustness_increases_with_the_margin ... ok
+test stl::tests::until_requires_the_guard_to_hold_until_the_witness ... ok
+test sysid::tests::identification_recovers_the_dynamics_from_data ... ok
+test sysid::tests::pseudo_inertia_detects_physical_consistency ... ok
+test sysid::tests::regressor_reproduces_the_rnea_torques ... ok
+test tdoa::tests::it_is_robust_to_tdoa_noise ... ok
+test tdoa::tests::it_recovers_a_known_source_from_exact_tdoa ... ok
+test tdoa::tests::too_few_receivers_return_none ... ok
+test teaser::tests::it_is_exact_with_no_outliers ... ok
+test teaser::tests::it_recovers_a_transform_despite_many_outliers ... ok
+test teaser::tests::register_refuses_correspondences_that_break_its_contract ... ok
+test tensegrity::tests::a_strut_carries_compression_a_cable_carries_tension ... ok
+test tensegrity::tests::form_finding_places_a_free_node_at_self_equilibrium ... ok
+test tensegrity::tests::form_finding_pulls_a_cable_net_taut ... ok
+test tensegrity::tests::the_force_density_matrix_annihilates_the_equilibrium_geometry ... ok
+test tensegrity::tests::the_x_square_self_equilibrates_only_at_the_right_force_ratio ... ok
+test tests::fk_at_zero_is_fully_extended ... ok
+test tests::ik_reaches_a_reachable_pose ... ok
+test tests::jacobian_matches_finite_difference ... ok
+test rrt::tests::plans_around_an_obstacle ... ok
+test translation_avg::tests::a_single_edge_reproduces_its_relative_translation ... ok
+test translation_avg::tests::it_is_least_squares_optimal_under_noise ... ok
+test translation_avg::tests::it_recovers_positions_from_consistent_measurements ... ok
+test transport::tests::malformed_transport_problems_are_refused ... ok
+test traj::tests::trajectory_through_waypoints_is_smooth ... ok
+test transport::tests::w1_on_the_line_is_the_sorted_pairing ... ok
+test transport::tests::w2_between_shifted_gaussians_is_the_mean_distance ... ok
+test transport::tests::w2_scalar_case_matches_the_textbook_formula ... ok
+test transport::tests::wasserstein_sees_distance_where_total_variation_saturates ... ok
+test transport_geometry::tests::cramer_has_an_unbiased_sample_gradient_where_a_sampled_wasserstein_loss_is_biased ... ok
+test transport_geometry::tests::cramer_sees_distance_where_total_variation_saturates ... ok
+test transport_geometry::tests::gromov_wasserstein_matches_isometric_sets_in_different_dimensions ... ok
+test transport_geometry::tests::the_distributional_bellman_operator_contracts_only_in_wasserstein ... ok
+test transport::tests::sinkhorn_meets_the_marginals_and_approaches_the_exact_optimum ... ok
+test transport_geometry::tests::the_kantorovich_dual_equals_the_primal_w1 ... ok
+test transport_geometry::tests::the_schrodinger_bridge_hits_both_marginals_exactly ... ok
+test tree_diffik::tests::a_fixed_base_stays_put_and_bad_input_is_refused ... ok
+test tree_diffik::tests::a_joint_limit_is_respected_and_the_reported_error_is_the_real_one ... ok
+test tree_diffik::tests::a_rigid_body_on_a_floating_base_lands_exactly_where_algebra_says ... ok
+test tree_diffik::tests::an_orientation_task_on_one_hinge_returns_exactly_the_angle_asked_for ... ok
+test acd::tests::fidelity_improves_with_the_part_budget ... ok
+test tree_diffik::tests::the_base_columns_match_the_analytic_rigid_body_twist ... ok
+test tree_diffik::tests::the_tree_solver_and_the_serial_solver_reach_the_same_point ... ok
+test tree_dynamics::tests::branched_free_body_falls_at_g ... ok
+test tree_dynamics::tests::fixed_base_tree_reduces_to_serial_and_is_self_consistent ... ok
+test tree_dynamics::tests::floating_mass_matrix_matches_aba ... ok
+test tree_dynamics::tests::tree_reduces_to_serial_chain ... ok
+test tree_jacobian::tests::the_angular_jacobian_differentiates_the_orientation ... ok
+test tree_jacobian::tests::the_contact_rows_and_invweights_match_mujoco_on_a_loaded_model ... ok
+test tree_jacobian::tests::the_contact_rows_are_the_relative_velocity_in_the_contact_frame ... ok
+test tree_jacobian::tests::the_point_jacobian_differentiates_the_forward_kinematics ... ok
+test trilateration::tests::it_is_robust_to_range_noise_when_over_determined ... ok
+test trilateration::tests::it_recovers_a_known_position_from_exact_ranges ... ok
+test trilateration::tests::too_few_anchors_return_none ... ok
+test urdf::tests::ik_on_loaded_arm ... ok
+test urdf::tests::loads_arm_and_folds_fixed_joints ... ok
+test urdf::tests::rpy_origin_is_parsed ... ok
+test urdf::tests::the_urdf_damping_survives_the_loader ... ok
+test urdf::tests::the_urdf_effort_and_velocity_limits_survive_the_loader ... ok
+test usda::tests::a_robot_round_trips_through_usda ... ok
+test usda::tests::a_stage_parses_into_prims_attributes_and_relationships ... ok
+test usda::tests::centimetre_content_is_scaled_to_metres ... ok
+test usda::tests::kilograms_per_unit_scales_mass_and_inertia ... ok
+test usda::tests::malformed_input_is_reported_not_panicked ... ok
+test usda::tests::revolute_limits_convert_from_degrees_and_prismatic_ones_do_not ... ok
+test usda::tests::the_body1_joint_frame_is_composed_not_discarded ... ok
+test usda::tests::the_two_stage_scales_compose_on_inertia ... ok
+test usda::tests::the_up_axis_is_reported_not_assumed ... ok
+test tree_diffik::tests::one_solve_for_three_fingers_beats_spending_the_shared_wrist_on_any_one ... ok
+test voxel::tests::a_mesh_with_a_hole_reports_that_the_fill_leaked ... ok
+test voxel::tests::a_cube_voxelises_conservatively_and_the_error_is_first_order ... ok
+test voxel::tests::empty_degenerate_and_absurd_inputs_are_refused ... ok
+test voxel::tests::the_channel_of_a_u_bracket_is_empty_and_its_volume_is_the_three_boxes ... ok
+test voxel::tests::the_edge_axes_reject_a_triangle_the_coarse_tests_accept ... ok
+test rrt::tests::asymptotically_approaches_the_straight_line_in_free_space ... ok
+test whole_body_contact::tests::contact_jacobian_matches_finite_difference ... ok
+test voxel::tests::a_sphere_voxelises_to_its_closed_form_volume ... ok
+test transport_geometry::tests::the_jko_flow_decreases_free_energy_and_lands_on_the_gibbs_measure ... ok
+test randomization::tests::a_k_sigma_support_covers_the_identifiable_directions ... ok
+test planar_contact::tests::contact_implicit_cem_pushes_box_to_a_target ... ok
+test xcorr::tests::autocorrelation_peaks_at_zero_lag ... ok
+test xcorr::tests::fft_convolution_matches_the_direct_sum ... ok
+test xcorr::tests::it_recovers_a_known_time_delay ... ok
+test xpbd::tests::a_free_bar_conserves_linear_momentum ... ok
+test xpbd::tests::damping_is_a_rate_not_a_per_substep_fraction ... ok
+test xpbd::tests::the_compliant_hang_matches_the_hookean_elongation ... ok
+test identification::tests::the_intervals_cover_at_about_their_nominal_rate ... ok
+test xpbd::tests::the_stiff_limit_is_rigid ... ok
+test xpbd::tests::the_equilibrium_is_step_count_independent ... ok
+test whole_body_contact::tests::a_walking_quadruped_does_not_chatter ... ok
+test whole_body_contact::tests::quadruped_settles_under_hard_contact ... ok
+test whole_body_contact::tests::the_gait_linearises_and_the_growth_is_probe_stable ... ok
+test robot_plan::tests::plans_a_collision_free_path_around_a_wall has been running for over 60 seconds
+test robot_plan::tests::plans_a_collision_free_path_around_a_wall ... ok
+test whole_body_contact::tests::passive_contact_never_creates_energy ... ok
+test whole_body_contact::tests::driven_multi_contact_stays_bounded_at_high_friction ... ok
+
+failures:
+
+---- mjcf_tree::tests::geom_frames_match_mujocos_kinematics_bit_for_bit stdout ----
+
+thread 'mjcf_tree::tests::geom_frames_match_mujocos_kinematics_bit_for_bit' (26247) panicked at crates/ferromotion-core/src/mjcf_tree.rs:9014:13:
+assertion `left == right` failed: geom 1: [0.3085959510102222, -0.13392457947568095, 1.2925641574957125, 0.0666397393551407, -0.7477583884274336, 0.6606182995308917, -0.9487862447474188, -0.252405056362066, -0.1899903926543502, 0.3088103089548191, -0.6141246453768732, -0.7262830805023338]
+  MuJoCo [0.3085959510102222, -0.13392457947568095, 1.2925641574957125, 0.0666397393551405, -0.7477583884274337, 0.6606182995308918, -0.9487862447474189, -0.25240505636206584, -0.18999039265435044, 0.30881030895481915, -0.6141246453768733, -0.726283080502334]
+  left: [4599230790357816642, 13817365198635090649, 4608500010630697062, 4589466319948410986, 13828282465199022129, 4604125540200479325, 13830093163156649679, 13821590582043796246, 13819385182437808078, 4599234651887254284, 13827078799448208872, 13828089032821483837]
+ right: [4599230790357816642, 13817365198635090649, 4608500010630697062, 4589466319948410972, 13828282465199022130, 4604125540200479326, 13830093163156649680, 13821590582043796243, 13819385182437808087, 4599234651887254285, 13827078799448208873, 13828089032821483839]
+
+---- mjcf_tree::tests::spatial_tendons_step_as_mujoco_does_bit_for_bit stdout ----
+
+thread 'mjcf_tree::tests::spatial_tendons_step_as_mujoco_does_bit_for_bit' (26262) panicked at crates/ferromotion-core/src/mjcf_tree.rs:7900:9:
+assertion `left == right` failed
+  left: [4609734117662855034, 13842436752815519228, 4622613446824682926]
+ right: [4609734117662855034, 13842436752815519230, 4622613446824682927]
+
+---- mjcf_tree::tests::the_native_mass_matrix_and_bias_are_mujocos_bit_for_bit stdout ----
+
+thread 'mjcf_tree::tests::the_native_mass_matrix_and_bias_are_mujocos_bit_for_bit' (26275) panicked at crates/ferromotion-core/src/mjcf_tree.rs:7614:9:
+assertion `left == right` failed
+  left: [4616189618054758400, 0, 4616189618054758400, 0, 0, 4616189618054758400, 13810258321273042093, 4576675478438663161, 4582451308561466540, 4580560284212516227, 4593203322577276161, 4597050497749249258, 13822874471308657126, 13802071208758436934, 4597236916193774115, 13823243297461709842, 4596948687066411581, 4580306813689172059, 4581653075617558682, 4564588493582345912, 4597446110576085256, 13790430372162359560, 4592423259563248944, 13818156133665466972, 13793685095141169316, 4590943731896010071, 4582885935022476684, 4587205772499912546, 4585976152672224824, 13812163255384815282, 4598917042068044016, 4576301181119963725, 13817327857275138424, 13808033081845363677, 13813864778168124614, 4599075939470750517, 13565086662392801024, 4341500172153178068, 4340595314201250244, 4536576014398882959, 13750375595641278443, 4535270197983625456, 4526764841857533036, 4337268850901802265, 4576933217283647565, 13784281205188138364, 4565879360785941651, 4554483048787545965, 13759458336768717942, 4554296848108094077, 4561691874002733887, 4553789066057642119, 13773486788679295848, 4340625615855026176, 4576980487065336445, 13788928987124992126, 13784793390891371062, 4557738682882978470, 4548630064155580576, 13784145274598439774, 4558639908555308820, 13778914624071443561, 4556612594054453734, 13564455049546956800, 4337810866087919616, 4576974722457813410]
+ right: [4616189618054758400, 0, 4616189618054758400, 0, 0, 4616189618054758400, 13810258321273042093, 4576675478438663161, 4582451308561466540, 4580560284212516225, 4593203322577276161, 4597050497749249258, 13822874471308657126, 13802071208758436926, 4597236916193774114, 13823243297461709842, 4596948687066411581, 4580306813689172059, 4581653075617558682, 4564588493582345912, 4597446110576085256, 13790430372162359560, 4592423259563248944, 13818156133665466972, 13793685095141169300, 4590943731896010070, 4582885935022476682, 4587205772499912546, 4585976152672224824, 13812163255384815282, 4598917042068044016, 4576301181119963725, 13817327857275138424, 13808033081845363677, 13813864778168124614, 4599075939470750517, 13565086662392801024, 4341500172153178068, 4340595314201250244, 4536576014398882959, 13750375595641278443, 4535270197983625456, 4526764841857533036, 4337268850901802265, 4576933217283647565, 13784281205188138364, 4565879360785941651, 4554483048787545965, 13759458336768717942, 4554296848108094077, 4561691874002733887, 4553789066057642119, 13773486788679295848, 4340625615855026176, 4576980487065336445, 13788928987124992126, 13784793390891371062, 4557738682882978470, 4548630064155580576, 13784145274598439774, 4558639908555308820, 13778914624071443561, 4556612594054453734, 13564455049546956800, 4337810866087919616, 4576974722457813410]
+
+
+failures:
+    mjcf_tree::tests::geom_frames_match_mujocos_kinematics_bit_for_bit
+    mjcf_tree::tests::spatial_tendons_step_as_mujoco_does_bit_for_bit
+    mjcf_tree::tests::the_native_mass_matrix_and_bias_are_mujocos_bit_for_bit
+
+test result: FAILED. 996 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 104.55s
+
+error: test failed, to rerun pass `-p ferromotion-core --lib`
+     Running tests/ferromorphic_receipt_v2.rs (target/debug/deps/ferromorphic_receipt_v2-4d538a3f2e6b1fb9)
+
+running 1 test
+test ferromorphic_receipt_v2_round_trips_both_ways ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/nalgebra_nan_behaviour.rs (target/debug/deps/nalgebra_nan_behaviour-d5e959ae48a4b298)
+
+running 1 test
+test which_nalgebra_routines_survive_a_nan ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
+
+     Running tests/no_panicking_float_comparisons.rs (target/debug/deps/no_panicking_float_comparisons-97db69f2486756a9)
+
+running 1 test
+test no_library_file_unwraps_a_float_comparison ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/no_unguarded_dynamic_svd.rs (target/debug/deps/no_unguarded_dynamic_svd-3675831a5afeb21e)
+
+running 1 test
+test every_dynamic_svd_call_in_library_code_is_guarded_or_explicitly_fixed_size ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/nonfinite_public_api.rs (target/debug/deps/nonfinite_public_api-a4aab434166fa0c0)
+
+running 2 tests
+test each_entry_point_honours_its_documented_non_finite_contract ... ok
+test report_which_public_entry_points_fault_on_a_non_finite_input ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/stability_bounds_are_tested_from_outside.rs (target/debug/deps/stability_bounds_are_tested_from_outside-b051bda629a897de)
+
+running 1 test
+test every_stability_bound_has_a_test_that_crosses_it ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/urdf_geometry_end_to_end.rs (target/debug/deps/urdf_geometry_end_to_end-2ed3535ab72bb761)
+
+running 2 tests
+test a_mesh_only_link_reports_what_it_needs_rather_than_failing_silently ... ok
+test a_shapes_only_urdf_yields_the_same_body_as_a_stated_one ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src/lib.rs (target/debug/deps/ferromotion_coupled-62cb4eaf86b4a21d)
+
+running 6 tests
+test verification::coupled_collision_conserves_momentum ... ok
+test verification::the_vertex_sphere_surface_is_a_sieve_below_a_threshold_radius ... ok
+test verification::grains_settle_on_soft_body ... ok
+test grasp::tests::weak_grasp_slips ... ok
+test grasp::tests::firm_grasp_lifts_the_soft_object ... ok
+test grasp::tests::oriented_grasp_lifts_along_a_nondefault_axis ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.37s
+
+     Running unittests src/lib.rs (target/debug/deps/ferromotion_dem-befd04faebc2a87e)
+
+running 3 tests
+test verification::head_on_collision_conserves_momentum_and_energy ... ok
+test verification::resting_grain_reaches_analytic_penetration ... ok
+test verification::poured_pile_settles ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+     Running unittests src/lib.rs (target/debug/deps/ferromotion_fem-c8bba2c712ace3e6)
+
+running 34 tests
+test plasticity::tests::an_inverted_gradient_is_refused ... ok
+test plasticity::tests::hydrostatic_compression_never_yields ... ok
+test plasticity::tests::below_yield_the_deformation_is_returned_bit_identically ... ok
+test plasticity::tests::plastic_flow_is_exactly_volume_preserving ... ok
+test verification::a_healthy_element_is_bit_identical_under_the_recovery_branch ... ok
+test plasticity::tests::the_returned_state_lies_on_the_yield_surface ... ok
+test plasticity::tests::loading_past_yield_leaves_permanent_deformation ... ok
+test plasticity::tests::a_higher_yield_stress_widens_the_elastic_range ... ok
+test verification::energy_gradient_wrt_stiffness_is_exact ... ok
+test verification::force_matches_energy_gradient ... ok
+test verification::near_incompressible_bending_response_is_pinned ... ignored, settles to rest at dt = 3e-6; run in the release --ignored lane
+test verification::nodal_averaging_reduces_to_per_element_on_a_homogeneous_deformation ... ok
+test verification::rigid_motion_is_energy_free ... ok
+test verification::free_fall_conserves_and_accelerates ... ok
+test verification::uniaxial_stretch_stores_energy ... ok
+test viscoelastic::tests::a_gripper_loses_force_over_a_hold_and_the_amount_is_predictable ... ok
+test viscoelastic::tests::a_held_strain_step_relaxes_along_the_relaxation_modulus_exactly ... ok
+test viscoelastic::tests::a_negative_branch_stiffness_is_rejected_because_it_would_generate_energy ... ok
+test viscoelastic::tests::a_time_domain_sinusoid_reproduces_the_complex_modulus_in_amplitude_and_phase ... ok
+test viscoelastic::tests::boltzmann_superposition_holds ... ok
+test verification::nodal_averaged_force_matches_energy_gradient ... ok
+test viscoelastic::tests::the_algorithmic_tangent_interpolates_the_two_static_limits ... ok
+test viscoelastic::tests::the_hysteresis_loop_area_is_the_dissipated_energy ... ok
+test viscoelastic::tests::the_loss_modulus_is_never_negative_and_peaks_at_one_over_tau ... ok
+test viscoelastic::tests::the_ramp_response_is_exact_at_every_timestep ... ok
+test viscoelastic::tests::the_standard_linear_solid_matches_its_closed_form ... ok
+test viscoelastic::tests::the_storage_modulus_spans_exactly_the_two_static_limits ... ok
+test verification::implicit_tet_mesh_meshes_a_sphere ... ok
+test viscoelastic::tests::creep_and_relaxation_satisfy_the_laplace_identity ... ok
+test verification::an_inverted_element_is_pushed_back_rather_than_ignored ... ok
+test verification::dropped_soft_body_lands_and_settles ... ok
+test verification::stable_timestep_bounds_the_measured_limit ... ok
+test verification::an_external_load_enters_as_a_force has been running for over 60 seconds
+test verification::damping_is_a_rate_not_a_per_step_fraction has been running for over 60 seconds
+test verification::damping_is_a_rate_not_a_per_step_fraction ... ok
+test verification::an_external_load_enters_as_a_force ... ok
+
+test result: ok. 33 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 144.67s
+
+     Running unittests src/lib.rs (target/debug/deps/ferromotion_fluid-2641897a870ca5c4)
+
+running 71 tests
+test env::verification::wind_field_is_divergence_free ... ok
+test euler::verification::conserves_mass_and_energy_momentum_tracks_boundary_impulse ... ok
+test euler::verification::sod_shock_tube_matches_exact_riemann ... ok
+test env::verification::routes_around_obstacles ... ok
+test fvm::verification::flux_form_conserves_the_scalar ... ok
+test fvm::verification::central_flux_is_second_order ... ok
+test harness::verification::harness_catches_the_divergence_cheat_at_equal_mse ... ok
+test harness::verification::harness_catches_the_spectral_cheat_at_equal_mse ... ok
+test env::verification::flow_aware_routing_beats_naive_and_scales ... ok
+test fvm::verification::upwind_flux_is_first_order ... ok
+test dmd::verification::dmd_reconstructs_the_training_flow ... ok
+test dmd::verification::dmd_predicts_beyond_training ... ok
+test lbm::gradients::dual_gradient_through_the_simulation_matches_fd ... ok
+test lbm3d::verification::mass_is_conserved ... ok
+test lbm3d::verification::z_invariant_flow_matches_2d_solver ... ok
+test lbm3d::gradients::dual_gradient_through_the_3d_simulation_matches_fd ... ok
+test mac_adjoint::verification::init_field_gradient_matches_fd ... ok
+test mac_adjoint::verification::lid_gradient_matches_fd ... ok
+test mac_adjoint::verification::nu_gradient_matches_fd ... ok
+test lbm::verification::taylor_green_periodic_decay_and_order ... ok
+test spectral::verification::convergence_is_spectral_not_polynomial ... ok
+test spectral::verification::poisson_2d_recovers_manufactured_solution ... ok
+test spectral::verification::spectral_derivative_is_exact_for_band_limited ... ok
+test spectral_ns::verification::enstrophy_decays_at_the_analytic_rate ... ok
+test spectral_ns::verification::taylor_green_decays_exactly ... ok
+test lbm::verification::mass_is_conserved_exactly ... ok
+test lbm::gradients::viscosity_identifies_from_decay_by_gradient ... ok
+test mac_adjoint::verification::viscosity_identifies_from_final_field_by_adjoint ... ok
+test sph::verification::free_blob_conserves_momentum ... ok
+test sph::verification::kernel_partition_recovers_density ... ok
+test spectral_ns::verification::the_advection_term_matches_an_analytic_two_mode_reference ... ok
+test sph::verification::dam_break_is_stable_and_surges ... ok
+test swimmer::verification::still_body_does_not_drift ... ok
+test gust::verification::coefficient_model_breaks_and_residual_recovers_it has been running for over 60 seconds
+test gust::verification::steady_flow_needs_no_residual has been running for over 60 seconds
+test lbm3d::verification::shear_wave_matches_analytic_and_converges has been running for over 60 seconds
+test lbm::verification::cavity_re100_matches_ghia_cross_oracle has been running for over 60 seconds
+test sph::verification::column_settles_to_hydrostatic has been running for over 60 seconds
+test swimmer::verification::amplitude_learns_to_hit_a_target_by_exact_gradient has been running for over 60 seconds
+test swimmer::verification::gait_tunes_to_a_commanded_cruise has been running for over 60 seconds
+test swimmer::verification::swim_displacement_gradient_is_exact has been running for over 60 seconds
+test lbm3d::verification::shear_wave_matches_analytic_and_converges ... ok
+test gust::verification::steady_flow_needs_no_residual ... ok
+test tests::a_diverged_field_is_reported_as_diverged_not_as_converged ... ok
+test tests::coupled_fsi_gradient_matches_finite_difference ... ok
+test gust::verification::coefficient_model_breaks_and_residual_recovers_it ... ok
+test tests::gradient_tunes_actuation_to_a_target_force ... ok
+test swimmer::verification::swim_displacement_gradient_is_exact ... ok
+test tests::immersed_disk_enforces_no_slip_and_drags_fluid ... ok
+test tests::lid_driven_cavity_matches_ghia_re100 ... ignored, benchmark: run in release
+test tests::free_disk_settles_to_terminal_velocity ... ok
+test tests::projection_keeps_the_field_divergence_free ... ok
+test turbulence::tests::komega_free_decay_matches_analytic ... ok
+test turbulence::tests::komega_produces_turbulence_under_shear ... ok
+test turbulence::tests::smagorinsky_vanishes_for_rotation_and_translation_and_is_galilean ... ok
+test turbulence::tests::strain_rate_matches_pure_shear ... ok
+test ufvm::verification::advection_diffusion_mms_second_order ... ok
+test ufvm::verification::conductivity_adjoint_matches_fd ... ok
+test ufvm::verification::mms_second_order_on_irregular_mesh ... ok
+test ufvm::verification::mms_second_order_on_regular_mesh ... ok
+test tests::moving_boundary_gradient_matches_finite_difference ... ok
+test ufvm_stokes::verification::only_edges_with_one_incident_triangle_are_boundary_nodes ... ok
+test ufvm_stokes::verification::stokes_mms_converges_high_order ... ok
+test ufvm_stokes::verification::stokes_solution_is_divergence_free ... ok
+test tests::immersed_drag_scales_with_velocity_in_the_stokes_regime ... ok
+test ufvm_stokes::verification::navier_stokes_mms_converges ... ok
+test swimmer::verification::amplitude_learns_to_hit_a_target_by_exact_gradient ... ok
+test vof::verification::boundedness_is_conditional_on_the_cfl_number ... ok
+test vof::verification::conserves_volume_under_rotation ... ok
+test vof::verification::disk_returns_after_one_revolution ... ok
+test swimmer::verification::traveling_wave_propels_and_reverses has been running for over 60 seconds
+test vof::verification::stays_bounded ... ok
+test vof::verification::the_bounds_monitor_does_not_hide_a_non_finite_field ... ok
+test verification::taylor_green_decay_and_convergence_order ... ok
+test verification::taylor_green_energy_budget ... ok
+test sph::verification::column_settles_to_hydrostatic ... ok
+test swimmer::verification::gait_tunes_to_a_commanded_cruise ... ok
+test verification::lid_driven_cavity_matches_ghia_re100 has been running for over 60 seconds
+test swimmer::verification::traveling_wave_propels_and_reverses ... ok
+test lbm::verification::cavity_re100_matches_ghia_cross_oracle ... ok
+test verification::lid_driven_cavity_matches_ghia_re100 ... ok
+
+test result: ok. 70 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 601.25s
+
+     Running unittests src/lib.rs (target/debug/deps/ferromotion_learn-d3c66f5a7b7790c5)
+
+running 88 tests
+test autodiff::tests::tanh_derivative_matches_one_minus_tanh_squared ... ok
+test autodiff::tests::product_and_quotient_rules_are_exact ... ok
+test autodiff::tests::a_shared_subexpression_accumulates_both_paths ... ok
+test autodiff::tests::sigmoid_and_relu_gradients_are_correct ... ok
+test delan::tests::delan_recovers_the_true_mass_matrix ... ignored, slow (~40s in release): recovers M(q) to a worst term of 0.026 at 8000 steps, bounded at 0.10 for the oscillation band; release --ignored lane
+test autodiff::tests::gradient_of_a_nonlinear_multivariable_function_matches_finite_differences ... ok
+test dual::tests::dual_first_derivative_matches_finite_difference ... ok
+test dual::tests::hyperdual_mixed_partial_is_exact ... ok
+test dual::tests::hyperdual_second_derivative_matches_finite_difference ... ok
+test env::tests::a_malformed_space_is_rejected_rather_than_silently_accepted ... ok
+test env::tests::a_rollout_truncates_at_the_budget_and_never_terminates ... ok
+test dual::gendyn_tests::dual_parameter_gradients_match_finite_differences ... ok
+test env::tests::a_seed_reproduces_an_episode_exactly ... ok
+test dual::gendyn_tests::dual_rnea_matches_analytical_id_derivatives ... ok
+test env::tests::scaling_round_trips_and_a_clamp_is_idempotent ... ok
+test env::tests::damping_removes_energy_and_torque_adds_it ... ok
+test env::tests::the_analytic_lqr_gain_solves_its_own_bellman_equation ... ok
+test env::tests::the_lqr_environment_matches_its_own_analytic_cost ... ok
+test env::tests::the_torque_limit_makes_swing_up_a_real_task ... ok
+test msnn::tests::a_rank_deficient_cell_reports_a_level_not_a_fabricated_zero ... ok
+test msnn::tests::fits_a_nonlinear_curve_with_readable_local_slopes ... ok
+test msnn::tests::memberships_partition_unity ... ok
+test msnn::tests::recovers_an_affine_function_exactly ... ok
+test env::tests::the_pendulum_energy_error_is_first_order_in_dt_and_does_not_grow ... ok
+test nls::tests::ik_as_a_differentiable_layer_through_the_real_fk ... ok
+test nls::tests::linear_problem_matches_the_closed_form_solution_and_sensitivity ... ok
+test nls::tests::nonlinear_sensitivity_matches_finite_differences_of_resolving ... ok
+test diff_control::tests::differentiable_tuning_nulls_the_steady_state_error_by_discovering_integral_action ... ok
+test capstone::tests::learn_a_model_then_control_the_real_plant_through_it ... ok
+test nn::tests::the_loss_decreases_monotonically_early_on ... ok
+test obs_norm::tests::a_constant_channel_divides_by_the_floor_rather_than_by_zero ... ok
+test obs_norm::tests::it_is_a_passthrough_until_there_is_a_spread_to_divide_by ... ok
+test obs_norm::tests::malformed_observations_are_ignored_rather_than_poisoning_the_estimate ... ok
+test obs_norm::tests::normalizing_its_own_data_gives_zero_mean_and_unit_variance ... ok
+test obs_norm::tests::the_naive_estimator_fails_where_welford_does_not ... ok
+test obs_norm::tests::the_snapshot_is_frozen_and_does_not_track_later_updates ... ok
+test obs_norm::tests::welford_matches_a_two_pass_computation ... ok
+test nn::tests::an_mlp_learns_xor ... ok
+test nn::tests::an_mlp_approximates_a_nonlinear_function ... ok
+test pinn::tests::an_untrained_pinn_does_not_satisfy_the_equation ... ok
+test ppo::export_tests::a_dimension_mismatch_is_reported_rather_than_silently_truncated ... ok
+test ppo::export_tests::a_json_round_trip_preserves_behaviour_exactly ... ok
+test ppo::export_tests::a_linear_policys_exported_weight_is_still_the_gain ... ok
+test ppo::export_tests::a_mismatched_normalizer_is_reported_rather_than_applied_partially ... ok
+test ppo::export_tests::a_multi_layer_export_preserves_every_layer_shape_and_activation ... ok
+test neural_ode::tests::neural_ode_learns_the_field_and_predicts_the_future ... ok
+test ppo::export_tests::normalization_rescues_a_badly_scaled_observation ... ok
+test ppo::export_tests::the_exported_checkpoint_reproduces_the_normalized_training_path ... ok
+test pinn::tests::a_pinn_solves_the_harmonic_oscillator_from_physics_alone ... ok
+test ppo::export_tests::the_exported_policy_reproduces_the_training_action_map_including_the_clamp ... ok
+test ppo::export_tests::without_the_clamp_the_deployed_policy_would_diverge ... ok
+test ppo::export_tests::training_without_a_normalizer_is_unchanged ... ok
+test ppo::tests::a_state_dependent_sigma_actually_varies_with_the_observation ... ok
+test ppo::tests::a_training_run_is_reproducible_from_its_seed ... ok
+test ppo::tests::an_exact_value_function_gives_exactly_zero_advantage ... ok
+test ppo::tests::a_state_dependent_policy_trains_and_its_sigma_head_moves ... ok
+test ppo::tests::exporting_a_state_dependent_policy_ships_the_means_only ... ok
+test ppo::tests::gae_reduces_to_its_two_known_limits ... ok
+test ppo::tests::gae_rejects_mismatched_inputs_rather_than_indexing_past_the_end ... ok
+test ppo::export_tests::a_trained_policy_achieves_the_same_cost_after_export ... ok
+test ppo::tests::termination_and_truncation_give_different_advantages ... ok
+test ppo::tests::the_annealed_rate_reaches_its_stated_endpoints ... ok
+test ppo::tests::the_annealed_sigma_ceiling_reaches_its_endpoints_and_actually_forces_sigma_down ... ok
+test ppo::tests::the_clip_stops_a_gradient_in_one_direction_and_not_the_other ... ok
+test ppo::tests::the_cost_metric_tracks_the_closed_form_at_several_gains ... ok
+test obs_norm::value_conditioning::an_unnormalised_value_head_learns_nothing_at_realistic_return_magnitudes ... ok
+test calib::tests::masses_and_friction_recover_from_perturbed_start ... ok
+test ppo::tests::the_initial_sigma_is_where_the_caller_asked_not_the_squash_midpoint ... ok
+test ppo::tests::the_gaussian_log_density_integrates_to_one_and_matches_its_own_sampler ... ok
+test ppo::tests::the_sampler_has_the_mean_and_variance_it_advertises ... ok
+test ppo::tests::the_squash_keeps_sigma_in_bounds_for_any_observation ... ok
+test ppo::tests::the_surrogate_gradient_matches_finite_differences ... ok
+test ppo::tests::the_surrogate_gradient_reaches_the_sigma_head ... ok
+test calib::tests::full_fit_predicts_held_out_trajectories ... ok
+test ppo::tests::the_density_normalises_at_several_observations_and_the_sampler_agrees ... ok
+test sindy::tests::monomial_library_has_the_expected_terms ... ok
+test sindy::tests::sindy_discovers_the_duffing_oscillator ... ok
+test sindy::tests::too_large_a_threshold_oversparsifies ... ok
+test smoothed::verification::smoothed_descent_crosses_the_boundary ... ok
+test smoothed::verification::smoothed_grad_is_informative_across_make_break ... ok
+test smoothed::verification::smoothed_grad_recovers_true_derivative ... ok
+test delan::tests::delan_learns_structured_dynamics_and_keeps_mass_matrix_spd ... ok
+test hnn::tests::hnn_learns_the_field_and_conserves_energy ... ok
+test ppo::tests::the_value_head_reads_back_in_reward_units ... ok
+test ppo::tests::ppo_recovers_the_lqr_policy_to_the_accuracy_a_flat_basin_allows ... ok
+test ppo::tests::training_reduces_the_value_heads_error_and_leaves_the_clip_in_a_useful_range ... ok
+test ppo::tests::annealing_the_learning_rate_improves_gain_recovery ... ok
+test ppo::tests::the_pendulum_trains_end_to_end_through_the_truncation_path ... ok
+
+test result: ok. 87 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 74.35s
+
+     Running unittests src/lib.rs (target/debug/deps/ferromotion_models-bb967f6477b8d84e)
+
+running 163 tests
+test abb::tests::irb140_has_six_dof_and_the_published_limits ... ok
+test abb::tests::irb140_passes_the_hessian_finite_difference_check ... ok
+test abb::tests::irb120_has_six_dof_and_the_published_limits ... ok
+test abb::tests::irb120_zero_pose_matches_the_hand_computed_flange_centre ... ok
+test abb::tests::irb120_read_as_modified_dh_is_a_different_arm ... ok
+test abb::tests::every_abb_joint_carries_its_datasheet_speed ... ok
+test abb::tests::irb140_read_as_standard_dh_is_a_different_arm ... ok
+test abb::tests::irb120_passes_the_hessian_finite_difference_check ... ok
+test abb::tests::the_abb_envelopes_are_the_published_reach_to_a_millimetre ... ignored, envelope search: seconds per arm in debug; release --ignored lane
+test abb::tests::irb1600_has_six_dof_and_the_published_limits ... ok
+test abb::tests::irb1600_read_as_modified_dh_is_a_different_arm ... ok
+test abb::tests::irb1600_zero_pose_matches_the_hand_computed_flange_centre ... ok
+test abb::tests::the_yumi_wrist_envelope_is_within_a_gross_error_of_abbs_published_559_mm ... ignored, envelope search: seconds per arm in debug; release --ignored lane
+test abb::tests::irb140_zero_pose_matches_the_hand_computed_flange_and_wrist_centre ... ok
+test abb::tests::yumi_has_seven_dof_and_the_published_limits ... ok
+test abb::tests::yumi_read_as_modified_dh_is_a_different_arm ... ok
+test abb::tests::yumi_zero_pose_matches_the_hand_computed_frame_7 ... ok
+test abb::tests::irb1600_passes_the_hessian_finite_difference_check ... ok
+test classic::tests::puma560_carries_corke_limits_and_the_stated_actuation ... ok
+test classic::tests::puma560_modified_carries_craig_limits_efforts_and_no_velocity ... ok
+test classic::tests::armstrong_khatib_burdick_table_a1_differs_from_the_consensus_by_the_stated_lengths ... ok
+test classic::tests::puma560_known_answer_computed_by_hand_from_corke_table_2_1 ... ok
+test classic::tests::both_puma560_tables_describe_the_same_arm ... ok
+test classic::tests::puma560_modified_known_answer_computed_by_hand_from_craig_fig_3_21 ... ok
+test abb::tests::yumi_passes_the_hessian_finite_difference_check ... ok
+test classic::tests::puma560_modified_convention_argument_is_load_bearing ... ok
+test classic::tests::puma560_convention_argument_is_load_bearing ... ok
+test classic::tests::puma560_modified_passes_the_hessian_finite_difference_check ... ok
+test classic::tests::stanford_convention_argument_is_load_bearing ... ok
+test classic::tests::stanford_home_pose_computed_by_hand ... ok
+test classic::tests::stanford_known_answer_is_pauls_printed_t6 ... ok
+test classic::tests::puma560_passes_the_hessian_finite_difference_check ... ok
+test envelope::the_envelope_search_has_converged ... ignored, envelope search: seconds per arm in debug; release --ignored lane
+test classic::tests::three_link_planar_convention_argument_is_load_bearing ... ok
+test classic::tests::two_link_planar_convention_argument_is_load_bearing ... ok
+test classic::tests::three_link_planar_known_answer_computed_by_hand ... ok
+test classic::tests::three_link_planar_passes_the_hessian_finite_difference_check ... ok
+test classic::tests::two_link_planar_known_answer_computed_by_hand ... ok
+test classic::tests::two_link_planar_passes_the_hessian_finite_difference_check ... ok
+test franka::tests::dof_is_seven ... ok
+test classic::tests::stanford_passes_the_hessian_finite_difference_check ... ok
+test franka::tests::limits_effort_and_velocity_are_the_published_values ... ok
+test franka::tests::the_arm_reaches_maximum_extension_at_frankas_published_elbow_angle ... ignored, envelope search: seconds per arm in debug; release --ignored lane
+test franka::tests::q_zero_flange_pose_matches_the_hand_computation_from_the_table ... ok
+test franka::tests::ready_pose_computed_from_the_table_matches_the_stated_position ... ok
+test kinova::tests::gen3_6dof_has_six_joints_and_the_stated_limits_and_ratings ... ok
+test geometry_oracles::the_external_geometry_coverage_is_reported_and_does_not_regress ... ok
+test franka::tests::panda_and_fr3_share_one_kinematic_chain ... ok
+test franka::tests::reading_the_table_as_standard_dh_moves_the_flange_by_more_than_a_millimetre ... ok
+test kinova::tests::gen3_6dof_link_length_is_the_410_mm_figure_89_confirms ... ok
+test kinova::tests::gen3_7dof_flange_envelope_is_the_published_902_mm_reach ... ignored, envelope search: seconds per arm in debug; release --ignored lane
+test kinova::tests::gen3_6dof_matches_the_known_answer_computed_by_hand_from_the_table ... ok
+test kinova::tests::gen3_6dof_read_as_modified_dh_is_a_different_arm ... ok
+test kinova::tests::gen3_7dof_base_row_flips_the_arm_upright ... ok
+test kinova::tests::gen3_7dof_matches_the_known_answer_computed_by_hand_from_the_table ... ok
+test kinova::tests::gen3_7dof_has_seven_joints_and_the_stated_limits_and_ratings ... ok
+test geometry_oracles::every_shipped_arm_is_recorded_with_its_geometry_oracle ... ok
+test kinova::tests::gen3_lite_flange_envelope_is_within_a_gross_error_of_the_published_760_mm ... ignored, envelope search: seconds per arm in debug; release --ignored lane
+test kinova::tests::gen3_6dof_passes_the_hessian_finite_difference_check ... ok
+test kinova::tests::gen3_7dof_read_as_modified_dh_is_a_different_arm ... ok
+test kinova::tests::gen3_lite_has_six_joints_and_the_stated_limits_and_ratings ... ok
+test kinova::tests::gen3_lite_home_orientation_is_the_identity_computed_by_hand ... ok
+test kuka::tests::iiwa_14_r820_derived_known_answer_at_q_zero_is_the_drawing_height_1306_mm ... ok
+test kinova::tests::gen3_lite_read_as_modified_dh_is_a_different_arm ... ok
+test kuka::tests::iiwa_14_r820_at_a_generic_q_matches_the_independent_numpy_chain ... ok
+test franka::tests::a_franka_arm_passes_the_hessian_finite_difference_check ... ok
+test kuka::tests::iiwa_14_r820_convention_swap_moves_the_known_answer_by_more_than_a_millimetre ... ok
+test kinova::tests::gen3_lite_matches_the_known_answer_computed_by_hand_from_the_table ... ok
+test kuka::tests::iiwa_14_r820_has_seven_dof_and_carries_the_published_limits_and_speeds ... ok
+test kuka::tests::iiwa_7_r800_has_seven_dof_and_carries_the_published_limits_and_speeds ... ok
+test kinova::tests::gen3_lite_passes_the_hessian_finite_difference_check ... ok
+test kuka::tests::iiwa_7_r800_derived_known_answer_at_q_zero_is_the_drawing_height_1266_mm ... ok
+test kuka::tests::iiwa_7_r800_at_a_generic_q_matches_the_independent_numpy_chain ... ok
+test kinova::tests::gen3_7dof_passes_the_hessian_finite_difference_check ... ok
+test kuka::tests::iiwa_7_r800_convention_swap_moves_the_known_answer_by_more_than_a_millimetre ... ok
+test kuka::tests::iiwa_14_r820_passes_the_hessian_finite_difference_check ... ok
+test kuka::tests::kr_5_arc_at_a_generic_q_matches_the_independent_numpy_chain ... ok
+test kuka::tests::kr_5_arc_convention_swap_moves_the_known_answer_by_more_than_a_millimetre ... ok
+test kuka::tests::kr_5_arc_reach_from_the_table_is_the_drawings_r1412 ... ok
+test kuka::tests::iiwa_reach_from_the_shipped_arm_is_the_specifications_800_and_820_mm ... ok
+test kuka::tests::iiwa_7_r800_passes_the_hessian_finite_difference_check ... ok
+test kuka::tests::kr_5_arc_has_six_dof_and_carries_the_published_limits_and_speeds ... ok
+test kuka::tests::kr_5_arc_derived_hand_computed_known_answer_at_q_zero_is_915_by_1120_mm ... ok
+test others::tests::denso_vs6556_wrist_envelope_is_the_published_653_mm_reach ... ignored, envelope search: seconds per arm in debug; release --ignored lane
+test others::tests::denso_vs6556_has_six_dof_with_the_specification_limits_and_speeds ... ok
+test others::tests::denso_vs6556_home_pose_matches_the_hand_computation_from_the_drawing_derived_table ... ok
+test others::tests::fanuc_lr_mate_200id_reach_from_the_table_is_the_data_sheet_reach_to_a_millimetre ... ok
+test others::tests::fanuc_lr_mate_200id_home_pose_matches_the_hand_computation_from_the_drawing_derived_table ... ok
+test others::tests::denso_vs6556_read_as_modified_dh_is_a_different_arm ... ok
+test others::tests::fanuc_lr_mate_200id_has_six_dof_with_j3_to_j6_unlimited ... ok
+test kuka::tests::kr_5_arc_passes_the_hessian_finite_difference_check ... ok
+test others::tests::denso_vs6556_passes_the_hessian_finite_difference_check ... ok
+test others::tests::lite6_has_six_dof_with_the_manual_limits_and_speeds ... ok
+test others::tests::fanuc_lr_mate_200id_read_as_modified_dh_is_a_different_arm ... ok
+test others::tests::fanuc_lr_mate_200id_passes_the_hessian_finite_difference_check ... ok
+test others::tests::lite6_zero_pose_matches_the_hand_computation_from_the_manual_table ... ok
+test others::tests::lite6_read_as_modified_dh_is_a_different_arm ... ok
+test others::tests::xarm5_has_five_dof_with_the_manual_limits_and_speeds ... ok
+test others::tests::xarm5_read_as_modified_dh_is_a_different_arm ... ok
+test others::tests::xarm5_zero_pose_matches_the_hand_computation_from_the_manual_table ... ok
+test others::tests::xarm6_has_six_dof_with_the_manual_limits_and_speeds ... ok
+test others::tests::xarm6_zero_pose_matches_the_hand_computation_from_the_manual_table ... ok
+test others::tests::xarm7_has_seven_dof_with_the_manual_limits_and_speeds ... ok
+test others::tests::xarm6_read_as_modified_dh_is_a_different_arm ... ok
+test others::tests::lite6_passes_the_hessian_finite_difference_check ... ok
+test others::tests::xarm7_zero_pose_matches_the_hand_computation_from_the_manual_table ... ok
+test others::tests::xarm7_read_as_modified_dh_is_a_different_arm ... ok
+test others::tests::xarm5_passes_the_hessian_finite_difference_check ... ok
+test others::tests::xarm_a2_is_the_manuals_formula_not_its_printed_decimal ... ok
+test rethink::tests::baxter_has_seven_joints_with_williams_limits ... ok
+test others::tests::xarm6_passes_the_hessian_finite_difference_check ... ok
+test rethink::tests::baxter_home_pose_matches_the_pose_computed_by_hand_from_williams_table ... ok
+test rethink::tests::baxter_read_as_standard_dh_is_a_different_arm ... ok
+test others::tests::xarm7_passes_the_hessian_finite_difference_check ... ok
+test rethink::tests::sawyer_home_pose_matches_the_pose_computed_by_hand_from_the_paper_geometry ... ok
+test rethink::tests::sawyer_dh_agrees_with_the_papers_product_of_exponentials_at_bent_configurations ... ok
+test rethink::tests::sawyer_has_seven_joints_and_no_invented_limits ... ok
+test ur::tests::datasheet_speed_constants_match_the_specification_radians ... ok
+test rethink::tests::sawyer_read_as_modified_dh_is_a_different_arm ... ok
+test rethink::tests::baxter_passes_the_hessian_finite_difference_check ... ok
+test ur::tests::the_ur_envelopes_bound_their_published_nominal_reach ... ignored, envelope search: seconds per arm in debug; release --ignored lane
+test ur::tests::ur10::has_six_dof ... ok
+test ur::tests::ur10::carries_the_datasheet_limits_and_speeds_and_no_effort ... ok
+test ur::tests::ur10::known_answer_at_q_zero_home_and_bent_computed_by_hand_from_the_table ... ok
+test ur::tests::ur10e::carries_the_datasheet_limits_and_speeds_and_no_effort ... ok
+test ur::tests::ur10::read_as_modified_dh_moves_the_known_answer_by_more_than_a_millimetre ... ok
+test rethink::tests::sawyer_passes_the_hessian_finite_difference_check ... ok
+test ur::tests::the_eight_models_are_pairwise_distinct_arms ... ok
+test ur::tests::ur10e::has_six_dof ... ok
+test ur::tests::ur10e::known_answer_at_q_zero_home_and_bent_computed_by_hand_from_the_table ... ok
+test ur::tests::ur16e::carries_the_datasheet_limits_and_speeds_and_no_effort ... ok
+test ur::tests::ur10e::read_as_modified_dh_moves_the_known_answer_by_more_than_a_millimetre ... ok
+test ur::tests::ur16e::has_six_dof ... ok
+test ur::tests::ur16e::known_answer_at_q_zero_home_and_bent_computed_by_hand_from_the_table ... ok
+test ur::tests::ur10::passes_the_hessian_finite_difference_check ... ok
+test ur::tests::ur20::carries_the_datasheet_limits_and_speeds_and_no_effort ... ok
+test ur::tests::ur16e::read_as_modified_dh_moves_the_known_answer_by_more_than_a_millimetre ... ok
+test ur::tests::ur20::has_six_dof ... ok
+test ur::tests::ur3::carries_the_datasheet_limits_and_speeds_and_no_effort ... ok
+test ur::tests::ur20::read_as_modified_dh_moves_the_known_answer_by_more_than_a_millimetre ... ok
+test ur::tests::ur10e::passes_the_hessian_finite_difference_check ... ok
+test ur::tests::ur3::has_six_dof ... ok
+test ur::tests::ur20::known_answer_at_q_zero_home_and_bent_computed_by_hand_from_the_table ... ok
+test ur::tests::ur3::known_answer_at_q_zero_home_and_bent_computed_by_hand_from_the_table ... ok
+test ur::tests::ur3::read_as_modified_dh_moves_the_known_answer_by_more_than_a_millimetre ... ok
+test ur::tests::ur20::passes_the_hessian_finite_difference_check ... ok
+test ur::tests::ur3e::carries_the_datasheet_limits_and_speeds_and_no_effort ... ok
+test ur::tests::ur3e::has_six_dof ... ok
+test ur::tests::ur3e::known_answer_at_q_zero_home_and_bent_computed_by_hand_from_the_table ... ok
+test ur::tests::ur3::passes_the_hessian_finite_difference_check ... ok
+test ur::tests::ur5::known_answer_at_q_zero_home_and_bent_computed_by_hand_from_the_table ... ok
+test ur::tests::ur3e::read_as_modified_dh_moves_the_known_answer_by_more_than_a_millimetre ... ok
+test ur::tests::ur16e::passes_the_hessian_finite_difference_check ... ok
+test ur::tests::ur3e::passes_the_hessian_finite_difference_check ... ok
+test ur::tests::ur5e::carries_the_datasheet_limits_and_speeds_and_no_effort ... ok
+test ur::tests::ur5::read_as_modified_dh_moves_the_known_answer_by_more_than_a_millimetre ... ok
+test ur::tests::ur5::has_six_dof ... ok
+test ur::tests::ur5::carries_the_datasheet_limits_and_speeds_and_no_effort ... ok
+test ur::tests::ur5e::has_six_dof ... ok
+test ur::tests::ur5e::known_answer_at_q_zero_home_and_bent_computed_by_hand_from_the_table ... ok
+test ur::tests::ur5e::read_as_modified_dh_moves_the_known_answer_by_more_than_a_millimetre ... ok
+test ur::tests::ur5::passes_the_hessian_finite_difference_check ... ok
+test ur::tests::ur5e::passes_the_hessian_finite_difference_check ... ok
+
+test result: ok. 155 passed; 0 failed; 8 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src/lib.rs (target/debug/deps/ferromotion_mpm-daea3405a0a7795e)
+
+running 8 tests
+test adjoint::tests::the_tape_gradient_matches_finite_differences_on_a_composite_function ... ok
+test adjoint::tests::the_adjoint_control_gradient_matches_finite_differences ... ok
+test adjoint::tests::the_loss_decreases_monotonically_under_descent ... ok
+test tests::material_gradient_matches_finite_difference ... ok
+test tests::free_particles_fall_at_g ... ok
+test tests::momentum_is_conserved_without_gravity ... ok
+test adjoint::tests::gradient_descent_drives_the_soft_body_to_the_target ... ok
+test tests::dropped_elastic_block_deforms_and_stays_bounded ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.89s
+
+     Running unittests src/lib.rs (target/debug/deps/ferromotion_policy-9c72c790466f5c4c)
+
+running 26 tests
+test clock::tests::frozen_is_derived_from_the_measured_latency ... ok
+test clock::tests::bad_input_is_refused ... ok
+test clock::tests::a_field_of_the_wrong_width_is_refused_not_indexed_past ... ok
+test clock::tests::a_starved_queue_says_so ... ok
+test clock::tests::slack_is_the_deadline_and_it_falls_as_the_queue_drains ... ok
+test clock::tests::latency_beyond_the_margin_is_reported ... ok
+test clock::tests::a_latency_prediction_larger_than_reality_does_not_skip_actions ... ok
+test clock::tests::the_first_chunk_really_is_a_plain_sample ... ok
+test clock::tests::frozen_matches_the_actions_consumed_during_inference ... ok
+test clock::tests::the_commanded_stream_is_continuous_across_a_chunk_boundary ... ok
+test clock::tests::the_frozen_prefix_is_not_replayed ... ok
+test flow::tests::constant_field_translates_exactly ... ok
+test flow::tests::linear_decay_converges_to_the_analytic_flow ... ok
+test rtc::tests::full_freeze_returns_the_target_and_a_free_tail_is_the_plain_sample ... ok
+test rtc::tests::the_soft_mask_ramps_monotonically_from_one_to_zero ... ok
+test rtc::tests::the_frozen_prefix_is_preserved_exactly ... ok
+test rtc::tests::zero_freeze_reduces_bit_identically_to_naive_chunking ... ok
+test tests::mlp_forward_matches_hand_computation ... ok
+test tests::normalization_squash_and_scaling ... ok
+test rtc::tests::rtc_makes_the_chunk_boundary_continuous_where_naive_jumps ... ok
+test clock::tests::zero_latency_reduces_to_naive_chunking ... ok
+test clock::tests::the_fast_loop_never_starves_while_inference_keeps_up ... ok
+test flow::tests::mlp_velocity_field_integrates_end_to_end ... ok
+test tests::json_round_trips ... ok
+test tests::linear_policy_executed_by_runner_stabilizes_double_integrator ... ok
+test tests::torque_policy_regulates_the_arm_via_forward_dynamics ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+
+     Running unittests src/lib.rs (target/debug/deps/ferromotion_rod-b56567d7c10bbf35)
+
+running 9 tests
+test tests::forces_are_the_exact_energy_gradient ... ok
+test tests::broadphase_finds_every_true_contact ... ok
+test tests::self_contact_force_is_the_exact_energy_gradient ... ok
+test tests::segment_distance_matches_analytic_cases ... ok
+test tests::free_vibration_conserves_energy ... ok
+test tests::self_contact_resolves_an_interpenetrating_rod ... ok
+test tests::relax_reports_divergence_instead_of_reporting_convergence ... ok
+test tests::damping_is_a_rate_not_a_per_step_factor ... ok
+test tests::cantilever_matches_euler_bernoulli ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 37.93s
+
+     Running unittests src/lib.rs (target/debug/deps/ferromotion_ruckig-50605821d03f48ae)
+
+running 8 tests
+test tests::long_move_hits_cruise_and_respects_limits ... ok
+test tests::multi_dof_is_synchronized ... ok
+test tests::negative_direction ... ok
+test tests::velocity_to_velocity_profiles_exact_and_stretchable ... ok
+test tests::a_short_dof_still_reaches_its_waypoint_when_a_long_dof_sets_the_pace ... ok
+test tests::short_move_no_cruise_still_exact ... ok
+test tests::reversal_waypoint_stops_only_the_reversing_dof ... ok
+test tests::waypoints_nonstop_within_limits_and_faster_than_stopping ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/ferromotion_tactile-ae8868ae54a11183)
+
+running 21 tests
+test elastic::tests::elastic_gel_matches_a_direct_elastic_solve ... ignored, relaxes two 3D FEM solves to rest; run in the release --ignored lane
+test elastic::tests::a_kernel_for_another_grid_is_refused ... ok
+test elastic::tests::a_kernel_with_the_wrong_sign_is_refused ... ok
+test shear::tests::degenerate_input_is_refused ... ok
+test shear::tests::the_annulus_is_at_the_friction_limit_and_the_core_is_not ... ok
+test elastic::tests::the_contact_solve_satisfies_complementarity ... ok
+test servo::tests::features_recover_the_true_contact_location_and_depth ... ok
+test shear::tests::the_displacement_profile_is_flat_then_falling ... ok
+test shear::tests::the_endpoints_are_exact ... ok
+test elastic::tests::the_elastic_surface_can_bulge_upward ... ok
+test elastic::tests::the_depth_gradient_matches_finite_differences ... ok
+test servo::tests::the_tactile_jacobian_is_the_expected_identity ... ok
+test shear::tests::the_warning_arrives_before_the_slip ... ok
+test tests::the_surface_can_never_bulge_upward ... ok
+test shear::tests::the_stuck_area_shrinks_long_before_gross_slip ... ok
+test tests::depth_gradient_matches_finite_difference ... ok
+test tests::deeper_press_gives_more_deformation_and_larger_patch ... ok
+test tests::the_geometric_field_has_bounded_support ... ok
+test tests::tactile_image_lights_up_under_contact ... ok
+test shear::tests::the_traction_field_integrates_to_the_applied_load ... ok
+test servo::tests::servo_centres_the_contact_and_regulates_depth ... ok
+
+test result: ok. 20 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.55s
+
+     Running unittests src/lib.rs (target/debug/deps/ferromotion_viz-e47a38072177895d)
+
+running 1 test
+test tests::logs_a_robot_and_trajectory_to_rrd ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running unittests src/lib.rs (target/debug/deps/ferromotion_wasm-2b4fa71711b05145)
+
+running 119 tests
+test autodiff_lab::tests::exact_gradient_matches_finite_difference ... ok
+test autodiff_lab::tests::gradient_descent_reaches_the_minimum ... ok
+test actuator_sysid_lab::tests::the_problem_is_genuinely_nonlinear ... ok
+test cbf_lab::tests::a_safe_command_passes_through_untouched ... ok
+test cbf_lab::tests::a_tangential_command_slides_freely_along_the_boundary ... ok
+test actuator_sysid_lab::tests::the_tape_gradient_matches_a_finite_difference ... ok
+test cable_lab::tests::dragging_toward_a_corner_eventually_becomes_infeasible ... ok
+test cbf_lab::tests::the_intervention_is_the_minimal_orthogonal_projection ... ok
+test cable_lab::tests::centered_hold_is_feasible_and_balanced ... ok
+test cbf_lab::tests::the_robot_cannot_be_driven_into_the_hazard ... ok
+test actuator_sysid_lab::tests::descent_identifies_the_coefficient ... ok
+test cbf_lab::tests::alpha_sets_how_close_it_rides ... ok
+test capstone_lab::tests::identifies_the_plant_and_controls_it_through_the_learned_model ... ok
+test certificate_lab::tests::a_short_horizon_produces_a_vacuous_certificate ... ok
+test certificate_lab::tests::the_ceiling_moves_the_verdict_in_the_obvious_direction ... ok
+test certificate_lab::tests::a_ceiling_below_the_planned_apex_is_refuted_on_any_evidence ... ok
+test certificate_lab::tests::the_gap_is_injected_per_step_not_all_at_once ... ok
+test certificate_lab::tests::the_reality_check_passes_a_trajectory_that_is_inside ... ok
+test certificate_lab::tests::a_contact_shorter_than_one_control_step_passes_the_reality_check ... ok
+test consensus_lab::tests::adding_a_link_never_slows_agreement ... ok
+test consensus_lab::tests::connectivity_agrees_with_the_fiedler_test ... ok
+test certificate_lab::tests::the_certificate_at_the_default_is_void_because_the_tube_misses_the_real_trajectory ... ok
+test certificate_lab::tests::stiffening_the_contact_shrinks_the_gap_and_changes_the_verdict ... ok
+test certificate_lab::tests::the_soft_contact_does_not_refute_a_ceiling_the_real_mass_never_reaches ... ok
+test consensus_lab::tests::disconnecting_the_graph_makes_agreement_impossible ... ok
+test contact_gradient_lab::tests::the_decomposition_blames_the_integrator ... ok
+test contact_gradient_lab::tests::the_lab_reproduces_the_measured_result ... ok
+test contact_gradient_lab::tests::the_timing_term_is_exposed_and_unbounded ... ok
+test contact_gradient_lab::tests::the_tolerance_route_costs_more_not_less ... ok
+test contact_gradient_lab::tests::the_tolerance_route_lands_on_the_exact_answer ... ok
+test ctr_lab::tests::sharper_kappa_pushes_the_force_toward_rigid ... ok
+test ctr_lab::tests::the_ctr_step_is_more_valid_than_a_big_step ... ok
+test ctr_lab::tests::the_planner_reaches_a_contact_only_target ... ok
+test contact_gradient_lab::tests::a_finer_timestep_does_not_rescue_it ... ok
+test dmp_lab::tests::a_new_goal_reproduces_the_same_shape ... ok
+test dmp_lab::tests::it_reproduces_the_demonstration_it_was_shown ... ok
+test dmp_lab::tests::tau_rescales_duration_but_not_the_path ... ok
+test dmp_lab::tests::the_goal_is_a_structural_attractor_whatever_was_learned ... ok
+test consensus_lab::tests::the_centroid_is_exactly_conserved ... ok
+test dynamics_lab::tests::a_free_swing_starts_falling_under_gravity ... ok
+test dynamics_lab::tests::mass_matrix_is_symmetric_positive_definite ... ok
+test energy_lab::tests::both_integrators_start_at_the_same_energy ... ok
+test consensus_lab::tests::the_fiedler_value_is_the_measured_decay_rate ... ok
+test foci_lab::tests::turning_to_align_with_the_slot_cuts_the_cost ... ok
+test grasp_lab::tests::a_narrow_pinch_needs_enough_friction_to_close ... ok
+test grasp_lab::tests::an_antipodal_pinch_is_force_closure_a_same_side_one_is_not ... ok
+test grasp_lab::tests::more_friction_never_lowers_the_quality ... ok
+test grasp_lab::tests::the_weakest_direction_realises_q1 ... ok
+test grasp_lab::tests::three_fingers_120_apart_grip_more_firmly_than_a_two_finger_pinch ... ok
+test energy_lab::tests::explicit_euler_gains_energy_while_symplectic_stays_bounded ... ok
+test grasp_reality_lab::tests::partial_slip_warns_well_before_gross_slip ... ok
+test certificate_lab::tests::the_verdict_tracks_the_evidence_not_the_geometry ... ok
+test grasp_reality_lab::tests::spreading_the_contacts_improves_the_spatial_grasp ... ok
+test grasp_reality_lab::tests::coplanar_contacts_are_full_rank_with_a_positive_wrench_ball ... ok
+test grasp_reality_lab::tests::the_stick_region_follows_the_cattaneo_mindlin_law ... ok
+test calib_lab::tests::lab_calibration_converges ... ok
+test inekf_lab::tests::a_is_state_independent_but_f_is_not ... ok
+test inekf_lab::tests::the_invariant_attitude_error_is_conserved ... ok
+test grasp_reality_lab::tests::q1_is_an_upper_bound_that_falls_with_the_direction_count ... ok
+test inekf_lab::tests::the_standard_ekf_model_drifts_and_worsens_with_error ... ok
+test koopman_lab::tests::edmd_recovers_the_exact_koopman_operator ... ok
+test koopman_lab::tests::the_lifted_model_predicts_exactly_while_the_naive_one_drifts ... ok
+test koopman_lab::tests::the_x1_squared_observable_is_what_makes_it_exact ... ok
+test msnn_lab::tests::more_local_models_tighten_the_fit_and_slopes_stay_readable ... ok
+test muscle_lab::tests::a_zero_delay_neural_controller_matches_the_muscle ... ok
+test muscle_lab::tests::curves_are_sane_for_plotting ... ok
+test muscle_lab::tests::delay_destabilizes_the_identical_impedance ... ok
+test muscle_lab::tests::hills_hyperbola_holds_live_in_the_rig ... ok
+test muscle_lab::tests::measured_impedance_is_a_restoring_spring_and_a_damper ... ok
+test inekf_lab::tests::the_invariant_error_model_is_exact_at_any_error_size ... ok
+test muscle_lab::tests::the_critical_delay_matches_the_classical_delay_margin ... ok
+test muscle_lab::tests::the_rig_starts_at_a_real_equilibrium_and_stays_there ... ok
+test grasp_reality_lab::tests::the_coplanar_invariance_claim_was_a_sampling_artifact ... ok
+test nn_lab::tests::switching_target_resets_progress ... ok
+test muscle_lab::tests::the_force_velocity_curve_is_what_catches_the_perturbation ... ok
+test nn_lab::tests::training_reduces_the_loss_and_fits_the_wave ... ok
+test physics_lab::contact_stability::the_shipped_contact_dt_is_inside_the_explicit_integration_limit ... ok
+test pid_lab::tests::training_drives_the_step_response_to_the_setpoint ... ok
+test neural_ode_lab::tests::training_lets_the_rollout_predict_beyond_the_window ... ok
+test hnn_lab::tests::trained_hnn_conserves_energy_better_than_the_baseline_on_rollout ... ok
+test rmp_lab::tests::a_far_obstacle_does_not_perturb_the_reach ... ok
+test rmp_lab::tests::it_reaches_the_goal_while_the_whole_arm_avoids_the_obstacle ... ok
+test pinn_lab::tests::training_the_pinn_reduces_the_error_toward_the_true_solution ... ok
+test robot_file_lab::tests::a_branched_tree_reports_more_than_one_chain ... ok
+test robot_file_lab::tests::closing_the_fingers_brings_the_tips_together_by_the_closed_form ... ok
+test robot_file_lab::tests::meters_per_unit_changes_the_torque_by_more_than_the_length_ratio ... ok
+test robot_file_lab::tests::revolute_limits_are_degrees_and_prismatic_limits_are_not ... ok
+test robot_file_lab::tests::up_axis_silently_changes_where_gravity_pulls ... ok
+test running_cost_lab::tests::a_fast_policy_never_gaps_and_a_slow_one_is_reported ... ok
+test running_cost_lab::tests::a_jittery_measurement_refuses_to_be_quoted ... ok
+test running_cost_lab::tests::frozen_actions_are_a_measurement_of_the_latency ... ok
+test running_cost_lab::tests::the_median_is_robust_where_the_spread_is_not ... ok
+test running_cost_lab::tests::the_optimistic_timeline_hides_real_starvation ... ok
+test running_cost_lab::tests::the_workspace_path_is_bit_identical ... ok
+test rmp_lab::tests::the_arm_bends_more_the_closer_the_obstacle_sits_to_the_path ... ok
+test scvx_lab::tests::the_lab_solves_and_lands ... ok
+test sindy_lab::tests::the_sparsity_knob_finds_the_true_model_in_a_window ... ok
+test cbf_lab::tests::many_hazards_are_all_respected_at_once ... ok
+test smoother_lab::tests::more_drift_opens_a_wider_loop ... ok
+test smoother_lab::tests::no_drift_recovers_the_truth ... ok
+test smoother_lab::tests::loop_closure_cuts_the_drift ... ok
+test soft_lab::tests::backbone_starts_clamped_and_has_the_right_length ... ok
+test topp_lab::tests::a_short_move_matches_the_analytic_triangular_optimum ... ok
+test topp_lab::tests::a_straight_move_matches_the_analytic_trapezoidal_optimum ... ok
+test topp_lab::tests::the_optimum_is_bang_bang_almost_everywhere ... ok
+test topp_lab::tests::tighter_limits_take_longer ... ok
+test topp_lab::tests::varying_the_speed_beats_a_single_safe_speed ... ok
+test walk_lab::tests::a_planned_walk_leads_the_com_forward_and_ends_at_rest ... ok
+test walk_lab::tests::stepping_past_the_capture_point_rocks_back ... ok
+test walk_lab::tests::stepping_short_of_the_capture_point_keeps_toppling ... ok
+test walk_lab::tests::stepping_to_the_capture_point_brings_the_body_to_rest ... ok
+test walk_lab::tests::the_capture_point_is_com_plus_velocity_over_omega ... ok
+test soft_lab::tests::matches_euler_bernoulli_for_a_small_load ... ok
+test delan_lab::tests::learned_mass_matrix_is_always_spd_and_converges_with_training ... ok
+test bimanual::tests::two_arms_lift_the_beam_together ... ok
+test dynamic_grasp::tests::arm_catches_and_lifts_the_gliding_block has been running for over 60 seconds
+test obstacle_reach::tests::bench_plans_around_the_wall has been running for over 60 seconds
+test planned_grasp::tests::plans_around_the_wall_then_grasps has been running for over 60 seconds
+test see_reach_grasp::tests::one_arm_sees_reaches_and_lifts_the_soft_sphere has been running for over 60 seconds
+test obstacle_reach::tests::bench_plans_around_the_wall ... ok
+test dynamic_grasp::tests::arm_catches_and_lifts_the_gliding_block ... ok
+test see_reach_grasp::tests::one_arm_sees_reaches_and_lifts_the_soft_sphere ... ok
+test planned_grasp::tests::plans_around_the_wall_then_grasps ... ok
+
+test result: ok. 119 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 152.05s
+
+   Doc-tests ferromotion
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ferromotion_bench
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ferromotion_circuit
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ferromotion_cloth
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ferromotion_control
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ferromotion_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ferromotion_coupled
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ferromotion_dem
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ferromotion_fem
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ferromotion_fluid
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ferromotion_learn
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ferromotion_models
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ferromotion_mpm
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ferromotion_policy
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ferromotion_rod
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ferromotion_ruckig
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ferromotion_tactile
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ferromotion_viz
+
+running 1 test
+test crates/ferromotion-viz/src/lib.rs - (line 7) - compile ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+all doctests ran in 1.87s; merged doctests compilation took 1.86s
+   Doc-tests ferromotion_wasm
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: 1 target failed:
+    `-p ferromotion-core --lib`
