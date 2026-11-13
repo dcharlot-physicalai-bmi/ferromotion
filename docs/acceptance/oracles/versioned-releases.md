@@ -34,6 +34,8 @@ Recipe, same as `scripts/build_mujoco_3130_x86_contract_off.sh`: `/usr/lib/llvm-
 
 `scripts/arm_oracle/direct-pull/` mirrors the Thor2 stage scripts for 3.14.0 through 4.0.0. Each stage refuses unless the machine is Linux aarch64, the hostname is `thor2`, and `FERROMOTION_THOR2_APPROVED=1`. They were not run. x86-versus-aarch64 bitwise parity is not proved, so there is no aarch64 oracle id that counts.
 
+`scripts/arm_oracle/4.0.0-aarch64/run.sh` is the unexecuted 4.0.0 recipe for `mujoco-4.0.0-aarch64-contract-off`. It accepts `thor2` and `thor.local`, fetches the pinned public tarballs, and writes a new run under `$HOME/ferromotion-oracle-4.0.0`. It does not read the 3.13.0 tree, `build-20261109T213225Z`, or the library `9164828bf04729b20b640bd09105baea98137a8749e262fc06fddc44ca869eb9`. On `thor.local` it holds `flock` `LOCK_EX` on `/tmp/bmi-energy.lock` for the whole run. The commands are in `COMMANDS.txt`. The script has not been run, so that id still does not count.
+
 ## Dump schema
 
 `scripts/oracle_schema_dump.c` emits schema `ferromotion.mujoco-dump.v1` when `mjNEQDATA` is 11. That is the line layout of `scripts/mujoco_native_oracle.py` and `scripts/mujoco_native_step_oracle.py`. v2 (`mjNEQDATA` 12, 3.17.0) appends `m eq_data`. v3 (header `4000000`) also appends `m tendon_type`, `d xiquat`, `d geom_xquat`, `d site_xquat`, and `d contact_surfacevel`.

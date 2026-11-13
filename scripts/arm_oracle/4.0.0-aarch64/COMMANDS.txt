@@ -1,0 +1,17 @@
+# mujoco-4.0.0-aarch64-contract-off
+# From a checkout of this commit. The script refuses every other host.
+# It does not use sudo, apt, pip, or a credential.
+
+# thor2
+sha256sum -c scripts/arm_oracle/4.0.0-aarch64/SHA256SUMS
+mkdir -p "$HOME/ferromotion-oracle-4.0.0"
+setsid nohup env FERROMOTION_THOR2_APPROVED=1 bash scripts/arm_oracle/4.0.0-aarch64/run.sh </dev/null >"$HOME/ferromotion-oracle-4.0.0/nohup-thor2.out" 2>&1 &
+echo $! >"$HOME/ferromotion-oracle-4.0.0/nohup-thor2.pid"
+
+# thor.local
+# The same script holds flock LOCK_EX on /tmp/bmi-energy.lock for the whole run.
+# BMI_ENERGY_LOCK_WAIT bounds the wait, in seconds. The default is 120.
+sha256sum -c scripts/arm_oracle/4.0.0-aarch64/SHA256SUMS
+mkdir -p "$HOME/ferromotion-oracle-4.0.0"
+setsid nohup env FERROMOTION_THOR2_APPROVED=1 BMI_ENERGY_LOCK_WAIT=120 bash scripts/arm_oracle/4.0.0-aarch64/run.sh </dev/null >"$HOME/ferromotion-oracle-4.0.0/nohup-thor.local.out" 2>&1 &
+echo $! >"$HOME/ferromotion-oracle-4.0.0/nohup-thor.local.pid"
