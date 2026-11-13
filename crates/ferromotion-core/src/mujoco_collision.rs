@@ -409,14 +409,22 @@ fn mat_vec(m: &Matrix3<f64>, v: &Vector3<f64>) -> Vector3<f64> {
     }
 }
 
-/// `mji_mulMatTVec3`: `matᵀ · v`.
+/// `mju_mulMatTVec3` (`0x14d810`): `(m2 vz) + (m1 vy + m0 vx)` on each column.
 fn mat_t_vec(m: &Matrix3<f64>, v: &Vector3<f64>) -> Vector3<f64> {
-    Vector3::from_fn(|c, _| m[(2, c)].mul_add(v.z, m[(0, c)].mul_add(v.x, m[(1, c)] * v.y)))
+    if contract_off() {
+        mat_t_vec_sep(m, v)
+    } else {
+        Vector3::from_fn(|c, _| m[(2, c)].mul_add(v.z, m[(0, c)].mul_add(v.x, m[(1, c)] * v.y)))
+    }
 }
 
-/// `mju_mulMatTMat3`: `aᵀ · b`.
+/// `mju_mulMatTMat3` (`0x14d9f0`): `(a2 b2) + (a1 b1 + a0 b0)`.
 fn mat_t_mat(a: &Matrix3<f64>, b: &Matrix3<f64>) -> Matrix3<f64> {
-    Matrix3::from_fn(|i, j| a[(2, i)].mul_add(b[(2, j)], a[(0, i)].mul_add(b[(0, j)], a[(1, i)] * b[(1, j)])))
+    if contract_off() {
+        mat_t_mat_sep(a, b)
+    } else {
+        Matrix3::from_fn(|i, j| a[(2, i)].mul_add(b[(2, j)], a[(0, i)].mul_add(b[(0, j)], a[(1, i)] * b[(1, j)])))
+    }
 }
 
 /// `mji_mulMatTVec3` as inlined in `mjc_BoxBox` (`64156abe`): `(m2 v2) + (m1 v1 + m0 v0)`.

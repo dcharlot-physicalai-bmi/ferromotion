@@ -2,7 +2,7 @@
 
 Oracle profile `mujoco-3.13.0-x86_64-contract-off`, library `64156abe`, Menagerie pin `4d038b3`. 212 models, three forward states, 20 steps. Equality is `f64::to_bits`.
 
-181 models are exact for all 20 steps. 31 fail a step. A fixed tendon's length is `(prm * qpos) + L` in `mj_tendon`. `mju_dot3` in the primitive colliders is `(az bz) + (ax bx + ay by)`. `mju_mulMatVec3` (`0x14d790`) is `(m02 vz) + (m00 vx + m01 vy)` on row 0, `(m12 vz) + (m11 vy + m10 vx)` on row 1, and `(m21 vy + m20 vx) + (m22 vz)` on row 2. That corner transform is what `mjc_PlaneBox` feeds to `mju_dot3`. Franka `scene.xml` step 1 was a 1 ulp `efc_pos` on two plane–box contacts of `right_finger`, and the Newton factor was already identical. Sphere-sphere distance is `(sqrt - r1) - r2`, and the witness offset is `(dist * 0.5) + r1`. Capsule-capsule numerators use the raw segment dots: `(dot12 * v - mc * u) / det`.
+184 models are exact for all 20 steps. 28 fail a step. A fixed tendon's length is `(prm * qpos) + L` in `mj_tendon`. `mju_dot3` in the primitive colliders is `(az bz) + (ax bx + ay by)`. `mju_mulMatVec3` (`0x14d790`) is `(m02 vz) + (m00 vx + m01 vy)` on row 0, `(m12 vz) + (m11 vy + m10 vx)` on row 1, and `(m21 vy + m20 vx) + (m22 vz)` on row 2. That corner transform is what `mjc_PlaneBox` feeds to `mju_dot3`. Franka `scene.xml` step 1 was a 1 ulp `efc_pos` on two plane–box contacts of `right_finger`, and the Newton factor was already identical. Sphere-sphere distance is `(sqrt - r1) - r2`, and the witness offset is `(dist * 0.5) + r1`. Capsule-capsule numerators use the raw segment dots: `(dot12 * v - mc * u) / det`.
 
 Box-box edge witnesses use `denom = 1 - b*b`, `s = (d1e - b*d2e) / denom`, `t = b*s - d2e`, then `s = d1e + b*t`. The edge corner `mji_mulMatVec3` is `(m2 v2) + (m1 v1 + m0 v0)`, then `pos +` that. Leap hand `efc_pos` is exact on all three forward states. Those four models still miss a step; the next forward field is `efc_J`.
 
@@ -11,14 +11,12 @@ Box-box edge witnesses use `denom = 1 - b*b`, `s = (d1e - b*d2e) / denom`, `t = 
 | models | stage | first field | site |
 | ---: | --- | --- | --- |
 | 4 | collision | `efc_pos` | `mjraw primitive / mesh` |
-| 4 | solver | `efc_force` | `mj_fwdConstraint` |
+| 3 | solver | `efc_force` | `mj_fwdConstraint` |
 | 9 | constants | `tendon_invweight0` | `set0 tendon block` |
 | 2 | constraint rows | `efc_J` | `mj_instantiateContact` |
 | 4 | constraint rows | `efc_AR` | `mj_makeARNumeric` |
 | 3 | solver | `qacc` | `mj_fwdConstraint` |
-| 1 | integration | `qpos` | `mj_integratePos` |
 | 2 | smooth | `ten_velocity` | `mj_fwdVelocity` |
-| 1 | integration | `qvel` | `mj_advance` |
 | 1 | smooth | `qfrc_fluid` | `mj_passive` |
 
 ## `efc_pos` — 4
@@ -30,20 +28,19 @@ Where it first appears: 1 at state 1, 2 at state 2, 1 at state 0.
 - `ufactory_lite6/lite6_gripper_narrow.xml` (state 0)
 - `wonik_allegro/scene_left.xml` (state 2)
 
-## `efc_force` — 4
+## `efc_force` — 3
 
-Where it first appears: 2 at step 1, 1 at step 9, 1 at step 18.
+Where it first appears: 1 at step 1, 1 at step 9, 1 at step 18.
 
 `qfrc_passive`, `qfrc_actuator`, and `qacc_smooth` match at that step. The step log still names `qacc_warmstart`, because that is the copy of this step's `qacc`.
 
-All four are Newton and dense (`nv` below 60). Spot's elliptic miss was not the cone force. `J` and `qacc` matched and `efc_aref` was one ulp off, from `getimpedance`: `imp = solimp[0] + y*(solimp[1]-solimp[0])`. With that product separated, Spot and eight other models are exact for 20 steps.
+All three are Newton and dense (`nv` below 60). Spot's elliptic miss was not the cone force. `J` and `qacc` matched and `efc_aref` was one ulp off, from `getimpedance`: `imp = solimp[0] + y*(solimp[1]-solimp[0])`. With that product separated, Spot and eight other models are exact for 20 steps.
 
 `toddlerbot_2xc_mjx` has one island, so the solver scale is `1/sum(diag M)`, bits `0x3fb7c7cbbacf81d1`, not `1/(meaninertia*nv)`. Iteration 1's improvement matches (`0x41b6b1b1798c8003`). The scaled gradient is three ulps off (`0x3fd3e6b0315133e4` vs `0x3fd3e6b0315133e7`) because `mju_norm(grad)` is four ulps off. The next linesearch then returns `alpha = 0`.
 
 - `rainbow_robotics_rby1/rby1m_1.2.xml` (step 1)
 - `robotiq_2f85/2f85.xml` (step 9)
 - `robotstudio_so101/scene_box.xml` (step 18)
-- `shadow_hand/scene_right.xml` (step 1)
 
 ## `tendon_invweight0` — 9
 
@@ -83,24 +80,12 @@ Where it first appears: 3 at state 0.
 - `robot_soccer_kit/robot_soccer_kit.xml` (state 0)
 - `robot_soccer_kit/scene.xml` (state 0)
 
-## `qpos` — 1
-
-Where it first appears: 1 at step 1.
-
-- `trossen_wxai/wxai_follower_biarm.xml` (step 1)
-
 ## `ten_velocity` — 2
 
 Where it first appears: 2 at state 1.
 
 - `iit_softfoot/scene.xml` (state 1)
 - `iit_softfoot/softfoot.xml` (state 1)
-
-## `qvel` — 1
-
-Where it first appears: 1 at step 5.
-
-- `trossen_wxai/scene.xml` (step 5)
 
 ## `qfrc_fluid` — 1
 
