@@ -1,0 +1,14 @@
+   Compiling ferromotion-core v0.73.0 (/agent/repos/ferromotion/crates/ferromotion-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.26s
+     Running tests/ferromorphic_bind_v2.rs (target/debug/deps/ferromorphic_bind_v2-9db1c11df4d32dca)
+
+running 6 tests
+test a_forward_product_mismatch_is_refused_before_an_envelope_exists ... ok
+test a_zero_step_count_checks_and_stamps_nothing ... ok
+test periods_above_2_pow_53_are_inexact_and_the_bound_is_accepted ... ok
+test a_snapshot_field_changed_after_a_good_bind_is_refused_on_the_next_call ... ok
+test a_matching_snapshot_binds ... ok
+test epoch_origin_period_dt_bits_and_the_t0_grid_are_refused ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

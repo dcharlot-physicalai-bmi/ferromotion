@@ -1,69 +1,127 @@
 # Proposal: a minimal closed loop
 
-Not built. `JOINT_LOOP_EXECUTED` stays false. `EPISODE_ENVELOPE_INTEROPERABLE` stays false. `FERROMORPHIC_BIND_VERIFIED` stays false. This document names the calls a later loop would make. It does not run them.
+Not built. `JOINT_LOOP_EXECUTED` stays false. `EPISODE_ENVELOPE_INTEROPERABLE` stays false. `FERROMORPHIC_BIND_VERIFIED` stays false.
 
-The loop is N steps. Each step is one ferromorphic tick, the spikes that tick emitted, one ferromotion action chunk for that tick, one stamped receipt, and one bind of the next snapshot. Both sides hash the bytes they emitted. The hashes are the trace. A matching hash is not authorization to actuate.
+`bind_v2_timestamps` is a pure validator. It returns `Result<(), TimebaseError>` and does not write the snapshot, the `Sim`, or a receipt. Stamping happens only in `StepReceipt::from_step`. A loop that treats `Ok(())` as a control value is inventing an output the function does not have.
 
-## One step
+The step that is not yet possible is: ferromotion `robot_contact::step`, then ferromorphic bind and readout, then that readout back into the next `tau`. The calls below are the agreed design for that gap. They are not in ferromorphic `a6722b49ff7dc770b1cb062adac21aa5c7155401`.
 
-1. Ferromorphic holds a `Sim<N>`. Before the first step, `episode_start(origin_ns, period_ns)` installs the shared period. `dt` is not rewritten. The call refuses unless `dt.to_bits()` equals `nominal_seconds(period_ns).to_bits()`.
-2. Copy `clock_snapshot()`. That copy is the untrusted snapshot for this step. The loop does not keep a validity bit.
-3. `try_step(external)` advances one tick and returns the neuron indexes that fired. `t` is the tick just completed only after the call returns; the receipt uses the tick from before the call.
-4. `StepReceipt::from_step(epoch, tick_before, dt, mode, &fired)` then `to_text()`. Ferromotion `parse_step_receipt` reads those bytes. SHA-256 of the text is ferromorphic's trace line.
-5. Ferromotion builds one `ChunkV2` whose `t0_ns` is `origin_ns + tick_before * period_ns`, `step_duration_ns` is `period_ns`, and `n_action_steps` is the chunk width for this step. `encode` produces the codec v2 body. SHA-256 of that body is ferromotion's trace line. The body is not written into the receipt text.
-6. `EpisodeEnvelope::try_new(1, epoch, dt.to_bits(), period_ns, origin_ns)`.
-7. `bind_v2_timestamps(t0_ns, period_ns, n_action_steps, Some(envelope), &snapshot)` on the snapshot from step 2, or on a fresh `clock_snapshot()` taken after the step if the comparison is the post-step clock. The proposal uses the post-step snapshot for the next bind, and the pre-step snapshot only to show that a mutation is visible. A refusal stops the loop. `Ok` does not authorize a rollout.
-8. Repeat from step 2 until N steps, or until a refusal.
+## `robot_contact::step`
 
-`external` for step k+1 may be a function of the decoded chunk from step k. That function is not specified here. Until it is, the proposal uses an empty current vector, which `try_step` already accepts.
+`RobotContactSim::step` in `crates/ferromotion-core/src/robot_contact.rs:31`:
 
-## What ferromotion needs from ferromorphic
+```rust
+pub fn step(&self, q: &[f64], qd: &[f64], tau: &[f64], dt: f64, g: Vector3<f64>) -> (Vec<f64>, Vec<f64>)
+```
 
-Pinned at `a6722b49ff7dc770b1cb062adac21aa5c7155401`, `src/sim.rs`. All of these are public today.
+`tau.len()` is `self.robot.dof()`, and `dof` is `KinematicTree::joints.len()` (`kinematic_tree.rs:46`). That length is `nv`, the number of velocity coordinates of this tree. It is not `nu`. `nu` equals `nv` only when the model has one scalar torque actuator on each velocity coordinate and no extra actuator. The function indexes `tau[i]` for `i in 0..nv` and does not read an actuator list.
 
-| item | signature |
-|---|---|
-| `Sim::new` | `fn new(net: Net, neurons: Vec<N>, dt: f64, mode: Mode) -> Result<Sim<N>, SimError>` |
-| `Sim::episode_start` | `fn episode_start(&mut self, origin_ns: u64, period_ns: u64) -> Result<u64, TimebaseError>` |
-| `Sim::clock_snapshot` | `fn clock_snapshot(&self) -> ClockSnapshot` |
-| `Sim::try_step` | `fn try_step(&mut self, external: &[f64]) -> Result<Vec<u32>, TimebaseError>` |
-| `ClockSnapshot` | `epoch: u64`, `tick: u64`, `dt_bits: u64`, `period_ns: Option<u64>`, `origin_ns: Option<u64>` |
-| `EpisodeEnvelope::try_new` | `fn try_new(version: u32, epoch: u64, dt_bits: u64, period_ns: u64, origin_ns: u64) -> Result<EpisodeEnvelope, TimebaseError>` |
-| `bind_v2_timestamps` | `fn bind_v2_timestamps(t0_ns: u64, step_duration_ns: u64, n_action_steps: u32, envelope: Option<EpisodeEnvelope>, clock: &ClockSnapshot) -> Result<(), TimebaseError>` |
-| `nominal_seconds` | `fn nominal_seconds(period_ns: u64) -> Result<f64, TimebaseError>` |
-| `StepReceipt::from_step` | `fn from_step(epoch: u64, step: u64, dt: f64, mode: Mode, fired: &[u32]) -> StepReceipt` |
-| `StepReceipt::to_text` | `fn to_text(&self) -> String` |
-| readable fields | `Sim.dt: f64`, `Sim.t: u64`, `Sim.epoch: u64`, `Sim.mode: Mode`, `Sim.origin_ns: Option<u64>`, `Sim.period_ns: Option<u64>` |
+For a 1-DoF joint, `tau[i]` is the generalized force on that joint, added as `tau[i] - bias[i]` before `M⁻¹`. A hinge is in newton-metres. A slide would be in newtons. This function does not convert or saturate. It has no `ctrlrange`, no `forcerange`, and no `actuatorfrcrange`.
 
-`TimebaseError` variants the loop has to match exactly, not by display string: `InexactPeriod`, `DtPeriodMismatch { dt_bits, period_ns, nominal_bits }`, `StaleEpoch { event, clock }`, `AmbiguousEpoch`, `Mismatch { left, right }`, `OffGrid`, `MissingEpoch`, `ScheduleOverflow { tick, period_ns }`, `BadExternal { got, want }`, `Overflow { step, delay }`, `EpochOverflow`.
+Saturation that does exist is elsewhere. `Actuator::force` clamps the scalar control to `ctrlrange` when `ctrllimited`, then clamps the scalar force to `forcerange` when `forcelimited` (`mujoco_actuator.rs:282` and `mujoco_actuator.rs:301`). `qfrc_actuator` then clamps the summed joint force to the joint `actuatorfrcrange` (`mujoco_actuator.rs:309`). `robot_contact::step` does not call either function. A loop that saturates must do it before `tau` is passed in, using those actuator and joint ranges, not a limit inside `step`.
 
-Determinism required from ferromorphic, and not yet a joint measurement:
+## Reference model
 
-* `Mode::Clocked` and `Mode::EventDriven` on the same net, the same `dt`, and the same `external` produce the same `Vec<u32>` from `try_step`, including order. Event-driven sorts the touched indexes before firing.
-* `StepReceipt::to_text` is a pure function of `from_step`'s arguments. SHA-256 of that string is the spike trace.
-* `bind_v2_timestamps` does not write `ClockSnapshot` and does not store a validity bit. A later write to `dt`, `t`, `epoch`, `origin_ns`, or `period_ns` is visible on the next call.
-* `n_action_steps == 0` still runs the checks and stamps no index. It returns `Ok(())` when the checks pass. It is not a refusal.
-* `period_ns > 2^53` and `step_duration_ns > 2^53` are `InexactPeriod`. `2^53` is accepted. `u64::MAX` is `InexactPeriod`.
+`franka_emika_panda/panda_nohand.xml` at Menagerie `4d038b3feae26ec82b46a4d586379114012a8ac7`. That file is in the 212-model exact set. The home keyframe is `qpos="0 0 0 -1.57079 0 1.57079 -0.7853"`.
 
-Missing for the loop, so it is not built:
+Seven hinges, depth-first, `joint1` through `joint7`. No free joint and no slide, so `nq = nv = 7`. Seven `<general>` actuators, one per joint, so `nu = 7` as well. `tau` for this model is length 7, in newton-metres, in joint order `joint1` … `joint7`.
 
-* No function returns the SHA-256 of a `StepReceipt`. The loop would hash `to_text()` itself.
-* No function applies a ferromotion `ChunkV2` body as `external`. That adapter is ferromotion's, and it is not written.
-* `EpisodeEnvelope` cannot be built with a forward-product mismatch. `try_new` refuses with `DtPeriodMismatch` first. `bind_v2_timestamps` has that check, and no public value can reach it.
+Class `panda` sets `ctrlrange="-2.8973 2.8973"` and `forcerange="-87 87"` on `<general>`. A joint with no `range` inherits `range="-2.8973 2.8973"`. An actuator attribute written on the element replaces the class value. No joint sets a velocity limit, and none sets `actuatorfrcrange`.
+
+| joint | qpos range (rad) | actuator `ctrlrange` | actuator `forcerange` (N·m) |
+|---|---|---|---|
+| joint1 | −2.8973 … 2.8973 | −2.8973 … 2.8973 | −87 … 87 |
+| joint2 | −1.7628 … 1.7628 | −1.7628 … 1.7628 | −87 … 87 |
+| joint3 | −2.8973 … 2.8973 | −2.8973 … 2.8973 | −87 … 87 |
+| joint4 | −3.0718 … −0.0698 | −3.0718 … −0.0698 | −87 … 87 |
+| joint5 | −2.8973 … 2.8973 | −2.8973 … 2.8973 | −12 … 12 |
+| joint6 | −0.0175 … 3.7525 | −0.0175 … 3.7525 | −12 … 12 |
+| joint7 | −2.8973 … 2.8973 | −2.8973 … 2.8973 | −12 … 12 |
+
+The torque passed into `step` is saturated to that joint's `forcerange` before the call. `ctrlrange` is in radians here because these general actuators are position servos (`gainprm` and `biasprm` on the element). It is not a torque limit. `step` never sees it.
+
+## Observation
+
+Length `nq + nv`. For a tree of 1-DoF joints that is `2 * nv`. Order is every `qpos` entry, then every `qvel` entry, both in the same joint order as `tau`.
+
+Units: hinge position in radians, hinge velocity in radians per second, slide position in metres, slide velocity in metres per second. A free joint is not in this reference model. If one appears, its `qpos` is the 7 MuJoCo free coordinates (3 metres, then a 4-component unit quaternion) and its `qvel` is 6 (3 metres per second, then 3 radians per second), and `nv` counts the 6, not the 7. `tau` still has length `nv`. This reference model has no free joint, so the observation length is 14.
+
+Component `i` of `qpos` is clamped to that joint's `range`. Component `i` of `qvel` is clamped only when the joint states a finite velocity limit. `panda_nohand` states none, so the seven velocity components are not clamped.
+
+Concrete observation bounds for `panda_nohand`, `qpos` then `qvel`:
+
+| index | field | unit | clamp |
+|---|---|---|---|
+| 0 | joint1 position | rad | −2.8973 … 2.8973 |
+| 1 | joint2 position | rad | −1.7628 … 1.7628 |
+| 2 | joint3 position | rad | −2.8973 … 2.8973 |
+| 3 | joint4 position | rad | −3.0718 … −0.0698 |
+| 4 | joint5 position | rad | −2.8973 … 2.8973 |
+| 5 | joint6 position | rad | −0.0175 … 3.7525 |
+| 6 | joint7 position | rad | −2.8973 … 2.8973 |
+| 7 | joint1 velocity | rad/s | none |
+| 8 | joint2 velocity | rad/s | none |
+| 9 | joint3 velocity | rad/s | none |
+| 10 | joint4 velocity | rad/s | none |
+| 11 | joint5 velocity | rad/s | none |
+| 12 | joint6 velocity | rad/s | none |
+| 13 | joint7 velocity | rad/s | none |
+
+## Agreed ferromorphic API
+
+bmi-2 will add these. They are not at `a6722b49`. Inputs and outputs are plain `f64` slices. The window is a count of ticks.
+
+```rust
+impl EpisodeEnvelope {
+    /// Line-oriented text. `from_text(to_text())` returns the same `version`, `epoch`,
+    /// `dt_bits`, `period_ns`, and `origin_ns`. `dt_bits` is 16 lowercase hex digits.
+    pub fn to_text(&self) -> String;
+    pub fn from_text(text: &str) -> Result<Self, TimebaseError>;
+}
+
+/// `counts` has length `window * n_neurons`, tick-major: tick 0 neuron 0, tick 0 neuron 1, …
+/// `weights` has length `tau_len * window * n_neurons`, row-major over
+/// `(tau index, tick in the window, neuron)`.
+/// `bias` has length `tau_len`.
+/// `tau_i = bias_i + Σ counts[t, n] * weights[i, t, n]`.
+/// For `robot_contact::step`, `tau_len` is `nv`.
+pub struct SpikeReadout {
+    pub window: u64,
+    pub n_neurons: usize,
+    pub tau_len: usize,
+    pub weights: Vec<f64>,
+    pub bias: Vec<f64>,
+}
+
+impl SpikeReadout {
+    pub fn tau(&self, counts: &[f64]) -> Vec<f64>;
+}
+
+/// `weight` is row-major `n_out * obs_len`. `bias`, `lo`, and `hi` have length `n_out`.
+/// `out_i = clamp(bias_i + Σ_j weight[i, j] * observation[j], lo_i, hi_i)`.
+/// `out` is amperes and has length `Sim`'s neuron count. It is the `external` slice of `try_step`.
+pub struct CurrentEncoder {
+    pub obs_len: usize,
+    pub n_out: usize,
+    pub weight: Vec<f64>,
+    pub bias: Vec<f64>,
+    pub lo: Vec<f64>,
+    pub hi: Vec<f64>,
+}
+
+impl CurrentEncoder {
+    pub fn amperes(&self, observation: &[f64]) -> Vec<f64>;
+}
+```
+
+Both maps are pure. The same input bits produce the same output bits. There is no RNG. Products are `f64` multiplies and sums in the index order above. `clamp` is inclusive.
+
+`SpikeReadout::tau` is the readout-to-control map into `robot_contact::step`'s `tau`. For `panda_nohand`, `tau_len` is 7. After `tau` returns, ferromotion saturates each entry to that joint's `forcerange` from the table above. The readout itself does not know those ranges.
+
+`CurrentEncoder::amperes` is the control-to-current map. Its `observation` is the length-14 vector in the table. Position components are already clamped to the joint ranges. Velocity components are not clamped for this model. `lo` and `hi` are the ampere clamp, per neuron, and they are parameters of the encoder, not fields of `panda_nohand`.
 
 ## What ferromotion provides
 
-Already in this crate. None of it runs the loop.
+`RobotContactSim::step` consumes `tau` and returns the next `(q, qd)`. `ChunkV2`, `encode`, `check_horizon`, and `action_timestamp_ns` build the action-chunk bytes. `parse_step_receipt` reads a `StepReceipt` text. The local `bind_v2_timestamps` takes a `BoundaryClock`, not a `ferromorphic::sim::ClockSnapshot`. A call to the local function is not a call into ferromorphic.
 
-| item | signature |
-|---|---|
-| `ChunkV2` | `t0_ns: u64`, `step_duration_ns: u64`, `n_action_steps: u32`, `action_dim: u32`, `values_time_major: Vec<f32>`, plus the provenance strings |
-| `encode` | `fn encode(chunk: &ChunkV2) -> Result<Vec<u8>, CodecError>` |
-| `check_horizon` | `fn check_horizon(n_action_steps: u32, chunk_size: u32) -> Result<(), CodecError>` |
-| `action_timestamp_ns` | `fn action_timestamp_ns(t0_ns: u64, step_duration_ns: u64, index: u32, steps: u32) -> Result<u64, CodecError>` |
-| `parse_step_receipt` | `fn parse_step_receipt(text: &str) -> Result<StepReceipt, TimebaseError>` |
-| local `bind_v2_timestamps` | same argument order, on `ferromotion_core::BoundaryClock`, not on `ferromorphic::sim::ClockSnapshot` |
-
-The local bind is a separate function. A test that calls it is not a call into ferromorphic. The cross-crate file `ferromorphic_bind_v2.rs` calls `ferromorphic::sim::bind_v2_timestamps`.
-
-SHA-256 of `encode`'s bytes is ferromotion's trace line. `authorize_rollout` still returns `EntryProposed`. The loop must not treat a matching bind or a matching digest as permission to actuate.
+Ferromotion does not yet provide `SpikeReadout` or `CurrentEncoder`. Putting either only on the ferromotion side is the same pair of functions with the same signatures and the same determinism rule. The loop is unbuilt either way until those functions exist and the envelope has `to_text` / `from_text`.
