@@ -5,8 +5,5 @@
   "native_dump_bytes": 73420440,
   "step_dump_sha256": "a039f949d938cefc0cf3633edec1415497f8400a776b88809adf9bb06f5678be",
   "step_dump_bytes": 7582957,
-  "menagerie_sha": "4d038b3feae26ec82b46a4d586379114012a8ac7",
-  "expected_step_exact": 212,
-  "expected_native_states": 636,
-  "native_required": ["efc_J", "qacc"]
+  "menagerie_sha": "4d038b3feae26ec82b46a4d586379114012a8ac7"
 }
