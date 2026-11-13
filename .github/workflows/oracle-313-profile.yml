@@ -1,7 +1,9 @@
 name: oracle-313-profile
 
-# The 3.13.0 contract-off counts. This job builds that oracle and compares
-# ferromotion under its identity. It does not read a checked-in ledger.
+# The 3.13.0 contract-off profile. The pin is the latest receipt for
+# mujoco-3.13.0-x86_64-contract-off. This branch carries the fidelity
+# receipt b6a3a885 byte for byte. The later fidelity receipt 701413e
+# records code that is not on this branch, so it is not copied here.
 on:
   push:
     branches:
@@ -68,5 +70,13 @@ jobs:
           set -euo pipefail
           cargo build --release -p ferromotion-core --example menagerie_native --example menagerie_native_step
           ./target/release/examples/menagerie_native /tmp/mujoco_menagerie /tmp/oracle-dumps/native.txt > /tmp/oracle-dumps/profile-native.txt
-          ./target/release/examples/menagerie_native_step /tmp/mujoco_menagerie /tmp/oracle-dumps/step.txt > /tmp/oracle-dumps/profile-step.txt
-          python3 scripts/oracle_313_profile_check.py /tmp/oracle-dumps/profile-native.txt /tmp/oracle-dumps/profile-step.txt
+          MENAGERIE_LEDGER=/tmp/oracle-dumps/profile-ledger.jsonl \
+            ./target/release/examples/menagerie_native_step /tmp/mujoco_menagerie /tmp/oracle-dumps/step.txt > /tmp/oracle-dumps/profile-step.txt
+          python3 scripts/oracle_profile_gate.py \
+            --oracle-id mujoco-3.13.0-x86_64-contract-off \
+            --native /tmp/oracle-dumps/profile-native.txt \
+            --step /tmp/oracle-dumps/profile-step.txt \
+            --ledger /tmp/oracle-dumps/profile-ledger.jsonl \
+            --lib /tmp/oracle-x86-contract-off/build/lib/libmujoco.so.3.13.0 \
+            --native-dump /tmp/oracle-dumps/native.txt \
+            --step-dump /tmp/oracle-dumps/step.txt

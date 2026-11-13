@@ -1,0 +1,81 @@
+name: oracle-40-profile
+
+# The 4.0.0 contract-off profile. The pin is the latest receipt for
+# mujoco-4.0.0-x86_64-contract-off. A gain needs a new receipt. A loss fails.
+on:
+  push:
+    branches:
+      - cursor/mujoco-versioned-oracles-f013
+  pull_request:
+    branches:
+      - cursor/mujoco-versioned-oracles-f013
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  profile:
+    name: 4.0 contract-off counts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Compiler and archiver
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y clang-18 cmake ninja-build python3-numpy g++-14 binutils
+          /usr/lib/llvm-18/bin/clang --version
+          test -x /usr/bin/ar
+          test -x /usr/bin/ld.gold
+      - name: MuJoCo 4.0.0 source at the pinned commit
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch 4.0.0 https://github.com/google-deepmind/mujoco.git /tmp/mujoco-4.0.0-src
+          test "$(git -C /tmp/mujoco-4.0.0-src rev-parse HEAD)" = "ac60eae30fa7e0d31315c38d9476752fb81be67e"
+      - name: Contract-off library
+        run: bash scripts/build_mujoco_x86_contract_off.sh 4.0.0 /tmp/mujoco-4.0.0-src /tmp/oracle-x86-contract-off-4.0.0
+      - name: Menagerie pin
+        run: |
+          set -euo pipefail
+          sha=$(python3 -c 'import json; print(json.load(open("conformance/menagerie_pin.json"))["menagerie_sha"])')
+          git clone https://github.com/google-deepmind/mujoco_menagerie.git /tmp/mujoco_menagerie
+          git -C /tmp/mujoco_menagerie checkout --detach "$sha"
+      - name: Dumps
+        run: |
+          set -euo pipefail
+          cc -O2 -I/tmp/mujoco-4.0.0-src/include scripts/oracle_schema_dump.c \
+            /tmp/oracle-x86-contract-off-4.0.0/build/lib/libmujoco.so.4.0.0 \
+            -o /tmp/oracle_schema_dump \
+            -Wl,-rpath,/tmp/oracle-x86-contract-off-4.0.0/build/lib -lm
+          /tmp/oracle_schema_dump schema | tee /tmp/schema.txt
+          grep -q 'ferromotion.mujoco-dump.v3' /tmp/schema.txt
+          test -d /tmp/oracle-x86-contract-off-4.0.0/build/lib/mujoco_plugin
+          mkdir -p /tmp/oracle-dumps
+          /tmp/oracle_schema_dump props /tmp/mujoco_menagerie /tmp/oracle-x86-contract-off-4.0.0/build/lib/mujoco_plugin /tmp/oracle-dumps/props.txt
+          python3 scripts/oracle_schema_schedule.py /tmp/oracle-dumps/props.txt native /tmp/oracle-dumps/native-schedule.txt
+          python3 scripts/oracle_schema_schedule.py /tmp/oracle-dumps/props.txt step /tmp/oracle-dumps/step-schedule.txt
+          /tmp/oracle_schema_dump native /tmp/mujoco_menagerie /tmp/oracle-x86-contract-off-4.0.0/build/lib/mujoco_plugin /tmp/oracle-dumps/native-schedule.txt /tmp/oracle-dumps/native.txt
+          /tmp/oracle_schema_dump step /tmp/mujoco_menagerie /tmp/oracle-x86-contract-off-4.0.0/build/lib/mujoco_plugin /tmp/oracle-dumps/step-schedule.txt /tmp/oracle-dumps/step.txt
+      - name: Profile
+        env:
+          FERROMOTION_BUILD_POLICY: mujoco-4.0.0-x86_64-contract-off
+          FERROMOTION_ORACLE_SHA256: 4849b2dd05ce3c57d75098ca47a10373866e048fbdf9b57cb7073c0be2210a86
+        run: |
+          set -euo pipefail
+          cargo build --release -p ferromotion-core --example menagerie_native --example menagerie_native_step
+          ./target/release/examples/menagerie_native /tmp/mujoco_menagerie /tmp/oracle-dumps/native.txt > /tmp/oracle-dumps/profile-native.txt
+          MENAGERIE_LEDGER=/tmp/oracle-dumps/profile-ledger.jsonl \
+            ./target/release/examples/menagerie_native_step /tmp/mujoco_menagerie /tmp/oracle-dumps/step.txt > /tmp/oracle-dumps/profile-step.txt
+          python3 scripts/oracle_profile_gate.py \
+            --oracle-id mujoco-4.0.0-x86_64-contract-off \
+            --native /tmp/oracle-dumps/profile-native.txt \
+            --step /tmp/oracle-dumps/profile-step.txt \
+            --ledger /tmp/oracle-dumps/profile-ledger.jsonl \
+            --lib /tmp/oracle-x86-contract-off-4.0.0/build/lib/libmujoco.so.4.0.0 \
+            --native-dump /tmp/oracle-dumps/native.txt \
+            --step-dump /tmp/oracle-dumps/step.txt

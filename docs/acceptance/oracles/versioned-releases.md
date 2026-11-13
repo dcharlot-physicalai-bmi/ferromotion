@@ -205,12 +205,12 @@ the next section.
 | 3.17 | `c8362756d064` | The Newton and noslip scales in `mujoco_solver.rs` and `mujoco_contact.rs` use `1 / trace(M)`. | `qacc` 1, `hello_robot_stretch_3/scene.xml` |
 | 3.17 | `abddec5b9193a` | Emit `m eq_data` at width 12, with the weld relative pose in the last column. No other field on this corpus. | `eq_data` added on 212; numeric `qacc` 0 |
 | 4.0 | `3ab3f0f0c9f3` | `elliptic_cost_dif` stores the tangential norm and differences it. | `qacc` 50; step 1 `qpos` 23 |
-| 4.0 | `6f3db612a730` | Implemented for the 4.0 profile. `chol_solve` divides the diagonal, then updates the row with `add_to_scl`. | isolation `qacc` 166, `efc_force` 153; profile `qacc` 149→251/636, `efc_force` 227→303/636; 20-step 9→28/212 |
+| 4.0 | `6f3db612a730` | Implemented for the 4.0 profile. `chol_solve` divides the diagonal, then updates the row with `add_to_scl`. The profile pin is the receipt, not this cell. | `qacc` 166, `efc_force` 153; step 1 `qpos` 77 |
 | 4.0 | `e161611dd090` | Flex stiffness cache identity covers every node and element. Ferromotion refuses `<flexcomp>` today, so this waits on a flex compiler. | `qacc`/`efc_aref` 20 |
 | 4.0 | `a650501666a7` | `wrap_circle` chooses the side-site homotopy by winding angle. | `ten_length` 9, `qacc` 8 |
 | 4.0 | `9a7f240f0336` | RK4 maps ball and free rates through `dexp⁻¹` before the stage sum. | step only, 2 Crazyflie models |
 | 4.0 | `a63f59172407` | Elliptic-cone tangent is `U/T` before the Hessian's cubic term. | `qacc` 54; step 1 `qpos` 28 |
-| 4.0 | `d9972b337c98` | Implemented for the 4.0 profile. `normalize4`, `mul_quat`, and `quat2mat` pair the sums the way the 256-bit reduction does. | isolation `xpos` 193, `M` 196, `qacc` 200; profile `xpos` 237→636/636, `M` 83→391/636, `qacc` 55→149/636; 20-step 3→9/212 |
+| 4.0 | `d9972b337c98` | Implemented for the 4.0 profile. `normalize4`, `mul_quat`, and `quat2mat` pair the sums the way the 256-bit reduction does. The profile pin is the receipt, not this cell. | `xpos` 193, `xmat` 206, `M` 196, `qacc` 200, `dof_M0` 54; step 1 `qpos` 140 |
 | 4.0 | `3bbf510d477a` | Nativeccd precision pass: no legacy GJK-intersect fallback, hardened EPA barycentrics and multicontact. | `efc_J` 71, `qacc` 69; `contact_surfacevel` 18 |
 | 4.0 | `aeb871ba1742` | The implicit step skips an actuator derivative when `qfrc_actuator` is outside the joint `actfrcrange`. | step `qpos` 36; native fields 0 |
 | 4.0 | `64af6504f`, `629feb74b`, `9916cc5f7` | Emit `tendon_type`, `xiquat`, `geom_xquat`, `site_xquat`, and `contact_surfacevel` under the 4.0 dump schema. | added on 212 |
@@ -219,24 +219,12 @@ the next section.
 
 ## 4.0 profile measurement
 
-Same 212 Menagerie models, three states (636 `mjData` rows) and 20 steps, against the 4.0.0 contract-off oracle `4849b2dd…`. The before column is the fidelity code with the 4.0 id installed and no new formulas. `d9972b33` is the paired quaternion sums. `6f3db612` is that plus the dense Cholesky row update. Counts are bit-identical rows.
+The 4.0 x86 profile pin is the receipt
+`docs/acceptance/receipts/f8fe0779ca35549d590f005f2a57768b522459a6.md`.
+`scripts/oracle_profile_gate.py` reads the latest receipt for the oracle id.
+Counts and the exact model set are in that file, hashed, and are not copied here.
 
-| field | before | after `d9972b33` | after `d9972b33` and `6f3db612` |
-| --- | ---: | ---: | ---: |
-| `xpos`, `xmat`, `xipos`, `xanchor`, `xaxis`, `xquat` | 237, 145, 194, 243, 415, 401 | 636 | 636 |
-| `ximat` | 18 | 325 | 325 |
-| `M`, `qLD` | 83, 85 | 391, 391 | 391, 391 |
-| `qacc` | 55 | 149 | 251 |
-| `qacc_smooth` | 95 | 365 | 365 |
-| `qfrc_bias` | 190 | 480 | 480 |
-| `efc_J` | 375 | 420 | 420 |
-| `efc_force` | 196 | 227 | 303 |
-| `qfrc_constraint` | 199 | 227 | 301 |
-| `efc_state` | 561 | 564 | 565 |
-| `dof_M0` (of 212) | 97 | 131 | 131 |
-| `ten_length` | 606 | 609 | 609 |
-| 20-step models | 3/212 | 9/212 | 28/212 |
-
-`6f3db612` moves only `qacc`, `efc_force`, `qfrc_constraint`, and `efc_state`. The other 71 fields stay on the `d9972b33` counts. `d9972b33` also moves `cdof` 208→630, `cdof_dot` 265→632, `cvel` 295→632, `subtree_com` 222→630, `cinert` 24→326, `crb` 35→329, `qLDiagInv` 156→392, `qfrc_smooth` 245→442, `efc_b` 158→284, and the smaller actuator, fluid, and constraint-row fields by the same pairing. Integer model fields stay 212/212.
-
-The 3.13.0 profile on the before binary and on the gated binary is the same file: 20-step 165/212, `M` `qLD` `xpos` `qfrc_bias` 636/636, `qacc` 529/636, `qacc_smooth` 609/636, `efc_J` 572/636. The published default is also the same file on both binaries (20-step 1/212 against the 3.13 dumps). The old 6/212 and `qacc` 148/636 pin is the pre-fidelity measurement.
+The 3.13 profile pin on this branch is the fidelity receipt
+`docs/acceptance/receipts/b6a3a885f8c405b3f2c098ece0cc1bdc8ad5ce03.md`,
+the same bytes as on `cursor/ferromotion-fidelity-conformance-bb9d`.
+The later fidelity receipt `701413e` records commits that are not in this branch.
