@@ -10,6 +10,10 @@
 use ferromotion_core::qhull::mesh_graph;
 
 fn main() {
+    if let Err(error) = ferromotion_core::install_policy_from_env() {
+        eprintln!("policy refused: {error:?}");
+        std::process::exit(2);
+    }
     let path = std::env::args().nth(1).expect("usage: qhull_graph_dump <verts txt>");
     let text = std::fs::read_to_string(path).unwrap();
     let mut lines = text.lines();

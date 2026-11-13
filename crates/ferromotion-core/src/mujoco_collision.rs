@@ -718,8 +718,14 @@ pub fn capsule_box(margin: f64, p1: &GeomPose, size1: [f64; 2], p2: &GeomPose, s
     let pos = mat_t_vec(&p2.mat, &(p1.pos - p2.pos));
     let axis = mat_t_vec(&p2.mat, &p1.axis());
     let halfaxis = axis * halflength;
-    // `mji_addToScl3(v, halfaxis, s)` on a copy of `pos`: fused per component
-    let along = |s: f64| Vector3::from_fn(|k, _| halfaxis[k].mul_add(s, pos[k]));
+    // `mji_addToScl3` in `64156abe` is `(halfaxis * s) + pos`, each product rounded before the add.
+    let along = |s: f64| {
+        if contract_off() {
+            Vector3::from_fn(|k, _| (halfaxis[k] * s) + pos[k])
+        } else {
+            Vector3::from_fn(|k, _| halfaxis[k].mul_add(s, pos[k]))
+        }
+    };
     let mut axisdir = 0;
     if halfaxis[0] > 0.0 {
         axisdir += 1;
@@ -782,13 +788,14 @@ pub fn capsule_box(margin: f64, p1: &GeomPose, size1: [f64; 2], p2: &GeomPose, s
             let mc = size1[1] * size1[1];
             let u = -size2[j] * dif[j];
             let v = dot3(&halfaxis, &dif);
-            let det = ma.mul_add(mc, -(mb * mb));
+            // `(ma·mc) − (mb·mb)`, then `((mc·u) − (mb·v)) · idet` and `((ma·v) − (mb·u)) · idet`.
+            let det = if contract_off() { (ma * mc) - (mb * mb) } else { ma.mul_add(mc, -(mb * mb)) };
             if det.abs() < MINVAL {
                 continue;
             }
             let idet = 1.0 / det;
-            let mut x1 = mc.mul_add(u, -(mb * v)) * idet;
-            let mut x2 = ma.mul_add(v, -(mb * u)) * idet;
+            let mut x1 = if contract_off() { ((mc * u) - (mb * v)) * idet } else { mc.mul_add(u, -(mb * v)) * idet };
+            let mut x2 = if contract_off() { ((ma * v) - (mb * u)) * idet } else { ma.mul_add(v, -(mb * u)) * idet };
             let (mut s1, mut s2) = (1, 1);
             if x1 > 1.0 {
                 x1 = 1.0;
@@ -823,8 +830,13 @@ pub fn capsule_box(margin: f64, p1: &GeomPose, size1: [f64; 2], p2: &GeomPose, s
                 }
             }
             let dif0 = tmp3 - pos;
-            let mut dif = Vector3::from_fn(|k, _| halfaxis[k].mul_add(-x2, dif0[k]));
-            dif[j] = size2[j].mul_add(x1, dif[j]);
+            // `mji_addToScl3(dif, halfaxis, -x2)` then `dif[j] += size2[j] * x1`.
+            let mut dif = if contract_off() {
+                Vector3::from_fn(|k, _| (halfaxis[k] * -x2) + dif0[k])
+            } else {
+                Vector3::from_fn(|k, _| halfaxis[k].mul_add(-x2, dif0[k]))
+            };
+            dif[j] = if contract_off() { (size2[j] * x1) + dif[j] } else { size2[j].mul_add(x1, dif[j]) };
             let d2 = dot3(&dif, &dif);
             let c1 = s1 * 3 + s2;
             // the −MINVAL fixes an axis numerically parallel to the box (MuJoCo's comment)
