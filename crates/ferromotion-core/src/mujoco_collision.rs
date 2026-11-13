@@ -1185,13 +1185,18 @@ pub fn hfield_convex(opts: &CollideOptions, margin: f64, hf_pose: &GeomPose, hf:
         return Vec::new();
     }
     // the sub-grid under the box
-    let cmin = (((xmin + size0) / (2.0 * size0) * (ncol - 1) as f64).floor() as i64).max(0);
-    let cmax = (((xmax + size0) / (2.0 * size0) * (ncol - 1) as f64).ceil() as i64).min(ncol - 1);
-    let rmin = (((ymin + size1) / (2.0 * size1) * (nrow - 1) as f64).floor() as i64).max(0);
-    let rmax = (((ymax + size1) / (2.0 * size1) * (nrow - 1) as f64).ceil() as i64).min(nrow - 1);
+    // `64156abe` `mjc_ConvexHField`: `2*size` is `size + size`, then
+    // `(xmin + size) / that * (ncol - 1)`. The cell is `(dx * c) - size`.
+    let separate = contract_off();
+    let two0 = if separate { size0 + size0 } else { 2.0 * size0 };
+    let two1 = if separate { size1 + size1 } else { 2.0 * size1 };
+    let cmin = (((xmin + size0) / two0 * (ncol - 1) as f64).floor() as i64).max(0);
+    let cmax = (((xmax + size0) / two0 * (ncol - 1) as f64).ceil() as i64).min(ncol - 1);
+    let rmin = (((ymin + size1) / two1 * (nrow - 1) as f64).floor() as i64).max(0);
+    let rmax = (((ymax + size1) / two1 * (nrow - 1) as f64).ceil() as i64).min(nrow - 1);
     obj2.margin = margin;
-    let dx = (2.0 * size0) / (ncol - 1) as f64;
-    let dy = (2.0 * size1) / (nrow - 1) as f64;
+    let dx = two0 / (ncol - 1) as f64;
+    let dy = two1 / (nrow - 1) as f64;
     for p in obj1.prism.iter_mut().take(3) {
         p[2] = -size3;
     }
@@ -1203,8 +1208,8 @@ pub fn hfield_convex(opts: &CollideOptions, margin: f64, hf_pose: &GeomPose, hf:
         pr[3] = pr[4];
         pr[4] = pr[5];
         let dr = 1 - i;
-        let x = dx.mul_add(c as f64, -size0);
-        let y = dy.mul_add((r + dr) as f64, -size1);
+        let x = if separate { dx * (c as f64) - size0 } else { dx.mul_add(c as f64, -size0) };
+        let y = if separate { dy * ((r + dr) as f64) - size1 } else { dy.mul_add((r + dr) as f64, -size1) };
         pr[2][0] = x;
         pr[5][0] = x;
         pr[2][1] = y;

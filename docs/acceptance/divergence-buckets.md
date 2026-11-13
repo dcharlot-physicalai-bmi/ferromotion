@@ -2,7 +2,7 @@
 
 Oracle profile `mujoco-3.13.0-x86_64-contract-off`, library `64156abe`, Menagerie pin `4d038b3`. 212 models, three forward states, 20 steps. Equality is `f64::to_bits`.
 
-184 models are exact for all 20 steps. 28 fail a step. A fixed tendon's length is `(prm * qpos) + L` in `mj_tendon`. `mju_dot3` in the primitive colliders is `(az bz) + (ax bx + ay by)`. `mju_mulMatVec3` (`0x14d790`) is `(m02 vz) + (m00 vx + m01 vy)` on row 0, `(m12 vz) + (m11 vy + m10 vx)` on row 1, and `(m21 vy + m20 vx) + (m22 vz)` on row 2. That corner transform is what `mjc_PlaneBox` feeds to `mju_dot3`. Franka `scene.xml` step 1 was a 1 ulp `efc_pos` on two plane–box contacts of `right_finger`, and the Newton factor was already identical. Sphere-sphere distance is `(sqrt - r1) - r2`, and the witness offset is `(dist * 0.5) + r1`. Capsule-capsule numerators use the raw segment dots: `(dot12 * v - mc * u) / det`.
+185 models are exact for all 20 steps. 27 fail a step. A fixed tendon's length is `(prm * qpos) + L` in `mj_tendon`. `mju_dot3` in the primitive colliders is `(az bz) + (ax bx + ay by)`. `mju_mulMatVec3` (`0x14d790`) is `(m02 vz) + (m00 vx + m01 vy)` on row 0, `(m12 vz) + (m11 vy + m10 vx)` on row 1, and `(m21 vy + m20 vx) + (m22 vz)` on row 2. That corner transform is what `mjc_PlaneBox` feeds to `mju_dot3`. Franka `scene.xml` step 1 was a 1 ulp `efc_pos` on two plane–box contacts of `right_finger`, and the Newton factor was already identical. Sphere-sphere distance is `(sqrt - r1) - r2`, and the witness offset is `(dist * 0.5) + r1`. Capsule-capsule numerators use the raw segment dots: `(dot12 * v - mc * u) / det`.
 
 Box-box edge witnesses use `denom = 1 - b*b`, `s = (d1e - b*d2e) / denom`, `t = b*s - d2e`, then `s = d1e + b*t`. The edge corner `mji_mulMatVec3` is `(m2 v2) + (m1 v1 + m0 v0)`, then `pos +` that. Leap hand `efc_pos` is exact on all three forward states. Those four models still miss a step; the next forward field is `efc_J`.
 
@@ -10,7 +10,7 @@ Box-box edge witnesses use `denom = 1 - b*b`, `s = (d1e - b*d2e) / denom`, `t = 
 
 | models | stage | first field | site |
 | ---: | --- | --- | --- |
-| 4 | collision | `efc_pos` | `mjraw primitive / mesh` |
+| 3 | collision | `efc_pos` | `mjraw primitive / mesh` |
 | 3 | solver | `efc_force` | `mj_fwdConstraint` |
 | 9 | constants | `tendon_invweight0` | `set0 tendon block` |
 | 2 | constraint rows | `efc_J` | `mj_instantiateContact` |
@@ -19,11 +19,12 @@ Box-box edge witnesses use `denom = 1 - b*b`, `s = (d1e - b*d2e) / denom`, `t = 
 | 2 | smooth | `ten_velocity` | `mj_fwdVelocity` |
 | 1 | smooth | `qfrc_fluid` | `mj_passive` |
 
-## `efc_pos` — 4
+## `efc_pos` — 3
 
-Where it first appears: 1 at state 1, 2 at state 2, 1 at state 0.
+Where it first appears: 1 at state 0, 2 at state 2.
 
-- `google_barkour_vb/scene_hfield_mjx.xml` (state 0)
+`mjc_ConvexHField` (`0x6a700`) builds the cell as `(size + size) / (ncol - 1)`, then `(dx * c) - size` and `(dy * row) - size`. The height is `(sample * size2) + margin`. Barkour `scene_hfield_mjx.xml` is exact for 20 steps after that schedule. The three below still miss a step.
+
 - `stanford_tidybot/scene.xml` (state 2)
 - `ufactory_lite6/lite6_gripper_narrow.xml` (state 0)
 - `wonik_allegro/scene_left.xml` (state 2)
