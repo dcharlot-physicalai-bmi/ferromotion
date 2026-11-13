@@ -17,7 +17,7 @@ env:
 jobs:
   contract-off-native:
     name: contract-off native
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
@@ -39,7 +39,7 @@ jobs:
 
   contract-off-conformance:
     name: contract-off conformance
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4

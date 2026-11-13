@@ -5,6 +5,16 @@ set -euo pipefail
 phase="${1:?native or step}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 work="${RUNNER_TEMP:-/tmp}"
+# The pin is Ubuntu clang 18.1.3. A newer clang, including the Ubuntu 26.04
+# clang-18 package that is a wrapper onto clang 21, does not reproduce it.
+if [[ -x /usr/bin/clang-18 && -x /usr/bin/clang++-18 ]]; then
+  mkdir -p "$work/clang-bin"
+  ln -sfn /usr/bin/clang-18 "$work/clang-bin/clang"
+  ln -sfn /usr/bin/clang++-18 "$work/clang-bin/clang++"
+  export PATH="$work/clang-bin:$PATH"
+fi
+clang --version
+clang++ --version
 src="$work/mujoco-3.13.0-src"
 build="$work/oracle-build"
 out="$work/oracle"

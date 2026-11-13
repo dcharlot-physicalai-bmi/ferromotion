@@ -395,9 +395,18 @@ fn dot3(a: &Vector3<f64>, b: &Vector3<f64>) -> f64 {
     }
 }
 
-/// `mji_mulMatVec3`: `mat · v`.
+/// `mju_mulMatVec3` (`0x14d790`). Rows 0 and 1 are `(m2 vz) + (m0 vx + m1 vy)`,
+/// except row 1's pair is `(m11 vy + m10 vx)`. Row 2 is `(m21 vy + m20 vx) + (m22 vz)`.
 fn mat_vec(m: &Matrix3<f64>, v: &Vector3<f64>) -> Vector3<f64> {
-    Vector3::from_fn(|r, _| m[(r, 2)].mul_add(v.z, m[(r, 0)].mul_add(v.x, m[(r, 1)] * v.y)))
+    if contract_off() {
+        Vector3::new(
+            (m[(0, 2)] * v.z) + (m[(0, 0)] * v.x + m[(0, 1)] * v.y),
+            (m[(1, 2)] * v.z) + (m[(1, 1)] * v.y + m[(1, 0)] * v.x),
+            (m[(2, 1)] * v.y + m[(2, 0)] * v.x) + (m[(2, 2)] * v.z),
+        )
+    } else {
+        Vector3::from_fn(|r, _| m[(r, 2)].mul_add(v.z, m[(r, 0)].mul_add(v.x, m[(r, 1)] * v.y)))
+    }
 }
 
 /// `mji_mulMatTVec3`: `matᵀ · v`.
