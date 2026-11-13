@@ -1,8 +1,3 @@
-
-# Patched copy of crates.io urdf-rs 0.10.0. The published crate requires
-# quick-xml ^0.39, which is RUSTSEC-2026-0194 and RUSTSEC-2026-0195
-# (fixed in quick-xml >= 0.41.0). 0.42 is source-compatible with the calls
-# this crate makes. Upstream 0.10.0, released 2026-09-25, did not take that fix.
 [package]
 name = "urdf-rs"
 # When publishing a new version:
@@ -29,3 +24,15 @@ thiserror = "2.0.0"
 
 [dev-dependencies]
 assert_approx_eq = "1"
+
+[lints]
+workspace = true
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+# missing_docs = "warn" # TODO
+rust_2018_idioms = "warn"
+single_use_lifetimes = "warn"
+unreachable_pub = "warn"
+[workspace.lints.clippy]
+lint_groups_priority = { level = "allow", priority = 1 } # https://github.com/rust-lang/rust-clippy/issues/12920
