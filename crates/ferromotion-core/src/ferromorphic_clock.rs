@@ -299,7 +299,7 @@ pub fn meter_reading() -> Meter {
 }
 
 /// Forward product `((period_ns as f64) * 1e-9)`. A zero period is refused.
-/// [`require_default_mapping`] compares `dt` bits to this value. There is no ratio exemption.
+/// `require_default_mapping` compares `dt` bits to this value. There is no ratio exemption.
 pub fn nominal_seconds(period_ns: u64) -> Result<f64, TimebaseError> {
     if period_ns == 0 {
         return Err(TimebaseError::BadTick);
