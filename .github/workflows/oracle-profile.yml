@@ -20,16 +20,19 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Receipt gate self-test
         run: python3 scripts/oracle_profile_ci.py --self-test
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v5
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
-          python-version: "3.12"
+          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown, aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2.9.3
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12.16"
       - name: Contract-off toolchain
         run: |
           sudo apt-get update
@@ -46,16 +49,19 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Receipt gate self-test
         run: python3 scripts/oracle_profile_ci.py --self-test
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v5
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
-          python-version: "3.12"
+          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown, aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2.9.3
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12.16"
       - name: Contract-off toolchain
         run: |
           sudo apt-get update

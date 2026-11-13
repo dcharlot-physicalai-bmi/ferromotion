@@ -274,7 +274,6 @@ def main() -> int:
     }
     cmd = [
         "cargo",
-        "+stable",
         "run",
         "--release",
         "-p",

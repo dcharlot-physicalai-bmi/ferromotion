@@ -45,7 +45,7 @@ test "$(git -C "$menagerie" rev-parse HEAD)" = "$sha"
 venv="$work/oracle-venv"
 if [[ ! -x "$venv/bin/python" ]]; then
   python3 -m venv "$venv"
-  "$venv/bin/pip" install -q "mujoco==3.13.0" numpy
+  "$venv/bin/pip" install -q "mujoco==3.13.0" "numpy==2.5.4"
 fi
 pkg="$venv/lib/python3.12/site-packages/mujoco"
 rm -f "$pkg/libmujoco.so.3.13.0"

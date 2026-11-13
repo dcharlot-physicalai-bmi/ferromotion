@@ -22,7 +22,7 @@ ferromotion-core = { path = "../ferromotion-core", version = "0.73.0" }
 
 [dev-dependencies]
 ferromotion-learn = { path = "../ferromotion-learn", version = "0.73.0" }
-pollster = "0.4"
+pollster = "1.0"
 
 [features]
 ## The fabric GPU path: wgpu-portable LBM (Metal/Vulkan/DX12 native, WebGPU in the browser).
@@ -33,7 +33,7 @@ version = "30"
 optional = true
 
 [dependencies.pollster]
-version = "0.4"
+version = "1.0"
 optional = true
 
 [dependencies.bytemuck]

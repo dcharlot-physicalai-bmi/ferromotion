@@ -382,7 +382,7 @@ impl SmoothModel {
                     wpnt[1] = x1;
                     wbody[1] = s1.body;
                     let sum = dist3(&wpnt[0], &wpnt[1]);
-                    len = if contract_off() { (sum / divisor) + len } else { len + sum / divisor };
+                    len = crate::mujoco_solver::add_left(sum / divisor, len);
                     1
                 }
                 Some(((w, wlen), gbody)) => {
@@ -394,8 +394,10 @@ impl SmoothModel {
                     wbody[3] = s1.body;
                     let d1 = dist3(&wpnt[0], &wpnt[1]);
                     let d2 = dist3(&wpnt[2], &wpnt[3]);
-                    let sum = if contract_off() { d2 + (wlen + d1) } else { d1 + wlen + d2 };
-                    len = if contract_off() { (sum / divisor) + len } else { len + sum / divisor };
+                    // `dist2 + (wlen + dist1)`. The published `(dist1 + wlen) + dist2`
+                    // adds the same pairs: each `+` is commutative.
+                    let sum = d2 + (wlen + d1);
+                    len = crate::mujoco_solver::add_left(sum / divisor, len);
                     3
                 }
             };

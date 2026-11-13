@@ -90,14 +90,15 @@ pub(crate) fn add_to_scl(res: &mut [f64], x: &[f64], scl: f64, wide_at: usize) {
     if n >= wide_at {
         let prefix = n & !3;
         for i in 0..prefix {
-            res[i] = res[i] + x[i] * scl;
+            // Prefix lanes are `res + scl*x`. `+=` is that order.
+            res[i] += x[i] * scl;
         }
         for i in prefix..n {
-            res[i] = x[i] * scl + res[i];
+            res[i] = add_left(x[i] * scl, res[i]);
         }
     } else {
         for i in 0..n {
-            res[i] = x[i] * scl + res[i];
+            res[i] = add_left(x[i] * scl, res[i]);
         }
     }
 }
@@ -105,6 +106,15 @@ pub(crate) fn add_to_scl(res: &mut [f64], x: &[f64], scl: f64, wide_at: usize) {
 /// An expression `a*b + c` (product on the left), as the contract-off source writes it.
 fn prod_add(a: f64, b: f64, c: f64) -> f64 {
     if oracle_axpy() { a * b + c } else { a.mul_add(b, c) }
+}
+
+/// `a + b` with the left-hand addend written first.
+///
+/// `+=` would rewrite `scl*x + res` and `(segment / divisor) + L` into the
+/// opposite addend order. Those are the schedules the contract-off sources use.
+#[inline(always)]
+pub(crate) fn add_left(a: f64, b: f64) -> f64 {
+    a + b
 }
 
 /// A contact as the cone code reads it: `dim`, the regularised cone's `mu`, and the five frictions.
@@ -1146,7 +1156,7 @@ impl SmoothModel {
         let mda = mul_sym_vec(&sd.m, &self.m_rownnz, &self.m_rowadr, &self.m_colind, &da);
         let gauss = 0.5 * dot(&da, &mda);
         // `cost += 0.5 * dot(da, M da)`.
-        let mut cost_ws = if oracle_axpy() { cost_con + gauss } else { axpy(cost_con, 0.5, dot(&da, &mda)) };
+        let cost_ws = if oracle_axpy() { cost_con + gauss } else { axpy(cost_con, 0.5, dot(&da, &mda)) };
         let cost_smooth = constraint_update(ne, nf, &e.d, &e.r, &e.frictionloss, &out.efc_b, &e.typ, &e.id, &cones, &mut state, &mut force, None);
         out.qfrc_constraint = if sparse {
             // `mju_mulMatTVecSparse`

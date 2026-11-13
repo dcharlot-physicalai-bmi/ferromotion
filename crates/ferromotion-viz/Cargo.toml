@@ -2,7 +2,9 @@
 name = "ferromotion-viz"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# rerun 0.43.2 declares rust-version 1.98. The rest of the workspace stays on the
+# shared floor; this crate is the one that pulls the higher compiler.
+rust-version = "1.98"
 license.workspace = true
 repository.workspace = true
 description = "Rerun logging for ferromotion — robots, trajectories, and calibration runs in the rerun.io viewer. Native-side companion crate (not WASM)."
@@ -10,7 +12,7 @@ description = "Rerun logging for ferromotion — robots, trajectories, and calib
 [dependencies]
 ferromotion-core = { path = "../ferromotion-core", version = "0.73.0" }
 ferromotion-ruckig = { path = "../ferromotion-ruckig", version = "0.73.0" }
-rerun = { version = "0.34", default-features = false, features = ["sdk"] }
+rerun = { version = "0.43", default-features = false, features = ["sdk"] }
 nalgebra = { workspace = true }
 
 [lints]

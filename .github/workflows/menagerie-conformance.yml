@@ -24,16 +24,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
-          python-version: "3.12"
+          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown, aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2.9.3
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12.16"
       - name: Pin check
         run: python3 scripts/menagerie_conformance.py --self-test
       - name: MuJoCo 3.13.0
-        run: python3 -m pip install "mujoco==3.13.0" numpy
+        run: python3 -m pip install "mujoco==3.13.0" "numpy==2.5.4"
       - name: Menagerie at the pinned sha
         run: |
           set -euo pipefail
@@ -45,7 +48,7 @@ jobs:
         run: python3 scripts/menagerie_conformance.py "$RUNNER_TEMP/menagerie" --out conformance/menagerie_ledger.json
       - name: Upload ledger
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: menagerie-ledger
           path: conformance/menagerie_ledger.json

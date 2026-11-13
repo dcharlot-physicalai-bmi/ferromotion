@@ -20,14 +20,17 @@ jobs:
       run:
         working-directory: physbench-leaderboard
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.100.0
+        with:
+          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown, aarch64-unknown-linux-gnu
       - name: Score all submissions
         run: cargo run --release --bin score
       - name: Publish standings to the job summary
         run: cat STANDINGS.md >> "$GITHUB_STEP_SUMMARY"
       - name: Upload standings.json artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: standings
           path: physbench-leaderboard/standings.json

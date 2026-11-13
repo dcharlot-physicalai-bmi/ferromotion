@@ -633,7 +633,6 @@ fn libstdcpp_unordered_order(hashes: &[u64]) -> Vec<usize> {
     let mut buckets: Vec<usize> = Vec::new();
     let mut bcount = 1usize;
     let mut next_resize = 0usize;
-    let mut size = 0usize;
     let bkt_of = |h: u64, bc: usize| (h % bc as u64) as usize;
     let insert_begin = |bkt: usize, node: usize, bcount: usize, next: &mut [usize], buckets: &mut [usize], hashes: &[u64]| {
         if buckets[bkt] != nil {
@@ -651,7 +650,7 @@ fn libstdcpp_unordered_order(hashes: &[u64]) -> Vec<usize> {
             buckets[bkt] = bb;
         }
     };
-    for (i, &h) in hashes.iter().enumerate() {
+    for (size, (i, &h)) in hashes.iter().enumerate().enumerate() {
         let mut do_rehash = false;
         let mut nb = 0usize;
         if size + 1 > next_resize {
@@ -697,7 +696,6 @@ fn libstdcpp_unordered_order(hashes: &[u64]) -> Vec<usize> {
         }
         next[i] = nil;
         insert_begin(bkt_of(h, bcount), i, bcount, &mut next, &mut buckets, hashes);
-        size += 1;
     }
     let mut order = Vec::with_capacity(n);
     let mut p = next[bb];

@@ -90,11 +90,13 @@ pub fn sphere_sphere(margin: f64, p1: &GeomPose, r1: f64, p2: &GeomPose, r2: f64
     let dif = p1.pos - p2.pos;
     let cdist_sqr = dot3(&dif, &dif);
     // `64156abe`: `(margin + r1) + r2`, then `dist = (sqrt - r1) - r2`.
-    let min_dist = if contract_off() { (margin + r1) + r2 } else { margin + r1 + r2 };
+    // Those parentheses are the left-associative parse, so the published
+    // expression is the same operation.
+    let min_dist = (margin + r1) + r2;
     if cdist_sqr > min_dist * min_dist {
         return None;
     }
-    let dist = if contract_off() { (cdist_sqr.sqrt() - r1) - r2 } else { cdist_sqr.sqrt() - r1 - r2 };
+    let dist = (cdist_sqr.sqrt() - r1) - r2;
     let mut normal = p2.pos - p1.pos;
     let len = if contract_off() { ((normal.x * normal.x + normal.y * normal.y) + normal.z * normal.z).sqrt() } else { dot3(&normal, &normal).sqrt() };
     normalize3_mj(&mut normal);

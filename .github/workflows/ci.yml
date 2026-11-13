@@ -13,11 +13,12 @@ jobs:
     name: test + wasm
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
-          targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
+          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown, aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: Test (native)
         run: cargo test --workspace
       # ⛔ THIS DOES NOT COVER THE GPU PATH, and the runner cannot. `cargo test --workspace` enables no
