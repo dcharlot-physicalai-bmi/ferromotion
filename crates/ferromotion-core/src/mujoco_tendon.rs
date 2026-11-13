@@ -301,12 +301,23 @@ fn wrap(x0: &[f64; 3], x1: &[f64; 3], xpos: &[f64; 3], xmat: &[f64; 9], radius: 
         }
     }
     if cylinder {
-        let l0 = (p0[0] - res[0]).mul_add(p0[0] - res[0], (p0[1] - res[1]) * (p0[1] - res[1])).sqrt();
-        let l1 = (p1[0] - res[3]).mul_add(p1[0] - res[3], (p1[1] - res[4]) * (p1[1] - res[4])).sqrt();
-        res[2] = p0[2] + (p1[2] - p0[2]) * l0 / (l0 + wlen + l1);
-        res[5] = p0[2] + (p1[2] - p0[2]) * (l0 + wlen) / (l0 + wlen + l1);
-        let height = (res[5] - res[2]).abs();
-        wlen = wlen.mul_add(wlen, height * height).sqrt();
+        // `64156abe` `mju_wrap`, cylinder correction. Each horizontal length is
+        // `sqrt(dy² + dx²)` (`mulpd`, `unpckhpd`, `addsd`, `sqrtsd`). The
+        // denominator is `L1 + (wlen + L0)`. The corrected length is
+        // `sqrt(height² + wlen²)`.
+        let (dx0, dy0) = (p0[0] - res[0], p0[1] - res[1]);
+        let (dx1, dy1) = (p1[0] - res[3], p1[1] - res[4]);
+        let (l0, l1) = if contract_off() {
+            ((dy0 * dy0 + dx0 * dx0).sqrt(), (dy1 * dy1 + dx1 * dx1).sqrt())
+        } else {
+            (dx0.mul_add(dx0, dy0 * dy0).sqrt(), dx1.mul_add(dx1, dy1 * dy1).sqrt())
+        };
+        let denom = if contract_off() { l1 + (wlen + l0) } else { l0 + wlen + l1 };
+        let dz = p1[2] - p0[2];
+        res[2] = p0[2] + dz * l0 / denom;
+        res[5] = p0[2] + dz * (wlen + l0) / denom;
+        let height = res[5] - res[2];
+        wlen = if contract_off() { (height * height + wlen * wlen).sqrt() } else { wlen.mul_add(wlen, height * height).sqrt() };
     }
     let w0 = mat_vec3(xmat, &[res[0], res[1], res[2]]);
     let w1 = mat_vec3(xmat, &[res[3], res[4], res[5]]);

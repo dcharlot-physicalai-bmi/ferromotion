@@ -738,13 +738,41 @@ impl SmoothModel {
                     let (cols, vals, cpos) = match j2 {
                         Some((dof2, qadr2, ref2)) => {
                             let dif = qpos[*qadr2] - ref2;
-                            let p = d[1].mul_add(dif, d[2] * dif * dif);
-                            let p = (d[3] * dif * dif).mul_add(dif, p);
-                            let p = (d[4] * dif * dif * dif).mul_add(dif, p);
-                            let cpos = pos0 - ref1 - d[0] - p;
-                            let deriv = (2.0 * d[2]).mul_add(dif, d[1]);
-                            let deriv = (3.0 * d[3] * dif).mul_add(dif, deriv);
-                            let deriv = (4.0 * d[4] * dif * dif).mul_add(dif, deriv);
+                            // `64156abe` `mj_instantiateEquality`. The position poly adds
+                            // `(coef*dif^k) + acc`, powers by successive `mulsd dif`.
+                            // The derivative is `data[1] + ((data[2]+data[2])*dif)`, then
+                            // `((3*data[3])*dif)*dif` and `(((4*data[4])*dif)*dif)*dif`,
+                            // each added as `term + acc`.
+                            let (p, deriv) = if oracle_identity() {
+                                let d1 = d[1] * dif;
+                                let d2 = (d[2] * dif) * dif;
+                                let mut acc = d2 + d1;
+                                let d3 = ((d[3] * dif) * dif) * dif;
+                                acc = d3 + acc;
+                                let d4 = (((d[4] * dif) * dif) * dif) * dif;
+                                let p = d4 + acc;
+                                let mut t = d[2] + d[2];
+                                t *= dif;
+                                let mut deriv = d[1] + t;
+                                let mut t3 = 3.0 * d[3];
+                                t3 *= dif;
+                                t3 *= dif;
+                                deriv = t3 + deriv;
+                                let mut t4 = 4.0 * d[4];
+                                t4 *= dif;
+                                t4 *= dif;
+                                t4 *= dif;
+                                (p, t4 + deriv)
+                            } else {
+                                let p = d[1].mul_add(dif, d[2] * dif * dif);
+                                let p = (d[3] * dif * dif).mul_add(dif, p);
+                                let p = (d[4] * dif * dif * dif).mul_add(dif, p);
+                                let deriv = (2.0 * d[2]).mul_add(dif, d[1]);
+                                let deriv = (3.0 * d[3] * dif).mul_add(dif, deriv);
+                                let deriv = (4.0 * d[4] * dif * dif).mul_add(dif, deriv);
+                                (p, deriv)
+                            };
+                            let cpos = ((pos0 - ref1) - d[0]) - p;
                             if sparse {
                                 // `mju_combineSparse`: the two sorted chains merged
                                 let mut entries = [(dof1, 1.0f64), (*dof2, -deriv)];

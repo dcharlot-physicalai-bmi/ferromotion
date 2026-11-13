@@ -12,7 +12,7 @@ Box-box edge witnesses use `denom = 1 - b*b`, `s = (d1e - b*d2e) / denom`, `t = 
 | ---: | --- | --- | --- |
 | 3 | collision | `efc_pos` | `mjraw primitive / mesh` |
 | 3 | solver | `efc_force` | `mj_fwdConstraint` |
-| 6 | smooth | `ten_length` | `mj_tendon` |
+| 6 | smooth | `qacc` | `mj_step` |
 | 4 | constraint rows | `efc_AR` | `mj_makeARNumeric` |
 | 5 | solver | `qacc` | `mj_fwdConstraint` |
 | 1 | smooth | `qfrc_fluid` | `mj_passive` |
@@ -41,18 +41,18 @@ All three are Newton and dense (`nv` below 60). Spot's elliptic miss was not the
 - `robotiq_2f85/2f85.xml` (step 9)
 - `robotstudio_so101/scene_box.xml` (step 18)
 
-## `ten_length` — 6
+## `ms_human_700` step 1 — 6
 
-Where it first appears: 6 at state 0.
+The index-35 ulp on `iliacus_r_tendon` was the cylinder correction in `mju_wrap`. `64156abe` takes each horizontal length as `sqrt(dy² + dx²)` (`mulpd`, `unpckhpd`, `addsd`, `sqrtsd`), the denominator as `L1 + (wlen + L0)`, and the corrected length as `sqrt(height² + wlen²)`. After that schedule, `ten_length` is 635 of 636. The one miss is `ms_human_700/scene.xml` state 1, index 186, one ulp (`0.4370790900602747` versus `0.43707909006027473`).
 
-`mju_dist3` in `64156abe` is `sqrt(dz² + (dy² + dx²))`. The running length is `(segment / divisor) + L`, and a wrap's segment is `d2 + (wlen + d1)`. Those match, and `tendon_invweight0` is exact. The six human models still miss `ten_length` by one ulp. On `MS-Human-700.xml` the first miss is index 35: `0.20770325484367838` versus `0.20770325484367835`. The trajectory then misses step 1.
+`mj_instantiateEquality` for a joint polynomial, in the same library, builds the position as successive `mulsd` by `dif` and `(term + acc)`, and the derivative as `data[1] + ((data[2]+data[2])*dif)`, then `((3*data[3])*dif)*dif` and `(((4*data[4])*dif)*dif)*dif`. `efc_J` on `MS-Human-700.xml` at the step-1 pose matches after that. The six models still miss step 1. On `MS-Human-700-Locomotion.xml` and `scene_locomotion.xml`, step-1 `qpos`, `qvel`, and `qacc_warmstart` match and `act` does not.
 
-- `ms_human_700/MS-Human-700-Locomotion.xml` (state 0)
-- `ms_human_700/MS-Human-700-Manipulation.xml` (state 0)
-- `ms_human_700/MS-Human-700.xml` (state 0)
-- `ms_human_700/scene.xml` (state 0)
-- `ms_human_700/scene_locomotion.xml` (state 0)
-- `ms_human_700/scene_manipulation.xml` (state 0)
+- `ms_human_700/MS-Human-700-Locomotion.xml` (step 1, `act`)
+- `ms_human_700/MS-Human-700-Manipulation.xml` (step 1)
+- `ms_human_700/MS-Human-700.xml` (step 1)
+- `ms_human_700/scene.xml` (step 1)
+- `ms_human_700/scene_locomotion.xml` (step 1, `act`)
+- `ms_human_700/scene_manipulation.xml` (step 1)
 
 ## `efc_AR` — 4
 
