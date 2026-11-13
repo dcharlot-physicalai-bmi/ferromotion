@@ -312,7 +312,9 @@ fn wrap(x0: &[f64; 3], x1: &[f64; 3], xpos: &[f64; 3], xmat: &[f64; 9], radius: 
         } else {
             (dx0.mul_add(dx0, dy0 * dy0).sqrt(), dx1.mul_add(dx1, dy1 * dy1).sqrt())
         };
-        let denom = if contract_off() { l1 + (wlen + l0) } else { l0 + wlen + l1 };
+        // `L1 + (wlen + L0)`. The published `(L0 + wlen) + L1` adds the same
+        // pairs: each `+` is commutative, so the two expressions are the same bits.
+        let denom = l1 + (wlen + l0);
         let dz = p1[2] - p0[2];
         res[2] = p0[2] + dz * l0 / denom;
         res[5] = p0[2] + dz * (wlen + l0) / denom;

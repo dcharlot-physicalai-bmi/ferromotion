@@ -748,7 +748,7 @@ impl SmoothModel {
                                 let d2 = (d[2] * dif) * dif;
                                 let mut acc = d2 + d1;
                                 let d3 = ((d[3] * dif) * dif) * dif;
-                                acc = d3 + acc;
+                                acc = crate::mujoco_solver::add_left(d3, acc);
                                 let d4 = (((d[4] * dif) * dif) * dif) * dif;
                                 let p = d4 + acc;
                                 let mut t = d[2] + d[2];
@@ -757,7 +757,7 @@ impl SmoothModel {
                                 let mut t3 = 3.0 * d[3];
                                 t3 *= dif;
                                 t3 *= dif;
-                                deriv = t3 + deriv;
+                                deriv = crate::mujoco_solver::add_left(t3, deriv);
                                 let mut t4 = 4.0 * d[4];
                                 t4 *= dif;
                                 t4 *= dif;
