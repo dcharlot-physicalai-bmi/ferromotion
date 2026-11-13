@@ -2,7 +2,7 @@
 
 Oracle profile `mujoco-3.13.0-x86_64-contract-off`, library `64156abe`, Menagerie pin `4d038b3`. 212 models, three forward states, 20 steps. Equality is `f64::to_bits`.
 
-198 models are exact for all 20 steps. 14 fail a step. `mju_sqrMatTDSparseNumeric` in `64156abe` forms each Hessian term as `(J · (vt · D)) + acc` (`mulsd` with `J` as the destination, then `addsd` of the accumulator). `efc_force` is 609 of 636, `qacc` 610 of 636, `qfrc_constraint` 609 of 636. Joined, and nothing left: `ms_human_700/MS-Human-700.xml`, `ms_human_700/scene.xml`, and `flybody/fruitfly.xml`. `mju_wrap` inside wrap (the side site's norm is below the radius) writes `cosG` as `((len1² + len0²) - dd) / ((len0 + len0)·len1)`, with `dd = (dif1²) + (dif0²)`. The Newton residual is `(asin(B·z) + asin(A·z))` minus `asin(z) + asin(z)`, and the point is `radius·((cos·vx) − (sin·vy))`, `radius·((cos·vy) + (sin·vx))`. `ten_length` and `ten_velocity` are 636 of 636. Joined, and nothing left: `ms_human_700/MS-Human-700-Manipulation.xml`. `mju_muscleGainLength` in `64156abe` writes the middle pieces as `1 + ((-0.5)*x)*x`. `mju_muscleDynamics` uses `s = 0.5 + (1.5*actclamp)` and `tau_deact + (tau_act-tau_deact)*sigmoid`, and `mju_sigmoid` is `(((x+x)-5)*(3*x) + 10) * ((x*x)*x)`. `mj_nextActivation` is `act + (h*act_dot)`. Joined, and nothing left: `ms_human_700/MS-Human-700-Locomotion.xml`, `ms_human_700/scene_locomotion.xml`, `ms_human_700/scene_manipulation.xml`, and `shadow_dexee/shadow_dexee.xml`. `mj_tendon` calls `mju_mulMatTVec` (`0x14edc0`). In `64156abe` that symbol vectorises at `n >= 4`: `res + scl*x` on the 4-wide prefix (`mulpd` then `addpd`) and `scl*x + res` on the tail (`mulsd` then `addsd`). `tendon_invweight0` is 212 of 212 after that schedule. Joined, and nothing left: `robotiq_2f85/scene.xml`, `robotiq_2f85_v4/scene.xml`, and the three `tetheria_aero_hand_open` models. A fixed tendon's length is `(prm * qpos) + L` in `mj_tendon`. `mju_dot3` in the primitive colliders is `(az bz) + (ax bx + ay by)`. `mju_mulMatVec3` (`0x14d790`) is `(m02 vz) + (m00 vx + m01 vy)` on row 0, `(m12 vz) + (m11 vy + m10 vx)` on row 1, and `(m21 vy + m20 vx) + (m22 vz)` on row 2. That corner transform is what `mjc_PlaneBox` feeds to `mju_dot3`. Franka `scene.xml` step 1 was a 1 ulp `efc_pos` on two plane–box contacts of `right_finger`, and the Newton factor was already identical. Sphere-sphere distance is `(sqrt - r1) - r2`, and the witness offset is `(dist * 0.5) + r1`. Capsule-capsule numerators use the raw segment dots: `(dot12 * v - mc * u) / det`.
+202 models are exact for all 20 steps. 10 fail a step. `mjc_ccd` for these meshes is native GJK (`disableflags` 0, so `mjDSBL_NATIVECCD` is clear). Sphere-mesh reduces the sphere to a point and returns the inflated GJK witness; EPA does not run. `qh_distplane` in `64156abe` is `offset + p0·n0`, then `(p1·n1) + that`, then `(p2·n2) + that`. With that schedule, plus the unfused plane normal, the four mesh models' `mesh_graph` arrays match the oracle. `efc_pos` is 636 of 636. Joined, and nothing left: `rainbow_robotics_rby1/rby1m_1.2.xml`, `robotiq_2f85/2f85.xml`, `stanford_tidybot/scene.xml`, and `ufactory_lite6/lite6_gripper_narrow.xml`. `mju_sqrMatTDSparseNumeric` in `64156abe` forms each Hessian term as `(J · (vt · D)) + acc` (`mulsd` with `J` as the destination, then `addsd` of the accumulator). `efc_force` is 611 of 636, `qacc` 612 of 636, `qfrc_constraint` 611 of 636. Joined, and nothing left: `ms_human_700/MS-Human-700.xml`, `ms_human_700/scene.xml`, and `flybody/fruitfly.xml`. `mju_wrap` inside wrap (the side site's norm is below the radius) writes `cosG` as `((len1² + len0²) - dd) / ((len0 + len0)·len1)`, with `dd = (dif1²) + (dif0²)`. The Newton residual is `(asin(B·z) + asin(A·z))` minus `asin(z) + asin(z)`, and the point is `radius·((cos·vx) − (sin·vy))`, `radius·((cos·vy) + (sin·vx))`. `ten_length` and `ten_velocity` are 636 of 636. Joined, and nothing left: `ms_human_700/MS-Human-700-Manipulation.xml`. `mju_muscleGainLength` in `64156abe` writes the middle pieces as `1 + ((-0.5)*x)*x`. `mju_muscleDynamics` uses `s = 0.5 + (1.5*actclamp)` and `tau_deact + (tau_act-tau_deact)*sigmoid`, and `mju_sigmoid` is `(((x+x)-5)*(3*x) + 10) * ((x*x)*x)`. `mj_nextActivation` is `act + (h*act_dot)`. Joined, and nothing left: `ms_human_700/MS-Human-700-Locomotion.xml`, `ms_human_700/scene_locomotion.xml`, `ms_human_700/scene_manipulation.xml`, and `shadow_dexee/shadow_dexee.xml`. `mj_tendon` calls `mju_mulMatTVec` (`0x14edc0`). In `64156abe` that symbol vectorises at `n >= 4`: `res + scl*x` on the 4-wide prefix (`mulpd` then `addpd`) and `scl*x + res` on the tail (`mulsd` then `addsd`). `tendon_invweight0` is 212 of 212 after that schedule. Joined, and nothing left: `robotiq_2f85/scene.xml`, `robotiq_2f85_v4/scene.xml`, and the three `tetheria_aero_hand_open` models. A fixed tendon's length is `(prm * qpos) + L` in `mj_tendon`. `mju_dot3` in the primitive colliders is `(az bz) + (ax bx + ay by)`. `mju_mulMatVec3` (`0x14d790`) is `(m02 vz) + (m00 vx + m01 vy)` on row 0, `(m12 vz) + (m11 vy + m10 vx)` on row 1, and `(m21 vy + m20 vx) + (m22 vz)` on row 2. That corner transform is what `mjc_PlaneBox` feeds to `mju_dot3`. Franka `scene.xml` step 1 was a 1 ulp `efc_pos` on two plane–box contacts of `right_finger`, and the Newton factor was already identical. Sphere-sphere distance is `(sqrt - r1) - r2`, and the witness offset is `(dist * 0.5) + r1`. Capsule-capsule numerators use the raw segment dots: `(dot12 * v - mc * u) / det`.
 
 Box-box edge witnesses use `denom = 1 - b*b`, `s = (d1e - b*d2e) / denom`, `t = b*s - d2e`, then `s = d1e + b*t`. The edge corner `mji_mulMatVec3` is `(m2 v2) + (m1 v1 + m0 v0)`, then `pos +` that. Leap hand `efc_pos` is exact on all three forward states. Those four models still miss a step; the next forward field is `efc_J`.
 
@@ -10,35 +10,27 @@ Box-box edge witnesses use `denom = 1 - b*b`, `s = (d1e - b*d2e) / denom`, `t = 
 
 | models | stage | first field | site |
 | ---: | --- | --- | --- |
-| 3 | collision | `efc_pos` | `mjraw primitive / mesh` |
-| 3 | solver | `efc_force` | `mj_fwdConstraint` |
+| 1 | solver | `efc_force` | `mj_fwdConstraint` |
 | 3 | constraint rows | `efc_AR` | `mj_makeARNumeric` |
 | 3 | solver | `qacc` | `mj_fwdConstraint` |
 | 2 | step | `qacc` | `mj_step` |
+| 1 | step | `qpos` | `mjraw_CapsuleBox` |
 
-## `efc_pos` — 3
+## `efc_pos`
 
-Where it first appears: 1 at state 0, 2 at state 2.
+`efc_pos` is 636 of 636. `mjc_ConvexHField` (`0x6a700`) builds the cell as `(size + size) / (ncol - 1)`, then `(dx * c) - size` and `(dy * row) - size`. The height is `(sample * size2) + margin`. Barkour `scene_hfield_mjx.xml` is exact for 20 steps after that schedule. The four mesh models above are exact for 20 steps after the contract-off `qh_distplane` schedule. `wonik_allegro/scene_left.xml` still misses step 6. Its forward `efc_pos` matches. The capsule-box witness `z` is 2 ulps off (`0x3f81e51912cdc799` vs `0x3f81e51912cdc79b`) while the frame, including an exact −Z normal, matches. `mjraw_CapsuleBox` builds the sphere center as `(halfaxis * t) + pos` in the box frame, then `mju_mulMatVec3` and `mju_addTo3`. That unfused form does not move the step-6 miss.
 
-`mjc_ConvexHField` (`0x6a700`) builds the cell as `(size + size) / (ncol - 1)`, then `(dx * c) - size` and `(dy * row) - size`. The height is `(sample * size2) + margin`. Barkour `scene_hfield_mjx.xml` is exact for 20 steps after that schedule. The three below still miss a step.
+## `efc_force` — 1
 
-- `stanford_tidybot/scene.xml` (state 2)
-- `ufactory_lite6/lite6_gripper_narrow.xml` (state 0)
-- `wonik_allegro/scene_left.xml` (state 2)
-
-## `efc_force` — 3
-
-Where it first appears: 1 at step 1, 1 at step 9, 1 at step 18.
+Where it first appears: 1 at step 19.
 
 `qfrc_passive`, `qfrc_actuator`, and `qacc_smooth` match at that step. The step log still names `qacc_warmstart`, because that is the copy of this step's `qacc`.
 
-All three are Newton and dense (`nv` below 60). Spot's elliptic miss was not the cone force. `J` and `qacc` matched and `efc_aref` was one ulp off, from `getimpedance`: `imp = solimp[0] + y*(solimp[1]-solimp[0])`. With that product separated, Spot and eight other models are exact for 20 steps.
+`scene_box.xml` is Newton and dense (`nv` below 60). Spot's elliptic miss was not the cone force. `J` and `qacc` matched and `efc_aref` was one ulp off, from `getimpedance`: `imp = solimp[0] + y*(solimp[1]-solimp[0])`. With that product separated, Spot and eight other models are exact for 20 steps.
 
 `toddlerbot_2xc_mjx` has one island, so the solver scale is `1/sum(diag M)`, bits `0x3fb7c7cbbacf81d1`, not `1/(meaninertia*nv)`. Iteration 1's improvement matches (`0x41b6b1b1798c8003`). The scaled gradient is three ulps off (`0x3fd3e6b0315133e4` vs `0x3fd3e6b0315133e7`) because `mju_norm(grad)` is four ulps off. The next linesearch then returns `alpha = 0`.
 
-- `rainbow_robotics_rby1/rby1m_1.2.xml` (step 1)
-- `robotiq_2f85/2f85.xml` (step 9)
-- `robotstudio_so101/scene_box.xml` (step 18)
+- `robotstudio_so101/scene_box.xml` (step 19)
 
 ## `efc_AR` — 3
 
@@ -57,6 +49,10 @@ Where it first appears: 3 at state 0.
 - `flybody/scene.xml` (state 0)
 - `robot_soccer_kit/robot_soccer_kit.xml` (state 0)
 - `robot_soccer_kit/scene.xml` (state 0)
+
+## `wonik_allegro` step — 1
+
+`scene_left.xml` misses step 6. The detail is unchanged from the 198 measurement: `qpos` 5.55e-17, `qvel` 2.66e-15, `qacc_warmstart` 3.98e-13.
 
 ## `iit_softfoot` step — 2
 

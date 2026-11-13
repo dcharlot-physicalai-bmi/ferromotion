@@ -17,6 +17,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 fn main() {
+    if let Err(error) = ferromotion_core::install_policy_from_env() {
+        eprintln!("policy refused: {error:?}");
+        std::process::exit(2);
+    }
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
         eprintln!("usage: menagerie_qhull <menagerie root> <graph oracle txt> [--dump <verts txt>]");
@@ -65,7 +69,18 @@ fn main() {
                     differ += 1;
                     if notes.len() < 25 {
                         let first = g.iter().zip(want).position(|(a, b)| a != b).unwrap_or(g.len().min(want.len()));
-                        notes.push(format!("{model}/{name}: {} verts {} faces here, MuJoCo {} {}; first difference at [{first}]", g[0], g[1], want[0], want[1]));
+                        let nv = g[0] as usize;
+                        let same_ids = g.len() > 2 + 2 * nv && want.len() > 2 + 2 * nv && g[2 + nv..2 + 2 * nv] == want[2 + nv..2 + 2 * nv];
+                        notes.push(format!(
+                            "{model}/{name}: {} verts {} faces here, MuJoCo {} {}; first difference at [{first}] got {:?} want {:?}; vertex ids {}",
+                            g[0],
+                            g[1],
+                            want[0],
+                            want[1],
+                            g.get(first),
+                            want.get(first),
+                            if same_ids { "match" } else { "differ" }
+                        ));
                     }
                 }
                 Err(e) => {
