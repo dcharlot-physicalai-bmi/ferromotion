@@ -1,0 +1,12 @@
+{
+  "oracle_id": "mujoco-3.13.0-x86_64-contract-off",
+  "lib_sha256": "64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc",
+  "native_dump_sha256": "a3168d763bed63c9181275b6a908348c0c0609fde425be1ece840c75d110b5b7",
+  "native_dump_bytes": 73420440,
+  "step_dump_sha256": "a039f949d938cefc0cf3633edec1415497f8400a776b88809adf9bb06f5678be",
+  "step_dump_bytes": 7582957,
+  "menagerie_sha": "4d038b3feae26ec82b46a4d586379114012a8ac7",
+  "expected_step_exact": 212,
+  "expected_native_states": 636,
+  "native_required": ["efc_J", "qacc"]
+}

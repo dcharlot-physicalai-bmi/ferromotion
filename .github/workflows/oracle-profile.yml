@@ -1,0 +1,60 @@
+name: oracle-profile
+
+on:
+  push:
+    branches: [main, "cursor/**"]
+  pull_request:
+
+# Contract-off comparisons against libmujoco 64156abe. The published-default
+# jobs in ci.yml and menagerie-conformance.yml are unchanged: their goldens
+# stay the contracted captures, and this workflow does not rewrite them.
+
+env:
+  CARGO_TERM_COLOR: always
+  FERROMOTION_BUILD_POLICY: mujoco-3.13.0-x86_64-contract-off
+  FERROMOTION_ORACLE_SHA256: 64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc
+
+jobs:
+  contract-off-native:
+    name: contract-off native
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Contract-off toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 cmake g++-14 python3-venv
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
+      - name: Build libmujoco 64156abe and the native dump
+        run: bash scripts/oracle_profile_prepare.sh native
+      - name: Native comparison
+        run: python3 scripts/oracle_profile_ci.py --phase native --lib "$RUNNER_TEMP/oracle/lib/libmujoco.so.3.13.0" --menagerie "$RUNNER_TEMP/menagerie" --dump "$RUNNER_TEMP/oracle/x86-native.txt"
+
+  contract-off-conformance:
+    name: contract-off conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Contract-off toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 cmake g++-14 python3-venv
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
+      - name: Build libmujoco 64156abe and the step dump
+        run: bash scripts/oracle_profile_prepare.sh step
+      - name: 20-step comparison
+        run: python3 scripts/oracle_profile_ci.py --phase step --lib "$RUNNER_TEMP/oracle/lib/libmujoco.so.3.13.0" --menagerie "$RUNNER_TEMP/menagerie" --dump "$RUNNER_TEMP/oracle/x86-step.txt"
