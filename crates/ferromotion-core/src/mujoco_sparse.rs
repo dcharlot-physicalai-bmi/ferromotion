@@ -94,7 +94,8 @@ pub(crate) fn hessian(j: &Rows, jt: &Rows, d: &[f64], m: &Rows) -> Rows {
         for (&k, &vt) in jt[r].0.iter().zip(&jt[r].1) {
             // `64156abe` `mju_sqrMatTDSparseNumeric`: `scale = vt * D`, then
             // `(J * scale) + acc` (`mulsd` with `J` as the destination, `addsd` of the accumulator).
-            let scale = if oracle_contract_off() { vt * d[k] } else { d[k] * vt };
+            // `D * vt` is the same product.
+            let scale = vt * d[k];
             if scale == 0.0 {
                 continue;
             }
