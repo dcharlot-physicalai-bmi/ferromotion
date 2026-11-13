@@ -52,9 +52,59 @@ fn max(a: f64, b: f64) -> f64 {
     if a >= b { a } else { b }
 }
 
-/// `mju_norm`, as inlined into the solver: a self-dot, fused throughout
+/// `mju_norm`. The published path is the fused inlined self-dot. `64156abe` is `sqrt(mju_dot(v, v))`.
 fn norm(v: &[f64]) -> f64 {
     dot_self(v).sqrt()
+}
+
+/// `64156abe` (`-ffp-contract=off`). `acc += a*b` rounds the product, then adds it on the right.
+fn oracle_axpy() -> bool {
+    crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID
+}
+
+fn axpy(acc: f64, a: f64, b: f64) -> f64 {
+    if oracle_axpy() { acc + a * b } else { a.mul_add(b, acc) }
+}
+
+/// `s += 0.5*D*jar*jar` in `mj_constraintUpdate_impl`. `64156abe` multiplies
+/// `(D * 0.5) * jar * jar`, then adds that term to `s`.
+fn quad_cost(s: f64, d: f64, jar: f64) -> f64 {
+    if oracle_axpy() { s + (d * 0.5) * jar * jar } else { (0.5 * d * jar).mul_add(jar, s) }
+}
+
+/// `64156abe` inlined `res += scl * x`.
+///
+/// The out-of-line `mju_addToScl` vectorises at `n >= 6`. `mju_sqrMatTD_impl` and
+/// `mju_mulMatTVec` inline their own copies and vectorise at `n >= 4`. In the wide
+/// prefix each lane is `res + scl*x`. The tail, and every lane of a short vector,
+/// is `scl*x + res`. `mju_addScl3` and `mju_addToScl3` are that short form for all
+/// three lanes. The published path contracts `scl*x + res`.
+pub(crate) fn add_to_scl(res: &mut [f64], x: &[f64], scl: f64, wide_at: usize) {
+    let n = res.len();
+    if !oracle_axpy() {
+        for i in 0..n {
+            res[i] = x[i].mul_add(scl, res[i]);
+        }
+        return;
+    }
+    if n >= wide_at {
+        let prefix = n & !3;
+        for i in 0..prefix {
+            res[i] = res[i] + x[i] * scl;
+        }
+        for i in prefix..n {
+            res[i] = x[i] * scl + res[i];
+        }
+    } else {
+        for i in 0..n {
+            res[i] = x[i] * scl + res[i];
+        }
+    }
+}
+
+/// An expression `a*b + c` (product on the left), as the contract-off source writes it.
+fn prod_add(a: f64, b: f64, c: f64) -> f64 {
+    if oracle_axpy() { a * b + c } else { a.mul_add(b, c) }
 }
 
 /// A contact as the cone code reads it: `dim`, the regularised cone's `mu`, and the five frictions.
@@ -82,22 +132,32 @@ fn constraint_update(ne: usize, nf: usize, d: &[f64], r: &[f64], floss: &[f64], 
     let mut i = 0;
     while i < nefc {
         if i < ne {
-            s = (0.5 * d[i] * jar[i]).mul_add(jar[i], s);
+            s = quad_cost(s, d[i], jar[i]);
             state[i] = QUADRATIC;
             i += 1;
             continue;
         }
         if i < ne + nf {
             if jar[i] <= -r[i] * floss[i] {
-                s += (-0.5 * r[i] * floss[i]).mul_add(floss[i], -(floss[i] * jar[i]));
+                // `((R*-0.5)*floss)*floss - jar*floss`, then `s + term`.
+                s = if oracle_axpy() {
+                    s + (((r[i] * -0.5) * floss[i]) * floss[i] - jar[i] * floss[i])
+                } else {
+                    s + (-0.5 * r[i] * floss[i]).mul_add(floss[i], -(floss[i] * jar[i]))
+                };
                 force[i] = floss[i];
                 state[i] = LINEARNEG;
             } else if jar[i] >= r[i] * floss[i] {
-                s += (-0.5 * r[i] * floss[i]).mul_add(floss[i], floss[i] * jar[i]);
+                // `(jar*floss) + ((R*-0.5)*floss)*floss`, then `s + term`.
+                s = if oracle_axpy() {
+                    s + (jar[i] * floss[i] + ((r[i] * -0.5) * floss[i]) * floss[i])
+                } else {
+                    s + (-0.5 * r[i] * floss[i]).mul_add(floss[i], floss[i] * jar[i])
+                };
                 force[i] = -floss[i];
                 state[i] = LINEARPOS;
             } else {
-                s = (0.5 * d[i] * jar[i]).mul_add(jar[i], s);
+                s = quad_cost(s, d[i], jar[i]);
                 state[i] = QUADRATIC;
             }
             i += 1;
@@ -108,7 +168,7 @@ fn constraint_update(ne: usize, nf: usize, d: &[f64], r: &[f64], floss: &[f64], 
                 force[i] = 0.0;
                 state[i] = SATISFIED;
             } else {
-                s = (0.5 * d[i] * jar[i]).mul_add(jar[i], s);
+                s = quad_cost(s, d[i], jar[i]);
                 state[i] = QUADRATIC;
             }
             i += 1;
@@ -129,16 +189,18 @@ fn constraint_update(ne: usize, nf: usize, d: &[f64], r: &[f64], floss: &[f64], 
                 force[i + j] = 0.0;
             }
             state[i] = SATISFIED;
-        } else if mu.mul_add(n, t) <= 0.0 || (t <= 0.0 && n < 0.0) {
+        } else if prod_add(mu, n, t) <= 0.0 || (t <= 0.0 && n < 0.0) {
             for j in 0..dim {
-                s = (0.5 * d[i + j] * jar[i + j]).mul_add(jar[i + j], s);
+                s = quad_cost(s, d[i + j], jar[i + j]);
             }
             state[i] = QUADRATIC;
         } else {
             // `D/(mu*mu*(1+mu*mu))`: the `1+mu*mu` is one fused multiply-add (`_mj_constraintUpdate_impl`)
-            let dm = d[i] / (mu * mu * mu.mul_add(mu, 1.0));
-            let nmt = (-mu).mul_add(t, n);
-            s = (0.5 * dm * nmt).mul_add(nmt, s);
+            let one_mu = if oracle_axpy() { 1.0 + mu * mu } else { mu.mul_add(mu, 1.0) };
+            let dm = d[i] / (mu * mu * one_mu);
+            // `N - mu*T`. Negating `mu` first is a different product.
+            let nmt = if oracle_axpy() { n - mu * t } else { axpy(n, -mu, t) };
+            s = quad_cost(s, dm, nmt);
             force[i] = -dm * nmt * mu;
             for j in 1..dim {
                 force[i + j] = -force[i] / t * u[j] * fr[j - 1];
@@ -157,7 +219,7 @@ fn constraint_update(ne: usize, nf: usize, d: &[f64], r: &[f64], floss: &[f64], 
                         h[k * dim + j] = scl * u[j] * u[k];
                     }
                 }
-                let scl = mu.mul_add(mu, -(mu * n / t));
+                let scl = prod_add(mu, mu, -(mu * n / t));
                 for j in 1..dim {
                     h[j * (dim + 1)] += scl;
                 }
@@ -193,8 +255,9 @@ fn mul_sym_vec(m: &[f64], rownnz: &[usize], rowadr: &[usize], colind: &[usize], 
         for k in (0..diag).rev() {
             let j = colind[adr + k];
             let val = m[adr + k];
-            res[i] = val.mul_add(v[j], res[i]);
-            res[j] = val.mul_add(v[i], res[j]);
+            // `mju_mulSymVecSparse`: `res += val * vec`, accumulator on the left.
+            res[i] = axpy(res[i], val, v[j]);
+            res[j] = axpy(res[j], val, v[i]);
         }
     }
     res
@@ -206,9 +269,8 @@ fn mul_mat_t_vec(mat: &[f64], vec: &[f64], nr: usize, nc: usize) -> Vec<f64> {
     for r in 0..nr {
         let t = vec[r];
         if t != 0.0 {
-            for c in 0..nc {
-                res[c] = mat[r * nc + c].mul_add(t, res[c]);
-            }
+            // `mju_mulMatTVec` inlines the scale-add and vectorises at `nc >= 4`.
+            add_to_scl(&mut res, &mat[r * nc..(r + 1) * nc], t, 4);
         }
     }
     res
@@ -255,7 +317,14 @@ pub(crate) fn chol_solve(mat: &[f64], vec: &[f64], n: usize) -> Vec<f64> {
     }
     for i in (0..n).rev() {
         for j in i + 1..n {
-            res[i] = (-mat[j * n + i]).mul_add(res[j], res[i]);
+            // `64156abe` `mju_cholSolve` back-substitution: `mulsd` then `subsd`,
+            // `res[i] - L[j, i] * res[j]`. The pair unroll keeps that left-to-right
+            // accumulator. The published path contracts `(-L)*res[j] + res[i]`.
+            res[i] = if oracle_axpy() {
+                res[i] - mat[j * n + i] * res[j]
+            } else {
+                (-mat[j * n + i]).mul_add(res[j], res[i])
+            };
         }
         res[i] /= mat[i * (n + 1)];
     }
@@ -263,22 +332,46 @@ pub(crate) fn chol_solve(mat: &[f64], vec: &[f64], n: usize) -> Vec<f64> {
 }
 
 /// `mju_cholUpdate`: `L·L' ± x·x'`; returns the rank.
+///
+/// `64156abe` does not use `hypot`. The diagonal is `sqrt` of `(x x + L L)` on an
+/// update and `(L L - x x)` on a downdate, clamped at `mjMINVAL`. `c = r/L` and
+/// `s = x/L` are one packed division, `cinv = 1/c`. An update writes
+/// `(s x + L) cinv`; a downdate writes `(L - s x) cinv`. The vector is then
+/// `(c x) - (s Lnew)`. The published path fuses those products.
 fn chol_update(mat: &mut [f64], x: &mut [f64], n: usize, plus: bool) -> usize {
     let mut rank = n;
     for k in 0..n {
-        if x[k] != 0.0 {
-            let lkk = mat[k * (n + 1)];
-            let xx = if plus { x[k] * x[k] } else { -(x[k] * x[k]) };
-            let mut tmp = lkk.mul_add(lkk, xx);
-            if tmp < MJ_MINVAL {
-                tmp = MJ_MINVAL;
-                rank -= 1;
+        if x[k] == 0.0 {
+            continue;
+        }
+        let lkk = mat[k * (n + 1)];
+        let xx = x[k] * x[k];
+        let mut tmp = if oracle_axpy() {
+            let ll = lkk * lkk;
+            if plus { xx + ll } else { ll - xx }
+        } else if plus {
+            lkk.mul_add(lkk, xx)
+        } else {
+            lkk.mul_add(lkk, -xx)
+        };
+        if tmp < MJ_MINVAL {
+            tmp = MJ_MINVAL;
+            rank -= 1;
+        }
+        let r = tmp.sqrt();
+        let c = r / lkk;
+        let cinv = 1.0 / c;
+        let s = x[k] / lkk;
+        mat[k * (n + 1)] = r;
+        if oracle_axpy() {
+            for i in k + 1..n {
+                let v = mat[i * n + k];
+                mat[i * n + k] = if plus { (s * x[i] + v) * cinv } else { (v - s * x[i]) * cinv };
             }
-            let r = tmp.sqrt();
-            let c = r / lkk;
-            let cinv = 1.0 / c;
-            let s = x[k] / lkk;
-            mat[k * (n + 1)] = r;
+            for i in k + 1..n {
+                x[i] = c * x[i] - s * mat[i * n + k];
+            }
+        } else {
             for i in k + 1..n {
                 let v = mat[i * n + k];
                 mat[i * n + k] = if plus { s.mul_add(x[i], v) } else { (-s).mul_add(x[i], v) } * cinv;
@@ -387,7 +480,7 @@ impl Ctx {
         };
         let mut gauss = 0.0f64;
         for i in 0..self.nv {
-            gauss = (0.5 * (self.ma[i] - self.qfrc_smooth[i])).mul_add(self.qacc[i] - self.qacc_smooth[i], gauss);
+            gauss = axpy(gauss, 0.5 * (self.ma[i] - self.qfrc_smooth[i]), self.qacc[i] - self.qacc_smooth[i]);
         }
         self.quad_gauss[0] = gauss;
         self.cost += gauss;
@@ -455,9 +548,8 @@ impl Ctx {
                     let t = self.j[jr * nv + i];
                     if t != 0.0 {
                         let scl = t * self.dvec[jr];
-                        for k in 0..=i {
-                            l[i * nv + k] = self.j[jr * nv + k].mul_add(scl, l[i * nv + k]);
-                        }
+                        // Inlined `mju_addToScl` inside `mju_sqrMatTD_impl`, length `i + 1`, wide at 4.
+                        add_to_scl(&mut l[i * nv..i * nv + i + 1], &self.j[jr * nv..jr * nv + i + 1], scl, 4);
                     }
                 }
             }
@@ -499,7 +591,7 @@ impl Ctx {
                     for c in 0..=r {
                         let scl = local[r * dim + c];
                         for k in 0..nv {
-                            ltj[c * nv + k] = self.j[(i + r) * nv + k].mul_add(scl, ltj[c * nv + k]);
+                            ltj[c * nv + k] = axpy(ltj[c * nv + k], self.j[(i + r) * nv + k], scl);
                         }
                     }
                 }
@@ -568,7 +660,7 @@ impl Ctx {
                     for r in c..*dim {
                         let scl = local[r * dim + c];
                         for (x, j) in dst.iter_mut().zip(&self.jrows[i + r].1) {
-                            *x = j.mul_add(scl, *x);
+                            *x = axpy(*x, *j, scl);
                         }
                     }
                     jmod[i + c].1 = dst;
@@ -587,7 +679,7 @@ impl Ctx {
                     for c in 0..=r {
                         let scl = local[r * dim + c];
                         for (x, j) in ltj[c].iter_mut().zip(&self.jrows[i + r].1) {
-                            *x = j.mul_add(scl, *x);
+                            *x = axpy(*x, *j, scl);
                         }
                     }
                 }
@@ -648,9 +740,9 @@ impl Ctx {
                 let (dim, mu, fr) = (con.dim, con.mu, con.friction);
                 for j in 1..dim {
                     let djj = d[i + j] * jaref[i + j];
-                    q[0] = jaref[i + j].mul_add(djj, q[0]);
-                    q[1] = jv[i + j].mul_add(djj, q[1]);
-                    q[2] = (jv[i + j] * d[i + j]).mul_add(jv[i + j], q[2]);
+                    q[0] = axpy(q[0], jaref[i + j], djj);
+                    q[1] = axpy(q[1], jv[i + j], djj);
+                    q[2] = axpy(q[2], jv[i + j] * d[i + j], jv[i + j]);
                 }
                 let (mut uu, mut uv, mut vv) = (0.0f64, 0.0f64, 0.0f64);
                 let (mut u, mut vv6) = ([0.0f64; 6], [0.0f64; 6]);
@@ -661,9 +753,9 @@ impl Ctx {
                     vv6[j] = jv[i + j] * fr[j - 1];
                 }
                 for j in 1..dim {
-                    uu = u[j].mul_add(u[j], uu);
-                    uv = u[j].mul_add(vv6[j], uv);
-                    vv = vv6[j].mul_add(vv6[j], vv);
+                    uu = axpy(uu, u[j], u[j]);
+                    uv = axpy(uv, u[j], vv6[j]);
+                    vv = axpy(vv, vv6[j], vv6[j]);
                 }
                 q[3] = u[0];
                 q[4] = vv6[0];
@@ -671,7 +763,9 @@ impl Ctx {
                 q[6] = uv;
                 q[7] = vv;
                 // `1 + (mu*mu)` fused, the parentheses notwithstanding (`_mj_solPrimal`)
-                q[8] = d[i] / ((mu * mu) * mu.mul_add(mu, 1.0));
+                // `D / (mu*mu*(1 + mu*mu))`. The contract-off library adds `1 + mu*mu`.
+                let denom = if oracle_axpy() { 1.0 + mu * mu } else { mu.mul_add(mu, 1.0) };
+                q[8] = d[i] / ((mu * mu) * denom);
                 adv = dim;
             }
             q[0] *= 0.5;
@@ -697,18 +791,18 @@ impl Ctx {
             if i < ne + nf {
                 let start = self.jaref[i];
                 let dir = self.jv[i];
-                let x = alpha.mul_add(dir, start);
+                let x = axpy(start, alpha, dir);
                 let f = self.floss[i];
                 let d = self.efc_d[i];
                 let rf = self.efc_r[i] * f;
                 cost += friction_cost_dif(start, x, f, rf, d);
                 if -rf < x && x < rf {
-                    deriv[0] = (d * x).mul_add(dir, deriv[0]);
-                    deriv[1] = (d * dir).mul_add(dir, deriv[1]);
+                    deriv[0] = axpy(deriv[0], d * x, dir);
+                    deriv[1] = axpy(deriv[1], d * dir, dir);
                 } else if x <= -rf {
-                    deriv[0] = (-f).mul_add(dir, deriv[0]);
+                    deriv[0] = axpy(deriv[0], -f, dir);
                 } else {
-                    deriv[0] = f.mul_add(dir, deriv[0]);
+                    deriv[0] = axpy(deriv[0], f, dir);
                 }
                 i += 1;
                 continue;
@@ -719,34 +813,35 @@ impl Ctx {
                 let mu = con.mu;
                 let (u0, v0, uu, uv, vv, dm) = (q[3], q[4], q[5], q[6], q[7], q[8]);
                 cost += elliptic_cost_dif(q, alpha, mu, dm);
-                let n = alpha.mul_add(v0, u0);
-                let tsqr = alpha.mul_add(2.0f64.mul_add(uv, alpha * vv), uu);
+                let n = axpy(u0, alpha, v0);
+                let tsqr = axpy(uu, alpha, prod_add(2.0, uv, alpha * vv));
                 if tsqr <= 0.0 {
                     if n < 0.0 {
-                        deriv[0] += (2.0 * alpha).mul_add(q[2], q[1]);
-                        deriv[1] = 2.0f64.mul_add(q[2], deriv[1]);
+                        deriv[0] += prod_add(2.0 * alpha, q[2], q[1]);
+                        deriv[1] = axpy(deriv[1], 2.0, q[2]);
                     }
                 } else {
                     let t = tsqr.sqrt();
                     if n >= mu * t {
-                    } else if mu.mul_add(n, t) <= 0.0 {
-                        deriv[0] += (2.0 * alpha).mul_add(q[2], q[1]);
-                        deriv[1] = 2.0f64.mul_add(q[2], deriv[1]);
+                    } else if prod_add(mu, n, t) <= 0.0 {
+                        deriv[0] += prod_add(2.0 * alpha, q[2], q[1]);
+                        deriv[1] = axpy(deriv[1], 2.0, q[2]);
                     } else {
                         let n1 = v0;
-                        let t1 = alpha.mul_add(vv, uv) / t;
-                        let t2 = vv / t - alpha.mul_add(vv, uv) * t1 / (t * t);
-                        let a = (-mu).mul_add(t1, n1);
-                        let b = (-mu).mul_add(t, n);
-                        deriv[0] = (dm * b).mul_add(a, deriv[0]);
-                        deriv[1] = dm.mul_add(a.mul_add(a, b * (-mu * t2)), deriv[1]);
+                        let uv_a = axpy(uv, alpha, vv);
+                        let t1 = uv_a / t;
+                        let t2 = vv / t - uv_a * t1 / (t * t);
+                        let a = axpy(n1, -mu, t1);
+                        let b = axpy(n, -mu, t);
+                        deriv[0] = axpy(deriv[0], dm * b, a);
+                        deriv[1] = axpy(deriv[1], dm, prod_add(a, a, b * (-mu * t2)));
                     }
                 }
                 i += con.dim;
                 continue;
             }
             let start = self.jaref[i];
-            let x = alpha.mul_add(self.jv[i], start);
+            let x = axpy(start, alpha, self.jv[i]);
             let cost0 = if start < 0.0 { self.quad[3 * i] } else { 0.0 };
             if x < 0.0 {
                 qt[0] += self.quad[3 * i] - cost0;
@@ -757,9 +852,9 @@ impl Ctx {
             }
             i += 1;
         }
-        cost += (alpha * alpha).mul_add(qt[2], alpha * qt[1]) + qt[0];
-        deriv[0] += (2.0 * alpha).mul_add(qt[2], qt[1]);
-        deriv[1] = 2.0f64.mul_add(qt[2], deriv[1]);
+        cost += prod_add(alpha * alpha, qt[2], alpha * qt[1]) + qt[0];
+        deriv[0] += prod_add(2.0 * alpha, qt[2], qt[1]);
+        deriv[1] = axpy(deriv[1], 2.0, qt[2]);
         if deriv[1] <= 0.0 {
             deriv[1] = MJ_MINVAL;
         }
@@ -882,11 +977,12 @@ impl Ctx {
                 break;
             }
             for i in 0..nv {
-                self.qacc[i] = self.search[i].mul_add(alpha, self.qacc[i]);
-                self.ma[i] = self.mv[i].mul_add(alpha, self.ma[i]);
+                // `mju_addToScl`: `qacc += search * alpha`.
+                self.qacc[i] = axpy(self.qacc[i], self.search[i], alpha);
+                self.ma[i] = axpy(self.ma[i], self.mv[i], alpha);
             }
             for i in 0..self.nefc {
-                self.jaref[i] = self.jv[i].mul_add(alpha, self.jaref[i]);
+                self.jaref[i] = axpy(self.jaref[i], self.jv[i], alpha);
             }
             let oldstate = self.state.clone();
             self.update_constraint();
@@ -913,43 +1009,43 @@ fn elliptic_cost_dif(q: &[f64], alpha: f64, mu: f64, dm: f64) -> f64 {
         (if u0 < 0.0 { 2 } else { 1 }, 0.0)
     } else {
         let t0 = uu.sqrt();
-        (if u0 >= mu * t0 { 1 } else if mu.mul_add(u0, t0) <= 0.0 { 2 } else { 3 }, t0)
+        (if u0 >= mu * t0 { 1 } else if prod_add(mu, u0, t0) <= 0.0 { 2 } else { 3 }, t0)
     };
-    let n = alpha.mul_add(v0, u0);
-    let tsqr = alpha.mul_add(2.0f64.mul_add(uv, alpha * vv), uu);
+    let n = axpy(u0, alpha, v0);
+    let tsqr = axpy(uu, alpha, prod_add(2.0, uv, alpha * vv));
     let (zone, t) = if tsqr <= 0.0 {
         (if n < 0.0 { 2 } else { 1 }, 0.0)
     } else {
         let t = tsqr.sqrt();
-        (if n >= mu * t { 1 } else if mu.mul_add(n, t) <= 0.0 { 2 } else { 3 }, t)
+        (if n >= mu * t { 1 } else if prod_add(mu, n, t) <= 0.0 { 2 } else { 3 }, t)
     };
     match (zone0, zone) {
         (1, 1) => 0.0,
-        (2, 2) => (alpha * alpha).mul_add(q[2], alpha * q[1]),
+        (2, 2) => prod_add(alpha * alpha, q[2], alpha * q[1]),
         (3, 3) => {
-            let tsqr_delta = alpha * 2.0f64.mul_add(uv, alpha * vv);
+            let tsqr_delta = alpha * prod_add(2.0, uv, alpha * vv);
             let t_delta = tsqr_delta / (t + t0);
-            let r_delta = alpha.mul_add(v0, -(mu * t_delta));
-            let r0 = (-mu).mul_add(t0, u0);
-            0.5 * dm * r_delta * 2.0f64.mul_add(r0, r_delta)
+            let r_delta = prod_add(alpha, v0, -(mu * t_delta));
+            let r0 = axpy(u0, -mu, t0);
+            0.5 * dm * r_delta * prod_add(2.0, r0, r_delta)
         }
         (3, 2) => {
-            let dq = alpha * alpha.mul_add(q[2], q[1]);
-            let b0 = mu.mul_add(u0, t0);
+            let dq = alpha * prod_add(alpha, q[2], q[1]);
+            let b0 = prod_add(mu, u0, t0);
             dq + 0.5 * dm * b0 * b0
         }
         (2, 3) => {
-            let dq = alpha * alpha.mul_add(q[2], q[1]);
-            let b = mu.mul_add(n, t);
+            let dq = alpha * prod_add(alpha, q[2], q[1]);
+            let b = prod_add(mu, n, t);
             dq - 0.5 * dm * b * b
         }
-        (1, 2) => (alpha * alpha).mul_add(q[2], alpha * q[1]) + q[0],
+        (1, 2) => prod_add(alpha * alpha, q[2], alpha * q[1]) + q[0],
         (1, 3) => {
-            let r = (-mu).mul_add(t, n);
+            let r = axpy(n, -mu, t);
             0.5 * dm * r * r
         }
         (3, 1) => {
-            let r0 = (-mu).mul_add(t0, u0);
+            let r0 = axpy(u0, -mu, t0);
             -0.5 * dm * r0 * r0
         }
         (2, 1) => -q[0],
@@ -962,9 +1058,9 @@ fn friction_cost(x: f64, f: f64, rf: f64, d: f64) -> f64 {
     if -rf < x && x < rf {
         0.5 * d * x * x
     } else if x <= -rf {
-        f * (-0.5f64).mul_add(rf, -x)
+        f * prod_add(-0.5, rf, -x)
     } else {
-        f * (-0.5f64).mul_add(rf, x)
+        f * prod_add(-0.5, rf, x)
     }
 }
 
@@ -1045,10 +1141,12 @@ impl SmoothModel {
         for i in 0..nefc {
             jar[i] -= e.aref[i];
         }
-        let mut cost_ws = constraint_update(ne, nf, &e.d, &e.r, &e.frictionloss, &jar, &e.typ, &e.id, &cones, &mut state, &mut force, None);
+        let cost_con = constraint_update(ne, nf, &e.d, &e.r, &e.frictionloss, &jar, &e.typ, &e.id, &cones, &mut state, &mut force, None);
         let da: Vec<f64> = (0..nv).map(|i| qacc_warmstart[i] - sd.qacc_smooth[i]).collect();
         let mda = mul_sym_vec(&sd.m, &self.m_rownnz, &self.m_rowadr, &self.m_colind, &da);
-        cost_ws = 0.5f64.mul_add(dot(&da, &mda), cost_ws);
+        let gauss = 0.5 * dot(&da, &mda);
+        // `cost += 0.5 * dot(da, M da)`.
+        let mut cost_ws = if oracle_axpy() { cost_con + gauss } else { axpy(cost_con, 0.5, dot(&da, &mda)) };
         let cost_smooth = constraint_update(ne, nf, &e.d, &e.r, &e.frictionloss, &out.efc_b, &e.typ, &e.id, &cones, &mut state, &mut force, None);
         out.qfrc_constraint = if sparse {
             // `mju_mulMatTVecSparse`
@@ -1056,7 +1154,7 @@ impl SmoothModel {
             for ((cols, vals), &f) in e.j.iter().zip(&force) {
                 if f != 0.0 {
                     for (&c, &v) in cols.iter().zip(vals) {
-                        q[c] = v.mul_add(f, q[c]);
+                        q[c] = axpy(q[c], v, f);
                     }
                 }
             }
@@ -1279,7 +1377,7 @@ impl SmoothModel {
                 for ((cols, vals), &f) in e.j.iter().zip(&force) {
                     if f != 0.0 {
                         for (&c, &v) in cols.iter().zip(vals) {
-                            q[c] = v.mul_add(f, q[c]);
+                            q[c] = axpy(q[c], v, f);
                         }
                     }
                 }

@@ -20,13 +20,26 @@ pub(crate) enum TendonObj {
     Wrap { geom: KinGeom, radius: f64, cylinder: bool, side: Option<KinGeom> },
 }
 
-fn dot3(a: &[f64; 3], b: &[f64; 3]) -> f64 {
-    a[2].mul_add(b[2], a[0].mul_add(b[0], a[1] * b[1]))
+fn contract_off() -> bool {
+    crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID
 }
 
-/// `mju_norm3`
+/// `mju_dot3`: `(a2 b2) + (a0 b0 + a1 b1)`.
+fn dot3(a: &[f64; 3], b: &[f64; 3]) -> f64 {
+    if contract_off() {
+        (a[2] * b[2]) + (a[0] * b[0] + a[1] * b[1])
+    } else {
+        a[2].mul_add(b[2], a[0].mul_add(b[0], a[1] * b[1]))
+    }
+}
+
+/// `mju_norm3`: `sqrt((x x + y y) + z z)`.
 fn norm3(v: &[f64; 3]) -> f64 {
-    v[2].mul_add(v[2], v[0].mul_add(v[0], v[1] * v[1])).sqrt()
+    if contract_off() {
+        ((v[0] * v[0] + v[1] * v[1]) + v[2] * v[2]).sqrt()
+    } else {
+        v[2].mul_add(v[2], v[0].mul_add(v[0], v[1] * v[1])).sqrt()
+    }
 }
 
 /// `mju_normalize3`: shorter than `mjMINVAL` becomes the x axis.
@@ -44,8 +57,13 @@ fn normalize3(v: &mut [f64; 3]) -> f64 {
 }
 
 /// `mju_dot` of two 2-vectors: `0 + (a0·b0 + a1·b1)`, the tail of the four-sum loop
+/// `mju_dot` at length 2: `(a1 b1) + (a0 b0)`.
 fn dot2(a: &[f64], b: &[f64]) -> f64 {
-    0.0 + a[0].mul_add(b[0], a[1] * b[1])
+    if contract_off() {
+        a[1] * b[1] + a[0] * b[0]
+    } else {
+        0.0 + a[0].mul_add(b[0], a[1] * b[1])
+    }
 }
 
 /// `mju_normalize` in two dimensions
@@ -61,13 +79,23 @@ fn normalize2(v: &mut [f64; 2]) {
 }
 
 /// `mji_cross`
+/// `mju_cross`: each component is one product minus the other, unfused.
 fn cross(a: &[f64; 3], b: &[f64; 3]) -> [f64; 3] {
-    [a[1].mul_add(b[2], -(a[2] * b[1])), a[2].mul_add(b[0], -(a[0] * b[2])), a[0].mul_add(b[1], -(a[1] * b[0]))]
+    if contract_off() {
+        [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+    } else {
+        [a[1].mul_add(b[2], -(a[2] * b[1])), a[2].mul_add(b[0], -(a[0] * b[2])), a[0].mul_add(b[1], -(a[1] * b[0]))]
+    }
 }
 
-/// `mju_dist3`
+/// `mju_dist3`: `sqrt((dz dz) + (dy dy + dx dx))`.
 fn dist3(a: &[f64; 3], b: &[f64; 3]) -> f64 {
-    norm3(&[a[0] - b[0], a[1] - b[1], a[2] - b[2]])
+    let (dx, dy, dz) = (a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+    if contract_off() {
+        ((dz * dz) + (dy * dy + dx * dx)).sqrt()
+    } else {
+        norm3(&[dx, dy, dz])
+    }
 }
 
 /// `is_intersect`: do the 2-D segments p1→p2 and p3→p4 cross?
@@ -96,21 +124,24 @@ fn length_circle(p0: &[f64; 2], p1: &[f64; 2], ind: usize, radius: f64) -> f64 {
 
 /// `wrap_circle`: the two tangent points and the arc's length, or `None` (MuJoCo's −1).
 fn wrap_circle(end: &[f64; 4], side: Option<&[f64; 2]>, radius: f64) -> Option<([f64; 4], f64)> {
-    let sqlen0 = end[0].mul_add(end[0], end[1] * end[1]);
-    let sqlen1 = end[2].mul_add(end[2], end[3] * end[3]);
+    let off = contract_off();
+    let sqlen0 = if off { end[0] * end[0] + end[1] * end[1] } else { end[0].mul_add(end[0], end[1] * end[1]) };
+    let sqlen1 = if off { end[2] * end[2] + end[3] * end[3] } else { end[2].mul_add(end[2], end[3] * end[3]) };
     let sqrad = radius * radius;
     if sqlen0 < sqrad || sqlen1 < sqrad || radius < MJ_MINVAL {
         return None;
     }
     let dif = [end[2] - end[0], end[3] - end[1]];
-    let dd = dif[0].mul_add(dif[0], dif[1] * dif[1]);
+    let dd = if off { dif[0] * dif[0] + dif[1] * dif[1] } else { dif[0].mul_add(dif[0], dif[1] * dif[1]) };
     if dd < MJ_MINVAL {
         return None;
     }
     // clamped to the segment (`clamp` is MuJoCo's if-chain, NaN through as NaN)
-    let a = (-dif[0].mul_add(end[0], dif[1] * end[1]) / dd).clamp(0.0, 1.0);
-    let tmp = [a.mul_add(dif[0], end[0]), a.mul_add(dif[1], end[1])];
-    if tmp[0].mul_add(tmp[0], tmp[1] * tmp[1]) > sqrad && side.is_none_or(|s| dot2(s, &tmp) >= 0.0) {
+    let adot = if off { dif[0] * end[0] + dif[1] * end[1] } else { dif[0].mul_add(end[0], dif[1] * end[1]) };
+    let a = (-adot / dd).clamp(0.0, 1.0);
+    let tmp = if off { [a * dif[0] + end[0], a * dif[1] + end[1]] } else { [a.mul_add(dif[0], end[0]), a.mul_add(dif[1], end[1])] };
+    let tmp_sq = if off { tmp[0] * tmp[0] + tmp[1] * tmp[1] } else { tmp[0].mul_add(tmp[0], tmp[1] * tmp[1]) };
+    if tmp_sq > sqrad && side.is_none_or(|s| dot2(s, &tmp) >= 0.0) {
         return None;
     }
     let sqrt0 = (sqlen0 - sqrad).sqrt();
@@ -119,10 +150,14 @@ fn wrap_circle(end: &[f64; 4], side: Option<&[f64; 2]>, radius: f64) -> Option<(
     let mut good = [0.0f64; 2];
     for i in 0..2 {
         let sgn = if i == 0 { 1.0 } else { -1.0 };
-        sol[i][0][0] = end[0].mul_add(sqrad, sgn * radius * end[1] * sqrt0) / sqlen0;
-        sol[i][0][1] = end[1].mul_add(sqrad, -(sgn * radius * end[0] * sqrt0)) / sqlen0;
-        sol[i][1][0] = end[2].mul_add(sqrad, -(sgn * radius * end[3] * sqrt1)) / sqlen1;
-        sol[i][1][1] = end[3].mul_add(sqrad, sgn * radius * end[2] * sqrt1) / sqlen1;
+        // `(end*sqrad + sgn*radius*end_other*sqrt) / sqlen`, products separate.
+        let arm = |e0: f64, e1: f64, sq: f64, srad: f64| {
+            if off { (e0 * sqrad + sgn * radius * e1 * srad) / sq } else { e0.mul_add(sqrad, sgn * radius * e1 * srad) / sq }
+        };
+        sol[i][0][0] = arm(end[0], end[1], sqlen0, sqrt0);
+        sol[i][0][1] = arm(end[1], -end[0], sqlen0, sqrt0);
+        sol[i][1][0] = arm(end[2], -end[3], sqlen1, sqrt1);
+        sol[i][1][1] = arm(end[3], end[2], sqlen1, sqrt1);
         good[i] = match side {
             Some(s) => {
                 let mut t = [sol[i][0][0] + sol[i][1][0], sol[i][0][1] + sol[i][1][1]];

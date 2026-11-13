@@ -33,9 +33,12 @@ impl SmoothModel {
         } else {
             // qH = M + h·diag(damping), factorised in place
             let mut qh = sd.m.clone();
+            let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
             for i in 0..nv {
                 let adr = self.m_rowadr[i] + self.m_rownnz[i] - 1;
-                qh[adr] = self.timestep.mul_add(self.dof_damping[i], qh[adr]);
+                // `qH[diag] += h * damp`. `64156abe` does `(h * damp) + qH`.
+                let damp = self.dof_damping[i];
+                qh[adr] = if separate { self.timestep * damp + qh[adr] } else { self.timestep.mul_add(damp, qh[adr]) };
             }
             let (qld, diag_inv) = self.factor_i(&qh);
             let qfrc: Vec<f64> = (0..nv).map(|i| sd.qfrc_smooth[i] + sol.qfrc_constraint[i]).collect();
@@ -64,11 +67,15 @@ impl SmoothModel {
                 }
             }
         }
-        // Published path fuses `qvel + h·qacc`. `mju_addToScl` in the contract-off
-        // library adds the product.
+        // `mju_addToScl(qvel, qacc, h)`. Wide prefix `qvel + h·qacc` from n = 6;
+        // the tail, and every lane below that, is `h·qacc + qvel`.
         let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
-        for (v, a) in next.qvel.iter_mut().zip(qacc) {
-            *v = if separate { *v + *a * h } else { a.mul_add(h, *v) };
+        if separate {
+            crate::mujoco_solver::add_to_scl(&mut next.qvel, qacc, h, 6);
+        } else {
+            for (v, a) in next.qvel.iter_mut().zip(qacc) {
+                *v = a.mul_add(h, *v);
+            }
         }
         let v = qvel_pos.map_or_else(|| next.qvel.clone(), <[f64]>::to_vec);
         self.integrate_pos(&mut next.qpos, &v, h);
@@ -85,34 +92,66 @@ impl SmoothModel {
             match kind {
                 // `mj_integratePos`: `qpos += dt * qvel`. The published path fuses that.
                 KinJointKind::Hinge | KinJointKind::Slide => {
-                    qpos[padr] = if separate { qpos[padr] + dt * qvel[vadr] } else { dt.mul_add(qvel[vadr], qpos[padr]) };
+                    // `64156abe`: `(dt * qvel) + qpos`.
+                    qpos[padr] = if separate { dt * qvel[vadr] + qpos[padr] } else { dt.mul_add(qvel[vadr], qpos[padr]) };
                 }
                 KinJointKind::Free | KinJointKind::Ball => {
                     if kind == KinJointKind::Free {
                         for i in 0..3 {
-                            qpos[padr + i] = if separate { qpos[padr + i] + dt * qvel[vadr + i] } else { dt.mul_add(qvel[vadr + i], qpos[padr + i]) };
+                            qpos[padr + i] = if separate { dt * qvel[vadr + i] + qpos[padr + i] } else { dt.mul_add(qvel[vadr + i], qpos[padr + i]) };
                         }
                         padr += 3;
                         vadr += 3;
                     }
-                    // `mju_quatIntegrate`
-                    let mut axis = [qvel[vadr], qvel[vadr + 1], qvel[vadr + 2]];
-                    let norm = axis[2].mul_add(axis[2], axis[0].mul_add(axis[0], axis[1] * axis[1])).sqrt();
-                    if norm < 1e-15 {
-                        axis = [1.0, 0.0, 0.0];
+                    if separate {
+                        quat_integrate_off(&mut qpos[padr..padr + 4], &[qvel[vadr], qvel[vadr + 1], qvel[vadr + 2]], dt);
                     } else {
-                        let inv = 1.0 / norm;
-                        axis = axis.map(|x| x * inv);
+                        let mut axis = [qvel[vadr], qvel[vadr + 1], qvel[vadr + 2]];
+                        let norm = axis[2].mul_add(axis[2], axis[0].mul_add(axis[0], axis[1] * axis[1])).sqrt();
+                        if norm < 1e-15 {
+                            axis = [1.0, 0.0, 0.0];
+                        } else {
+                            let inv = 1.0 / norm;
+                            axis = axis.map(|x| x * inv);
+                        }
+                        let qrot = axis_angle2quat(&axis, dt * norm);
+                        let mut q = [qpos[padr], qpos[padr + 1], qpos[padr + 2], qpos[padr + 3]];
+                        normalize4(&mut q);
+                        let q = mul_quat(&q, &qrot);
+                        qpos[padr..padr + 4].copy_from_slice(&q);
                     }
-                    let qrot = axis_angle2quat(&axis, dt * norm);
-                    let mut q = [qpos[padr], qpos[padr + 1], qpos[padr + 2], qpos[padr + 3]];
-                    normalize4(&mut q);
-                    let q = mul_quat(&q, &qrot);
-                    qpos[padr..padr + 4].copy_from_slice(&q);
                 }
             }
         }
     }
+}
+
+/// `mju_quatIntegrate` as `64156abe` inlines it. The axis norm is `(y y + x x) + z z`.
+/// The multiply is `mju_mulQuat` except lane 1, which adds the cross term on the left:
+/// `(p23 + (p10 + p01)) - p32`. There is no second normalize after the multiply.
+fn quat_integrate_off(q: &mut [f64], vel: &[f64], scale: f64) {
+    let norm = ((vel[1] * vel[1] + vel[0] * vel[0]) + vel[2] * vel[2]).sqrt();
+    let axis = if norm < 1e-15 {
+        [1.0, 0.0, 0.0]
+    } else {
+        let inv = 1.0 / norm;
+        [vel[0] * inv, vel[1] * inv, vel[2] * inv]
+    };
+    let qrot = axis_angle2quat(&axis, scale * norm);
+    let mut a = [q[0], q[1], q[2], q[3]];
+    normalize4(&mut a);
+    let b = qrot;
+    let (p00, p11, p22, p33) = (a[0] * b[0], a[1] * b[1], a[2] * b[2], a[3] * b[3]);
+    let (p01, p10, p23, p32) = (a[0] * b[1], a[1] * b[0], a[2] * b[3], a[3] * b[2]);
+    let (p02, p13, p20, p31) = (a[0] * b[2], a[1] * b[3], a[2] * b[0], a[3] * b[1]);
+    let (p03, p12, p21, p30) = (a[0] * b[3], a[1] * b[2], a[2] * b[1], a[3] * b[0]);
+    let out = [
+        ((p00 - p11) - p22) - p33,
+        (p23 + (p10 + p01)) - p32,
+        ((p02 - p13) + p20) + p31,
+        ((p12 + p03) - p21) + p30,
+    ];
+    q.copy_from_slice(&out);
 }
 
 /// `mji_mulMatVec3`, contracted.

@@ -1788,20 +1788,33 @@ impl MjcfTree {
         const B: [f64; 4] = [1.0 / 6.0, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 6.0];
         let sm = self.smooth_model();
         let (nv, na, h) = (st.qvel.len(), st.act.len(), sm.timestep);
+        let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
         let mut x = vec![(st.qpos.clone(), st.qvel.clone(), st.act.clone())];
         let mut f = vec![(sol.qacc.clone(), sd.act_dot.clone())];
-        // the weighted rates: `dX = Σ w_j·[qvel_j, qacc_j, act_dot_j]`
+        // `mju_addToScl` of each tableau weight. Velocity is one call of length `nv`. Acceleration and
+        // `act_dot` are the next call, one vector of length `nv+na`, so the wide prefix can cross that boundary.
         let weigh = |x: &[(Vec<f64>, Vec<f64>, Vec<f64>)], f: &[(Vec<f64>, Vec<f64>)], w: &[f64]| -> (Vec<f64>, Vec<f64>, Vec<f64>) {
             let (mut dv, mut da, mut dact) = (vec![0.0f64; nv], vec![0.0f64; nv], vec![0.0f64; na]);
             for (j, &wj) in w.iter().enumerate() {
-                for k in 0..nv {
-                    dv[k] = x[j].1[k].mul_add(wj, dv[k]);
-                }
-                for k in 0..nv {
-                    da[k] = f[j].0[k].mul_add(wj, da[k]);
-                }
-                for k in 0..na {
-                    dact[k] = f[j].1[k].mul_add(wj, dact[k]);
+                if separate {
+                    crate::mujoco_solver::add_to_scl(&mut dv, &x[j].1, wj, 6);
+                    let mut acc = da.clone();
+                    acc.extend_from_slice(&dact);
+                    let mut src = f[j].0.clone();
+                    src.extend_from_slice(&f[j].1);
+                    crate::mujoco_solver::add_to_scl(&mut acc, &src, wj, 6);
+                    da.copy_from_slice(&acc[..nv]);
+                    if na > 0 {
+                        dact.copy_from_slice(&acc[nv..]);
+                    }
+                } else {
+                    for k in 0..nv {
+                        dv[k] = x[j].1[k].mul_add(wj, dv[k]);
+                        da[k] = f[j].0[k].mul_add(wj, da[k]);
+                    }
+                    for k in 0..na {
+                        dact[k] = f[j].1[k].mul_add(wj, dact[k]);
+                    }
                 }
             }
             (dv, da, dact)
@@ -1812,12 +1825,22 @@ impl MjcfTree {
             for a in row {
                 c += a;
             }
-            let t = c.mul_add(h, st.time);
+            // `T = time + C*h`. Step 1 starts at time 0, so the product is the whole sum.
+            let t = if separate { st.time + c * h } else { c.mul_add(h, st.time) };
             let (dv, da, dact) = weigh(&x, &f, row);
             let mut qpos = x[0].0.clone();
             sm.integrate_pos(&mut qpos, &dv, h);
-            let qvel: Vec<f64> = (0..nv).map(|k| da[k].mul_add(h, x[0].1[k])).collect();
-            let act: Vec<f64> = (0..na).map(|k| dact[k].mul_add(h, x[0].2[k])).collect();
+            // `mju_addToScl(X[i]+nq, dX+nv, h, nv+na)` onto a copy of `X[0]`.
+            let (qvel, act) = if separate {
+                let mut acc = x[0].1.clone();
+                acc.extend_from_slice(&x[0].2);
+                let mut src = da.clone();
+                src.extend_from_slice(&dact);
+                crate::mujoco_solver::add_to_scl(&mut acc, &src, h, 6);
+                (acc[..nv].to_vec(), acc[nv..].to_vec())
+            } else {
+                ((0..nv).map(|k| da[k].mul_add(h, x[0].1[k])).collect(), (0..na).map(|k| dact[k].mul_add(h, x[0].2[k])).collect())
+            };
             let (sdi, _, soli) = self.native_forward(t, &qpos, &qvel, ctrl, &act, &st.qacc_warmstart);
             x.push((qpos, qvel, act));
             f.push((soli.qacc, sdi.act_dot));

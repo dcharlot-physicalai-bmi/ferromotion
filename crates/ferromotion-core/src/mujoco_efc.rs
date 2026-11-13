@@ -36,6 +36,11 @@ pub(crate) const CONTACT_ELLIPTIC: i32 = 7;
 /// `libmujoco.3.13.0.dylib`, and the reason `body_invweight0` was one ulp off on every free-floating
 /// model while every smaller dot agreed.
 pub(crate) fn dot(a: &[f64], b: &[f64]) -> f64 {
+    // `mju_mulMatVec` and `mju_cholFactor` call the out-of-line `mju_dot` in 64156abe.
+    // That symbol is the SSE schedule in `dot_contract_off` (`mulpd`/`addpd`, no FMA).
+    if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+        return dot_contract_off(a, b);
+    }
     let n = a.len();
     let (mut r0, mut r1, mut r2, mut r3) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     let groups = n / 4;
@@ -69,6 +74,10 @@ pub(crate) fn dot(a: &[f64], b: &[f64]) -> f64 {
 /// vectoriser keeps every group fused (`fmla.2d` only, no unfused 32-entry block) — read off the inlined
 /// copies in `_mju_cholFactor` and `_mj_solPrimal`.
 pub(crate) fn dot_self(a: &[f64]) -> f64 {
+    // `mju_norm` and the Cholesky diagonal call `mju_dot(v, v)`, the same SSE symbol.
+    if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+        return dot_contract_off(a, a);
+    }
     let n = a.len();
     let (mut r0, mut r1, mut r2, mut r3) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     let groups = n / 4;
@@ -129,14 +138,33 @@ impl NativeEq {
     }
 }
 
-/// `mji_mulMatVec3` / `mju_mulMatVec3`, contracted.
-pub(crate) fn mat_vec3(m: &[f64; 9], v: &[f64; 3]) -> [f64; 3] {
-    [m[2].mul_add(v[2], m[0].mul_add(v[0], m[1] * v[1])), m[5].mul_add(v[2], m[3].mul_add(v[0], m[4] * v[1])), m[8].mul_add(v[2], m[6].mul_add(v[0], m[7] * v[1]))]
+fn oracle_identity() -> bool {
+    crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID
 }
 
-/// `mju_mulMatTVec3`, contracted.
+/// `mji_mulMatVec3`. Published rows are fused from the right. `64156abe` is
+/// `(m0*v0 + m1*v1) + m2*v2`.
+pub(crate) fn mat_vec3(m: &[f64; 9], v: &[f64; 3]) -> [f64; 3] {
+    let row = |a: f64, b: f64, c: f64| {
+        if oracle_identity() {
+            (a * v[0] + b * v[1]) + c * v[2]
+        } else {
+            c.mul_add(v[2], a.mul_add(v[0], b * v[1]))
+        }
+    };
+    [row(m[0], m[1], m[2]), row(m[3], m[4], m[5]), row(m[6], m[7], m[8])]
+}
+
+/// `mji_mulMatTVec3`. Same split: published fused, `64156abe` left-associated.
 pub(crate) fn mat_t_vec3(m: &[f64; 9], v: &[f64; 3]) -> [f64; 3] {
-    [m[6].mul_add(v[2], m[0].mul_add(v[0], m[3] * v[1])), m[7].mul_add(v[2], m[1].mul_add(v[0], m[4] * v[1])), m[8].mul_add(v[2], m[2].mul_add(v[0], m[5] * v[1]))]
+    let row = |a: f64, b: f64, c: f64| {
+        if oracle_identity() {
+            (a * v[0] + b * v[1]) + c * v[2]
+        } else {
+            c.mul_add(v[2], a.mul_add(v[0], b * v[1]))
+        }
+    };
+    [row(m[0], m[3], m[6]), row(m[1], m[4], m[7]), row(m[2], m[5], m[8])]
 }
 
 /// `set0`'s `eq_data[3..6]` for a body connect: the anchor as a world point at `qpos0`, in body2's frame.
@@ -854,7 +882,8 @@ impl SmoothModel {
                             let f = con.frame[(first_frame_row + i) * 3 + k];
                             if f != 0.0 {
                                 for (o, d) in out.iter_mut().zip(&dif[k]) {
-                                    *o = d.mul_add(f, *o);
+                                    // `mju_addToScl`: `res += row * frame`. `64156abe` adds the product.
+                                    *o = if oracle_identity() { *o + *d * f } else { d.mul_add(f, *o) };
                                 }
                             }
                         }
@@ -872,8 +901,9 @@ impl SmoothModel {
             } else if !em.elliptic {
                 for k in 1..dim {
                     let fr = con.friction[k - 1];
-                    let plus: Vec<f64> = jac[0].iter().zip(&jac[k]).map(|(a, b)| b.mul_add(fr, *a)).collect();
-                    let minus: Vec<f64> = jac[0].iter().zip(&jac[k]).map(|(a, b)| b.mul_add(-fr, *a)).collect();
+                    // `mju_addScl`: `jac0 + friction * jac_k`. `64156abe` multiplies, then adds.
+                    let plus: Vec<f64> = jac[0].iter().zip(&jac[k]).map(|(a, b)| if oracle_identity() { *a + *b * fr } else { b.mul_add(fr, *a) }).collect();
+                    let minus: Vec<f64> = jac[0].iter().zip(&jac[k]).map(|(a, b)| if oracle_identity() { *a + *b * -fr } else { b.mul_add(-fr, *a) }).collect();
                     e.push(chain.clone(), plus, con.dist, con.includemargin, 0.0, CONTACT_PYRAMIDAL, ci);
                     e.push(chain.clone(), minus, con.dist, con.includemargin, 0.0, CONTACT_PYRAMIDAL, ci);
                 }
@@ -1089,6 +1119,21 @@ impl SmoothModel {
 
 /// `mji_crossMotion`
 fn cross_motion(vel: &[f64; 6], v: &[f64; 6]) -> [f64; 6] {
+    // `mji_crossMotion`. `64156abe` adds the two products, then adds that sum.
+    if oracle_identity() {
+        let mut r = [
+            -vel[2] * v[1] + vel[1] * v[2],
+            vel[2] * v[0] - vel[0] * v[2],
+            -vel[1] * v[0] + vel[0] * v[1],
+            -vel[2] * v[4] + vel[1] * v[5],
+            vel[2] * v[3] - vel[0] * v[5],
+            -vel[1] * v[3] + vel[0] * v[4],
+        ];
+        r[3] += -vel[5] * v[1] + vel[4] * v[2];
+        r[4] += vel[5] * v[0] - vel[3] * v[2];
+        r[5] += -vel[4] * v[0] + vel[3] * v[1];
+        return r;
+    }
     let mut r = [
         (-vel[2]).mul_add(v[1], vel[1] * v[2]),
         vel[2].mul_add(v[0], -(vel[0] * v[2])),
@@ -1111,8 +1156,11 @@ fn min(a: f64, b: f64) -> f64 {
     if a <= b { a } else { b }
 }
 
-/// `mji_cross`, contracted.
+/// `mji_cross`. `64156abe` subtracts the products: `a1*b2 - a2*b1`.
 fn cross(a: &[f64; 3], b: &[f64; 3]) -> [f64; 3] {
+    if oracle_identity() {
+        return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    }
     [a[1].mul_add(b[2], -(a[2] * b[1])), a[2].mul_add(b[0], -(a[0] * b[2])), a[0].mul_add(b[1], -(a[1] * b[0]))]
 }
 
@@ -1151,10 +1199,62 @@ fn impedance(s: &[f64; 5], pos: f64, margin: f64) -> (f64, f64) {
         yp = s[4] * a * power(x, s[4] - 1.0);
     } else {
         let b = 1.0 / power(1.0 - s[3], s[4] - 1.0);
-        y = (-b).mul_add(power(1.0 - x, s[4]), 1.0);
+        let p = power(1.0 - x, s[4]);
+        // `y = 1 - b*(1-x)^p`. Negating `b` first is a different product.
+        y = if oracle_identity() { 1.0 - b * p } else { (-b).mul_add(p, 1.0) };
         yp = s[4] * b * power(1.0 - x, s[4] - 1.0);
     }
-    (y.mul_add(s[1] - s[0], s[0]), yp * sgn * (s[1] - s[0]) / s[2])
+    let width = s[1] - s[0];
+    // `imp = solimp[0] + y*(solimp[1]-solimp[0])`.
+    let imp = if oracle_identity() { s[0] + y * width } else { y.mul_add(width, s[0]) };
+    (imp, yp * sgn * width / s[2])
+}
+
+/// `mju_dot` as clang compiled it into libmujoco `64156abe` (`mulpd`/`addpd`, no FMA).
+///
+/// For `n >= 8`, pairs of doubles accumulate eight at a time:
+/// `acc_odd = p2 + (p0 + acc_odd)`, `acc_even = p3 + (p1 + acc_even)`, then
+/// `high + low` of `acc_odd + acc_even`. A leftover group of four uses the same pair
+/// add. The tail is `res + p0` (`n%4 == 1`), `res + (p1 + p0)` (`n%4 == 2`), or
+/// `res + (p2 + (p0 + p1))` (`n%4 == 3`). Lengths below 4 are only that tail.
+/// `mju_mulMatVec` calls this once per row; it does not have a second reduction.
+fn dot_contract_off(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len();
+    let tail = |res: f64, i: usize| match n - i {
+        1 => res + a[i] * b[i],
+        2 => res + (a[i + 1] * b[i + 1] + a[i] * b[i]),
+        3 => res + (a[i + 2] * b[i + 2] + (a[i] * b[i] + a[i + 1] * b[i + 1])),
+        _ => res,
+    };
+    if n < 4 {
+        return tail(0.0, 0);
+    }
+    let pair = |i: usize| [a[i] * b[i], a[i + 1] * b[i + 1]];
+    let add = |p: [f64; 2], q: [f64; 2]| [p[0] + q[0], p[1] + q[1]];
+    let mut acc0 = [0.0; 2];
+    let mut acc1 = [0.0; 2];
+    let mut i = 0;
+    let groups = ((n - 4) >> 2) + 1;
+    if n - 4 >= 4 {
+        let mut end = groups * 4;
+        end &= !7;
+        while i < end {
+            let (p0, p1, p2, p3) = (pair(i), pair(i + 2), pair(i + 4), pair(i + 6));
+            let t0 = add(p0, acc1);
+            let t1 = add(p1, acc0);
+            acc1 = add(p2, t0);
+            acc0 = add(p3, t1);
+            i += 8;
+        }
+    }
+    if groups & 1 == 1 {
+        let (p0, p1) = (pair(i), pair(i + 2));
+        acc1 = add(p0, acc1);
+        acc0 = add(p1, acc0);
+    }
+    let pair = add(acc1, acc0);
+    let res = pair[1] + pair[0];
+    tail(res, ((n - 4) & !3) + 4)
 }
 
 #[cfg(test)]
@@ -1169,6 +1269,27 @@ mod tests {
             let a: Vec<f64> = (0..n).map(|i| ((i * 7) % 13) as f64 / 3.0 - 1.7).collect();
             let b: Vec<f64> = (0..n).map(|i| ((i * 5) % 11) as f64 / 7.0 + 0.3).collect();
             assert_eq!(dot(&a, &b).to_bits(), want, "n = {n}");
+        }
+    }
+
+    /// Bits of the SSE schedule, checked against `mju_dot` in libmujoco 64156abe.
+    #[test]
+    fn contract_off_dot_matches_the_pinned_sse_schedule() {
+        let bits = [
+            0u64,
+            0xbfe051eb851eb852,
+            0x3fc0f1dbea8b7588,
+            0xc001d70a3d70a3d8,
+            0xbff633b007cd49a2,
+            0xc00835a35a35a35a,
+            0xc000a1e3b7d516eb,
+            0xc008b65e991cc500,
+            0xc0010f1dbea8b758,
+        ];
+        for n in 0..9 {
+            let a: Vec<f64> = (0..n).map(|i| ((i * 7) % 13) as f64 / 3.0 - 1.7).collect();
+            let b: Vec<f64> = (0..n).map(|i| ((i * 5) % 11) as f64 / 7.0 + 0.3).collect();
+            assert_eq!(dot_contract_off(&a, &b).to_bits(), bits[n], "n = {n}");
         }
     }
 }

@@ -24,17 +24,19 @@ fn contract_off() -> bool {
 
 /// `mju_mulInertVec`: a 6-D motion vector through a com-based inertia (`i` = the 10 numbers of `cinert`).
 fn mul_inert_vec(i: &[f64; 10], v: &[f64; 6]) -> [f64; 6] {
-    // `mju_mulInertVec` in the contract-off library, left to right, one product at a time.
+    // Out-of-line `mju_mulInertVec` in `64156abe`. Lanes 0 and 1 share one `addpd`/`subpd`
+    // chain; lane 2 is scalar; lanes 3 and 4 share one `subpd` then `+ i9*v`. Swapping the
+    // two operands of a single add does not change the bits.
     if contract_off() {
-        return [
-            (((i[0] * v[0] + i[3] * v[1]) + i[4] * v[2]) - i[8] * v[4]) + i[7] * v[5],
-            (((i[3] * v[0] + i[1] * v[1]) + i[5] * v[2]) + i[8] * v[3]) - i[6] * v[5],
-            (((i[4] * v[0] + i[5] * v[1]) + i[2] * v[2]) - i[7] * v[3]) + i[6] * v[4],
-            (i[8] * v[1] - i[7] * v[2]) + i[9] * v[3],
-            (i[6] * v[2] - i[8] * v[0]) + i[9] * v[4],
-            (i[7] * v[0] - i[6] * v[1]) + i[9] * v[5],
-        ];
-    }
+            return [
+                (((i[0] * v[0] + i[3] * v[1]) + i[4] * v[2]) - i[8] * v[4]) + i[7] * v[5],
+                (((i[1] * v[1] + i[3] * v[0]) + i[5] * v[2]) + i[8] * v[3]) - i[6] * v[5],
+                (((i[5] * v[1] + i[4] * v[0]) + i[2] * v[2]) - i[7] * v[3]) + i[6] * v[4],
+                (i[8] * v[1] - i[7] * v[2]) + i[9] * v[3],
+                (i[6] * v[2] - i[8] * v[0]) + i[9] * v[4],
+                i[9] * v[5] + (i[7] * v[0] - i[6] * v[1]),
+            ];
+        }
     [
         i[7].mul_add(v[5], (-i[8]).mul_add(v[4], i[4].mul_add(v[2], i[0].mul_add(v[0], i[3] * v[1])))),
         (-i[6]).mul_add(v[5], i[8].mul_add(v[3], i[5].mul_add(v[2], i[3].mul_add(v[0], i[1] * v[1])))),
@@ -93,10 +95,12 @@ pub(crate) fn dot_sparse(v: &[f64], x: &[f64], ind: &[usize]) -> f64 {
 /// zero coefficient skipped, each fused into the running column.
 fn mul_mat_t_vec3(j: &[[f64; 3]], v: &[f64; 3]) -> Vec<f64> {
     let mut res = vec![0.0f64; j.len()];
+    // `mju_mulMatTVec` → `mju_addToScl`: `res += jac_row * wrench`. `64156abe` adds the product.
+    let separate = contract_off();
     for r in 0..3 {
         if v[r] != 0.0 {
             for (x, row) in res.iter_mut().zip(j) {
-                *x = row[r].mul_add(v[r], *x);
+                *x = if separate { *x + row[r] * v[r] } else { row[r].mul_add(v[r], *x) };
             }
         }
     }
@@ -638,11 +642,21 @@ impl SmoothModel {
             m.m_rownnz.push(row.len());
             m.m_colind.extend(row);
         }
-        // `mj_setM0`: at qpos0, the composite inertia seen by each dof, plus its armature
+        // `mj_setM0` (`engine_setconst.c`), at qpos0. The composite pass is `mju_addTo` of
+        // length 10: each parent entry is `crb[parent] + crb[child]`. Then the out-of-line
+        // `mju_mulInertVec` and `mju_dot(..., 6)`. In `64156abe` that dot is unfused:
+        // `((a1 b1 + a3 b3) + (a0 b0 + a2 b2)) + (a5 b5 + a4 b4)`. The published path keeps
+        // the fused four-accumulator `dot_n6`, whose tail is `fma(a4, b4, a5 b5)`.
         let kin0 = kin.state(qpos0);
         let (cinert, cdof, _) = m.com_pos(&kin0);
         let crb = m.composite(&cinert);
-        m.dof_m0 = (0..nv).map(|i| m.dof_armature[i] + dot_n6(&cdof[i], &mul_inert_vec(&crb[m.dof_bodyid[i]], &cdof[i]))).collect();
+        m.dof_m0 = (0..nv)
+            .map(|i| {
+                let buf = mul_inert_vec(&crb[m.dof_bodyid[i]], &cdof[i]);
+                let kinetic = if contract_off() { dot6(&cdof[i], &buf) } else { dot_n6(&cdof[i], &buf) };
+                m.dof_armature[i] + kinetic
+            })
+            .collect();
         // springs on a ball or free joint are not ported yet
         for (j, &k) in m.jnt_type.iter().enumerate() {
             if matches!(k, KinJointKind::Ball | KinJointKind::Free) && m.jnt_stiffness[j] != 0.0 {
@@ -1066,6 +1080,7 @@ impl SmoothModel {
             };
         }
         let mut actuator_force = vec![0.0; nu];
+        let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
         for (i, a) in self.actuators.iter().enumerate() {
             use crate::mujoco_actuator::{ActBias, ActDyn, ActGain};
             // `Pid::Compute` (MuJoCo runs the plugins after the builtin laws; the outputs are disjoint),
@@ -1081,9 +1096,16 @@ impl SmoothModel {
                 continue;
             }
             let (p, len, vel) = (&a.act.gainprm, actuator_length[i], actuator_velocity[i]);
+            let affine = |prm: &[f64]| {
+                if separate {
+                    (prm[0] + prm[1] * len) + prm[2] * vel
+                } else {
+                    prm[2].mul_add(vel, prm[1].mul_add(len, prm[0]))
+                }
+            };
             let gain = match a.act.gain {
                 ActGain::Fixed => p[0],
-                ActGain::Affine => p[2].mul_add(vel, p[1].mul_add(len, p[0])),
+                ActGain::Affine => affine(p),
                 ActGain::Muscle => muscle_gain(len, vel, &a.act.lengthrange, a.act.acc0, p),
             };
             let input = match (a.act.dynamics, a.actadr) {
@@ -1097,7 +1119,7 @@ impl SmoothModel {
             let b = &a.act.biasprm;
             let bias = match a.act.bias {
                 ActBias::None => 0.0,
-                ActBias::Affine => b[2].mul_add(vel, b[1].mul_add(len, b[0])),
+                ActBias::Affine => affine(b),
                 ActBias::Muscle => muscle_bias(len, &a.act.lengthrange, a.act.acc0, b),
             };
             f += bias;
@@ -1112,7 +1134,7 @@ impl SmoothModel {
             let f = actuator_force[i];
             if f != 0.0 {
                 for (&c, &v) in cols.iter().zip(vals) {
-                    qfrc_actuator[c] = v.mul_add(f, qfrc_actuator[c]);
+                    qfrc_actuator[c] = if separate { qfrc_actuator[c] + v * f } else { v.mul_add(f, qfrc_actuator[c]) };
                 }
             }
         }
@@ -1174,7 +1196,14 @@ impl SmoothModel {
             let rho = self.density;
             for (k, (p, q)) in [(1, 2), (0, 2), (0, 1)].into_iter().enumerate() {
                 let v = lvel[3 + k];
-                lfrc[3 + k] = (-(0.5 * rho * bb[p] * bb[q] * v.abs())).mul_add(v, lfrc[3 + k]);
+                // `lfrc -= 0.5*rho*box[p]*box[q]*|v|*v`. `64156abe` multiplies from
+                // `0.5*rho` and subtracts the product.
+                if contract_off() {
+                    let prod = ((((0.5 * rho) * bb[p]) * bb[q]) * v.abs()) * v;
+                    lfrc[3 + k] -= prod;
+                } else {
+                    lfrc[3 + k] = (-(0.5 * rho * bb[p] * bb[q] * v.abs())).mul_add(v, lfrc[3 + k]);
+                }
             }
             for (k, (p, q)) in [(1, 2), (0, 2), (0, 1)].into_iter().enumerate() {
                 let s = (bb[p] * bb[p] * bb[p]).mul_add(bb[p], bb[q] * bb[q] * bb[q] * bb[q]);
@@ -1208,7 +1237,8 @@ impl SmoothModel {
             }
             let mut row = vec![0.0f64; t.colind.len()];
             for &(qadr, dof, prm) in &t.path {
-                len[i] = prm.mul_add(qpos[qadr], len[i]);
+                // `L += prm * qpos`. `64156abe` `mj_tendon` multiplies, then adds the product onto `L`.
+                len[i] = if contract_off() { prm * qpos[qadr] + len[i] } else { prm.mul_add(qpos[qadr], len[i]) };
                 if let Some(k) = t.colind.iter().position(|&c| c == dof) {
                     row[k] = prm.mul_add(1.0, row[k]);
                 }

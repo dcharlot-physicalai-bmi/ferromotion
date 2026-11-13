@@ -89,21 +89,33 @@ pub fn plane_sphere(margin: f64, p1: &GeomPose, p2: &GeomPose, r2: f64) -> Optio
 pub fn sphere_sphere(margin: f64, p1: &GeomPose, r1: f64, p2: &GeomPose, r2: f64) -> Option<PreContact> {
     let dif = p1.pos - p2.pos;
     let cdist_sqr = dot3(&dif, &dif);
-    let min_dist = margin + r1 + r2;
+    // `64156abe`: `(margin + r1) + r2`, then `dist = (sqrt - r1) - r2`.
+    let min_dist = if contract_off() { (margin + r1) + r2 } else { margin + r1 + r2 };
     if cdist_sqr > min_dist * min_dist {
         return None;
     }
-    let dist = cdist_sqr.sqrt() - r1 - r2;
+    let dist = if contract_off() { (cdist_sqr.sqrt() - r1) - r2 } else { cdist_sqr.sqrt() - r1 - r2 };
     let mut normal = p2.pos - p1.pos;
-    let len = dot3(&normal, &normal).sqrt();
+    let len = if contract_off() { ((normal.x * normal.x + normal.y * normal.y) + normal.z * normal.z).sqrt() } else { dot3(&normal, &normal).sqrt() };
     normalize3_mj(&mut normal);
     if len < MINVAL {
         // coincident centres: the cross product of the two z axes, or +x when they are parallel too
         let (a1, a2) = (p1.axis(), p2.axis());
-        normal = Vector3::new(a1.y.mul_add(a2.z, -(a1.z * a2.y)), a1.z.mul_add(a2.x, -(a1.x * a2.z)), a1.x.mul_add(a2.y, -(a1.y * a2.x)));
+        normal = if contract_off() {
+            Vector3::new(a1.y * a2.z - a1.z * a2.y, a1.z * a2.x - a1.x * a2.z, a1.x * a2.y - a1.y * a2.x)
+        } else {
+            Vector3::new(a1.y.mul_add(a2.z, -(a1.z * a2.y)), a1.z.mul_add(a2.x, -(a1.x * a2.z)), a1.x.mul_add(a2.y, -(a1.y * a2.x)))
+        };
         normalize3_mj(&mut normal);
     }
-    Some(pre(dist, normal * (r1 + dist / 2.0) + p1.pos, normal, Vector3::zeros()))
+    // witness: `normal * ((dist * 0.5) + r1) + pos1`
+    let pos = if contract_off() {
+        let s = dist * 0.5 + r1;
+        normal * s + p1.pos
+    } else {
+        normal * (r1 + dist / 2.0) + p1.pos
+    };
+    Some(pre(dist, pos, normal, Vector3::zeros()))
 }
 
 /// `mjc_PlaneCapsule`: `size2 = (radius, half-length)`; each end cap is a plane–sphere test and the
@@ -135,16 +147,19 @@ pub fn capsule_capsule(margin: f64, p1: &GeomPose, size1: [f64; 2], p2: &GeomPos
     let axis1 = p1.axis() * size1[1];
     let axis2 = p2.axis() * size2[1];
     let dif = p1.pos - p2.pos;
+    let raw12 = dot3(&axis1, &axis2);
+    let raw_u = dot3(&axis1, &dif);
     let ma = dot3(&axis1, &axis1);
-    let mb = -dot3(&axis1, &axis2);
+    let mb = -raw12;
     let mc = dot3(&axis2, &axis2);
-    let u = -dot3(&axis1, &dif);
+    let u = -raw_u;
     let v = dot3(&axis2, &dif);
-    let det = ma.mul_add(mc, -(mb * mb));
+    // `64156abe`: `det = (ma mc) - (mb mb)`, then the numerators from the raw dots.
+    let det = if contract_off() { ma * mc - mb * mb } else { ma.mul_add(mc, -(mb * mb)) };
     let ss = |p: Vector3<f64>, q: Vector3<f64>| sphere_sphere(margin, &GeomPose { pos: p, mat: p1.mat }, size1[0], &GeomPose { pos: q, mat: p2.mat }, size2[0]);
     if det.abs() >= MINVAL {
-        let mut x1 = mc.mul_add(u, -(mb * v)) / det;
-        let mut x2 = ma.mul_add(v, -(mb * u)) / det;
+        let mut x1 = if contract_off() { (raw12 * v - mc * raw_u) / det } else { mc.mul_add(u, -(mb * v)) / det };
+        let mut x2 = if contract_off() { (v * ma - raw12 * raw_u) / det } else { ma.mul_add(v, -(mb * u)) / det };
         if x1 > 1.0 {
             x1 = 1.0;
             x2 = (v - mb) / mc;
@@ -340,7 +355,9 @@ const BOXBOX_EDGEBIAS: f64 = 1e-6;
 const BOXBOX_MAXVERT: usize = 12;
 
 fn clip_half_plane(poly: &mut Vec<[f64; 3]>, coord: usize, sign: f64, limit: f64) {
-    let d: Vec<f64> = poly.iter().map(|p| sign.mul_add(p[coord], -limit)).collect();
+    // `d = sign*coord - limit`, and a crossing is `p + t*(q-p)`.
+    let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
+    let d: Vec<f64> = poly.iter().map(|p| if separate { sign * p[coord] - limit } else { sign.mul_add(p[coord], -limit) }).collect();
     if d.iter().all(|&x| x <= 0.0) {
         return;
     }
@@ -355,7 +372,8 @@ fn clip_half_plane(poly: &mut Vec<[f64; 3]>, coord: usize, sign: f64, limit: f64
         if ((dp < 0.0 && dq > 0.0) || (dp > 0.0 && dq < 0.0)) && out.len() < BOXBOX_MAXVERT {
             let t = dp / (dp - dq);
             let (p, q) = (poly[k], poly[k1]);
-            out.push([t.mul_add(q[0] - p[0], p[0]), t.mul_add(q[1] - p[1], p[1]), t.mul_add(q[2] - p[2], p[2])]);
+            let hit = |k: usize| if separate { p[k] + t * (q[k] - p[k]) } else { t.mul_add(q[k] - p[k], p[k]) };
+            out.push([hit(0), hit(1), hit(2)]);
         }
     }
     *poly = out;
@@ -364,9 +382,17 @@ fn clip_half_plane(poly: &mut Vec<[f64; 3]>, coord: usize, sign: f64, limit: f64
 // The primitive colliders' arithmetic, contracted as clang contracts MuJoCo's C on arm64 (see
 // `mujoco_ccd`): the LEFT product of `a*b + c*d` fused, each later product of a chain fused into the sum.
 
-/// `mju_dot3` / `mji_dot3`.
+fn contract_off() -> bool {
+    crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID
+}
+
+/// `mju_dot3`: `(az bz) + (ax bx + ay by)`.
 fn dot3(a: &Vector3<f64>, b: &Vector3<f64>) -> f64 {
-    a.z.mul_add(b.z, a.x.mul_add(b.x, a.y * b.y))
+    if contract_off() {
+        (a.z * b.z) + (a.x * b.x + a.y * b.y)
+    } else {
+        a.z.mul_add(b.z, a.x.mul_add(b.x, a.y * b.y))
+    }
 }
 
 /// `mji_mulMatVec3`: `mat · v`.
@@ -384,9 +410,20 @@ fn mat_t_mat(a: &Matrix3<f64>, b: &Matrix3<f64>) -> Matrix3<f64> {
     Matrix3::from_fn(|i, j| a[(2, i)].mul_add(b[(2, j)], a[(0, i)].mul_add(b[(0, j)], a[(1, i)] * b[(1, j)])))
 }
 
+/// `mji_mulMatTVec3` as inlined in `mjc_BoxBox` (`64156abe`): `(m2 v2) + (m1 v1 + m0 v0)`.
+fn mat_t_vec_sep(m: &Matrix3<f64>, v: &Vector3<f64>) -> Vector3<f64> {
+    Vector3::from_fn(|c, _| (m[(2, c)] * v.z) + (m[(1, c)] * v.y + m[(0, c)] * v.x))
+}
+
+/// `mju_mulMatTMat3` (`0x14d9f0`): `(a2 b2) + (a1 b1 + a0 b0)` per element of `aᵀ b`.
+fn mat_t_mat_sep(a: &Matrix3<f64>, b: &Matrix3<f64>) -> Matrix3<f64> {
+    Matrix3::from_fn(|i, j| (a[(2, i)] * b[(2, j)]) + (a[(1, i)] * b[(1, j)] + a[(0, i)] * b[(0, j)]))
+}
+
 /// `mju_normalize3`: below `mjMINVAL` the x axis; otherwise multiplied by the reciprocal of the norm.
 fn normalize3_mj(v: &mut Vector3<f64>) {
-    let norm = dot3(v, v).sqrt();
+    // `mju_normalize3` sums `(y y + x x) + z z`, not `mju_dot3`.
+    let norm = if contract_off() { ((v.y * v.y + v.x * v.x) + v.z * v.z).sqrt() } else { dot3(v, v).sqrt() };
     if norm < MINVAL {
         *v = Vector3::x();
     } else {
@@ -397,17 +434,30 @@ fn normalize3_mj(v: &mut Vector3<f64>) {
 /// `mjc_BoxBox`: separating-axis test over 15 axes, then either one edge–edge contact or the incident
 /// face clipped to the reference face (up to 8 contacts).
 pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2: [f64; 3]) -> Vec<PreContact> {
-    let pos21 = mat_t_vec(&p1.mat, &(p2.pos - p1.pos));
-    let pos12 = mat_t_vec(&p2.mat, &(p1.pos - p2.pos));
-    let rot = mat_t_mat(&p1.mat, &p2.mat);
+    let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
+    let (pos21, pos12, rot) = if separate {
+        (mat_t_vec_sep(&p1.mat, &(p2.pos - p1.pos)), mat_t_vec_sep(&p2.mat, &(p1.pos - p2.pos)), mat_t_mat_sep(&p1.mat, &p2.mat))
+    } else {
+        (mat_t_vec(&p1.mat, &(p2.pos - p1.pos)), mat_t_vec(&p2.mat, &(p1.pos - p2.pos)), mat_t_mat(&p1.mat, &p2.mat))
+    };
     let r = |i: usize, j: usize| rot[(i, j)];
     let rotabs = rot.abs();
-    let septol = BOXBOX_SEPEPS.mul_add(size1[0] + size1[1] + size1[2] + size2[0] + size2[1] + size2[2], margin);
+    // Face radii and the stored witness depth follow `mjc_BoxBox` in libmujoco 64156abe
+    // (`-ffp-contract=off -mno-fma`, recorded in the oracle recipe). Products are separate
+    // and sums are left-associated. The published path keeps the fused form.
+    let extent = size1[0] + size1[1] + size1[2] + size2[0] + size2[1] + size2[2];
+    let septol = if separate { margin + BOXBOX_SEPEPS * extent } else { BOXBOX_SEPEPS.mul_add(extent, margin) };
     let mut sep_best = -MAXVAL;
     let mut code: i32 = -1;
     for i in 0..3 {
-        let radius2 = rotabs[(i, 2)].mul_add(size2[2], rotabs[(i, 0)].mul_add(size2[0], rotabs[(i, 1)] * size2[1]));
-        let sep = pos21[i].abs() - size1[i] - radius2;
+        // `radius2 = |R_i0|*s0 + |R_i1|*s1 + |R_i2|*s2`, then `sep = |p| - size - radius2`.
+        let radius2 = if separate {
+            // `(s2 |R_i2|) + (s0 |R_i0| + s1 |R_i1|)`
+            (rotabs[(i, 2)] * size2[2]) + (rotabs[(i, 0)] * size2[0] + rotabs[(i, 1)] * size2[1])
+        } else {
+            rotabs[(i, 2)].mul_add(size2[2], rotabs[(i, 0)].mul_add(size2[0], rotabs[(i, 1)] * size2[1]))
+        };
+        let sep = (pos21[i].abs() - size1[i]) - radius2;
         if sep > septol {
             return Vec::new();
         }
@@ -417,8 +467,13 @@ pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2
         }
     }
     for j in 0..3 {
-        let radius1 = rotabs[(2, j)].mul_add(size1[2], rotabs[(0, j)].mul_add(size1[0], rotabs[(1, j)] * size1[1]));
-        let sep = pos12[j].abs() - size2[j] - radius1;
+        let radius1 = if separate {
+            // `(s2 |R_2j|) + (s1 |R_1j| + s0 |R_0j|)`
+            (rotabs[(2, j)] * size1[2]) + (rotabs[(1, j)] * size1[1] + rotabs[(0, j)] * size1[0])
+        } else {
+            rotabs[(2, j)].mul_add(size1[2], rotabs[(0, j)].mul_add(size1[0], rotabs[(1, j)] * size1[1]))
+        };
+        let sep = (pos12[j].abs() - size2[j]) - radius1;
         if sep > septol {
             return Vec::new();
         }
@@ -434,23 +489,25 @@ pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2
             let (i1, i2) = ((i + 1) % 3, (i + 2) % 3);
             let mut ax1 = -r(i2, j);
             let mut ax2 = r(i1, j);
-            let norm2 = ax1.mul_add(ax1, ax2 * ax2);
+            // `64156abe` squares the unnegated component second: `(ax2 ax2) + (ax1 ax1)`.
+            let norm2 = if separate { ax2 * ax2 + ax1 * ax1 } else { ax1.mul_add(ax1, ax2 * ax2) };
             if norm2 < BOXBOX_PAREPS {
                 continue;
             }
             let inv = 1.0 / norm2.sqrt();
             ax1 *= inv;
             ax2 *= inv;
-            let radius1 = size1[i1].mul_add(ax1.abs(), size1[i2] * ax2.abs());
+            let radius1 = if separate { size1[i2] * ax2.abs() + size1[i1] * ax1.abs() } else { size1[i1].mul_add(ax1.abs(), size1[i2] * ax2.abs()) };
             let (j1, j2) = ((j + 1) % 3, (j + 2) % 3);
-            let a2_1 = ax1.mul_add(r(i1, j1), ax2 * r(i2, j1));
-            let a2_2 = ax1.mul_add(r(i1, j2), ax2 * r(i2, j2));
-            let radius2 = size2[j1].mul_add(a2_1.abs(), size2[j2] * a2_2.abs());
-            let sep = ax1.mul_add(pos21[i1], ax2 * pos21[i2]).abs() - radius1 - radius2;
+            let a2_1 = if separate { ax2 * r(i2, j1) + ax1 * r(i1, j1) } else { ax1.mul_add(r(i1, j1), ax2 * r(i2, j1)) };
+            let a2_2 = if separate { ax2 * r(i2, j2) + ax1 * r(i1, j2) } else { ax1.mul_add(r(i1, j2), ax2 * r(i2, j2)) };
+            let radius2 = if separate { size2[j2] * a2_2.abs() + size2[j1] * a2_1.abs() } else { size2[j1].mul_add(a2_1.abs(), size2[j2] * a2_2.abs()) };
+            let sep = if separate { (ax2 * pos21[i2] + ax1 * pos21[i1]).abs() - radius1 - radius2 } else { ax1.mul_add(pos21[i1], ax2 * pos21[i2]).abs() - radius1 - radius2 };
             if sep > septol {
                 return Vec::new();
             }
-            if (-BOXBOX_EDGEBIAS).mul_add(sep.abs(), sep) > sep_best && sep > sep_face {
+            let biased = if separate { (-BOXBOX_EDGEBIAS) * sep.abs() + sep } else { (-BOXBOX_EDGEBIAS).mul_add(sep.abs(), sep) };
+            if biased > sep_best && sep > sep_face {
                 sep_best = sep;
                 code = 6 + 3 * i as i32 + j as i32;
             }
@@ -490,13 +547,18 @@ pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2
         if dot3(&axis, &pos21) < 0.0 {
             axis = -axis;
         }
-        let a2 = Vector3::from_fn(|c, _| axis[2].mul_add(r(2, c), axis[0].mul_add(r(0, c), axis[1] * r(1, c))));
+        let a2 = if separate {
+            Vector3::from_fn(|c, _| (axis[2] * r(2, c)) + (axis[1] * r(1, c) + axis[0] * r(0, c)))
+        } else {
+            Vector3::from_fn(|c, _| axis[2].mul_add(r(2, c), axis[0].mul_add(r(0, c), axis[1] * r(1, c))))
+        };
         let ambig = BOXBOX_SGNEPS;
         let amb1: Option<usize> = if axis[i1].abs() < ambig { Some(i1) } else if axis[i2].abs() < ambig { Some(i2) } else { None };
         let amb2: Option<usize> = if a2[j1].abs() < ambig { Some(j1) } else if a2[j2].abs() < ambig { Some(j2) } else { None };
         let d2 = Vector3::new(r(0, j), r(1, j), r(2, j));
         let b = d2[i];
-        let denom = (-b).mul_add(b, 1.0);
+        // `denom = 1 - b*b`, `s = (d1e - b*d2e) / denom`, `t = b*s - d2e`, then `s = d1e + b*t`.
+        let denom = if separate { 1.0 - b * b } else { (-b).mul_add(b, 1.0) };
         let (mut w1, mut w2) = (Vector3::zeros(), Vector3::zeros());
         let mut best_d2 = MAXVAL;
         for v1 in 0..if amb1.is_some() { 2 } else { 1 } {
@@ -513,17 +575,31 @@ pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2
                 if let (Some(a), 1) = (amb2, v2) {
                     cc[a] = -cc[a];
                 }
-                let c2 = mat_vec(&rot, &cc) + pos21;
+                // `mji_mulMatVec3` then `mji_addTo3`. `64156abe` (`-mno-fma`) sums a row as
+                // `(m2 v2) + (m1 v1 + m0 v0)`, then `pos +` that.
+                let c2 = if separate {
+                    Vector3::from_fn(|r, _| pos21[r] + ((rot[(r, 2)] * cc[2]) + (rot[(r, 1)] * cc[1] + rot[(r, 0)] * cc[0])))
+                } else {
+                    mat_vec(&rot, &cc) + pos21
+                };
                 let e = c2 - c1;
                 let d1e = e[i];
                 let d2e = dot3(&d2, &e);
-                let mut s = if denom < MINVAL { 0.0 } else { (-b).mul_add(d2e, d1e) / denom };
+                let mut s = if denom < MINVAL {
+                    0.0
+                } else if separate {
+                    (d1e - b * d2e) / denom
+                } else {
+                    (-b).mul_add(d2e, d1e) / denom
+                };
                 s = s.clamp(-size1[i], size1[i]);
-                let t = b.mul_add(s, -d2e).clamp(-size2[j], size2[j]);
-                s = b.mul_add(t, d1e).clamp(-size1[i], size1[i]);
+                let t_raw = if separate { b * s - d2e } else { b.mul_add(s, -d2e) };
+                let t = t_raw.clamp(-size2[j], size2[j]);
+                s = if separate { d1e + b * t } else { b.mul_add(t, d1e) };
+                s = s.clamp(-size1[i], size1[i]);
                 let mut p1c = c1;
                 p1c[i] += s;
-                let p2c = Vector3::from_fn(|k, _| d2[k].mul_add(t, c2[k]));
+                let p2c = if separate { Vector3::from_fn(|k, _| c2[k] + d2[k] * t) } else { Vector3::from_fn(|k, _| d2[k].mul_add(t, c2[k])) };
                 let gap = p2c - p1c;
                 let gap2 = dot3(&gap, &gap);
                 if gap2 < best_d2 {
@@ -561,20 +637,28 @@ pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2
     let (mut cx, mut du, mut dv) = ([0.0; 3], [0.0; 3], [0.0; 3]);
     for rr in 0..3 {
         let c = if rr == 0 { ax } else if rr == 1 { ay } else { a };
-        cx[rr] = (tinc * sizeinc[binc]).mul_add(rinc[(c, binc)], posoi[c]);
+        // `cx = pos + (tinc*size)*R`. The witness depth is this center, then `cx + su*du + sv*dv`.
+        cx[rr] = if separate {
+            posoi[c] + (tinc * sizeinc[binc]) * rinc[(c, binc)]
+        } else {
+            (tinc * sizeinc[binc]).mul_add(rinc[(c, binc)], posoi[c])
+        };
         du[rr] = sizeinc[bu] * rinc[(c, bu)];
         dv[rr] = sizeinc[bv] * rinc[(c, bv)];
     }
-    cx[2] = sgn.mul_add(cx[2], -sizeref[a]);
+    cx[2] = if separate { sgn * cx[2] - sizeref[a] } else { sgn.mul_add(cx[2], -sizeref[a]) };
     du[2] *= sgn;
     dv[2] *= sgn;
     let corner_sign = [[1.0f64, 1.0], [-1.0, 1.0], [-1.0, -1.0], [1.0, -1.0]];
-    let mut poly: Vec<[f64; 3]> = corner_sign.iter().map(|[su, sv]| [sv.mul_add(dv[0], su.mul_add(du[0], cx[0])), sv.mul_add(dv[1], su.mul_add(du[1], cx[1])), sv.mul_add(dv[2], su.mul_add(du[2], cx[2]))]).collect();
+    let corner = |su: f64, sv: f64, k: usize| {
+        if separate { (cx[k] + su * du[k]) + sv * dv[k] } else { sv.mul_add(dv[k], su.mul_add(du[k], cx[k])) }
+    };
+    let mut poly: Vec<[f64; 3]> = corner_sign.iter().map(|[su, sv]| [corner(*su, *sv, 0), corner(*su, *sv, 1), corner(*su, *sv, 2)]).collect();
     clip_half_plane(&mut poly, 0, 1.0, sizeref[ax]);
     clip_half_plane(&mut poly, 0, -1.0, sizeref[ax]);
     clip_half_plane(&mut poly, 1, 1.0, sizeref[ay]);
     clip_half_plane(&mut poly, 1, -1.0, sizeref[ay]);
-    let dupe2 = BOXBOX_DUPEPS * sizeref[ax].mul_add(sizeref[ax], sizeref[ay] * sizeref[ay]);
+    let dupe2 = if separate { ((sizeref[ax] * sizeref[ax]) + (sizeref[ay] * sizeref[ay])) * BOXBOX_DUPEPS } else { BOXBOX_DUPEPS * sizeref[ax].mul_add(sizeref[ax], sizeref[ay] * sizeref[ay]) };
     let mut accepted: Vec<[f64; 3]> = Vec::new();
     for v in &poly {
         if v[2] > margin {
@@ -582,7 +666,7 @@ pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2
         }
         if accepted.iter().any(|q| {
             let (dx, dy) = (q[0] - v[0], q[1] - v[1]);
-            dx.mul_add(dx, dy * dy) < dupe2
+            (if separate { dy * dy + dx * dx } else { dx.mul_add(dx, dy * dy) }) < dupe2
         }) {
             continue;
         }
@@ -596,7 +680,8 @@ pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2
             let mut posc = Vector3::zeros();
             posc[ax] = v[0];
             posc[ay] = v[1];
-            posc[a] = sgn * 0.5f64.mul_add(v[2], sizeref[a]);
+            // `sgn * (size + 0.5*depth)`. Depth itself is the polygon z, already `con.dist`.
+            posc[a] = if separate { sgn * (sizeref[a] + 0.5 * v[2]) } else { sgn * 0.5f64.mul_add(v[2], sizeref[a]) };
             pre(v[2], mat_vec(&matref, &posc) + posref, normal, Vector3::zeros())
         })
         .collect()
@@ -866,9 +951,19 @@ pub fn capsule_box(margin: f64, p1: &GeomPose, size1: [f64; 2], p2: &GeomPose, s
 /// `mju_makeFrame`: complete `[normal, tangent]` into an orthonormal frame; a zero tangent is replaced by
 /// `y` unless the normal is mostly `y`, in which case `z`.
 pub fn make_frame(normal: Vector3<f64>, tangent: Vector3<f64>) -> [Vector3<f64>; 3] {
-    // as clang contracts `mju_makeFrame` (`mju_normalize3`, `mju_dot3`, `mji_cross` each fuse their products)
-    let dot = |a: &Vector3<f64>, b: &Vector3<f64>| a.z.mul_add(b.z, a.x.mul_add(b.x, a.y * b.y));
-    let norm = |v: &Vector3<f64>| dot(v, v).sqrt();
+    // Published path: clang fuses `mju_normalize3`, `mju_dot3` and `mji_cross`.
+    // `64156abe` is the source: `(x*x + y*y) + z*z`, `(a0*b0 + a1*b1) + a2*b2`, and `a1*b2 - a2*b1`.
+    let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
+    let dot = |a: &Vector3<f64>, b: &Vector3<f64>| {
+        if separate {
+            (a.x * b.x + a.y * b.y) + a.z * b.z
+        } else {
+            a.z.mul_add(b.z, a.x.mul_add(b.x, a.y * b.y))
+        }
+    };
+    let norm = |v: &Vector3<f64>| {
+        if separate { (v.x * v.x + v.y * v.y + v.z * v.z).sqrt() } else { dot(v, v).sqrt() }
+    };
     let n = normal * (1.0 / norm(&normal));
     let mut t = tangent;
     if dot(&t, &t) < 0.25 {
@@ -876,7 +971,11 @@ pub fn make_frame(normal: Vector3<f64>, tangent: Vector3<f64>) -> [Vector3<f64>;
     }
     t -= n * dot(&n, &t);
     t *= 1.0 / norm(&t);
-    let z = Vector3::new(n.y.mul_add(t.z, -(n.z * t.y)), n.z.mul_add(t.x, -(n.x * t.z)), n.x.mul_add(t.y, -(n.y * t.x)));
+    let z = if separate {
+        Vector3::new(n.y * t.z - n.z * t.y, n.z * t.x - n.x * t.z, n.x * t.y - n.y * t.x)
+    } else {
+        Vector3::new(n.y.mul_add(t.z, -(n.z * t.y)), n.z.mul_add(t.x, -(n.x * t.z)), n.x.mul_add(t.y, -(n.y * t.x)))
+    };
     [n, t, z]
 }
 
