@@ -46,8 +46,7 @@ pub fn oracle_4_0() -> bool {
 
 /// `d9972b33` and `6f3db612` schedules. Both the 4.0.0 and 4.0.1 libraries have them.
 pub fn oracle_4_0_schedules() -> bool {
-    let id = active_policy().id;
-    id == ORACLE_4_0_ID || id == ORACLE_4_0_1_ID
+    oracle_4_0() || active_policy().id == ORACLE_4_0_1_ID
 }
 
 /// Active contraction for the three opt-in sites. The published default leaves every site contracted.

@@ -219,8 +219,11 @@ the next section.
 
 ## 4.0 profile measurement
 
-The 4.0 x86 profile pin is the receipt
+The 4.0.0 x86 profile pin is the receipt
 `docs/acceptance/receipts/f8fe0779ca35549d590f005f2a57768b522459a6.md`.
+The 4.0.1 identity is a separate oracle. Its pin is
+`docs/acceptance/receipts/d9e1bc38d6e4cc9606f6b506291f7dd220b4f3d8.md`.
+The library-versus-library dump diff is `docs/acceptance/oracles/4.0.1-dump-diff.md`.
 `scripts/oracle_profile_gate.py` reads the latest receipt for the oracle id.
 Counts and the exact model set are in that file, hashed, and are not copied here.
 
