@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Re-run stage 5 against a pinned ferromotion commit and an explicit build policy.
-# The commit and tree come from the codeload tarball. The GitHub API is not used.
+# Re-run stage 5 against a ferromotion commit and an explicit build policy.
+# Any full 40-hex commit is accepted. The tree comes from the GitHub commit
+# object, fetched with no token. The codeload tarball must reproduce that tree.
+# The commit must be reachable on cursor/ferromotion-fidelity-conformance-bb9d.
 # Cargo stays offline. A missing vendored crate is listed and cargo is not started.
 # Each invocation uses a new sibling directory. An existing one is not overwritten.
 # rust212-20261109T215708Z is the dated e0557dd receipt. It is not overwritten.
@@ -43,13 +45,17 @@ if [[ $# -ne 3 || -z "${2:-}" || -z "${3:-}" ]]; then
 fi
 COMMIT="$2"
 POLICY="$3"
+if [[ ! "$COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "refusing: $COMMIT is not a full 40-hex commit" >&2
+  exit 2
+fi
 trap - ERR
 set +e
-TREE="$(direct_pull_profile_tree "$COMMIT")"
+TREE="$(direct_pull_fidelity_tree "$COMMIT")"
 tree_rc=$?
 set -e
 trap refuse_unexpected ERR
-if [[ "$tree_rc" -ne 0 ]]; then
+if [[ "$tree_rc" -ne 0 || ! "$TREE" =~ ^[0-9a-f]{40}$ ]]; then
   exit 2
 fi
 case "$POLICY" in
@@ -132,6 +138,7 @@ fetch_codeload() {
     echo "ferromotion_tested_commit $COMMIT"
     echo "ferromotion_tested_tree $TREE"
     echo "ferromotion_source codeload"
+    echo "ferromotion_tree_source github-commit-object"
     echo "ferromotion_tested_dir $dest"
     echo "ferromotion_build_policy $POLICY"
     echo "ferromotion_oracle_sha256 $POLICY_SHA"
@@ -164,7 +171,7 @@ write_profile_receipt() {
       echo "refusing: ${COMMIT} install_policy does not select ${POLICY} bound to ${POLICY_SHA}."
       echo "The only oracle identity these commits accept is ${ORACLE_X86_CONTRACT_OFF_ID} bound to ${ORACLE_X86_CONTRACT_OFF_SHA256}."
       echo "Selecting that x86 id while the dumps were produced by libmujoco ${THOR2_LIB_MUJOCO_STAGE3} would relabel the oracle. This script does not do that."
-      echo "To run the unfused profile against those dumps, install_policy in the tested commit must gain a match arm for ${ORACLE_AARCH64_CONTRACT_OFF_ID} that requires artifact sha256 ${THOR2_LIB_MUJOCO_STAGE3} and sets mul_quat Unfused, rot_vec_quat Unfused, and mul_mat_vec3 Contracted. Unknown sites and mul_mat_vec3 must be refused, the same way the x86 arm refuses them. That arm is not in ${FERROMOTION_PROFILE_6092_COMMIT} or ${FERROMOTION_PROFILE_D14_COMMIT}. Cargo was not started."
+      echo "To run the unfused profile against those dumps, install_policy in the tested commit must gain a match arm for ${ORACLE_AARCH64_CONTRACT_OFF_ID} that requires artifact sha256 ${THOR2_LIB_MUJOCO_STAGE3} and sets mul_quat Unfused, rot_vec_quat Unfused, and mul_mat_vec3 Contracted. Unknown sites and mul_mat_vec3 must be refused, the same way the x86 arm refuses them. That arm is not in this commit. Cargo was not started."
     fi
   } >"$receipt"
   sha256sum "$receipt" >"${receipt}.sha256"
@@ -245,7 +252,7 @@ if [[ "$bind_rc" -ne 0 || "$binding" != "$POLICY_SHA" ]]; then
   echo "refusing: ${COMMIT} install_policy does not select ${POLICY} bound to ${POLICY_SHA}." >&2
   echo "The only oracle identity these commits accept is ${ORACLE_X86_CONTRACT_OFF_ID} bound to ${ORACLE_X86_CONTRACT_OFF_SHA256}." >&2
   echo "Selecting that x86 id while the dumps were produced by libmujoco ${THOR2_LIB_MUJOCO_STAGE3} would relabel the oracle. This script does not do that." >&2
-  echo "To run the unfused profile against those dumps, install_policy in the tested commit must gain a match arm for ${ORACLE_AARCH64_CONTRACT_OFF_ID} that requires artifact sha256 ${THOR2_LIB_MUJOCO_STAGE3} and sets mul_quat Unfused, rot_vec_quat Unfused, and mul_mat_vec3 Contracted. Unknown sites and mul_mat_vec3 must be refused, the same way the x86 arm refuses them. That arm is not in ${FERROMOTION_PROFILE_6092_COMMIT} or ${FERROMOTION_PROFILE_D14_COMMIT}. Cargo was not started." >&2
+  echo "To run the unfused profile against those dumps, install_policy in the tested commit must gain a match arm for ${ORACLE_AARCH64_CONTRACT_OFF_ID} that requires artifact sha256 ${THOR2_LIB_MUJOCO_STAGE3} and sets mul_quat Unfused, rot_vec_quat Unfused, and mul_mat_vec3 Contracted. Unknown sites and mul_mat_vec3 must be refused, the same way the x86 arm refuses them. That arm is not in this commit. Cargo was not started." >&2
   write_profile_receipt policy_not_selected not_run "${binding:-not_selected}"
   keep_superseded
   exit 2

@@ -81,8 +81,9 @@ RUSTC_RELEASE=1.99.1
 FERROMOTION_RERUN_COMMIT=515a7dec4b4ed2fa7257f328c7c3f9b169b8d7ba
 FERROMOTION_RERUN_TREE=67e20a00014302498e9b350862549f9d705911a6
 FERROMOTION_RERUN_CONTAINS=7998624df8a4ac2591187540a59ddc9b13d51640
-# Oracle-profile re-runs. The commit argument must be one of these.
-# The tree is what the codeload archive must hash to. The GitHub API is not consulted.
+# Oracle-profile re-runs accept any full commit reachable on this branch.
+# These two are recorded examples. They are not an allowlist.
+FERROMOTION_FIDELITY_BRANCH=cursor/ferromotion-fidelity-conformance-bb9d
 FERROMOTION_PROFILE_6092_COMMIT=6092a8e537d9eb1264fce1775daf809e15616b03
 FERROMOTION_PROFILE_6092_TREE=99b771db50be4e3f377592212b589aba172d572a
 FERROMOTION_PROFILE_D14_COMMIT=d14e65fac3bcc44fa603dc9c8d87e4ea149a4200

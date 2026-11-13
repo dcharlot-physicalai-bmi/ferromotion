@@ -2,11 +2,9 @@
 
 ## Oracle-profile re-run
 
-Two ferromotion commits, each in its own sibling directory. Nothing already on disk is overwritten. Cargo stays offline. A missing vendored crate is listed and cargo is not started. The commit and the tree are checked from the codeload tarball. The GitHub API is not used.
+The commit argument is any full 40-hex object id. A short SHA is refused. The script fetches the GitHub commit object with no token, reads that object's tree, and refuses unless the commit is reachable on `cursor/ferromotion-fidelity-conformance-bb9d` (`identical` or `behind`). The codeload tarball must reproduce that tree. The receipt records the commit and the tree. Nothing already on disk is overwritten. Cargo stays offline. A missing vendored crate is listed and cargo is not started.
 
-The build policy argument is `mujoco-3.13.0-aarch64-contract-off`, bound to libmujoco `9164828bf04729b20b640bd09105baea98137a8749e262fc06fddc44ca869eb9`. `6092a8e537d9eb1264fce1775daf809e15616b03` (tree `99b771db50be4e3f377592212b589aba172d572a`) and `d14e65fac3bcc44fa603dc9c8d87e4ea149a4200` (tree `be573c7badb5195e49e5435038f63acce112de7d`) do not select that id. `install_policy` accepts only `mujoco-3.13.0-x86_64-contract-off` bound to `64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc`. The script does not substitute that x86 id. It writes a receipt with the commit, the tree, the requested policy, the measured libmujoco sha256, and `counts not_run`, then exits 2 before cargo.
-
-To run the unfused profile against the 9164828b dumps, `install_policy` in the tested commit has to gain a match arm for `mujoco-3.13.0-aarch64-contract-off` that requires artifact sha256 `9164828bf04729b20b640bd09105baea98137a8749e262fc06fddc44ca869eb9` and sets `mul_quat` Unfused, `rot_vec_quat` Unfused, and `mul_mat_vec3` Contracted. Unknown sites and `mul_mat_vec3` are refused, the same way the x86 arm refuses them.
+The build policy argument is `mujoco-3.13.0-aarch64-contract-off`, bound to libmujoco `9164828bf04729b20b640bd09105baea98137a8749e262fc06fddc44ca869eb9`. `b6a3a885f8c405b3f2c098ece0cc1bdc8ad5ce03` selects that arm. The script does not substitute the x86 id. A commit whose `install_policy` does not select the requested id writes a receipt with `counts not_run` and exits 2 before cargo.
 
 ### thor2
 
@@ -33,10 +31,10 @@ curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/runners/run-gold
 curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/runners/run-rust-212.sh" "$BASE/scripts/arm_oracle/run-rust-212.sh"
 cd "$D"
 sha256sum -c - <<'EOF'
-fc7b516db873a31beacb8640932063729615a1d8ca9e533097ea51d4d1ce70dc  05-rust-rereun.sh
+5a5ddcff278e75dabfdeaee8c076d8a6e6695a2261d1dc19985d5782cc7c1d64  05-rust-rereun.sh
 15cd7716ab4d3821706b6ef4e589309cec7af64810b64d15f96e02e6f6a92f47  direct-pull-receipt.sh
-3a0f9b1256317c310ea7e802aa058305d15ce16077036e1a485ae5470b50203d  lib.sh
-607ed62911bdc090190d37a7cf7782c74daf996d085b173527ba4d9892836513  pins.sh
+91885373ebe63022e46c78a36c533a03e61b329f36eecb05392b40e871dd5f17  lib.sh
+f982ef8a667b9af6d60dd74bdf7afa7fb738d9bed44093fe9d98a965f8065294  pins.sh
 61972b22b66be5b5de9b9b887d80505b2d8b3a2b9e77f0845b424b0cba34ba08  runners/compiler-rt.sh
 b0c08e9569be14e624caffe17563b4ade2b34c1e33cbe71b601401ef22e49f38  runners/limits.sh
 a1e77ec49a52fe82863922a49863e0c66def4c0fcb30621fe4b3b4b60587a11d  runners/run-goldens.sh
@@ -51,19 +49,17 @@ setsid nohup bash -c '
   export CARGO_NET_OFFLINE=true
   unset CUDA_VISIBLE_DEVICES MUJOCO_GL GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN || true
   set +e
-  bash "$1/05-rust-rereun.sh" "$2" 6092a8e537d9eb1264fce1775daf809e15616b03 mujoco-3.13.0-aarch64-contract-off > "$1/stage5-6092a8e.log" 2>&1
-  echo "6092a8e_exit $?" >> "$1/driver-status.txt"
-  bash "$1/05-rust-rereun.sh" "$2" d14e65fac3bcc44fa603dc9c8d87e4ea149a4200 mujoco-3.13.0-aarch64-contract-off > "$1/stage5-d14e65f.log" 2>&1
-  echo "d14e65f_exit $?" >> "$1/driver-status.txt"
+  bash "$1/05-rust-rereun.sh" "$2" b6a3a885f8c405b3f2c098ece0cc1bdc8ad5ce03 mujoco-3.13.0-aarch64-contract-off > "$1/stage5-b6a3a885.log" 2>&1
+  echo "b6a3a885_exit $?" >> "$1/driver-status.txt"
 ' bash "$D" "$RUN" > "$D/driver.log" 2>&1 < /dev/null &
 echo $! > "$D/driver.pid"
 echo "driver pid $(cat "$D/driver.pid")"
-echo "tail -f $D/stage5-6092a8e.log"
+echo "tail -f $D/stage5-b6a3a885.log"
 ```
 
 ### thor.local
 
-A fresh run. Stages 01 through 04 reproduce the 3.13 aarch64 contract-off library and the 212-model dumps, then stage 05 runs the same two commits. Do not point `FERROMOTION_ORACLE_HOME` at an existing tree. Do not copy credentials. Do not apt, sudo, or otherwise change the system.
+A fresh run. Stages 01 through 04 reproduce the 3.13 aarch64 contract-off library and the 212-model dumps, then stage 05 takes any full commit on the fidelity branch. The driver below uses `b6a3a885f8c405b3f2c098ece0cc1bdc8ad5ce03`. Do not point `FERROMOTION_ORACLE_HOME` at an existing tree. Do not copy credentials. Do not apt, sudo, or otherwise change the system.
 
 Each stage takes `flock -x` (`LOCK_EX`) on `/tmp/bmi-energy.lock`, waits at most 120 seconds, and writes the lock window. Do not flock the driver. A driver-held lock would make the stage wait on itself.
 
@@ -107,11 +103,11 @@ sha256sum -c - <<'EOF'
 90ead490a43c51c76d107a2f8e505f3f5e5aaaf2ed6afb1e4217564871fcd09a  02-verify.sh
 7e763bc28a5400d27c8c4eea618c7e9bda0f6a50d7f755531a9ba0bc5da8e5c3  03-cbuild.sh
 8d6471620522e48c8301e8db7d5f2b6030920d2df87a76df1724237855af15fb  04-corpus.sh
-fc7b516db873a31beacb8640932063729615a1d8ca9e533097ea51d4d1ce70dc  05-rust-rereun.sh
+5a5ddcff278e75dabfdeaee8c076d8a6e6695a2261d1dc19985d5782cc7c1d64  05-rust-rereun.sh
 5ea7fee85bf55cbe239df15abbb59123a027d275566c5903986acbb32b3a59ff  compare-arm-x86.sh
 15cd7716ab4d3821706b6ef4e589309cec7af64810b64d15f96e02e6f6a92f47  direct-pull-receipt.sh
-3a0f9b1256317c310ea7e802aa058305d15ce16077036e1a485ae5470b50203d  lib.sh
-607ed62911bdc090190d37a7cf7782c74daf996d085b173527ba4d9892836513  pins.sh
+91885373ebe63022e46c78a36c533a03e61b329f36eecb05392b40e871dd5f17  lib.sh
+f982ef8a667b9af6d60dd74bdf7afa7fb738d9bed44093fe9d98a965f8065294  pins.sh
 ed3a5247ea4817fd9f83842618dac753867b89d580f90d50014abdb55802865f  materialize-schedules.sh
 599e5b91ed6603effd57e74e3b008fe24fe777b6a1917360a931afee5e6a91fa  patches/ccd.patch
 c15466df72091ce8210bf745eae3f6906930465e00d192fad7caca77477d5939  patches/qhull.patch
@@ -154,10 +150,8 @@ setsid nohup bash -c '
   fi
   echo "stage4_exit $stage4_rc" >> "$1/driver-status.txt"
   export CARGO_NET_OFFLINE=true
-  bash "$1/05-rust-rereun.sh" "$RUN" 6092a8e537d9eb1264fce1775daf809e15616b03 mujoco-3.13.0-aarch64-contract-off > "$1/stage5-6092a8e.log" 2>&1
-  echo "6092a8e_exit $?" >> "$1/driver-status.txt"
-  bash "$1/05-rust-rereun.sh" "$RUN" d14e65fac3bcc44fa603dc9c8d87e4ea149a4200 mujoco-3.13.0-aarch64-contract-off > "$1/stage5-d14e65f.log" 2>&1
-  echo "d14e65f_exit $?" >> "$1/driver-status.txt"
+  bash "$1/05-rust-rereun.sh" "$RUN" b6a3a885f8c405b3f2c098ece0cc1bdc8ad5ce03 mujoco-3.13.0-aarch64-contract-off > "$1/stage5-b6a3a885.log" 2>&1
+  echo "b6a3a885_exit $?" >> "$1/driver-status.txt"
 ' bash "$D" > "$D/driver.log" 2>&1 < /dev/null &
 echo $! > "$D/driver.pid"
 echo "driver pid $(cat "$D/driver.pid")"
@@ -191,10 +185,10 @@ curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/runners/run-gold
 curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' -o "$D/runners/run-rust-212.sh" "$BASE/scripts/arm_oracle/run-rust-212.sh"
 cd "$D"
 sha256sum -c - <<'EOF'
-fc7b516db873a31beacb8640932063729615a1d8ca9e533097ea51d4d1ce70dc  05-rust-rereun.sh
+5a5ddcff278e75dabfdeaee8c076d8a6e6695a2261d1dc19985d5782cc7c1d64  05-rust-rereun.sh
 15cd7716ab4d3821706b6ef4e589309cec7af64810b64d15f96e02e6f6a92f47  direct-pull-receipt.sh
-3a0f9b1256317c310ea7e802aa058305d15ce16077036e1a485ae5470b50203d  lib.sh
-607ed62911bdc090190d37a7cf7782c74daf996d085b173527ba4d9892836513  pins.sh
+91885373ebe63022e46c78a36c533a03e61b329f36eecb05392b40e871dd5f17  lib.sh
+f982ef8a667b9af6d60dd74bdf7afa7fb738d9bed44093fe9d98a965f8065294  pins.sh
 61972b22b66be5b5de9b9b887d80505b2d8b3a2b9e77f0845b424b0cba34ba08  runners/compiler-rt.sh
 b0c08e9569be14e624caffe17563b4ade2b34c1e33cbe71b601401ef22e49f38  runners/limits.sh
 a1e77ec49a52fe82863922a49863e0c66def4c0fcb30621fe4b3b4b60587a11d  runners/run-goldens.sh
@@ -253,8 +247,8 @@ sha256sum -c - <<'EOF'
 f01994cc777b45cb7bbb3dbf8fb9086ae07b005d2c6f39d5e2d2b659927d0dca  05-rust.sh
 5ea7fee85bf55cbe239df15abbb59123a027d275566c5903986acbb32b3a59ff  compare-arm-x86.sh
 15cd7716ab4d3821706b6ef4e589309cec7af64810b64d15f96e02e6f6a92f47  direct-pull-receipt.sh
-3a0f9b1256317c310ea7e802aa058305d15ce16077036e1a485ae5470b50203d  lib.sh
-607ed62911bdc090190d37a7cf7782c74daf996d085b173527ba4d9892836513  pins.sh
+91885373ebe63022e46c78a36c533a03e61b329f36eecb05392b40e871dd5f17  lib.sh
+f982ef8a667b9af6d60dd74bdf7afa7fb738d9bed44093fe9d98a965f8065294  pins.sh
 61972b22b66be5b5de9b9b887d80505b2d8b3a2b9e77f0845b424b0cba34ba08  runners/compiler-rt.sh
 b0c08e9569be14e624caffe17563b4ade2b34c1e33cbe71b601401ef22e49f38  runners/limits.sh
 64c139aec23de404820a41a3a8ce5f842d6c48a1432e446ab373a721b8c8b1d8  runners/read-mulquat-fixture.sh

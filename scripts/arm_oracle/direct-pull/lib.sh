@@ -241,21 +241,70 @@ offline = true
 EOF
 }
 
-# Tree pin for an oracle-profile re-run commit. Unknown commits are refused.
-direct_pull_profile_tree() {
+# A stage-05 commit argument is a full object id. Short SHAs are refused.
+direct_pull_require_full_sha() {
   local commit="$1"
-  case "$commit" in
-    "$FERROMOTION_PROFILE_6092_COMMIT") printf '%s\n' "$FERROMOTION_PROFILE_6092_TREE" ;;
-    "$FERROMOTION_PROFILE_D14_COMMIT") printf '%s\n' "$FERROMOTION_PROFILE_D14_TREE" ;;
+  if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "refusing: $commit is not a full 40-hex commit" >&2
+    return 2
+  fi
+}
+
+# identical: the commit is the branch tip. behind: it is an ancestor.
+# ahead and diverged are not on the branch.
+direct_pull_fidelity_status_ok() {
+  case "$1" in
+    identical|behind) return 0 ;;
     *)
-      echo "refusing: $commit is not a pinned oracle-profile commit" >&2
+      echo "refusing: compare status ${1:-absent} is not reachable on ${FERROMOTION_FIDELITY_BRANCH}" >&2
       return 2
       ;;
   esac
 }
 
+# Tree from the GitHub commit object, without auth. The commit must be
+# reachable on the fidelity branch. Prints the tree sha.
+direct_pull_fidelity_tree() {
+  local commit="$1" json cmp sha tree status
+  direct_pull_require_full_sha "$commit" || return 2
+  command -v python3 >/dev/null 2>&1 || {
+    echo "refusing: python3 is not on PATH. This script does not install it." >&2
+    return 2
+  }
+  json="$(mktemp)"
+  cmp="$(mktemp)"
+  if ! curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' \
+      -H 'Accept: application/vnd.github+json' \
+      -o "$json" \
+      "https://api.github.com/repos/dcharlot-physicalai-bmi/ferromotion/commits/${commit}"; then
+    rm -f "$json" "$cmp"
+    echo "refusing: unauthenticated commit object for $commit was not fetched" >&2
+    return 2
+  fi
+  sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha"])' "$json")"
+  tree="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["commit"]["tree"]["sha"])' "$json")"
+  rm -f "$json"
+  if [[ "$sha" != "$commit" || ! "$tree" =~ ^[0-9a-f]{40}$ ]]; then
+    rm -f "$cmp"
+    echo "refusing: commit object sha $sha tree $tree is not $commit" >&2
+    return 2
+  fi
+  if ! curl -fsSL --proto '=https' -A 'ferromotion-direct-pull' \
+      -H 'Accept: application/vnd.github+json' \
+      -o "$cmp" \
+      "https://api.github.com/repos/dcharlot-physicalai-bmi/ferromotion/compare/${FERROMOTION_FIDELITY_BRANCH}...${commit}"; then
+    rm -f "$cmp"
+    echo "refusing: unauthenticated reachability check for $commit on ${FERROMOTION_FIDELITY_BRANCH} failed" >&2
+    return 2
+  fi
+  status="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status",""))' "$cmp")"
+  rm -f "$cmp"
+  direct_pull_fidelity_status_ok "$status" || return 2
+  printf '%s\n' "$tree"
+}
+
 # Commit identity carried by a GitHub codeload tarball. Both the pax comment
-# and the archive root directory must be the full SHA. No API and no token.
+# and the archive root directory must be the full SHA. No token is sent.
 direct_pull_codeload_commit() {
   local tar="$1" want="$2"
   python3 - "$tar" "$want" <<'PY'

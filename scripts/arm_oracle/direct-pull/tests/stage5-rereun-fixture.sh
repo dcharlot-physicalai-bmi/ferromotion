@@ -164,8 +164,25 @@ grep -q 'rust212-20261109T215708Z' "$pull/05-rust-rereun.sh"
 grep -q 'codeload.github.com' "$pull/05-rust-rereun.sh"
 grep -q 'CARGO_NET_OFFLINE=true' "$pull/05-rust-rereun.sh"
 grep -q 'Cargo was not started' "$pull/05-rust-rereun.sh"
-if grep -q 'api.github.com' "$pull/05-rust-rereun.sh"; then
-  echo "codeload identity still calls the GitHub API" >&2
+grep -q 'api.github.com' "$pull/lib.sh"
+grep -q 'codeload.github.com' "$pull/05-rust-rereun.sh"
+if grep -q 'Authorization:' "$pull/05-rust-rereun.sh" "$pull/lib.sh"; then
+  echo "commit fetch sends an Authorization header" >&2
+  exit 1
+fi
+direct_pull_require_full_sha b6a3a885 && {
+  echo "a short sha was accepted" >&2
+  exit 1
+}
+direct_pull_require_full_sha b6a3a885f8c405b3f2c098ece0cc1bdc8ad5ce03
+direct_pull_fidelity_status_ok identical
+direct_pull_fidelity_status_ok behind
+direct_pull_fidelity_status_ok diverged && {
+  echo "a diverged commit was treated as reachable" >&2
+  exit 1
+}
+if grep -q 'not a pinned oracle-profile commit' "$pull/lib.sh" "$pull/05-rust-rereun.sh"; then
+  echo "the commit allowlist is still in place" >&2
   exit 1
 fi
 grep -q -- '--offline' "$root/run-rust-212.sh"
