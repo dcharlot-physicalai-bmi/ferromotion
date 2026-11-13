@@ -271,7 +271,7 @@ fn clip(x: f64, lo: f64, hi: f64) -> f64 {
     }
 }
 
-/// `mju_sigmoid`, contracted.
+/// `mju_sigmoid`. `64156abe` is `((x+x) + -5) * (3*x) + 10` times `(x*x)*x`.
 fn sigmoid(x: f64) -> f64 {
     if x <= 0.0 {
         return 0.0;
@@ -279,7 +279,14 @@ fn sigmoid(x: f64) -> f64 {
     if x >= 1.0 {
         return 1.0;
     }
-    x * x * x * (3.0 * x).mul_add(2.0f64.mul_add(x, -5.0), 10.0)
+    if crate::fp_contract::contract_off() {
+        let x3 = (x * x) * x;
+        let t = 3.0 * x;
+        let u = (x + x) + -5.0;
+        ((u * t) + 10.0) * x3
+    } else {
+        x * x * x * (3.0 * x).mul_add(2.0f64.mul_add(x, -5.0), 10.0)
+    }
 }
 
 /// `mju_muscleGainLength`, contracted.
@@ -292,10 +299,11 @@ fn muscle_gain_length(length: f64, lmin: f64, lmax: f64) -> f64 {
             0.5 * x * x
         } else if length <= 1.0 {
             let x = (1.0 - length) / MJ_MINVAL.max(1.0 - a);
-            (-(0.5 * x)).mul_add(x, 1.0)
+            // `64156abe`: `1 + ((-0.5)*x)*x`.
+            if crate::fp_contract::contract_off() { 1.0 + ((-0.5) * x) * x } else { (-(0.5 * x)).mul_add(x, 1.0) }
         } else if length <= b {
             let x = (length - 1.0) / MJ_MINVAL.max(b - 1.0);
-            (-(0.5 * x)).mul_add(x, 1.0)
+            if crate::fp_contract::contract_off() { 1.0 + ((-0.5) * x) * x } else { (-(0.5 * x)).mul_add(x, 1.0) }
         } else {
             let x = (lmax - length) / MJ_MINVAL.max(lmax - b);
             0.5 * x * x
@@ -352,7 +360,8 @@ fn muscle_bias(len: f64, lr: &[f64; 2], acc0: f64, prm: &[f64; 10]) -> f64 {
 fn muscle_dynamics(ctrl: f64, act: f64, prm: &[f64; 3]) -> f64 {
     let ctrlclamp = clip(ctrl, 0.0, 1.0);
     let actclamp = clip(act, 0.0, 1.0);
-    let s = 1.5f64.mul_add(actclamp, 0.5);
+    // `64156abe`: `s = 0.5 + (1.5*actclamp)`, then `tau_deact + (tau_act-tau_deact)*sigmoid`.
+    let s = if crate::fp_contract::contract_off() { 0.5 + 1.5 * actclamp } else { 1.5f64.mul_add(actclamp, 0.5) };
     let tau_act = prm[0] * s;
     let tau_deact = prm[1] / s;
     let dctrl = ctrlclamp - act;
@@ -362,6 +371,8 @@ fn muscle_dynamics(ctrl: f64, act: f64, prm: &[f64; 3]) -> f64 {
         } else {
             tau_deact
         }
+    } else if crate::fp_contract::contract_off() {
+        tau_deact + (tau_act - tau_deact) * sigmoid(dctrl / prm[2] + 0.5)
     } else {
         (tau_act - tau_deact).mul_add(sigmoid(dctrl / prm[2] + 0.5), tau_deact)
     };
@@ -1254,7 +1265,15 @@ impl SmoothModel {
         let h = self.timestep;
         let next = if a.act.dynamics == crate::mujoco_actuator::ActDyn::FilterExact {
             let tau = MJ_MINVAL.max(a.act.dynprm[0]);
-            (act_dot * tau).mul_add(1.0 - (-h / tau).exp(), act)
+            // `64156abe` filterexact: `act + ((h*act_dot) * (1 - exp(-h/tau)))`.
+            if crate::fp_contract::contract_off() {
+                act + (act_dot * tau) * (1.0 - (-h / tau).exp())
+            } else {
+                (act_dot * tau).mul_add(1.0 - (-h / tau).exp(), act)
+            }
+        } else if crate::fp_contract::contract_off() {
+            // `64156abe`: `act + (h * act_dot)`.
+            act + h * act_dot
         } else {
             act_dot.mul_add(h, act)
         };

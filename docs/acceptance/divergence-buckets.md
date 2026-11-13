@@ -2,7 +2,7 @@
 
 Oracle profile `mujoco-3.13.0-x86_64-contract-off`, library `64156abe`, Menagerie pin `4d038b3`. 212 models, three forward states, 20 steps. Equality is `f64::to_bits`.
 
-185 models are exact for all 20 steps. 27 fail a step. A fixed tendon's length is `(prm * qpos) + L` in `mj_tendon`. `mju_dot3` in the primitive colliders is `(az bz) + (ax bx + ay by)`. `mju_mulMatVec3` (`0x14d790`) is `(m02 vz) + (m00 vx + m01 vy)` on row 0, `(m12 vz) + (m11 vy + m10 vx)` on row 1, and `(m21 vy + m20 vx) + (m22 vz)` on row 2. That corner transform is what `mjc_PlaneBox` feeds to `mju_dot3`. Franka `scene.xml` step 1 was a 1 ulp `efc_pos` on two plane–box contacts of `right_finger`, and the Newton factor was already identical. Sphere-sphere distance is `(sqrt - r1) - r2`, and the witness offset is `(dist * 0.5) + r1`. Capsule-capsule numerators use the raw segment dots: `(dot12 * v - mc * u) / det`.
+194 models are exact for all 20 steps. 18 fail a step. `mju_muscleGainLength` in `64156abe` writes the middle pieces as `1 + ((-0.5)*x)*x`. `mju_muscleDynamics` uses `s = 0.5 + (1.5*actclamp)` and `tau_deact + (tau_act-tau_deact)*sigmoid`, and `mju_sigmoid` is `(((x+x)-5)*(3*x) + 10) * ((x*x)*x)`. `mj_nextActivation` is `act + (h*act_dot)`. Joined, and nothing left: `ms_human_700/MS-Human-700-Locomotion.xml`, `ms_human_700/scene_locomotion.xml`, `ms_human_700/scene_manipulation.xml`, and `shadow_dexee/shadow_dexee.xml`. `mj_tendon` calls `mju_mulMatTVec` (`0x14edc0`). In `64156abe` that symbol vectorises at `n >= 4`: `res + scl*x` on the 4-wide prefix (`mulpd` then `addpd`) and `scl*x + res` on the tail (`mulsd` then `addsd`). `tendon_invweight0` is 212 of 212 after that schedule. Joined, and nothing left: `robotiq_2f85/scene.xml`, `robotiq_2f85_v4/scene.xml`, and the three `tetheria_aero_hand_open` models. A fixed tendon's length is `(prm * qpos) + L` in `mj_tendon`. `mju_dot3` in the primitive colliders is `(az bz) + (ax bx + ay by)`. `mju_mulMatVec3` (`0x14d790`) is `(m02 vz) + (m00 vx + m01 vy)` on row 0, `(m12 vz) + (m11 vy + m10 vx)` on row 1, and `(m21 vy + m20 vx) + (m22 vz)` on row 2. That corner transform is what `mjc_PlaneBox` feeds to `mju_dot3`. Franka `scene.xml` step 1 was a 1 ulp `efc_pos` on two plane–box contacts of `right_finger`, and the Newton factor was already identical. Sphere-sphere distance is `(sqrt - r1) - r2`, and the witness offset is `(dist * 0.5) + r1`. Capsule-capsule numerators use the raw segment dots: `(dot12 * v - mc * u) / det`.
 
 Box-box edge witnesses use `denom = 1 - b*b`, `s = (d1e - b*d2e) / denom`, `t = b*s - d2e`, then `s = d1e + b*t`. The edge corner `mji_mulMatVec3` is `(m2 v2) + (m1 v1 + m0 v0)`, then `pos +` that. Leap hand `efc_pos` is exact on all three forward states. Those four models still miss a step; the next forward field is `efc_J`.
 
@@ -12,11 +12,9 @@ Box-box edge witnesses use `denom = 1 - b*b`, `s = (d1e - b*d2e) / denom`, `t = 
 | ---: | --- | --- | --- |
 | 3 | collision | `efc_pos` | `mjraw primitive / mesh` |
 | 3 | solver | `efc_force` | `mj_fwdConstraint` |
-| 9 | constants | `tendon_invweight0` | `set0 tendon block` |
-| 2 | constraint rows | `efc_J` | `mj_instantiateContact` |
-| 4 | constraint rows | `efc_AR` | `mj_makeARNumeric` |
-| 3 | solver | `qacc` | `mj_fwdConstraint` |
-| 2 | smooth | `ten_velocity` | `mj_fwdVelocity` |
+| 3 | smooth | `qacc` | `mj_step` |
+| 3 | constraint rows | `efc_AR` | `mj_makeARNumeric` |
+| 5 | solver | `qacc` | `mj_fwdConstraint` |
 | 1 | smooth | `qfrc_fluid` | `mj_passive` |
 
 ## `efc_pos` — 3
@@ -43,50 +41,33 @@ All three are Newton and dense (`nv` below 60). Spot's elliptic miss was not the
 - `robotiq_2f85/2f85.xml` (step 9)
 - `robotstudio_so101/scene_box.xml` (step 18)
 
-## `tendon_invweight0` — 9
+## `ms_human_700` step — 3
 
-Where it first appears: 9 at model.
+`ten_length` is 635 of 636. The one miss is `ms_human_700/scene.xml` state 1, index 186, one ulp (`0.4370790900602747` versus `0.43707909006027473`). Locomotion and `scene_manipulation` are exact for 20 steps. Three models still miss a step.
 
-- `ms_human_700/MS-Human-700-Locomotion.xml` (model)
-- `ms_human_700/MS-Human-700-Manipulation.xml` (model)
-- `ms_human_700/MS-Human-700.xml` (model)
-- `ms_human_700/scene.xml` (model)
-- `ms_human_700/scene_locomotion.xml` (model)
-- `ms_human_700/scene_manipulation.xml` (model)
-- `tetheria_aero_hand_open/left_hand.xml` (model)
-- `tetheria_aero_hand_open/right_hand.xml` (model)
-- `tetheria_aero_hand_open/scene_right.xml` (model)
+- `ms_human_700/MS-Human-700-Manipulation.xml` (step 1)
+- `ms_human_700/MS-Human-700.xml` (step 4)
+- `ms_human_700/scene.xml` (step 1)
 
-## `efc_J` — 2
+## `efc_AR` — 3
 
-Where it first appears: 2 at state 0.
-
-- `robotiq_2f85/scene.xml` (state 0)
-- `robotiq_2f85_v4/scene.xml` (state 0)
-
-## `efc_AR` — 4
-
-Where it first appears: 4 at state 0.
+Where it first appears: 3 at state 0. `shadow_dexee/shadow_dexee.xml` is exact for 20 steps. `shadow_dexee/scene.xml` now first misses at step 8.
 
 - `hello_robot_stretch/stretch.xml` (state 0)
 - `hello_robot_stretch_3/scene.xml` (state 0)
-- `shadow_dexee/scene.xml` (state 0)
-- `shadow_dexee/shadow_dexee.xml` (state 0)
+- `shadow_dexee/scene.xml` (step 8)
 
-## `qacc` — 3
+## `qacc` — 5
 
-Where it first appears: 3 at state 0.
+Where it first appears: 5 at state 0.
+
+`iit_softfoot` `ten_velocity` matches the three forward states after the `mju_mulMatTVec` schedule. The first listed miss is `qacc`, and the trajectory still misses step 1.
 
 - `flybody/scene.xml` (state 0)
+- `iit_softfoot/scene.xml` (state 0)
+- `iit_softfoot/softfoot.xml` (state 0)
 - `robot_soccer_kit/robot_soccer_kit.xml` (state 0)
 - `robot_soccer_kit/scene.xml` (state 0)
-
-## `ten_velocity` — 2
-
-Where it first appears: 2 at state 1.
-
-- `iit_softfoot/scene.xml` (state 1)
-- `iit_softfoot/softfoot.xml` (state 1)
 
 ## `qfrc_fluid` — 1
 
@@ -96,34 +77,20 @@ Where it first appears: 1 at state 1.
 
 ## Step-exact models that still miss a forward state
 
-These 29 pass all 20 steps and still differ on a forward state.
+These 15 pass all 20 steps and still differ on a forward state. The field is the first name in the native stage order.
 
-- `agilex_piper/scene.xml` `efc_J` (state 2)
-- `aloha/aloha.xml` `efc_D` (state 0)
-- `aloha/scene.xml` `efc_D` (state 0)
-- `anybotics_anymal_c/scene_mjx.xml` `efc_D` (state 0)
-- `berkeley_humanoid/scene.xml` `efc_pos` (state 2)
-- `booster_t1/scene.xml` `efc_pos` (state 1)
-- `dynamixel_2r/scene.xml` `efc_AR` (state 2)
-- `google_barkour_v0/scene.xml` `efc_D` (state 0)
-- `google_barkour_v0/scene_barkour.xml` `efc_D` (state 0)
-- `google_barkour_v0/scene_mjx.xml` `efc_D` (state 0)
-- `hello_robot_stretch/scene.xml` `efc_pos` (state 2)
-- `hello_robot_stretch_3/stretch.xml` `efc_AR` (state 0)
-- `pal_talos/scene_motor.xml` `efc_J` (state 1)
-- `pal_tiago/scene_position.xml` `efc_pos` (state 1)
-- `pal_tiago/scene_velocity.xml` `efc_pos` (state 1)
-- `pal_tiago_dual/scene_motor.xml` `efc_pos` (state 1)
-- `robotis_op3/scene.xml` `efc_J` (state 2)
-- `robotstudio_so101/scene.xml` `efc_J` (state 2)
-- `robotstudio_so101/so101.xml` `efc_pos` (state 2)
-- `shadow_hand/right_hand.xml` `efc_J` (state 2)
-- `skydio_x2/scene.xml` `qfrc_fluid` (state 1)
-- `skydio_x2/x2.xml` `qfrc_fluid` (state 2)
-- `ufactory_lite6/lite6_gripper_wide.xml` `efc_D` (state 2)
-- `umi_gripper/scene.xml` `efc_AR` (state 0)
-- `umi_gripper/umi_gripper.xml` `efc_AR` (state 0)
-- `unitree_g1/scene_with_hands.xml` `efc_pos` (state 2)
-- `unitree_go2/scene.xml` `efc_pos` (state 1)
-- `unitree_h1/scene.xml` `efc_pos` (state 2)
-- `wonik_allegro/right_hand.xml` `efc_pos` (state 1)
+- `anybotics_anymal_b/scene.xml` `efc_J`
+- `anybotics_anymal_c/scene.xml` `efc_J`
+- `anybotics_anymal_c/scene_mjx.xml` `qacc`
+- `berkeley_humanoid/scene.xml` `efc_J`
+- `dynamixel_2r/scene.xml` `efc_AR`
+- `hello_robot_stretch/scene.xml` `qacc`
+- `hello_robot_stretch_3/stretch.xml` `qacc`
+- `ms_human_700/scene_manipulation.xml` `ten_velocity`
+- `pndbotics_adam_lite/scene.xml` `efc_J`
+- `shadow_dexee/shadow_dexee.xml` `qacc`
+- `tetheria_aero_hand_open/left_hand.xml` `qfrc_spring`
+- `tetheria_aero_hand_open/right_hand.xml` `qfrc_spring`
+- `tetheria_aero_hand_open/scene_right.xml` `qfrc_spring`
+- `umi_gripper/scene.xml` `qacc`
+- `umi_gripper/umi_gripper.xml` `qacc`
