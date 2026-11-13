@@ -409,13 +409,13 @@ impl SmoothModel {
                 if chain.is_empty() {
                     continue;
                 }
-                // `mju_mulMatTVec(tmp, jacdif, dif, 3, NV)`
+                // `mj_tendon` calls `mju_mulMatTVec`. In `64156abe` that symbol
+                // vectorises at `n >= 4`: `res + scl*x` on the 4-wide prefix and
+                // `scl*x + res` on the tail (`mulpd`/`addpd`, then `mulsd`/`addsd`).
                 let mut tmp = vec![0.0f64; chain.len()];
                 for r in 0..3 {
                     if dif[r] != 0.0 {
-                        for (t, row) in tmp.iter_mut().zip(&jd[r]) {
-                            *t = row.mul_add(dif[r], *t);
-                        }
+                        crate::mujoco_solver::add_to_scl(&mut tmp, &jd[r], dif[r], 4);
                     }
                 }
                 // `mju_combineSparseInc`. The identical-pattern tail is `(src*b) + (dst*a)`
