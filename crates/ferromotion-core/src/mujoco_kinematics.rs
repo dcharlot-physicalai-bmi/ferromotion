@@ -119,7 +119,7 @@ pub(crate) type XFrame = ([f64; 3], [f64; 9]);
 /// `mji_mulMatVec3`. The published path fuses each row. The contract-off identity uses
 /// the source order `(m0*v0 + m1*v1) + m2*v2`. Naming the site is still refused.
 fn mul_mat_vec3(m: &[f64; 9], v: &[f64; 3]) -> [f64; 3] {
-    let mode = if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+    let mode = if crate::fp_contract::contract_off_family() {
         crate::fp_contract::Contraction::Unfused
     } else {
         crate::fp_contract::Contraction::Contracted
@@ -161,7 +161,12 @@ fn rot_vec_quat(v: &[f64; 3], q: &[f64; 4]) -> [f64; 3] {
 /// This is not a contraction-policy site. `mul_quat` stays contracted.
 pub(crate) fn normalize4(q: &mut [f64; 4]) {
     let before = *q;
-    let norm = (((q[0] * q[0] + q[1] * q[1]) + q[2] * q[2]) + q[3] * q[3]).sqrt();
+    // 3.13 contract-off is left-associated. `d9972b33` pairs the squares.
+    let norm = if crate::fp_contract::oracle_4_0() {
+        ((q[0] * q[0] + q[1] * q[1]) + (q[2] * q[2] + q[3] * q[3])).sqrt()
+    } else {
+        (((q[0] * q[0] + q[1] * q[1]) + q[2] * q[2]) + q[3] * q[3]).sqrt()
+    };
     if norm < 1e-15 {
         *q = [1.0, 0.0, 0.0, 0.0];
     } else if (norm - 1.0).abs() > 1e-15 {
@@ -173,6 +178,15 @@ pub(crate) fn normalize4(q: &mut [f64; 4]) {
     crate::fp_contract::record_op("normalize4", &before, q);
 }
 
+/// Diagonal of `mju_quat2Mat`. 3.13 is left-associated. `d9972b33` pairs the terms.
+pub(crate) fn quat2mat_diagonal(q00: f64, q11: f64, q22: f64, q33: f64) -> (f64, f64, f64) {
+    if crate::fp_contract::oracle_4_0() {
+        ((q00 - q22) + (q11 - q33), (q00 + q22) - (q11 + q33), (q00 - q22) - (q11 - q33))
+    } else {
+        (q00 + q11 - q22 - q33, q00 - q11 + q22 - q33, q00 - q11 - q22 + q33)
+    }
+}
+
 /// `mju_quat2Mat` (its products are separate statements, so nothing fuses).
 pub(crate) fn quat2mat(q: &[f64; 4]) -> [f64; 9] {
     let out = if q[0] == 1.0 && q[1] == 0.0 && q[2] == 0.0 && q[3] == 0.0 {
@@ -181,16 +195,17 @@ pub(crate) fn quat2mat(q: &[f64; 4]) -> [f64; 9] {
         let (q00, q01, q02, q03) = (q[0] * q[0], q[0] * q[1], q[0] * q[2], q[0] * q[3]);
         let (q11, q12, q13) = (q[1] * q[1], q[1] * q[2], q[1] * q[3]);
         let (q22, q23, q33) = (q[2] * q[2], q[2] * q[3], q[3] * q[3]);
+        let (d0, d4, d8) = quat2mat_diagonal(q00, q11, q22, q33);
         [
-            q00 + q11 - q22 - q33,
+            d0,
             2.0 * (q12 - q03),
             2.0 * (q13 + q02),
             2.0 * (q12 + q03),
-            q00 - q11 + q22 - q33,
+            d4,
             2.0 * (q23 - q01),
             2.0 * (q13 - q02),
             2.0 * (q23 + q01),
-            q00 - q11 - q22 + q33,
+            d8,
         ]
     };
     crate::fp_contract::record_op("quat2mat", q, &out);
@@ -289,7 +304,7 @@ impl MjKinematics {
                             let s = qpos[j.qposadr] - j.qpos0;
                             // Published default keeps the fused `mul_add`. The contract-off oracle
                             // compiles `mji_addToScl3` as `p += axis * s` (mulpd then add, no FMA).
-                            p = if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+                            p = if crate::fp_contract::contract_off_family() {
                                 [p[0] + xaxis[0] * s, p[1] + xaxis[1] * s, p[2] + xaxis[2] * s]
                             } else {
                                 [xaxis[0].mul_add(s, p[0]), xaxis[1].mul_add(s, p[1]), xaxis[2].mul_add(s, p[2])]

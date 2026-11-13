@@ -209,7 +209,7 @@ impl MeshHull {
                 // separate multiplies. The published path stays fused.
                 let at = |local: usize| {
                     let v = &self.verts[g.vert_globalid[local]];
-                    if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+                    if crate::fp_contract::contract_off_family() {
                         (local_dir.x * v.x + local_dir.y * v.y) + local_dir.z * v.z
                     } else {
                         dot3f(local_dir, v)
@@ -251,14 +251,14 @@ impl MeshHull {
                 if *vertindex >= 0 {
                     imax = *vertindex as usize;
                     let v = &self.verts[imax];
-                    max = if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+                    max = if crate::fp_contract::contract_off_family() {
                         (local_dir.x * v.x + local_dir.y * v.y) + local_dir.z * v.z
                     } else {
                         dot3f(local_dir, v)
                     };
                 }
                 for (i, v) in self.verts.iter().enumerate() {
-                    let vdot = if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+                    let vdot = if crate::fp_contract::contract_off_family() {
                         (local_dir.x * v.x + local_dir.y * v.y) + local_dir.z * v.z
                     } else {
                         dot3f(local_dir, v)
@@ -463,7 +463,7 @@ fn make_polygons(verts: &[Vector3<f64>], faces: &[[usize; 3]], normal_verts: &[V
     // The published path walks polygons in libc++ order, which is what the Apple build does.
     // The contract-off oracle is linked with libstdc++, whose `unordered_map` walks a different order,
     // and `alignedFaceEdge` keeps the first face in that order.
-    let order = if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+    let order = if crate::fp_contract::contract_off_family() {
         let hashes: Vec<u64> = keys.iter().map(|&(t, p)| libstdcpp_hash_f64(t as f64) ^ libstdcpp_hash_f64(p as f64)).collect();
         libstdcpp_unordered_order(&hashes)
     } else {
@@ -714,12 +714,12 @@ fn make_normal(a: &Vector3<f64>, b: &Vector3<f64>, c: &Vector3<f64>) -> Vector3<
     let (ab, ac) = (b - a, c - a);
     // `mjuu_makenormal` in 64156abe: separate products, then `normal[i] /= nrm`.
     // `mjuu_dot3` is `nz*nz + (nx*nx + ny*ny)`. The published path stays fused.
-    let n = if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+    let n = if crate::fp_contract::contract_off_family() {
         Vector3::new(ab.y * ac.z - ab.z * ac.y, ab.z * ac.x - ab.x * ac.z, ab.x * ac.y - ab.y * ac.x)
     } else {
         crossvec(&ab, &ac)
     };
-    let nrm = if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+    let nrm = if crate::fp_contract::contract_off_family() {
         (n.z * n.z + (n.x * n.x + n.y * n.y)).sqrt()
     } else {
         dot3(&n, &n).sqrt()

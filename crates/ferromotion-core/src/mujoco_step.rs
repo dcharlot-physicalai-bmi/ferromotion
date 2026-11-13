@@ -33,7 +33,7 @@ impl SmoothModel {
         } else {
             // qH = M + h·diag(damping), factorised in place
             let mut qh = sd.m.clone();
-            let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
+            let separate = crate::fp_contract::contract_off_family();
             for i in 0..nv {
                 let adr = self.m_rowadr[i] + self.m_rownnz[i] - 1;
                 // `qH[diag] += h * damp`. `64156abe` does `(h * damp) + qH`.
@@ -69,7 +69,7 @@ impl SmoothModel {
         }
         // `mju_addToScl(qvel, qacc, h)`. Wide prefix `qvel + h·qacc` from n = 6;
         // the tail, and every lane below that, is `h·qacc + qvel`.
-        let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
+        let separate = crate::fp_contract::contract_off_family();
         if separate {
             crate::mujoco_solver::add_to_scl(&mut next.qvel, qacc, h, 6);
         } else {
@@ -86,7 +86,7 @@ impl SmoothModel {
 
     /// `mj_integratePos`
     pub(crate) fn integrate_pos(&self, qpos: &mut [f64], qvel: &[f64], dt: f64) {
-        let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
+        let separate = crate::fp_contract::contract_off_family();
         for (j, &kind) in self.jnt_type.iter().enumerate() {
             let (mut padr, mut vadr) = (self.jnt_qposadr[j], self.jnt_dofadr[j]);
             match kind {
@@ -319,7 +319,7 @@ impl SmoothModel {
         // row's last). A joint transmission and a damper touch only the diagonal; a fixed tendon's
         // `moment'·b·moment` reaches every pair of its dofs, and of those only the ones M stores survive.
         let mut qderiv = vec![0.0; self.m_colind.len()];
-        let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
+        let separate = crate::fp_contract::contract_off_family();
         let diag = |i: usize| self.m_rowadr[i] + self.m_rownnz[i] - 1;
         let at = |r: usize, c: usize| (self.m_rowadr[r]..self.m_rowadr[r] + self.m_rownnz[r]).find(|&k| self.m_colind[k] == c);
         for (i, a) in self.actuators.iter().enumerate() {

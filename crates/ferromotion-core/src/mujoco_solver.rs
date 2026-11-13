@@ -59,7 +59,7 @@ fn norm(v: &[f64]) -> f64 {
 
 /// `64156abe` (`-ffp-contract=off`). `acc += a*b` rounds the product, then adds it on the right.
 fn oracle_axpy() -> bool {
-    crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID
+    crate::fp_contract::contract_off_family()
 }
 
 fn axpy(acc: f64, a: f64, b: f64) -> f64 {
@@ -315,18 +315,30 @@ pub(crate) fn chol_solve(mat: &[f64], vec: &[f64], n: usize) -> Vec<f64> {
         }
         res[i] /= mat[i * (n + 1)];
     }
-    for i in (0..n).rev() {
-        for j in i + 1..n {
-            // `64156abe` `mju_cholSolve` back-substitution: `mulsd` then `subsd`,
-            // `res[i] - L[j, i] * res[j]`. The pair unroll keeps that left-to-right
-            // accumulator. The published path contracts `(-L)*res[j] + res[i]`.
-            res[i] = if oracle_axpy() {
-                res[i] - mat[j * n + i] * res[j]
-            } else {
-                (-mat[j * n + i]).mul_add(res[j], res[i])
-            };
+    if crate::fp_contract::oracle_4_0() {
+        // `6f3db612` solves L' by dividing the diagonal, then scattering
+        // `-x[i] * L[i, 0..i)` into the prefix with `mju_addToScl`.
+        for i in (0..n).rev() {
+            res[i] /= mat[i * (n + 1)];
+            if i > 0 && res[i] != 0.0 {
+                let scl = -res[i];
+                add_to_scl(&mut res[..i], &mat[i * n..i * n + i], scl, 6);
+            }
         }
-        res[i] /= mat[i * (n + 1)];
+    } else {
+        for i in (0..n).rev() {
+            for j in i + 1..n {
+                // `64156abe` `mju_cholSolve` back-substitution: `mulsd` then `subsd`,
+                // `res[i] - L[j, i] * res[j]`. The pair unroll keeps that left-to-right
+                // accumulator. The published path contracts `(-L)*res[j] + res[i]`.
+                res[i] = if oracle_axpy() {
+                    res[i] - mat[j * n + i] * res[j]
+                } else {
+                    (-mat[j * n + i]).mul_add(res[j], res[i])
+                };
+            }
+            res[i] /= mat[i * (n + 1)];
+        }
     }
     res
 }

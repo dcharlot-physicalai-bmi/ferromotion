@@ -22,6 +22,22 @@ pub const MUL_QUAT: Contraction = Contraction::Contracted;
 pub const ORACLE_X86_CONTRACT_OFF_ID: &str = "mujoco-3.13.0-x86_64-contract-off";
 pub const ORACLE_X86_CONTRACT_OFF_SHA256: &str = "64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc";
 
+/// MuJoCo 4.0.0 contract-off source build. The 3.13 transcriptions stay in force.
+/// Later mechanisms turn on only when this id is installed.
+pub const ORACLE_4_0_ID: &str = "mujoco-4.0.0-x86_64-contract-off";
+pub const ORACLE_4_0_SHA256: &str = "4849b2dd05ce3c57d75098ca47a10373866e048fbdf9b57cb7073c0be2210a86";
+
+/// True for the 3.13 and 4.0 contract-off identities. The published default is false.
+pub fn contract_off_family() -> bool {
+    let id = active_policy().id;
+    id == ORACLE_X86_CONTRACT_OFF_ID || id == ORACLE_4_0_ID
+}
+
+/// True only for the 4.0 identity. 3.13 and the published default stay off.
+pub fn oracle_4_0() -> bool {
+    active_policy().id == ORACLE_4_0_ID
+}
+
 /// Active contraction for the three opt-in sites. The published default leaves every site contracted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BuildPolicy {
@@ -85,9 +101,23 @@ pub fn install_policy(id: &str, artifact_sha256: &str, sites: &str) -> Result<Bu
                 mul_mat_vec3: Contraction::Contracted,
             }
         }
+        ORACLE_4_0_ID => {
+            if artifact_sha256 != ORACLE_4_0_SHA256 {
+                return Err(PolicyError::InconsistentIdentity);
+            }
+            BuildPolicy {
+                id: ORACLE_4_0_ID,
+                artifact_sha256: ORACLE_4_0_SHA256,
+                // Same contract-off SSE base as 3.13. `d9972b33` replaces
+                // `mul_quat` inside `mul_quat` when this id is active.
+                mul_quat: Contraction::Unfused,
+                rot_vec_quat: Contraction::Unfused,
+                mul_mat_vec3: Contraction::Contracted,
+            }
+        }
         _ => return Err(PolicyError::UnknownIdentity),
     };
-    if id == ORACLE_X86_CONTRACT_OFF_ID {
+    if id == ORACLE_X86_CONTRACT_OFF_ID || id == ORACLE_4_0_ID {
         for site in sites.split(',').filter(|site| !site.is_empty()) {
             match site {
                 "mul_quat" => policy.mul_quat = Contraction::Unfused,
@@ -121,7 +151,8 @@ pub fn policy_receipt(policy: BuildPolicy) -> String {
 }
 
 pub fn mul_quat(a: &[f64; 4], b: &[f64; 4]) -> [f64; 4] {
-    let out = mul_quat_with(active_policy().mul_quat, a, b);
+    // `d9972b33` pairs the four products. 3.13 keeps the left-associated SSE schedule.
+    let out = if oracle_4_0() { mul_quat_paired(a, b) } else { mul_quat_with(active_policy().mul_quat, a, b) };
     let mut inputs = [0.0; 8];
     inputs[..4].copy_from_slice(a);
     inputs[4..].copy_from_slice(b);
@@ -213,6 +244,20 @@ pub fn mul_mat_vec3_with(policy: Contraction, m: &[f64; 9], v: &[f64; 3]) -> [f6
             (m[6] * v[0] + m[7] * v[1]) + m[8] * v[2],
         ],
     }
+}
+
+/// `d9972b33` `mju_mulQuat`: products stay separate, sums are `(a+b)+(c+d)`.
+pub fn mul_quat_paired(a: &[f64; 4], b: &[f64; 4]) -> [f64; 4] {
+    let (p00, p11, p22, p33) = (a[0] * b[0], a[1] * b[1], a[2] * b[2], a[3] * b[3]);
+    let (p01, p10, p23, p32) = (a[0] * b[1], a[1] * b[0], a[2] * b[3], a[3] * b[2]);
+    let (p02, p13, p20, p31) = (a[0] * b[2], a[1] * b[3], a[2] * b[0], a[3] * b[1]);
+    let (p03, p12, p21, p30) = (a[0] * b[3], a[1] * b[2], a[2] * b[1], a[3] * b[0]);
+    [
+        (p00 - p11) + (-p22 - p33),
+        (p01 + p10) + (p23 - p32),
+        (p02 - p13) + (p20 + p31),
+        (p03 + p12) + (-p21 + p30),
+    ]
 }
 
 pub fn mul_quat_with(policy: Contraction, a: &[f64; 4], b: &[f64; 4]) -> [f64; 4] {
@@ -308,6 +353,26 @@ mod tests {
             rot_vec_quat_with(Contraction::Unfused, &v, &q).map(f64::to_bits)
         );
         reset_policy();
+        assert_eq!(mul_quat(&a, &b).map(f64::to_bits), mul_quat_with(Contraction::Contracted, &a, &b).map(f64::to_bits));
+    }
+
+    #[test]
+    fn the_4_0_identity_pairs_mul_quat_and_leaves_rot_vec_quat_unfused() {
+        reset_policy();
+        assert_eq!(install_policy(ORACLE_4_0_ID, ORACLE_X86_CONTRACT_OFF_SHA256, ""), Err(PolicyError::InconsistentIdentity));
+        assert_eq!(active_policy(), DEFAULT_POLICY);
+        let policy = install_policy(ORACLE_4_0_ID, ORACLE_4_0_SHA256, "").unwrap();
+        assert!(oracle_4_0());
+        assert!(contract_off_family());
+        assert_eq!(policy.mul_quat, Contraction::Unfused);
+        assert_eq!(policy.rot_vec_quat, Contraction::Unfused);
+        let a = [0.9, 0.1, -0.2, 0.3];
+        let b = [0.8, -0.1, 0.4, 0.2];
+        assert_eq!(mul_quat(&a, &b).map(f64::to_bits), mul_quat_paired(&a, &b).map(f64::to_bits));
+        assert_ne!(mul_quat(&a, &b).map(f64::to_bits), mul_quat_with(Contraction::Unfused, &a, &b).map(f64::to_bits));
+        reset_policy();
+        assert!(!oracle_4_0());
+        assert!(!contract_off_family());
         assert_eq!(mul_quat(&a, &b).map(f64::to_bits), mul_quat_with(Contraction::Contracted, &a, &b).map(f64::to_bits));
     }
 

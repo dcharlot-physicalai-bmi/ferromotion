@@ -1788,7 +1788,7 @@ impl MjcfTree {
         const B: [f64; 4] = [1.0 / 6.0, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 6.0];
         let sm = self.smooth_model();
         let (nv, na, h) = (st.qvel.len(), st.act.len(), sm.timestep);
-        let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
+        let separate = crate::fp_contract::contract_off_family();
         let mut x = vec![(st.qpos.clone(), st.qvel.clone(), st.act.clone())];
         let mut f = vec![(sol.qacc.clone(), sd.act_dot.clone())];
         // `mju_addToScl` of each tableau weight. Velocity is one call of length `nv`. Acceleration and

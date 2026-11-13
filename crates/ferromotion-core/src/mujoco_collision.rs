@@ -356,7 +356,7 @@ const BOXBOX_MAXVERT: usize = 12;
 
 fn clip_half_plane(poly: &mut Vec<[f64; 3]>, coord: usize, sign: f64, limit: f64) {
     // `d = sign*coord - limit`, and a crossing is `p + t*(q-p)`.
-    let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
+    let separate = crate::fp_contract::contract_off_family();
     let d: Vec<f64> = poly.iter().map(|p| if separate { sign * p[coord] - limit } else { sign.mul_add(p[coord], -limit) }).collect();
     if d.iter().all(|&x| x <= 0.0) {
         return;
@@ -383,7 +383,7 @@ fn clip_half_plane(poly: &mut Vec<[f64; 3]>, coord: usize, sign: f64, limit: f64
 // `mujoco_ccd`): the LEFT product of `a*b + c*d` fused, each later product of a chain fused into the sum.
 
 fn contract_off() -> bool {
-    crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID
+    crate::fp_contract::contract_off_family()
 }
 
 /// `mju_dot3`: `(az bz) + (ax bx + ay by)`.
@@ -434,7 +434,7 @@ fn normalize3_mj(v: &mut Vector3<f64>) {
 /// `mjc_BoxBox`: separating-axis test over 15 axes, then either one edge–edge contact or the incident
 /// face clipped to the reference face (up to 8 contacts).
 pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2: [f64; 3]) -> Vec<PreContact> {
-    let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
+    let separate = crate::fp_contract::contract_off_family();
     let (pos21, pos12, rot) = if separate {
         (mat_t_vec_sep(&p1.mat, &(p2.pos - p1.pos)), mat_t_vec_sep(&p2.mat, &(p1.pos - p2.pos)), mat_t_mat_sep(&p1.mat, &p2.mat))
     } else {
@@ -953,7 +953,7 @@ pub fn capsule_box(margin: f64, p1: &GeomPose, size1: [f64; 2], p2: &GeomPose, s
 pub fn make_frame(normal: Vector3<f64>, tangent: Vector3<f64>) -> [Vector3<f64>; 3] {
     // Published path: clang fuses `mju_normalize3`, `mju_dot3` and `mji_cross`.
     // `64156abe` is the source: `(x*x + y*y) + z*z`, `(a0*b0 + a1*b1) + a2*b2`, and `a1*b2 - a2*b1`.
-    let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
+    let separate = crate::fp_contract::contract_off_family();
     let dot = |a: &Vector3<f64>, b: &Vector3<f64>| {
         if separate {
             (a.x * b.x + a.y * b.y) + a.z * b.z

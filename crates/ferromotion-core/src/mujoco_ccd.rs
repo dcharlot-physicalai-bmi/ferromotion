@@ -59,7 +59,7 @@ type V3 = Vector3<f64>;
 // `x + y + z` of products fuses each later product into the running sum; `s += a*b` is one fma.
 
 fn contract_off() -> bool {
-    crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID
+    crate::fp_contract::contract_off_family()
 }
 
 /// `dot3` / `mju_dot3`.
@@ -2038,10 +2038,11 @@ fn quat_to_mat(q: &[f64; 4]) -> nalgebra::Matrix3<f64> {
     let (q00, q01, q02, q03) = (q[0] * q[0], q[0] * q[1], q[0] * q[2], q[0] * q[3]);
     let (q11, q12, q13) = (q[1] * q[1], q[1] * q[2], q[1] * q[3]);
     let (q22, q23, q33) = (q[2] * q[2], q[2] * q[3], q[3] * q[3]);
+    let (d0, d4, d8) = crate::mujoco_kinematics::quat2mat_diagonal(q00, q11, q22, q33);
     nalgebra::Matrix3::new(
-        q00 + q11 - q22 - q33, 2.0 * (q12 - q03), 2.0 * (q13 + q02),
-        2.0 * (q12 + q03), q00 - q11 + q22 - q33, 2.0 * (q23 - q01),
-        2.0 * (q13 - q02), 2.0 * (q23 + q01), q00 - q11 - q22 + q33,
+        d0, 2.0 * (q12 - q03), 2.0 * (q13 + q02),
+        2.0 * (q12 + q03), d4, 2.0 * (q23 - q01),
+        2.0 * (q13 - q02), 2.0 * (q23 + q01), d8,
     )
 }
 

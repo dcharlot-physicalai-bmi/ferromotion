@@ -38,7 +38,7 @@ pub(crate) const CONTACT_ELLIPTIC: i32 = 7;
 pub(crate) fn dot(a: &[f64], b: &[f64]) -> f64 {
     // `mju_mulMatVec` and `mju_cholFactor` call the out-of-line `mju_dot` in 64156abe.
     // That symbol is the SSE schedule in `dot_contract_off` (`mulpd`/`addpd`, no FMA).
-    if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+    if crate::fp_contract::contract_off_family() {
         return dot_contract_off(a, b);
     }
     let n = a.len();
@@ -75,7 +75,7 @@ pub(crate) fn dot(a: &[f64], b: &[f64]) -> f64 {
 /// copies in `_mju_cholFactor` and `_mj_solPrimal`.
 pub(crate) fn dot_self(a: &[f64]) -> f64 {
     // `mju_norm` and the Cholesky diagonal call `mju_dot(v, v)`, the same SSE symbol.
-    if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+    if crate::fp_contract::contract_off_family() {
         return dot_contract_off(a, a);
     }
     let n = a.len();
@@ -139,7 +139,7 @@ impl NativeEq {
 }
 
 fn oracle_identity() -> bool {
-    crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID
+    crate::fp_contract::contract_off_family()
 }
 
 /// `mji_mulMatVec3`. Published rows are fused from the right. `64156abe` is
@@ -1072,7 +1072,7 @@ impl SmoothModel {
             .collect();
         // Published path keeps the fused form. The contract-off identity uses
         // `mj_referenceConstraint` with `shift = 0`: `-B*vel - K*I*(pos-margin)`.
-        let contract_off = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
+        let contract_off = crate::fp_contract::contract_off_family();
         e.aref = (0..nefc)
             .map(|i| {
                 let k = &e.kbip[i];

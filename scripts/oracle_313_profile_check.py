@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """Fail unless the 3.13.0 contract-off profile counts are unchanged.
 
-The counts were measured at 35a135f8 and again at 575be4e against
-libmujoco 64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc.
+Measured against libmujoco
+64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc.
+The pin at 575be4e was qacc 148/636, qacc_smooth 575/636, efc_J 382/636,
+and 6/212 models bit-exact over 20 steps. The fidelity transcriptions
+merged from d14e65f moved those four numbers. M, qLD, xpos, and
+qfrc_bias stayed 636/636. The 4.0 gates (d9972b33 and 6f3db612) do not
+move any of them: the pre-mechanism binary and the gated binary produce
+the same tallies, including 165/212 over 20 steps.
 """
 import re
 import sys
@@ -12,9 +18,9 @@ NATIVE = {
     "qLD": (636, 636),
     "xpos": (636, 636),
     "qfrc_bias": (636, 636),
-    "qacc": (148, 636),
-    "qacc_smooth": (575, 636),
-    "efc_J": (382, 636),
+    "qacc": (529, 636),
+    "qacc_smooth": (609, 636),
+    "efc_J": (572, 636),
 }
 
 
@@ -42,7 +48,7 @@ def step_count(text):
     if not m:
         raise SystemExit("step profile summary line is missing")
     steps, exact, compared, refused = (int(m.group(i)) for i in range(1, 5))
-    if (steps, exact, compared, refused) != (20, 6, 212, 0):
+    if (steps, exact, compared, refused) != (20, 165, 212, 0):
         raise SystemExit(
             f"step count changed: {exact} of {compared} over {steps} steps, refused {refused}"
         )
@@ -53,7 +59,7 @@ def main():
         raise SystemExit("usage: oracle_313_profile_check.py <native.txt> <step.txt>")
     native_counts(open(sys.argv[1]).read())
     step_count(open(sys.argv[2]).read())
-    print("3.13.0 contract-off profile counts unchanged: 20-step 6/212; M qLD xpos qfrc_bias 636/636; qacc 148/636; qacc_smooth 575/636; efc_J 382/636")
+    print("3.13.0 contract-off profile counts unchanged: 20-step 165/212; M qLD xpos qfrc_bias 636/636; qacc 529/636; qacc_smooth 609/636; efc_J 572/636")
 
 
 if __name__ == "__main__":
