@@ -92,7 +92,9 @@ pub(crate) fn hessian(j: &Rows, jt: &Rows, d: &[f64], m: &Rows) -> Rows {
         }
         // values
         for (&k, &vt) in jt[r].0.iter().zip(&jt[r].1) {
-            let scale = d[k] * vt;
+            // `64156abe` `mju_sqrMatTDSparseNumeric`: `scale = vt * D`, then
+            // `(J * scale) + acc` (`mulsd` with `J` as the destination, `addsd` of the accumulator).
+            let scale = if oracle_contract_off() { vt * d[k] } else { d[k] * vt };
             if scale == 0.0 {
                 continue;
             }
@@ -100,7 +102,7 @@ pub(crate) fn hessian(j: &Rows, jt: &Rows, d: &[f64], m: &Rows) -> Rows {
                 if c > r {
                     break;
                 }
-                buffer[c] = scale.mul_add(v, buffer[c]);
+                buffer[c] = if oracle_contract_off() { (v * scale) + buffer[c] } else { scale.mul_add(v, buffer[c]) };
             }
         }
         let vals: Vec<f64> = cols.iter().map(|&c| std::mem::take(&mut buffer[c])).collect();
