@@ -3,7 +3,7 @@ name: menagerie-conformance
 on:
   pull_request:
   push:
-    branches: [main, "cursor/**"]
+    branches: [main, "cursor/**", "chore/**"]
 
 # This workflow is the conformance gate. A checked-in ledger is not read back as
 # a success. The job fails if MuJoCo or the corpus pin is missing, if any XML is

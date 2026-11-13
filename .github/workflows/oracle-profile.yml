@@ -2,7 +2,7 @@ name: oracle-profile
 
 on:
   push:
-    branches: [main, "cursor/**"]
+    branches: [main, "cursor/**", "chore/**"]
   pull_request:
 
 # Contract-off comparisons against libmujoco 64156abe. The published-default

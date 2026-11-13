@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, "cursor/**"]
+    branches: [main, "cursor/**", "chore/**"]
   pull_request:
 
 env:
