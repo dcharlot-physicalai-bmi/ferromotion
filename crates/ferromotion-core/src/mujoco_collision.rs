@@ -335,12 +335,26 @@ pub fn sphere_box(margin: f64, p1: &GeomPose, r1: f64, p2: &GeomPose, size2: [f6
         let mut nearest: Vector3<f64> = Vector3::zeros();
         nearest[k / 2] = if k % 2 == 1 { -1.0 } else { 1.0 };
         let f = (r1 - closest) / 2.0;
-        pos = Vector3::from_fn(|i, _| nearest[i].mul_add(f, center[i]));
+        // `mji_addToScl3(pos, nearest, (r - closest) / 2)` is `(nearest * f) + center`.
+        pos = if contract_off() {
+            Vector3::from_fn(|i, _| (nearest[i] * f) + center[i])
+        } else {
+            Vector3::from_fn(|i, _| nearest[i].mul_add(f, center[i]))
+        };
         normal_local = nearest;
         dist = -closest;
     } else {
-        let deepest = Vector3::from_fn(|i, _| tmp[i].mul_add(r1, center[i]));
-        pos = Vector3::from_fn(|i, _| deepest[i].mul_add(0.5, clamped[i] * 0.5));
+        // `deepest = (normal * r) + center`, then `pos = (deepest * 0.5) + (clamped * 0.5)`.
+        let deepest = if contract_off() {
+            Vector3::from_fn(|i, _| (tmp[i] * r1) + center[i])
+        } else {
+            Vector3::from_fn(|i, _| tmp[i].mul_add(r1, center[i]))
+        };
+        pos = if contract_off() {
+            Vector3::from_fn(|i, _| (deepest[i] * 0.5) + (clamped[i] * 0.5))
+        } else {
+            Vector3::from_fn(|i, _| deepest[i].mul_add(0.5, clamped[i] * 0.5))
+        };
         normal_local = tmp;
     }
     Some(pre(dist - r1, mat_vec(&p2.mat, &pos) + p2.pos, mat_vec(&p2.mat, &normal_local), Vector3::zeros()))
