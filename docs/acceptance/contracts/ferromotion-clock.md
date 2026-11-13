@@ -1,7 +1,7 @@
 # Ferromotion side of the ferromorphic step clock
 
-Read-only source: [ferromorphic `docs/contracts/ferromotion-clock.md`](https://github.com/dcharlot-physicalai-bmi/ferromorphic/blob/15e219b8f7f1bc76029c359df676cbbcf9817ec0/docs/contracts/ferromotion-clock.md)
-at `15e219b8f7f1bc76029c359df676cbbcf9817ec0`.
+Read-only source: [ferromorphic `docs/contracts/ferromotion-clock.md`](https://github.com/dcharlot-physicalai-bmi/ferromorphic/blob/a6722b49ff7dc770b1cb062adac21aa5c7155401/docs/contracts/ferromotion-clock.md)
+at `a6722b49ff7dc770b1cb062adac21aa5c7155401`.
 
 That pin is the clock document. It is not `FERROMORPHIC_REVISION` in
 `joint_acceptance` (`8dabe3a45e589908f524b595da09bbadbc8aa103`). No peer repository

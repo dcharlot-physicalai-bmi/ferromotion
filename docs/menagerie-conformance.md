@@ -110,7 +110,7 @@ MuJoCo Warp `4d1c64bc077d725247e9bf5e2ac3f357749ff804` (Apache-2.0, Google DeepM
 
 SmolVLA (`lerobot/smolvla_base`, Apache-2.0, paper arXiv:2506.01844) stays an unexecuted model. Codec version 2 is pinned to Ferric `3ee11c015e3478c7c4aa0409499346f79ab1c8ce` in `docs/acceptance/contracts/smolvla-ferromotion.md`. The fixture digest is a protocol test. It does not authorize a rollout, and physical actuation is still refused. The entry remains proposed. Real weight sha256 values were not published.
 
-The ferromorphic clock document `15e219b8f7f1bc76029c359df676cbbcf9817ec0` is recorded in `docs/acceptance/contracts/ferromotion-clock.md`. The integer-tick adapter does not replace `DynamicsLab`'s accumulated `f64` time, and the joint loop was not executed.
+The ferromorphic clock document `a6722b49ff7dc770b1cb062adac21aa5c7155401` is recorded in `docs/acceptance/contracts/ferromotion-clock.md`. The integer-tick adapter does not replace `DynamicsLab`'s accumulated `f64` time, and the joint loop was not executed.
 
 Counterpart inputs still required, not invented here:
 

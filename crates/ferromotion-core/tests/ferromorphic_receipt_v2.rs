@@ -1,14 +1,14 @@
 //! Receipt v2 bytes produced by compiling ferromorphic at the clock pin.
 //!
 //! A text round trip is not envelope interoperability, a joint loop, or an inference claim.
-//! `FERROMORPHIC_BIND_VERIFIED` stays false: that repository has no bind.
+//! `FERROMORPHIC_BIND_VERIFIED` stays false. Their bind revalidation is not this flag.
 
 use ferromotion_core::{
     parse_step_receipt, StepReceipt, EPISODE_ENVELOPE_INTEROPERABLE, FERROMORPHIC_BIND_VERIFIED, FERROMORPHIC_CLOCK_REVISION,
     JOINT_LOOP_EXECUTED,
 };
 
-const PIN: &str = "15e219b8f7f1bc76029c359df676cbbcf9817ec0";
+const PIN: &str = "a6722b49ff7dc770b1cb062adac21aa5c7155401";
 
 const PINNED_SAMPLE: &str = "\
 ferromorphic-step 2
