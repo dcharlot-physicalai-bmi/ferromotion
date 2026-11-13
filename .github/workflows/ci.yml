@@ -86,3 +86,11 @@ jobs:
         run: cargo doc --all-features --no-deps --workspace
         env:
           RUSTDOCFLAGS: -D warnings
+
+  arm40-dry-run:
+    name: 4.0 aarch64 fetch dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse the fetch table without downloading
+        run: bash scripts/arm_oracle/4.0.0-aarch64/dry-run.sh

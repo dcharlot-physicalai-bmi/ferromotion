@@ -1,6 +1,11 @@
 # mujoco-4.0.0-aarch64-contract-off
 # From a checkout of this commit. The script refuses every other host.
 # It does not use sudo, apt, pip, or a credential.
+# Each run creates a new build-<UTC stamp> directory and leaves earlier ones,
+# including build-20261113T131521Z, in place.
+
+# x86 or CI, no download
+bash scripts/arm_oracle/4.0.0-aarch64/dry-run.sh
 
 # thor2
 sha256sum -c scripts/arm_oracle/4.0.0-aarch64/SHA256SUMS

@@ -130,8 +130,39 @@ arm40_hold_lock() {
   } >"$ENERGY_LOCK_FILE"
 }
 
+# One row is "<file> <url>". The dry-run and the download loop both read this.
+arm40_fetch_table() {
+  cat <<EOF
+mujoco-4.0.0.tar.gz https://codeload.github.com/google-deepmind/mujoco/tar.gz/refs/tags/4.0.0
+ccd.tar.gz https://codeload.github.com/danfis/libccd/tar.gz/7931e764a19ef6b21b443376c699bbc9c6d4fba8
+qhull.tar.gz https://codeload.github.com/qhull/qhull/tar.gz/d1c2fc0caa5f644f3a0f220290d4a868c68ed4f6
+tinyxml2.tar.gz https://codeload.github.com/leethomason/tinyxml2/tar.gz/e6caeae85799003f4ca74ff26ee16a789bc2af48
+tinyobjloader.tar.gz https://codeload.github.com/tinyobjloader/tinyobjloader/tar.gz/2945a967c5303b2c8c14174117c45f3302591150
+lodepng.tar.gz https://codeload.github.com/lvandeve/lodepng/tar.gz/22561883dd63fd1850f18e1f6adac321e4f609b0
+miniz.tar.gz https://codeload.github.com/richgel999/miniz/tar.gz/77d0dce8627735138c51770d1799a1ef48f2117d
+marchingcubecpp.tar.gz https://codeload.github.com/aparis69/MarchingCubeCpp/tar.gz/f03a1b3ec29b1d7d865691ca8aea4f1eb2c2873d
+menagerie.tar.gz https://codeload.github.com/google-deepmind/mujoco_menagerie/tar.gz/${MENAGERIE_COMMIT}
+EOF
+}
+
+arm40_each_fetch() {
+  local name url
+  while read -r name url; do
+    [[ -n "${name:-}" ]] || continue
+    [[ "${name}" != \#* ]] || continue
+    [[ -n "${url:-}" ]] || arm40_refuse "fetch entry ${name} has no URL"
+    "$@" "$name" "$url"
+  done < <(arm40_fetch_table)
+}
+
+# $1 and $2 are expanded before local runs. Referencing $name in that same
+# local command sees the unset global and set -u aborts the fetch.
 arm40_fetch() {
-  local name="$1" url="$2" dest="$RUN/tarballs/$name"
+  local name url dest
+  [[ $# -eq 2 ]] || arm40_refuse "arm40_fetch expects a name and a URL"
+  name="$1"
+  url="$2"
+  dest="$RUN/tarballs/$name"
   arm40_need curl
   [[ ! -e "$dest" ]] || arm40_refuse "$dest already exists"
   # -q ignores ~/.curlrc. No netrc. HTTPS only.
@@ -139,11 +170,38 @@ arm40_fetch() {
     --max-time 14400 -A 'ferromotion-4.0.0-aarch64' -o "$dest" "$url"
 }
 
+arm40_print_fetch() {
+  printf 'fetch %s %s\n' "$1" "$2"
+}
+
+arm40_dry_run() {
+  local name url listed=0 sha_names
+  arm40_each_fetch arm40_print_fetch
+  sha_names="$(awk '{print $2}' "$SCRIPT_DIR/tarballs.sha256" | sort)"
+  while read -r name url; do
+    [[ -n "${name:-}" ]] || continue
+    listed=$((listed + 1))
+    grep -qx "$name" <<<"$sha_names" || arm40_refuse "tarballs.sha256 has no line for $name"
+    [[ "$url" == https://codeload.github.com/* ]] || arm40_refuse "$name URL is not a public codeload URL"
+  done < <(arm40_fetch_table)
+  [[ "$listed" -eq 9 ]] || arm40_refuse "expected 9 fetch entries, got $listed"
+  local sha_count
+  sha_count="$(grep -cve '^[[:space:]]*$' "$SCRIPT_DIR/tarballs.sha256")"
+  [[ "$sha_count" -eq 9 ]] || arm40_refuse "tarballs.sha256 has $sha_count lines"
+  echo "dry-run ok: 9 fetch entries, no download"
+}
+
 arm40_unpack() {
   local archive="$1" dest="$2"
   mkdir -p "$dest"
   tar -xzf "$archive" -C "$dest" --strip-components=1
 }
+
+# x86 can run this. It prints every name/URL pair and does not download.
+if [[ "${1:-}" == "--dry-run" ]]; then
+  arm40_dry_run
+  exit 0
+fi
 
 if [[ "$(uname -s)" != "Linux" || "$(uname -m)" != "aarch64" ]]; then
   arm40_refuse "Linux aarch64 only (got $(uname -s) $(uname -m))"
@@ -165,11 +223,13 @@ cmake_line="$(cmake --version | head -n 1)"
 python3 -c 'import numpy' >/dev/null 2>&1 || arm40_refuse "python3 numpy is not importable. This script does not install it."
 
 BASE="${FERROMOTION_ORACLE_4_HOME:-$HOME/ferromotion-oracle-4.0.0}"
+# A new second-resolution stamp every invocation. Existing build-* directories,
+# including the failed build-20261113T131521Z, are left in place.
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN="$BASE/$MUJOCO_COMMIT/build-$STAMP"
 arm40_protected "$BASE"
 arm40_protected "$RUN"
-[[ ! -e "$RUN" ]] || arm40_refuse "$RUN already exists"
+[[ ! -e "$RUN" ]] || arm40_refuse "$RUN already exists. This script does not reuse or delete a build directory."
 mkdir -p "$RUN/tarballs" "$RUN/src" "$RUN/deps" "$RUN/dumps" "$RUN/provenance"
 
 arm40_hold_lock
@@ -183,15 +243,7 @@ arm40_hold_lock
 } | tee "$RUN/provenance/start.txt"
 
 cd "$RUN/tarballs"
-arm40_fetch mujoco-4.0.0.tar.gz "https://codeload.github.com/google-deepmind/mujoco/tar.gz/refs/tags/4.0.0"
-arm40_fetch ccd.tar.gz "https://codeload.github.com/danfis/libccd/tar.gz/7931e764a19ef6b21b443376c699bbc9c6d4fba8"
-arm40_fetch qhull.tar.gz "https://codeload.github.com/qhull/qhull/tar.gz/d1c2fc0caa5f644f3a0f220290d4a868c68ed4f6"
-arm40_fetch tinyxml2.tar.gz "https://codeload.github.com/leethomason/tinyxml2/tar.gz/e6caeae85799003f4ca74ff26ee16a789bc2af48"
-arm40_fetch tinyobjloader.tar.gz "https://codeload.github.com/tinyobjloader/tinyobjloader/tar.gz/2945a967c5303b2c8c14174117c45f3302591150"
-arm40_fetch lodepng.tar.gz "https://codeload.github.com/lvandeve/lodepng/tar.gz/22561883dd63fd1850f18e1f6adac321e4f609b0"
-arm40_fetch miniz.tar.gz "https://codeload.github.com/richgel999/miniz/tar.gz/77d0dce8627735138c51770d1799a1ef48f2117d"
-arm40_fetch marchingcubecpp.tar.gz "https://codeload.github.com/aparis69/MarchingCubeCpp/tar.gz/f03a1b3ec29b1d7d865691ca8aea4f1eb2c2873d"
-arm40_fetch menagerie.tar.gz "https://codeload.github.com/google-deepmind/mujoco_menagerie/tar.gz/${MENAGERIE_COMMIT}"
+arm40_each_fetch arm40_fetch
 sha256sum -c "$SCRIPT_DIR/tarballs.sha256"
 
 arm40_unpack "$RUN/tarballs/mujoco-4.0.0.tar.gz" "$RUN/src/mujoco"
