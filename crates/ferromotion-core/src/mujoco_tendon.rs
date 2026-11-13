@@ -207,14 +207,36 @@ fn wrap_inside(end: &[f64; 4], radius: f64) -> Option<([f64; 4], f64)> {
     normalize2(&mut mid);
     let fallback = [mid[0] * radius, mid[1] * radius, mid[0] * radius, mid[1] * radius];
     let (a, b) = (radius / len0, radius / len1);
-    let cos_g = (len0.mul_add(len0, len1 * len1) - dd) / (2.0 * len0 * len1);
+    // `64156abe` `mju_wrap` inside wrap. `dd` is `(dif1²) + (dif0²)`.
+    // `cosG` is `((len1² + len0²) - dd) / ((len0 + len0) · len1)`.
+    // The residual at the initial `z` adds the baked `-2·asin(z)` (`0x3550a0`);
+    // later residuals subtract `asin(z) + asin(z)`. The derivative is
+    // `((B / √(1-B²z²)) + (A / √(1-A²z²))) - (2 / √(1-z²))`, each square
+    // `((z²)·c)·c`. The point is `radius · (cos·v − sin·swap(v))`
+    // via `addsubpd`, so `y` is `(cos·vy) + (sin·vx)`.
+    let off = contract_off();
+    let cos_g = if off {
+        let dd = dif[1] * dif[1] + dif[0] * dif[0];
+        ((len1 * len1 + len0 * len0) - dd) / ((len0 + len0) * len1)
+    } else {
+        (len0.mul_add(len0, len1 * len1) - dd) / (2.0 * len0 * len1)
+    };
     if cos_g < -1.0 + MJ_MINVAL {
         return None;
     } else if cos_g > 1.0 - MJ_MINVAL {
         return Some((fallback, 0.0));
     }
     let g = cos_g.acos();
-    let fz = |z: f64| (a * z).asin() + (b * z).asin() - 2.0 * z.asin() + g;
+    // rodata `-2·asin(1 - 1e-7)`, added (not subtracted) into the first residual
+    const NEG_TWO_ASIN_ZINIT: f64 = f64::from_bits(0xc00920266447a7fa);
+    let fz = |z: f64| {
+        if off {
+            let sum = (b * z).asin() + (a * z).asin();
+            if z.to_bits() == ZINIT.to_bits() { (sum + NEG_TWO_ASIN_ZINIT) + g } else { (sum - (z.asin() + z.asin())) + g }
+        } else {
+            (a * z).asin() + (b * z).asin() - 2.0 * z.asin() + g
+        }
+    };
     let mut z = ZINIT;
     let mut f = fz(z);
     if f > 0.0 {
@@ -223,7 +245,13 @@ fn wrap_inside(end: &[f64; 4], radius: f64) -> Option<([f64; 4], f64)> {
     let mut iter = 0;
     while iter < MAXITER && f.abs() > TOLERANCE {
         let fmax = |x: f64| if MJ_MINVAL >= x { MJ_MINVAL } else { x };
-        let df = a / fmax((-(z * z * a)).mul_add(a, 1.0).sqrt()) + b / fmax((-(z * z * b)).mul_add(b, 1.0).sqrt()) - 2.0 / fmax((-z).mul_add(z, 1.0).sqrt());
+        let df = if off {
+            let zz = z * z;
+            let term = |c: f64| c / fmax((1.0 - (zz * c) * c).sqrt());
+            (term(b) + term(a)) - (2.0 / fmax((1.0 - zz).sqrt()))
+        } else {
+            a / fmax((-(z * z * a)).mul_add(a, 1.0).sqrt()) + b / fmax((-(z * z * b)).mul_add(b, 1.0).sqrt()) - 2.0 / fmax((-z).mul_add(z, 1.0).sqrt())
+        };
         if df > -MJ_MINVAL {
             return Some((fallback, 0.0));
         }
@@ -241,10 +269,15 @@ fn wrap_inside(end: &[f64; 4], radius: f64) -> Option<([f64; 4], f64)> {
     if iter >= MAXITER {
         return Some((fallback, 0.0));
     }
-    let (mut vec, ang) = if end[0].mul_add(end[3], -(end[1] * end[2])) > 0.0 { ([end[0], end[1]], z.asin() - (a * z).asin()) } else { ([end[2], end[3]], z.asin() - (b * z).asin()) };
+    let cross = if off { end[0] * end[3] - end[1] * end[2] } else { end[0].mul_add(end[3], -(end[1] * end[2])) };
+    let (mut vec, ang) = if cross > 0.0 { ([end[0], end[1]], z.asin() - (a * z).asin()) } else { ([end[2], end[3]], z.asin() - (b * z).asin()) };
     normalize2(&mut vec);
     let (sn, cs) = crate::mujoco_kinematics::sincos(ang);
-    let p = [radius * cs.mul_add(vec[0], -(sn * vec[1])), radius * sn.mul_add(vec[0], cs * vec[1])];
+    let p = if off {
+        [radius * (cs * vec[0] - sn * vec[1]), radius * (cs * vec[1] + sn * vec[0])]
+    } else {
+        [radius * cs.mul_add(vec[0], -(sn * vec[1])), radius * sn.mul_add(vec[0], cs * vec[1])]
+    };
     Some(([p[0], p[1], p[0], p[1]], 0.0))
 }
 
