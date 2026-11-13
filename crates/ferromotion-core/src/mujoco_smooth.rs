@@ -1240,7 +1240,8 @@ impl SmoothModel {
                 // `L += prm * qpos`. `64156abe` `mj_tendon` multiplies, then adds the product onto `L`.
                 len[i] = if contract_off() { prm * qpos[qadr] + len[i] } else { prm.mul_add(qpos[qadr], len[i]) };
                 if let Some(k) = t.colind.iter().position(|&c| c == dof) {
-                    row[k] = prm.mul_add(1.0, row[k]);
+                    // `mju_combineSparseInc` with `src = 1` and `b = prm`: `(prm * 1) + row`.
+                    row[k] = if contract_off() { (prm * 1.0) + row[k] } else { prm.mul_add(1.0, row[k]) };
                 }
             }
             jac[i] = row;

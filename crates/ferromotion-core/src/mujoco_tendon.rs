@@ -375,11 +375,14 @@ impl SmoothModel {
                 TendonObj::Site(s1) => (None, s1, 1),
             };
             let x1 = self.obj_frame(k, s1).0;
+            // `64156abe` `mj_tendon` stores `(segment / divisor) + L`. A wrap is
+            // `dist2 + (wlen + dist1)` before that division.
             let nseg = match wrapped {
                 None => {
                     wpnt[1] = x1;
                     wbody[1] = s1.body;
-                    len += dist3(&wpnt[0], &wpnt[1]) / divisor;
+                    let sum = dist3(&wpnt[0], &wpnt[1]);
+                    len = if contract_off() { (sum / divisor) + len } else { len + sum / divisor };
                     1
                 }
                 Some(((w, wlen), gbody)) => {
@@ -389,7 +392,10 @@ impl SmoothModel {
                     wbody[1] = gbody;
                     wbody[2] = gbody;
                     wbody[3] = s1.body;
-                    len += (dist3(&wpnt[0], &wpnt[1]) + wlen + dist3(&wpnt[2], &wpnt[3])) / divisor;
+                    let d1 = dist3(&wpnt[0], &wpnt[1]);
+                    let d2 = dist3(&wpnt[2], &wpnt[3]);
+                    let sum = if contract_off() { d2 + (wlen + d1) } else { d1 + wlen + d2 };
+                    len = if contract_off() { (sum / divisor) + len } else { len + sum / divisor };
                     3
                 }
             };
@@ -412,11 +418,12 @@ impl SmoothModel {
                         }
                     }
                 }
-                // `mju_combineSparseInc(J, tmp, nv, 1, 1/divisor, …)`
+                // `mju_combineSparseInc`. The identical-pattern tail is `(src*b) + (dst*a)`
+                // and the merge is `(b*src) + dst`. `a` is 1 here.
                 let b = 1.0 / divisor;
                 if chain.as_slice() == colind {
                     for (x, t) in jrow.iter_mut().zip(&tmp) {
-                        *x = x.mul_add(1.0, t * b);
+                        *x = if contract_off() { (t * b) + *x } else { x.mul_add(1.0, t * b) };
                     }
                 } else {
                     let mut si = 0;
@@ -425,7 +432,7 @@ impl SmoothModel {
                             si += 1;
                         }
                         if si < chain.len() && chain[si] == c {
-                            jrow[di] = b.mul_add(tmp[si], jrow[di]);
+                            jrow[di] = if contract_off() { (b * tmp[si]) + jrow[di] } else { b.mul_add(tmp[si], jrow[di]) };
                             si += 1;
                         }
                     }
