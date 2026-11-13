@@ -234,6 +234,24 @@ tmp="$(mktemp)"
   if [[ -f "$BUILD/ferromotion-tested.txt" ]]; then
     cat "$BUILD/ferromotion-tested.txt"
   fi
+  if [[ "$ROLE" == "rust" && -n "$LIBDIR" && -f "$LIBDIR/libmujoco.so.3.13.0" ]]; then
+    echo "dump_libmujoco_sha256 $(sha_of "$LIBDIR/libmujoco.so.3.13.0")"
+  fi
+  if [[ "$ROLE" == "rust" && -f "$BUILD/step.txt" ]]; then
+    step_line="$(grep -E -m 1 '^mj_step against MuJoCo 3\.13\.0, BIT FOR BIT' "$BUILD/step.txt" || true)"
+    if [[ -n "$step_line" ]]; then
+      echo "count_step $step_line"
+    fi
+  fi
+  if [[ "$ROLE" == "rust" && -f "$BUILD/native.txt" ]]; then
+    native_line="$(grep -E -m 1 "^MuJoCo 3\\.13\\.0's own arrays, BIT FOR BIT:" "$BUILD/native.txt" || true)"
+    if [[ -n "$native_line" ]]; then
+      echo "count_native $native_line"
+    fi
+    while IFS= read -r field_line; do
+      echo "count_field ${field_line#"${field_line%%[![:space:]]*}"}"
+    done < <(grep -E '^  mj(Data|Model)  ' "$BUILD/native.txt" || true)
+  fi
   if [[ -n "${ENERGY_LOCK_FILE:-}" && -f "$ENERGY_LOCK_FILE" ]]; then
     cat "$ENERGY_LOCK_FILE"
     echo "$receipt" >>"$(dirname "$ENERGY_LOCK_FILE")/energy-lock-receipts.txt"

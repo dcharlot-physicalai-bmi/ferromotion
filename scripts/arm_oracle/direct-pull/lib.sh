@@ -135,7 +135,8 @@ direct_pull_hold_energy_lock() {
   mkdir -p "$run/provenance"
   exec 9>/tmp/bmi-energy.lock
   requested="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  if ! flock -w "$wait_s" 9; then
+  # LOCK_EX. The wait is bounded. thor2 never reaches this.
+  if ! flock -x -w "$wait_s" 9; then
     echo "refusing: /tmp/bmi-energy.lock not acquired within ${wait_s}s on thor.local" >&2
     exit 2
   fi
@@ -238,6 +239,84 @@ directory = "vendor"
 [net]
 offline = true
 EOF
+}
+
+# Tree pin for an oracle-profile re-run commit. Unknown commits are refused.
+direct_pull_profile_tree() {
+  local commit="$1"
+  case "$commit" in
+    "$FERROMOTION_PROFILE_6092_COMMIT") printf '%s\n' "$FERROMOTION_PROFILE_6092_TREE" ;;
+    "$FERROMOTION_PROFILE_D14_COMMIT") printf '%s\n' "$FERROMOTION_PROFILE_D14_TREE" ;;
+    *)
+      echo "refusing: $commit is not a pinned oracle-profile commit" >&2
+      return 2
+      ;;
+  esac
+}
+
+# Commit identity carried by a GitHub codeload tarball. Both the pax comment
+# and the archive root directory must be the full SHA. No API and no token.
+direct_pull_codeload_commit() {
+  local tar="$1" want="$2"
+  python3 - "$tar" "$want" <<'PY'
+import sys, tarfile
+path, want = sys.argv[1], sys.argv[2]
+tf = tarfile.open(path, "r:gz")
+comment = ""
+root = ""
+for member in tf:
+    pax = getattr(member, "pax_headers", {}) or {}
+    if not comment and pax.get("comment"):
+        comment = pax["comment"].strip()
+    top = member.name.split("/", 1)[0]
+    if not root and top.startswith("ferromotion-"):
+        root = top[len("ferromotion-"):]
+    if comment and root:
+        break
+if comment != want or root != want:
+    sys.stderr.write(
+        "refusing: codeload commit comment %s root %s is not %s\n" % (comment, root, want)
+    )
+    sys.exit(2)
+print(want)
+PY
+}
+
+# Sha256 that install_policy binds to this id, if the match arm selects it.
+# Exit 3 when the id is not a match arm. Prints the bound sha256 on success.
+direct_pull_policy_binding() {
+  local src="$1" policy_id="$2"
+  python3 - "$src" "$policy_id" <<'PY'
+import re, sys
+path, want = sys.argv[1], sys.argv[2]
+text = open(path, encoding="utf-8").read()
+start = text.find("pub fn install_policy(")
+end = text.find("pub fn install_policy_from_env(")
+if start < 0 or end <= start:
+    sys.exit(2)
+body = text[start:end]
+consts = {}
+for match in re.finditer(
+    r'pub const ([A-Z0-9_]+):\s*&str\s*=\s*(?:\"([^\"]*)\"|\n\s*\"([^\"]*)\")',
+    text,
+):
+    consts[match.group(1)] = match.group(2) if match.group(2) is not None else match.group(3)
+if want == "published-default" and re.search(r'"published-default"\s*=>', body):
+    print("published-default")
+    sys.exit(0)
+for name, value in consts.items():
+    if value != want or not name.endswith("_ID"):
+        continue
+    if not re.search(r'\b' + name + r'\b\s*=>', body):
+        continue
+    sha_name = name[:-2] + "SHA256"
+    sha = consts.get(sha_name, "")
+    if not sha:
+        sys.exit(2)
+    print(sha)
+    sys.exit(0)
+sys.exit(3)
+PY
 }
 
 direct_pull_run_root() {

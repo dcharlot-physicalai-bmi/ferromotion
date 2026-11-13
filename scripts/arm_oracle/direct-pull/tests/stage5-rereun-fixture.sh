@@ -126,9 +126,9 @@ direct_pull_install_offline_cargo_config "$reuse"
 grep -F -x -q 'offline = true' "$reuse/.cargo/config.toml"
 grep -F -x -q "ferromotion_tested_commit $FERROMOTION_RERUN_COMMIT" "$reuse/PROVENANCE.txt"
 awk '
-  /echo "reusing / { reuse = NR }
+  /exists and is not overwritten/ && !refuse { refuse = NR }
   /direct_pull_install_offline_cargo_config/ { install = NR }
-  END { exit !(reuse && install && reuse < install) }
+  END { exit !(refuse && install && refuse < install) }
 ' "$pull/05-rust-rereun.sh"
 
 set +e
@@ -158,8 +158,30 @@ set -e
 
 grep -q 'FERROMOTION_RERUN_COMMIT=515a7dec4b4ed2fa7257f328c7c3f9b169b8d7ba' "$pull/pins.sh"
 grep -q 'FERROMOTION_RERUN_CONTAINS=7998624df8a4ac2591187540a59ddc9b13d51640' "$pull/pins.sh"
+grep -q 'FERROMOTION_PROFILE_6092_COMMIT=6092a8e537d9eb1264fce1775daf809e15616b03' "$pull/pins.sh"
+grep -q 'FERROMOTION_PROFILE_D14_COMMIT=d14e65fac3bcc44fa603dc9c8d87e4ea149a4200' "$pull/pins.sh"
 grep -q 'rust212-20261109T215708Z' "$pull/05-rust-rereun.sh"
 grep -q 'codeload.github.com' "$pull/05-rust-rereun.sh"
 grep -q 'CARGO_NET_OFFLINE=true' "$pull/05-rust-rereun.sh"
+grep -q 'Cargo was not started' "$pull/05-rust-rereun.sh"
+if grep -q 'api.github.com' "$pull/05-rust-rereun.sh"; then
+  echo "codeload identity still calls the GitHub API" >&2
+  exit 1
+fi
 grep -q -- '--offline' "$root/run-rust-212.sh"
+repo="$(git -C "$pull" rev-parse --show-toplevel)"
+git -C "$repo" show "${FERROMOTION_PROFILE_6092_COMMIT}:crates/ferromotion-core/src/fp_contract.rs" >"$tmp/fp6092.rs"
+git -C "$repo" show "${FERROMOTION_PROFILE_D14_COMMIT}:crates/ferromotion-core/src/fp_contract.rs" >"$tmp/fpd14.rs"
+set +e
+direct_pull_policy_binding "$tmp/fp6092.rs" "$ORACLE_AARCH64_CONTRACT_OFF_ID" >"$tmp/arm6092.out" 2>"$tmp/arm6092.err"
+arm6092_rc=$?
+direct_pull_policy_binding "$tmp/fpd14.rs" "$ORACLE_AARCH64_CONTRACT_OFF_ID" >"$tmp/armd14.out" 2>"$tmp/armd14.err"
+armd14_rc=$?
+direct_pull_policy_binding "$repo/crates/ferromotion-core/src/fp_contract.rs" "$ORACLE_AARCH64_CONTRACT_OFF_ID" >"$tmp/armhead.out" 2>"$tmp/armhead.err"
+armhead_rc=$?
+set -e
+[[ "$arm6092_rc" -eq 3 && "$armd14_rc" -eq 3 && "$armhead_rc" -eq 3 ]]
+[[ "$(direct_pull_policy_binding "$tmp/fp6092.rs" "$ORACLE_X86_CONTRACT_OFF_ID")" == "$ORACLE_X86_CONTRACT_OFF_SHA256" ]]
+[[ "$(direct_pull_policy_binding "$tmp/fpd14.rs" "$ORACLE_X86_CONTRACT_OFF_ID")" == "$ORACLE_X86_CONTRACT_OFF_SHA256" ]]
+[[ "$(direct_pull_policy_binding "$repo/crates/ferromotion-core/src/fp_contract.rs" published-default)" == "published-default" ]]
 echo "stage5-rereun-fixture ok"
