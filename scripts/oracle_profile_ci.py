@@ -247,7 +247,7 @@ def self_test() -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--phase", choices=("native", "step"))
+    parser.add_argument("--phase", choices=("native", "step", "graph"))
     parser.add_argument("--lib", type=Path)
     parser.add_argument("--menagerie", type=Path)
     parser.add_argument("--dump", type=Path)
@@ -262,6 +262,9 @@ def main() -> int:
     if args.phase == "native":
         check_file(args.dump, artifact["native_dump_sha256"], artifact["native_dump_bytes"], "x86-native.txt")
         example = "menagerie_native"
+    elif args.phase == "graph":
+        check_file(args.dump, artifact["graph_dump_sha256"], artifact["graph_dump_bytes"], "x86-mesh-graph.txt")
+        example = "menagerie_qhull"
     else:
         check_file(args.dump, artifact["step_dump_sha256"], artifact["step_dump_bytes"], "x86-step.txt")
         example = "menagerie_native_step"
@@ -297,6 +300,16 @@ def main() -> int:
     if policy not in proc.stderr:
         print("policy line missing from stderr", file=sys.stderr)
         return 1
+    if args.phase == "graph":
+        match = re.search(r"identical (\d+), different (\d+), refused (\d+), no oracle (\d+)", proc.stdout)
+        if match is None:
+            print("mesh_graph summary missing", file=sys.stderr)
+            return 1
+        identical, different, refused, missing = (int(match.group(i)) for i in range(1, 5))
+        print(f"mesh_graph {identical} identical, {different} different, {refused} refused, {missing} without an oracle line")
+        if different or refused or missing:
+            return 1
+        return 0
     if args.phase == "step":
         exact, compared = parse_step_summary(proc.stdout)
         observed = ledger_exact(ledger)

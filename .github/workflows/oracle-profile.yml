@@ -40,6 +40,8 @@ jobs:
         run: bash scripts/oracle_profile_prepare.sh native
       - name: Native comparison
         run: python3 scripts/oracle_profile_ci.py --phase native --lib "$RUNNER_TEMP/oracle/lib/libmujoco.so.3.13.0" --menagerie "$RUNNER_TEMP/menagerie" --dump "$RUNNER_TEMP/oracle/x86-native.txt"
+      - name: mesh_graph comparison
+        run: python3 scripts/oracle_profile_ci.py --phase graph --lib "$RUNNER_TEMP/oracle/lib/libmujoco.so.3.13.0" --menagerie "$RUNNER_TEMP/menagerie" --dump "$RUNNER_TEMP/oracle/x86-mesh-graph.txt"
 
   contract-off-conformance:
     name: contract-off conformance

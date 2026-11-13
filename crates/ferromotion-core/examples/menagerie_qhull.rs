@@ -17,9 +17,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 fn main() {
-    if let Err(error) = ferromotion_core::install_policy_from_env() {
-        eprintln!("policy refused: {error:?}");
-        std::process::exit(2);
+    match ferromotion_core::install_policy_from_env() {
+        Ok(policy) => eprintln!("{}", ferromotion_core::policy_receipt(policy)),
+        Err(error) => {
+            eprintln!("policy refused: {error:?}");
+            std::process::exit(2);
+        }
     }
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {

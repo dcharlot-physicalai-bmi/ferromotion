@@ -5,5 +5,7 @@
   "native_dump_bytes": 73420440,
   "step_dump_sha256": "a039f949d938cefc0cf3633edec1415497f8400a776b88809adf9bb06f5678be",
   "step_dump_bytes": 7582957,
+  "graph_dump_sha256": "744105177f6ebfd14ffcd87602513f89af7bd38967c5c671cb3ba5314e50f51e",
+  "graph_dump_bytes": 14382748,
   "menagerie_sha": "4d038b3feae26ec82b46a4d586379114012a8ac7"
 }
