@@ -7,6 +7,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 work="${RUNNER_TEMP:-/tmp}"
 # `__FILE__` strings in the pinned library are `/tmp/mujoco-3.13.0-src/...`.
 # A checkout anywhere else changes the sha256 even with the same clang.
+# The link must be GNU gold, not lld. See build_mujoco_3130_x86_contract_off.sh.
 src=/tmp/mujoco-3.13.0-src
 build=/tmp/oracle-x86-contract-off
 # The pin is Ubuntu clang 18.1.3. A newer clang, including the Ubuntu 26.04
