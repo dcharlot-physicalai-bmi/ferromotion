@@ -21,7 +21,7 @@ pub(crate) enum TendonObj {
 }
 
 fn contract_off() -> bool {
-    crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID
+    crate::fp_contract::contract_off()
 }
 
 /// `mju_dot3`: `(a2 b2) + (a0 b0 + a1 b1)`.

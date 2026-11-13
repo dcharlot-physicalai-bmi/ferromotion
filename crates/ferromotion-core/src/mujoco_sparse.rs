@@ -11,7 +11,7 @@
 use crate::mujoco_smooth::dot_sparse;
 
 fn oracle_contract_off() -> bool {
-    crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID
+    crate::fp_contract::contract_off()
 }
 
 /// Forward dot inside `mju_cholSolveSparse` (`64156abe`).

@@ -19,7 +19,7 @@ use crate::mujoco_kinematics::{KinJointKind, KinState, MjKinematics, SameFrame};
 const MJ_MINVAL: f64 = 1e-15;
 
 fn contract_off() -> bool {
-    crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID
+    crate::fp_contract::contract_off()
 }
 
 /// `mju_mulInertVec`: a 6-D motion vector through a com-based inertia (`i` = the 10 numbers of `cinert`).
@@ -68,7 +68,7 @@ pub(crate) fn dot_sparse(v: &[f64], x: &[f64], ind: &[usize]) -> f64 {
     let (mut r0, mut r1, mut r2, mut r3) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     let mut i = 0;
     // Published path fuses each `res += a*b`. The contract-off library adds the product.
-    let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
+    let separate = crate::fp_contract::contract_off();
     while i + 4 <= n {
         if separate {
             r0 += v[i] * x[ind[i]];
@@ -1080,7 +1080,7 @@ impl SmoothModel {
             };
         }
         let mut actuator_force = vec![0.0; nu];
-        let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
+        let separate = crate::fp_contract::contract_off();
         for (i, a) in self.actuators.iter().enumerate() {
             use crate::mujoco_actuator::{ActBias, ActDyn, ActGain};
             // `Pid::Compute` (MuJoCo runs the plugins after the builtin laws; the outputs are disjoint),
@@ -1310,7 +1310,7 @@ impl SmoothModel {
             diag_inv[k] = inv_d;
             // Published path fuses the rank-1 update. `mj_factorI` calls `mju_addToScl`,
             // which is `row += src * scl`.
-            let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
+            let separate = crate::fp_contract::contract_off();
             for adr in (start..end).rev() {
                 let i = self.m_colind[adr];
                 let scl = -qld[adr] * inv_d;
@@ -1353,7 +1353,7 @@ impl SmoothModel {
                 let (start, end) = (self.m_rowadr[i], self.m_rowadr[i] + self.m_rownnz[i] - 1);
                 // Published path fuses `x - qLD·x_i`. `mj_solveLD` in the contract-off
                 // library subtracts the product.
-                let separate = crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID;
+                let separate = crate::fp_contract::contract_off();
                 for adr in start..end {
                     let c = self.m_colind[adr];
                     x[c] = if separate { x[c] - qld[adr] * xi } else { (-qld[adr]).mul_add(xi, x[c]) };

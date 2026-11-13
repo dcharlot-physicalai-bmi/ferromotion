@@ -116,7 +116,7 @@ impl Pid {
             let prev = act[usize::from(self.ki != 0.0)];
             // Published path fuses `prev ∓ slew·h`. The contract-off plugin
             // multiplies `slew * h` once, then `prev - sh` and `sh + prev`.
-            u = if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+            u = if crate::fp_contract::contract_off() {
                 let sh = slew * h;
                 u.clamp(prev - sh, sh + prev)
             } else {
@@ -132,7 +132,7 @@ impl Pid {
             return 0.0;
         }
         // Published path is `fma(e, h, ∫)`. The contract-off plugin is `∫ + e*h`.
-        let i = if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+        let i = if crate::fp_contract::contract_off() {
             act[0] + error * h
         } else {
             error.mul_add(h, act[0])
@@ -152,7 +152,7 @@ impl Pid {
         // `Pid::Compute` in libactuator 64156abe multiplies the three terms, then
         // adds `(kd*ė + kp*e) + ki*∫`.
         let integral = self.integral(act, error, h);
-        if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+        if crate::fp_contract::contract_off() {
             (self.kd * error_dot + self.kp * error) + self.ki * integral
         } else {
             self.ki.mul_add(integral, self.kp.mul_add(error, self.kd * error_dot))

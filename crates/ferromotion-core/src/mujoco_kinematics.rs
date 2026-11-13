@@ -119,7 +119,7 @@ pub(crate) type XFrame = ([f64; 3], [f64; 9]);
 /// `mji_mulMatVec3`. The published path fuses each row. The contract-off identity uses
 /// the source order `(m0*v0 + m1*v1) + m2*v2`. Naming the site is still refused.
 fn mul_mat_vec3(m: &[f64; 9], v: &[f64; 3]) -> [f64; 3] {
-    let mode = if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+    let mode = if crate::fp_contract::contract_off() {
         crate::fp_contract::Contraction::Unfused
     } else {
         crate::fp_contract::Contraction::Contracted
@@ -289,7 +289,7 @@ impl MjKinematics {
                             let s = qpos[j.qposadr] - j.qpos0;
                             // Published default keeps the fused `mul_add`. The contract-off oracle
                             // compiles `mji_addToScl3` as `p += axis * s` (mulpd then add, no FMA).
-                            p = if crate::fp_contract::active_policy().id == crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID {
+                            p = if crate::fp_contract::contract_off() {
                                 [p[0] + xaxis[0] * s, p[1] + xaxis[1] * s, p[2] + xaxis[2] * s]
                             } else {
                                 [xaxis[0].mul_add(s, p[0]), xaxis[1].mul_add(s, p[1]), xaxis[2].mul_add(s, p[2])]

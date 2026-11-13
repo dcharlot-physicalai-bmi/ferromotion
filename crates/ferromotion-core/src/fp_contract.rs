@@ -18,9 +18,64 @@ pub enum Contraction {
 /// `mul_quat` build selection. Contracted until a manifest entry changes it.
 pub const MUL_QUAT: Contraction = Contraction::Contracted;
 
-/// Named source oracle. Selecting it is explicit. The host architecture does not select it.
+/// Named source oracles. Selecting one is explicit. The host architecture does not select it.
+/// The two ids are not aliases: each stays bound to its own artifact hash.
 pub const ORACLE_X86_CONTRACT_OFF_ID: &str = "mujoco-3.13.0-x86_64-contract-off";
 pub const ORACLE_X86_CONTRACT_OFF_SHA256: &str = "64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc";
+pub const ORACLE_AARCH64_CONTRACT_OFF_ID: &str = "mujoco-3.13.0-aarch64-contract-off";
+pub const ORACLE_AARCH64_CONTRACT_OFF_SHA256: &str = "9164828bf04729b20b640bd09105baea98137a8749e262fc06fddc44ca869eb9";
+
+/// The artifact hash bound to a contract-off id, if `id` is one of those oracles.
+fn contract_off_sha(id: &str) -> Option<&'static str> {
+    match id {
+        ORACLE_X86_CONTRACT_OFF_ID => Some(ORACLE_X86_CONTRACT_OFF_SHA256),
+        ORACLE_AARCH64_CONTRACT_OFF_ID => Some(ORACLE_AARCH64_CONTRACT_OFF_SHA256),
+        _ => None,
+    }
+}
+
+/// Schedule both contract-off oracles install. `id` and `artifact_sha256` stay the pair that was asked for.
+fn contract_off_policy(id: &'static str, artifact_sha256: &'static str) -> BuildPolicy {
+    BuildPolicy {
+        id,
+        artifact_sha256,
+        // `mju_mulQuat` and `mju_rotVecQuat` in `64156abe` are the unfused SSE schedules
+        // transcribed below. The aarch64 artifact uses the same selection.
+        mul_quat: Contraction::Unfused,
+        rot_vec_quat: Contraction::Unfused,
+        mul_mat_vec3: Contraction::Contracted,
+    }
+}
+
+/// Site list shared by both contract-off ids. `mul_mat_vec3` and any other name are refused.
+fn apply_contract_off_sites(policy: &mut BuildPolicy, sites: &str) -> Result<(), PolicyError> {
+    for site in sites.split(',').filter(|site| !site.is_empty()) {
+        match site {
+            "mul_quat" => policy.mul_quat = Contraction::Unfused,
+            "rot_vec_quat" => policy.rot_vec_quat = Contraction::Unfused,
+            // Reverted after the post-mesh remeasure: unfusing this site moved
+            // `qacc` from 24/636 back to 23/636. The formula stays in
+            // `mul_mat_vec3_with` for the vector file. It is not selectable.
+            "mul_mat_vec3" => return Err(PolicyError::UnknownSite),
+            _ => return Err(PolicyError::UnknownSite),
+        }
+    }
+    Ok(())
+}
+
+fn install_contract_off(id: &'static str, bound_sha: &'static str, artifact_sha256: &str, sites: &str) -> Result<BuildPolicy, PolicyError> {
+    if artifact_sha256 != bound_sha {
+        return Err(PolicyError::InconsistentIdentity);
+    }
+    let mut policy = contract_off_policy(id, bound_sha);
+    apply_contract_off_sites(&mut policy, sites)?;
+    Ok(policy)
+}
+
+/// True when the active policy is either contract-off oracle. The published default is not.
+pub(crate) fn contract_off() -> bool {
+    contract_off_sha(active_policy().id).is_some()
+}
 
 /// Active contraction for the three opt-in sites. The published default leaves every site contracted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,7 +119,7 @@ pub fn reset_policy() {
 /// Install a named policy. A sha that does not match the id is refused. An unknown site is refused.
 /// Neither case falls back to the default.
 pub fn install_policy(id: &str, artifact_sha256: &str, sites: &str) -> Result<BuildPolicy, PolicyError> {
-    let mut policy = match id {
+    let policy = match id {
         "published-default" => {
             if artifact_sha256 != "published-default" || !sites.is_empty() {
                 return Err(PolicyError::InconsistentIdentity);
@@ -72,34 +127,13 @@ pub fn install_policy(id: &str, artifact_sha256: &str, sites: &str) -> Result<Bu
             DEFAULT_POLICY
         }
         ORACLE_X86_CONTRACT_OFF_ID => {
-            if artifact_sha256 != ORACLE_X86_CONTRACT_OFF_SHA256 {
-                return Err(PolicyError::InconsistentIdentity);
-            }
-            BuildPolicy {
-                id: ORACLE_X86_CONTRACT_OFF_ID,
-                artifact_sha256: ORACLE_X86_CONTRACT_OFF_SHA256,
-                // `mju_mulQuat` and `mju_rotVecQuat` in that artifact are the
-                // unfused SSE schedules transcribed below.
-                mul_quat: Contraction::Unfused,
-                rot_vec_quat: Contraction::Unfused,
-                mul_mat_vec3: Contraction::Contracted,
-            }
+            install_contract_off(ORACLE_X86_CONTRACT_OFF_ID, ORACLE_X86_CONTRACT_OFF_SHA256, artifact_sha256, sites)?
+        }
+        ORACLE_AARCH64_CONTRACT_OFF_ID => {
+            install_contract_off(ORACLE_AARCH64_CONTRACT_OFF_ID, ORACLE_AARCH64_CONTRACT_OFF_SHA256, artifact_sha256, sites)?
         }
         _ => return Err(PolicyError::UnknownIdentity),
     };
-    if id == ORACLE_X86_CONTRACT_OFF_ID {
-        for site in sites.split(',').filter(|site| !site.is_empty()) {
-            match site {
-                "mul_quat" => policy.mul_quat = Contraction::Unfused,
-                "rot_vec_quat" => policy.rot_vec_quat = Contraction::Unfused,
-                // Reverted after the post-mesh remeasure: unfusing this site moved
-                // `qacc` from 24/636 back to 23/636. The formula stays in
-                // `mul_mat_vec3_with` for the vector file. It is not selectable.
-                "mul_mat_vec3" => return Err(PolicyError::UnknownSite),
-                _ => return Err(PolicyError::UnknownSite),
-            }
-        }
-    }
     ACTIVE.with(|slot| slot.set(policy));
     Ok(policy)
 }
@@ -309,6 +343,53 @@ mod tests {
         );
         reset_policy();
         assert_eq!(mul_quat(&a, &b).map(f64::to_bits), mul_quat_with(Contraction::Contracted, &a, &b).map(f64::to_bits));
+    }
+
+    #[test]
+    fn both_contract_off_oracles_select_the_same_schedules_and_refuse_a_wrong_hash() {
+        reset_policy();
+        let wrong = "0".repeat(64);
+        let arms = [
+            (ORACLE_X86_CONTRACT_OFF_ID, ORACLE_X86_CONTRACT_OFF_SHA256),
+            (ORACLE_AARCH64_CONTRACT_OFF_ID, ORACLE_AARCH64_CONTRACT_OFF_SHA256),
+        ];
+        for (id, sha) in arms {
+            assert_eq!(install_policy(id, &wrong, ""), Err(PolicyError::InconsistentIdentity), "{id}");
+            assert_eq!(active_policy(), DEFAULT_POLICY, "{id}");
+            assert!(!contract_off());
+            let other = if id == ORACLE_X86_CONTRACT_OFF_ID { ORACLE_AARCH64_CONTRACT_OFF_SHA256 } else { ORACLE_X86_CONTRACT_OFF_SHA256 };
+            assert_eq!(install_policy(id, other, "mul_quat"), Err(PolicyError::InconsistentIdentity), "{id}");
+            assert_eq!(active_policy(), DEFAULT_POLICY);
+            assert_eq!(install_policy(id, sha, "solver"), Err(PolicyError::UnknownSite), "{id}");
+            assert_eq!(install_policy(id, sha, "mul_mat_vec3"), Err(PolicyError::UnknownSite), "{id}");
+            assert_eq!(active_policy(), DEFAULT_POLICY);
+        }
+        let x86 = install_policy(ORACLE_X86_CONTRACT_OFF_ID, ORACLE_X86_CONTRACT_OFF_SHA256, "mul_quat,rot_vec_quat").unwrap();
+        assert!(contract_off());
+        assert_eq!(x86.id, ORACLE_X86_CONTRACT_OFF_ID);
+        assert_eq!(x86.artifact_sha256, ORACLE_X86_CONTRACT_OFF_SHA256);
+        reset_policy();
+        let arm = install_policy(ORACLE_AARCH64_CONTRACT_OFF_ID, ORACLE_AARCH64_CONTRACT_OFF_SHA256, "mul_quat,rot_vec_quat").unwrap();
+        assert!(contract_off());
+        assert_eq!(arm.id, ORACLE_AARCH64_CONTRACT_OFF_ID);
+        assert_eq!(arm.artifact_sha256, ORACLE_AARCH64_CONTRACT_OFF_SHA256);
+        assert_ne!(x86.id, arm.id);
+        assert_ne!(x86.artifact_sha256, arm.artifact_sha256);
+        assert_eq!(x86.mul_quat, arm.mul_quat);
+        assert_eq!(x86.rot_vec_quat, arm.rot_vec_quat);
+        assert_eq!(x86.mul_mat_vec3, arm.mul_mat_vec3);
+        assert_eq!(arm.mul_quat, Contraction::Unfused);
+        assert_eq!(arm.rot_vec_quat, Contraction::Unfused);
+        assert_eq!(arm.mul_mat_vec3, Contraction::Contracted);
+        let bare_x86 = install_policy(ORACLE_X86_CONTRACT_OFF_ID, ORACLE_X86_CONTRACT_OFF_SHA256, "").unwrap();
+        let bare_arm = install_policy(ORACLE_AARCH64_CONTRACT_OFF_ID, ORACLE_AARCH64_CONTRACT_OFF_SHA256, "").unwrap();
+        assert_eq!(
+            (bare_x86.mul_quat, bare_x86.rot_vec_quat, bare_x86.mul_mat_vec3),
+            (bare_arm.mul_quat, bare_arm.rot_vec_quat, bare_arm.mul_mat_vec3)
+        );
+        reset_policy();
+        assert!(!contract_off());
+        assert_eq!(active_policy(), DEFAULT_POLICY);
     }
 
     #[test]
