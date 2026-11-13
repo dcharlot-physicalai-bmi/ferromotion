@@ -315,7 +315,7 @@ pub(crate) fn chol_solve(mat: &[f64], vec: &[f64], n: usize) -> Vec<f64> {
         }
         res[i] /= mat[i * (n + 1)];
     }
-    if crate::fp_contract::oracle_4_0() {
+    if crate::fp_contract::oracle_4_0_schedules() {
         // `6f3db612` solves L' by dividing the diagonal, then scattering
         // `-x[i] * L[i, 0..i)` into the prefix with `mju_addToScl`.
         for i in (0..n).rev() {

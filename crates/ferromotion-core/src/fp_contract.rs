@@ -27,15 +27,27 @@ pub const ORACLE_X86_CONTRACT_OFF_SHA256: &str = "64156abef7859ac3cedfa4f589c318
 pub const ORACLE_4_0_ID: &str = "mujoco-4.0.0-x86_64-contract-off";
 pub const ORACLE_4_0_SHA256: &str = "4849b2dd05ce3c57d75098ca47a10373866e048fbdf9b57cb7073c0be2210a86";
 
-/// True for the 3.13 and 4.0 contract-off identities. The published default is false.
+/// MuJoCo 4.0.1 contract-off source build. A different id from 4.0.0.
+/// The paired quaternion sums and the dense Cholesky row update are the same
+/// instruction schedules in both libraries, so this id runs them too.
+pub const ORACLE_4_0_1_ID: &str = "mujoco-4.0.1-x86_64-contract-off";
+pub const ORACLE_4_0_1_SHA256: &str = "5491d70f1168c1fed16dca689bd6c63d6af5abb4d9a3d6146fdfae13e40dafa6";
+
+/// True for the 3.13, 4.0.0, and 4.0.1 contract-off identities. The published default is false.
 pub fn contract_off_family() -> bool {
     let id = active_policy().id;
-    id == ORACLE_X86_CONTRACT_OFF_ID || id == ORACLE_4_0_ID
+    id == ORACLE_X86_CONTRACT_OFF_ID || id == ORACLE_4_0_ID || id == ORACLE_4_0_1_ID
 }
 
-/// True only for the 4.0 identity. 3.13 and the published default stay off.
+/// True only for the 4.0.0 identity. 4.0.1, 3.13, and the published default stay off.
 pub fn oracle_4_0() -> bool {
     active_policy().id == ORACLE_4_0_ID
+}
+
+/// `d9972b33` and `6f3db612` schedules. Both the 4.0.0 and 4.0.1 libraries have them.
+pub fn oracle_4_0_schedules() -> bool {
+    let id = active_policy().id;
+    id == ORACLE_4_0_ID || id == ORACLE_4_0_1_ID
 }
 
 /// Active contraction for the three opt-in sites. The published default leaves every site contracted.
@@ -115,9 +127,21 @@ pub fn install_policy(id: &str, artifact_sha256: &str, sites: &str) -> Result<Bu
                 mul_mat_vec3: Contraction::Contracted,
             }
         }
+        ORACLE_4_0_1_ID => {
+            if artifact_sha256 != ORACLE_4_0_1_SHA256 {
+                return Err(PolicyError::InconsistentIdentity);
+            }
+            BuildPolicy {
+                id: ORACLE_4_0_1_ID,
+                artifact_sha256: ORACLE_4_0_1_SHA256,
+                mul_quat: Contraction::Unfused,
+                rot_vec_quat: Contraction::Unfused,
+                mul_mat_vec3: Contraction::Contracted,
+            }
+        }
         _ => return Err(PolicyError::UnknownIdentity),
     };
-    if id == ORACLE_X86_CONTRACT_OFF_ID || id == ORACLE_4_0_ID {
+    if id == ORACLE_X86_CONTRACT_OFF_ID || id == ORACLE_4_0_ID || id == ORACLE_4_0_1_ID {
         for site in sites.split(',').filter(|site| !site.is_empty()) {
             match site {
                 "mul_quat" => policy.mul_quat = Contraction::Unfused,
@@ -152,7 +176,7 @@ pub fn policy_receipt(policy: BuildPolicy) -> String {
 
 pub fn mul_quat(a: &[f64; 4], b: &[f64; 4]) -> [f64; 4] {
     // `d9972b33` pairs the four products. 3.13 keeps the left-associated SSE schedule.
-    let out = if oracle_4_0() { mul_quat_paired(a, b) } else { mul_quat_with(active_policy().mul_quat, a, b) };
+    let out = if oracle_4_0_schedules() { mul_quat_paired(a, b) } else { mul_quat_with(active_policy().mul_quat, a, b) };
     let mut inputs = [0.0; 8];
     inputs[..4].copy_from_slice(a);
     inputs[4..].copy_from_slice(b);
@@ -374,6 +398,22 @@ mod tests {
         assert!(!oracle_4_0());
         assert!(!contract_off_family());
         assert_eq!(mul_quat(&a, &b).map(f64::to_bits), mul_quat_with(Contraction::Contracted, &a, &b).map(f64::to_bits));
+    }
+
+    #[test]
+    fn the_4_0_1_identity_is_not_the_4_0_0_identity_and_keeps_the_same_schedules() {
+        reset_policy();
+        assert_eq!(install_policy(ORACLE_4_0_1_ID, ORACLE_4_0_SHA256, ""), Err(PolicyError::InconsistentIdentity));
+        let policy = install_policy(ORACLE_4_0_1_ID, ORACLE_4_0_1_SHA256, "").unwrap();
+        assert!(!oracle_4_0());
+        assert!(oracle_4_0_schedules());
+        assert!(contract_off_family());
+        assert_eq!(policy.id, ORACLE_4_0_1_ID);
+        let a = [0.9, 0.1, -0.2, 0.3];
+        let b = [0.8, -0.1, 0.4, 0.2];
+        assert_eq!(mul_quat(&a, &b).map(f64::to_bits), mul_quat_paired(&a, &b).map(f64::to_bits));
+        reset_policy();
+        assert!(!oracle_4_0_schedules());
     }
 
     #[test]

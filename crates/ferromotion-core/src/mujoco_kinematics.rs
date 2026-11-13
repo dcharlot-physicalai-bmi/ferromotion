@@ -162,7 +162,7 @@ fn rot_vec_quat(v: &[f64; 3], q: &[f64; 4]) -> [f64; 3] {
 pub(crate) fn normalize4(q: &mut [f64; 4]) {
     let before = *q;
     // 3.13 contract-off is left-associated. `d9972b33` pairs the squares.
-    let norm = if crate::fp_contract::oracle_4_0() {
+    let norm = if crate::fp_contract::oracle_4_0_schedules() {
         ((q[0] * q[0] + q[1] * q[1]) + (q[2] * q[2] + q[3] * q[3])).sqrt()
     } else {
         (((q[0] * q[0] + q[1] * q[1]) + q[2] * q[2]) + q[3] * q[3]).sqrt()
@@ -180,7 +180,7 @@ pub(crate) fn normalize4(q: &mut [f64; 4]) {
 
 /// Diagonal of `mju_quat2Mat`. 3.13 is left-associated. `d9972b33` pairs the terms.
 pub(crate) fn quat2mat_diagonal(q00: f64, q11: f64, q22: f64, q33: f64) -> (f64, f64, f64) {
-    if crate::fp_contract::oracle_4_0() {
+    if crate::fp_contract::oracle_4_0_schedules() {
         ((q00 - q22) + (q11 - q33), (q00 + q22) - (q11 + q33), (q00 - q22) - (q11 - q33))
     } else {
         (q00 + q11 - q22 - q33, q00 - q11 + q22 - q33, q00 - q11 - q22 + q33)

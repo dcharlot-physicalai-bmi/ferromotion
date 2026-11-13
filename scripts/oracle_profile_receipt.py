@@ -21,6 +21,7 @@ from oracle_profile_gate import exact_models, model_set_sha256, parse_fields, pa
 ROOT = Path(__file__).resolve().parents[1]
 LIB_CONST = {
     "mujoco-4.0.0-x86_64-contract-off": "ORACLE_4_0_SHA256",
+    "mujoco-4.0.1-x86_64-contract-off": "ORACLE_4_0_1_SHA256",
     "mujoco-3.13.0-x86_64-contract-off": "ORACLE_X86_CONTRACT_OFF_SHA256",
 }
 
