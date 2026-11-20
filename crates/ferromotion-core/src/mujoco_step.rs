@@ -154,30 +154,43 @@ fn quat_integrate_off(q: &mut [f64], vel: &[f64], scale: f64) {
     q.copy_from_slice(&out);
 }
 
-/// `mji_mulMatVec3`, contracted.
-fn mat_vec3(m: &[f64; 9], v: &[f64; 3]) -> [f64; 3] {
-    [m[2].mul_add(v[2], m[0].mul_add(v[0], m[1] * v[1])), m[5].mul_add(v[2], m[3].mul_add(v[0], m[4] * v[1])), m[8].mul_add(v[2], m[6].mul_add(v[0], m[7] * v[1]))]
+fn off() -> bool {
+    crate::fp_contract::contract_off()
 }
 
-/// `mji_mulMatMat3`, contracted.
+/// `a·b` as `mji_mulMatVec3` writes it: `(a0 b0 + a1 b1) + a2 b2`.
+fn dot3_row(a0: f64, b0: f64, a1: f64, b1: f64, a2: f64, b2: f64) -> f64 {
+    if off() { (a0 * b0 + a1 * b1) + a2 * b2 } else { a2.mul_add(b2, a0.mul_add(b0, a1 * b1)) }
+}
+
+/// `mji_mulMatVec3`.
+fn mat_vec3(m: &[f64; 9], v: &[f64; 3]) -> [f64; 3] {
+    [dot3_row(m[0], v[0], m[1], v[1], m[2], v[2]), dot3_row(m[3], v[0], m[4], v[1], m[5], v[2]), dot3_row(m[6], v[0], m[7], v[1], m[8], v[2])]
+}
+
+/// `mji_mulMatMat3`.
 fn mat_mat3(a: &[f64; 9], b: &[f64; 9]) -> [f64; 9] {
     std::array::from_fn(|k| {
         let (r, c) = (k / 3, k % 3);
-        a[3 * r + 2].mul_add(b[6 + c], a[3 * r].mul_add(b[c], a[3 * r + 1] * b[3 + c]))
+        dot3_row(a[3 * r], b[c], a[3 * r + 1], b[3 + c], a[3 * r + 2], b[6 + c])
     })
 }
 
-/// `mji_mulMatTMat3`, contracted.
+/// `mji_mulMatTMat3`.
 fn mat_t_mat3(a: &[f64; 9], b: &[f64; 9]) -> [f64; 9] {
     std::array::from_fn(|k| {
         let (r, c) = (k / 3, k % 3);
-        a[6 + r].mul_add(b[6 + c], a[r].mul_add(b[c], a[3 + r] * b[3 + c]))
+        dot3_row(a[r], b[c], a[3 + r], b[3 + c], a[6 + r], b[6 + c])
     })
 }
 
-/// `mji_cross`, contracted.
+/// `mji_cross`: `a1 b2 − a2 b1`.
 fn cross3(a: &[f64; 3], b: &[f64; 3]) -> [f64; 3] {
-    [a[1].mul_add(b[2], -(a[2] * b[1])), a[2].mul_add(b[0], -(a[0] * b[2])), a[0].mul_add(b[1], -(a[1] * b[0]))]
+    if off() {
+        [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+    } else {
+        [a[1].mul_add(b[2], -(a[2] * b[1])), a[2].mul_add(b[0], -(a[0] * b[2])), a[0].mul_add(b[1], -(a[1] * b[0]))]
+    }
 }
 
 /// `freeBias_vel_blocks`: the two 3×3 blocks of a free body's gyroscopic derivative.
@@ -189,7 +202,9 @@ fn free_bias_vel_blocks(mass: f64, r: &[f64; 9], xi: &[f64; 9], inertia: &[f64; 
             xi_i[3 * i + k] = xi[3 * i + k] * inertia[k];
         }
     }
-    let row = |a: usize, b: usize| xi_i[3 * a + 2].mul_add(xi[3 * b + 2], xi_i[3 * a].mul_add(xi[3 * b], xi_i[3 * a + 1] * xi[3 * b + 1]));
+    let row = |a: usize, b: usize| {
+        dot3_row(xi_i[3 * a], xi[3 * b], xi_i[3 * a + 1], xi[3 * b + 1], xi_i[3 * a + 2], xi[3 * b + 2])
+    };
     let mut iw = [0.0; 9];
     iw[0] = row(0, 0);
     iw[4] = row(1, 1);
@@ -202,33 +217,45 @@ fn free_bias_vel_blocks(mass: f64, r: &[f64; 9], xi: &[f64; 9], inertia: &[f64; 
     iw[7] = iw[5];
     let ws = cross3(&w, s);
     let iww = mat_vec3(&iw, &w);
-    let w_dot_s = w[2].mul_add(s[2], w[0].mul_add(s[0], w[1] * s[1]));
-    let k = [
-        s[0].mul_add(w[0], -w_dot_s),
-        s[0].mul_add(w[1], -ws[2]),
-        s[0].mul_add(w[2], ws[1]),
-        s[1].mul_add(w[0], ws[2]),
-        s[1].mul_add(w[1], -w_dot_s),
-        s[1].mul_add(w[2], -ws[0]),
-        s[2].mul_add(w[0], -ws[1]),
-        s[2].mul_add(w[1], ws[0]),
-        s[2].mul_add(w[2], -w_dot_s),
-    ];
+    let w_dot_s = dot3_row(w[0], s[0], w[1], s[1], w[2], s[2]);
+    let k = if off() {
+        [s[0] * w[0] - w_dot_s, s[0] * w[1] - ws[2], s[0] * w[2] + ws[1], s[1] * w[0] + ws[2], s[1] * w[1] - w_dot_s, s[1] * w[2] - ws[0], s[2] * w[0] - ws[1], s[2] * w[1] + ws[0], s[2] * w[2] - w_dot_s]
+    } else {
+        [
+            s[0].mul_add(w[0], -w_dot_s),
+            s[0].mul_add(w[1], -ws[2]),
+            s[0].mul_add(w[2], ws[1]),
+            s[1].mul_add(w[0], ws[2]),
+            s[1].mul_add(w[1], -w_dot_s),
+            s[1].mul_add(w[2], -ws[0]),
+            s[2].mul_add(w[0], -ws[1]),
+            s[2].mul_add(w[1], ws[0]),
+            s[2].mul_add(w[2], -w_dot_s),
+        ]
+    };
     let lin = mat_mat3(&k, r);
     let mut c = [0.0; 9];
     for col in 0..3 {
-        let sxk0 = s[1].mul_add(k[6 + col], -(s[2] * k[3 + col]));
-        let sxk1 = s[2].mul_add(k[col], -(s[0] * k[6 + col]));
-        let sxk2 = s[0].mul_add(k[3 + col], -(s[1] * k[col]));
-        let wxi0 = w[1].mul_add(iw[6 + col], -(w[2] * iw[3 + col]));
-        let wxi1 = w[2].mul_add(iw[col], -(w[0] * iw[6 + col]));
-        let wxi2 = w[0].mul_add(iw[3 + col], -(w[1] * iw[col]));
+        let (sxk0, sxk1, sxk2, wxi0, wxi1, wxi2) = if off() {
+            (s[1] * k[6 + col] - s[2] * k[3 + col], s[2] * k[col] - s[0] * k[6 + col], s[0] * k[3 + col] - s[1] * k[col], w[1] * iw[6 + col] - w[2] * iw[3 + col], w[2] * iw[col] - w[0] * iw[6 + col], w[0] * iw[3 + col] - w[1] * iw[col])
+        } else {
+            (
+                s[1].mul_add(k[6 + col], -(s[2] * k[3 + col])),
+                s[2].mul_add(k[col], -(s[0] * k[6 + col])),
+                s[0].mul_add(k[3 + col], -(s[1] * k[col])),
+                w[1].mul_add(iw[6 + col], -(w[2] * iw[3 + col])),
+                w[2].mul_add(iw[col], -(w[0] * iw[6 + col])),
+                w[0].mul_add(iw[3 + col], -(w[1] * iw[col])),
+            )
+        };
         let t0 = if col == 1 { iww[2] } else if col == 2 { -iww[1] } else { 0.0 };
         let t1 = if col == 0 { -iww[2] } else if col == 2 { iww[0] } else { 0.0 };
         let t2 = if col == 0 { iww[1] } else if col == 1 { -iww[0] } else { 0.0 };
-        c[col] = (-mass).mul_add(sxk0, wxi0) + t0;
-        c[3 + col] = (-mass).mul_add(sxk1, wxi1) + t1;
-        c[6 + col] = (-mass).mul_add(sxk2, wxi2) + t2;
+        // `(-mass)·(s×K) + (w×Iw) + t`.
+        let acc = |sxk, wxi, t| if off() { ((-mass) * sxk + wxi) + t } else { (-mass).mul_add(sxk, wxi) + t };
+        c[col] = acc(sxk0, wxi0, t0);
+        c[3 + col] = acc(sxk1, wxi1, t1);
+        c[6 + col] = acc(sxk2, wxi2, t2);
     }
     let tmp = mat_t_mat3(r, &c);
     (lin, mat_mat3(&tmp, r))
@@ -261,7 +288,8 @@ fn factor_lu6(a: &mut [f64; 36], pivot: &mut [usize; 6]) -> bool {
             a[i * 6 + k] *= diaginv;
             let aik = a[i * 6 + k];
             for j in k + 1..6 {
-                a[i * 6 + j] = (-aik).mul_add(a[k * 6 + j], a[i * 6 + j]);
+                // `a − aik·pivot`. `64156abe` subtracts the product.
+                a[i * 6 + j] = if off() { a[i * 6 + j] - aik * a[k * 6 + j] } else { (-aik).mul_add(a[k * 6 + j], a[i * 6 + j]) };
             }
         }
     }
@@ -276,12 +304,12 @@ fn solve_lu6(lu: &[f64; 36], b: &[f64], pivot: &[usize; 6]) -> [f64; 6] {
             x.swap(i, pivot[i]);
         }
         for j in 0..i {
-            x[i] = (-lu[i * 6 + j]).mul_add(x[j], x[i]);
+            x[i] = if off() { x[i] - lu[i * 6 + j] * x[j] } else { (-lu[i * 6 + j]).mul_add(x[j], x[i]) };
         }
     }
     for i in (0..6).rev() {
         for j in i + 1..6 {
-            x[i] = (-lu[i * 6 + j]).mul_add(x[j], x[i]);
+            x[i] = if off() { x[i] - lu[i * 6 + j] * x[j] } else { (-lu[i * 6 + j]).mul_add(x[j], x[i]) };
         }
         x[i] /= lu[i * 6 + i];
     }
@@ -414,7 +442,8 @@ impl SmoothModel {
             for r in 0..6 {
                 for c in 0..6 {
                     let q = if r == c { qderiv[diag(adr + r)] } else { 0.0 };
-                    a[6 * r + c] = (-h).mul_add(q, a[6 * r + c]);
+                    // `A −= h·qDeriv`.
+                    a[6 * r + c] = if separate { a[6 * r + c] - h * q } else { (-h).mul_add(q, a[6 * r + c]) };
                 }
             }
             let k = &sd.kin;
@@ -424,8 +453,14 @@ impl SmoothModel {
             let h_mass = -h * mass;
             for r in 0..3 {
                 for c in 0..3 {
-                    a[6 * r + 3 + c] = h_mass.mul_add(lin[3 * r + c], a[6 * r + 3 + c]);
-                    a[6 * (3 + r) + 3 + c] = h.mul_add(rot[3 * r + c], a[6 * (3 + r) + 3 + c]);
+                    // `A += h_mass·lin` and `A += h·rot`.
+                    if separate {
+                        a[6 * r + 3 + c] += h_mass * lin[3 * r + c];
+                        a[6 * (3 + r) + 3 + c] += h * rot[3 * r + c];
+                    } else {
+                        a[6 * r + 3 + c] = h_mass.mul_add(lin[3 * r + c], a[6 * r + 3 + c]);
+                        a[6 * (3 + r) + 3 + c] = h.mul_add(rot[3 * r + c], a[6 * (3 + r) + 3 + c]);
+                    }
                 }
             }
             let mut pivot = [0usize; 6];
