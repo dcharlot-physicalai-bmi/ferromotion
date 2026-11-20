@@ -19,7 +19,9 @@ pub const FERROMORPHIC_CLOCK_PATH: &str = "docs/contracts/ferromotion-clock.md";
 
 /// Signed off by bmi-2 on 2026-11-20 in
 /// `docs/acceptance/receipts/2026-11-20-panda-closed-loop-signoff.md`,
-/// sha256 `83529316ddc99e7f48ee916be3e49d4cf258f0df4f717c3e48659e3a85a0d26c`.
+/// sha256 `05c0d17f1219c399c03cba2fc23a14bb2fa5d00a534b0be82968f3801dcd028b`.
+/// The bmi-3 section of that file was added in `eae3b03259218e59bca5b82a88e1e6d756b6dc5f`.
+/// `378c762d5082b82816ba796415d4ce59d4025a1c` set the envelope-text flag and did not add the sign-off.
 ///
 /// The scope is a 16-tick executed loop on panda_nohand, contact-free dynamics
 /// only (ncon=0 on every tick, mesh-free collision geometry), x86_64,
