@@ -214,7 +214,8 @@ fn wrap_inside(end: &[f64; 4], radius: f64) -> Option<([f64; 4], f64)> {
     // `((B / √(1-B²z²)) + (A / √(1-A²z²))) - (2 / √(1-z²))`, each square
     // `((z²)·c)·c`. The point is `radius · (cos·v − sin·swap(v))`
     // via `addsubpd`, so `y` is `(cos·vy) + (sin·vx)`.
-    let off = contract_off();
+    // 4.0.0 and 4.0.1 `mju_wrap` is not this 3.13 inside-wrap schedule.
+    let off = crate::fp_contract::contract_off();
     let cos_g = if off {
         let dd = dif[1] * dif[1] + dif[0] * dif[0];
         ((len1 * len1 + len0 * len0) - dd) / ((len0 + len0) * len1)
@@ -340,17 +341,18 @@ fn wrap(x0: &[f64; 3], x1: &[f64; 3], xpos: &[f64; 3], xmat: &[f64; 9], radius: 
         // `sqrt(height² + wlen²)`.
         let (dx0, dy0) = (p0[0] - res[0], p0[1] - res[1]);
         let (dx1, dy1) = (p1[0] - res[3], p1[1] - res[4]);
-        let (l0, l1) = if contract_off() {
+        let wrap_313 = crate::fp_contract::contract_off();
+        let (l0, l1) = if wrap_313 {
             ((dy0 * dy0 + dx0 * dx0).sqrt(), (dy1 * dy1 + dx1 * dx1).sqrt())
         } else {
             (dx0.mul_add(dx0, dy0 * dy0).sqrt(), dx1.mul_add(dx1, dy1 * dy1).sqrt())
         };
-        let denom = if contract_off() { l1 + (wlen + l0) } else { l0 + wlen + l1 };
+        let denom = if wrap_313 { l1 + (wlen + l0) } else { l0 + wlen + l1 };
         let dz = p1[2] - p0[2];
         res[2] = p0[2] + dz * l0 / denom;
         res[5] = p0[2] + dz * (wlen + l0) / denom;
         let height = res[5] - res[2];
-        wlen = if contract_off() { (height * height + wlen * wlen).sqrt() } else { wlen.mul_add(wlen, height * height).sqrt() };
+        wlen = if wrap_313 { (height * height + wlen * wlen).sqrt() } else { wlen.mul_add(wlen, height * height).sqrt() };
     }
     let w0 = mat_vec3(xmat, &[res[0], res[1], res[2]]);
     let w1 = mat_vec3(xmat, &[res[3], res[4], res[5]]);

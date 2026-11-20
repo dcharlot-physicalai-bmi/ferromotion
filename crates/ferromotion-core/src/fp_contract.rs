@@ -107,7 +107,7 @@ pub fn oracle_4_0_schedules() -> bool {
 /// 3.13 contract-off ids plus the 4.0.0 and 4.0.1 ids. The published default is false.
 /// Schedules added after `b6a3a885` stay on [`contract_off`] until a 4.x disassembly matches.
 pub(crate) fn contract_off_line() -> bool {
-    contract_off() || oracle_4_0_schedules()
+    contract_off() || contract_off_family()
 }
 
 /// Active contraction for the three opt-in sites. The published default leaves every site contracted.

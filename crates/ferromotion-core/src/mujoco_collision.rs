@@ -1213,7 +1213,8 @@ pub fn hfield_convex(opts: &CollideOptions, margin: f64, hf_pose: &GeomPose, hf:
     // the sub-grid under the box
     // `64156abe` `mjc_ConvexHField`: `2*size` is `size + size`, then
     // `(xmin + size) / that * (ncol - 1)`. The cell is `(dx * c) - size`.
-    let separate = contract_off();
+    // 4.0.0 and 4.0.1 `mjc_ConvexHField` is not this 3.13 cell schedule.
+    let separate = crate::fp_contract::contract_off();
     let two0 = if separate { size0 + size0 } else { 2.0 * size0 };
     let two1 = if separate { size1 + size1 } else { 2.0 * size1 };
     let cmin = (((xmin + size0) / two0 * (ncol - 1) as f64).floor() as i64).max(0);
