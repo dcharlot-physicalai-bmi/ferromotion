@@ -142,8 +142,101 @@ pub fn sphere_capsule(margin: f64, p1: &GeomPose, r1: f64, p2: &GeomPose, size2:
     sphere_sphere(margin, p1, r1, &near, size2[0])
 }
 
+/// `mju_clip(x, +0, 1)` as `5491d70f` schedules it: `minsd` against 1, then
+/// `cmpltsd` against `+0`. `-0 < +0` is false, so a negative zero inside the
+/// interval keeps its sign bit.
+fn clip_unit(x: f64) -> f64 {
+    if x < 0.0 { 0.0 } else if x > 1.0 { 1.0 } else { x }
+}
+
+/// `xorpd` with the `-0` mask at `478d90`.
+fn neg_bit(x: f64) -> f64 {
+    f64::from_bits(x.to_bits() ^ 0x8000_0000_0000_0000)
+}
+
+/// Packed cross of `ab × cd` in `mjc_segWeights`: the xy pair is
+/// `[cd.z·ab.y − ab.z·cd.y, cd.x·ab.z − ab.x·cd.z]` and z is `cd.y·ab.x − ab.y·cd.x`.
+fn cross_ab_cd(ab: [f64; 3], cd: [f64; 3]) -> [f64; 3] {
+    [cd[2] * ab[1] - ab[2] * cd[1], cd[0] * ab[2] - ab[0] * cd[2], cd[1] * ab[0] - ab[1] * cd[0]]
+}
+
+/// Packed cross of `cd × ca`: `[ca.z·cd.y − cd.z·ca.y, ca.x·cd.z − cd.x·ca.z]`,
+/// z `ca.y·cd.x − cd.y·ca.x`.
+fn cross_cd_ca(cd: [f64; 3], ca: [f64; 3]) -> [f64; 3] {
+    [ca[2] * cd[1] - cd[2] * ca[1], ca[0] * cd[2] - cd[0] * ca[2], ca[1] * cd[0] - cd[1] * ca[0]]
+}
+
+/// `clampSeg`. An in-range `t` is stored as computed, so `-0` survives.
+fn clamp_seg(s: f64, t: f64, s0: f64, s1: f64) -> [f64; 2] {
+    if t < 0.0 {
+        [clip_unit(s0), 0.0]
+    } else if t > 1.0 {
+        [clip_unit(s1), 1.0]
+    } else {
+        [s, t]
+    }
+}
+
+/// `mjc_segWeights` (`5491d70f` / `4849b2dd`). Weights are in `[0, 1]` along
+/// `A→B` and `C→D`. Parallel segments (`det <= (dot1·1e-8)·dot2`) return two pairs.
+fn seg_weights_4(a: [f64; 3], b: [f64; 3], c: [f64; 3], d: [f64; 3]) -> Vec<[f64; 2]> {
+    let sub = |u: [f64; 3], v: [f64; 3]| [u[0] - v[0], u[1] - v[1], u[2] - v[2]];
+    let ab = sub(b, a);
+    let cd = sub(d, c);
+    let ca = sub(a, c);
+    let dot = |u: [f64; 3], v: [f64; 3]| (u[2] * v[2]) + (u[0] * v[0] + u[1] * v[1]);
+    let dot1 = dot(ab, ab);
+    let dot2 = dot(cd, cd);
+    let dot3 = dot(cd, ca);
+    let dot4 = dot(ab, ca);
+    let dot5 = dot(ab, cd);
+    if dot1 <= MINVAL && dot2 <= MINVAL {
+        return vec![[0.0, 0.0]];
+    }
+    if dot1 <= MINVAL {
+        return vec![[0.0, clip_unit(dot3 / dot2)]];
+    }
+    if dot2 <= MINVAL {
+        return vec![[clip_unit(neg_bit(dot4) / dot1), 0.0]];
+    }
+    let s0 = neg_bit(dot4) / dot1;
+    let s1 = (dot5 - dot4) / dot1;
+    let cross = cross_ab_cd(ab, cd);
+    let det = dot(cross, cross);
+    if det > (dot1 * 1e-8) * dot2 {
+        let cross_ca = cross_cd_ca(cd, ca);
+        let s = clip_unit(dot(cross, cross_ca) / det);
+        let t = (dot3 + dot5 * s) / dot2;
+        return vec![clamp_seg(s, t, s0, s1)];
+    }
+    vec![clamp_seg(0.0, dot3 / dot2, s0, s1), clamp_seg(1.0, (dot3 + dot5) / dot2, s0, s1)]
+}
+
+fn arr3(v: Vector3<f64>) -> [f64; 3] {
+    [v.x, v.y, v.z]
+}
+
+/// `mjraw_CapsuleCapsule` on 4.x: segment endpoints, then `mjc_segWeights`, then
+/// one sphere-sphere per weight pair. The witness is `start + w·(end − start)`.
+fn capsule_capsule_4(margin: f64, p1: &GeomPose, size1: [f64; 2], p2: &GeomPose, size2: [f64; 2]) -> Vec<PreContact> {
+    let axis1 = p1.axis() * size1[1];
+    let axis2 = p2.axis() * size2[1];
+    let a = p1.pos - axis1;
+    let b = p1.pos + axis1;
+    let c = p2.pos - axis2;
+    let d = p2.pos + axis2;
+    let lerp = |start: Vector3<f64>, end: Vector3<f64>, w: f64| start + (end - start) * w;
+    seg_weights_4(arr3(a), arr3(b), arr3(c), arr3(d))
+        .into_iter()
+        .filter_map(|[s, t]| sphere_sphere(margin, &GeomPose { pos: lerp(a, b, s), mat: p1.mat }, size1[0], &GeomPose { pos: lerp(c, d, t), mat: p2.mat }, size2[0]))
+        .collect()
+}
+
 /// `mjraw_CapsuleCapsule`: closest points of the two segments (two contacts when parallel).
 pub fn capsule_capsule(margin: f64, p1: &GeomPose, size1: [f64; 2], p2: &GeomPose, size2: [f64; 2]) -> Vec<PreContact> {
+    if crate::fp_contract::oracle_4_0_schedules() {
+        return capsule_capsule_4(margin, p1, size1, p2, size2);
+    }
     let axis1 = p1.axis() * size1[1];
     let axis2 = p2.axis() * size2[1];
     let dif = p1.pos - p2.pos;
