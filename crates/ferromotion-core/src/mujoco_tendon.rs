@@ -214,9 +214,12 @@ fn wrap_inside(end: &[f64; 4], radius: f64) -> Option<([f64; 4], f64)> {
     // `((B / √(1-B²z²)) + (A / √(1-A²z²))) - (2 / √(1-z²))`, each square
     // `((z²)·c)·c`. The point is `radius · (cos·v − sin·swap(v))`
     // via `addsubpd`, so `y` is `(cos·vy) + (sin·vx)`.
-    // 4.0.0 and 4.0.1 `mju_wrap` is not this 3.13 inside-wrap schedule.
+    // 4.0.0 and 4.0.1 have no FMA and no baked `-2·asin` constant. The first
+    // residual is the same separate sum as the later ones.
     let off = crate::fp_contract::contract_off();
-    let cos_g = if off {
+    let four = crate::fp_contract::oracle_4_0_schedules();
+    let separate = off || four;
+    let cos_g = if separate {
         let dd = dif[1] * dif[1] + dif[0] * dif[0];
         ((len1 * len1 + len0 * len0) - dd) / ((len0 + len0) * len1)
     } else {
@@ -234,6 +237,9 @@ fn wrap_inside(end: &[f64; 4], radius: f64) -> Option<([f64; 4], f64)> {
         if off {
             let sum = (b * z).asin() + (a * z).asin();
             if z.to_bits() == ZINIT.to_bits() { (sum + NEG_TWO_ASIN_ZINIT) + g } else { (sum - (z.asin() + z.asin())) + g }
+        } else if four {
+            let sum = (b * z).asin() + (a * z).asin();
+            (sum - (z.asin() + z.asin())) + g
         } else {
             (a * z).asin() + (b * z).asin() - 2.0 * z.asin() + g
         }
@@ -246,7 +252,7 @@ fn wrap_inside(end: &[f64; 4], radius: f64) -> Option<([f64; 4], f64)> {
     let mut iter = 0;
     while iter < MAXITER && f.abs() > TOLERANCE {
         let fmax = |x: f64| if MJ_MINVAL >= x { MJ_MINVAL } else { x };
-        let df = if off {
+        let df = if separate {
             let zz = z * z;
             let term = |c: f64| c / fmax((1.0 - (zz * c) * c).sqrt());
             (term(b) + term(a)) - (2.0 / fmax((1.0 - zz).sqrt()))
@@ -270,11 +276,11 @@ fn wrap_inside(end: &[f64; 4], radius: f64) -> Option<([f64; 4], f64)> {
     if iter >= MAXITER {
         return Some((fallback, 0.0));
     }
-    let cross = if off { end[0] * end[3] - end[1] * end[2] } else { end[0].mul_add(end[3], -(end[1] * end[2])) };
+    let cross = if separate { end[0] * end[3] - end[1] * end[2] } else { end[0].mul_add(end[3], -(end[1] * end[2])) };
     let (mut vec, ang) = if cross > 0.0 { ([end[0], end[1]], z.asin() - (a * z).asin()) } else { ([end[2], end[3]], z.asin() - (b * z).asin()) };
     normalize2(&mut vec);
     let (sn, cs) = crate::mujoco_kinematics::sincos(ang);
-    let p = if off {
+    let p = if separate {
         [radius * (cs * vec[0] - sn * vec[1]), radius * (cs * vec[1] + sn * vec[0])]
     } else {
         [radius * cs.mul_add(vec[0], -(sn * vec[1])), radius * sn.mul_add(vec[0], cs * vec[1])]
@@ -341,18 +347,19 @@ fn wrap(x0: &[f64; 3], x1: &[f64; 3], xpos: &[f64; 3], xmat: &[f64; 9], radius: 
         // `sqrt(height² + wlen²)`.
         let (dx0, dy0) = (p0[0] - res[0], p0[1] - res[1]);
         let (dx1, dy1) = (p1[0] - res[3], p1[1] - res[4]);
-        let wrap_313 = crate::fp_contract::contract_off();
-        let (l0, l1) = if wrap_313 {
+        // 4.x is the same `mulpd` / `unpckhpd` / `addsd` / `sqrtsd` pair, with no FMA.
+        let wrap_sep = crate::fp_contract::contract_off() || crate::fp_contract::oracle_4_0_schedules();
+        let (l0, l1) = if wrap_sep {
             ((dy0 * dy0 + dx0 * dx0).sqrt(), (dy1 * dy1 + dx1 * dx1).sqrt())
         } else {
             (dx0.mul_add(dx0, dy0 * dy0).sqrt(), dx1.mul_add(dx1, dy1 * dy1).sqrt())
         };
-        let denom = if wrap_313 { l1 + (wlen + l0) } else { l0 + wlen + l1 };
+        let denom = if wrap_sep { l1 + (wlen + l0) } else { l0 + wlen + l1 };
         let dz = p1[2] - p0[2];
         res[2] = p0[2] + dz * l0 / denom;
         res[5] = p0[2] + dz * (wlen + l0) / denom;
         let height = res[5] - res[2];
-        wlen = if wrap_313 { (height * height + wlen * wlen).sqrt() } else { wlen.mul_add(wlen, height * height).sqrt() };
+        wlen = if wrap_sep { (height * height + wlen * wlen).sqrt() } else { wlen.mul_add(wlen, height * height).sqrt() };
     }
     let w0 = mat_vec3(xmat, &[res[0], res[1], res[2]]);
     let w1 = mat_vec3(xmat, &[res[3], res[4], res[5]]);

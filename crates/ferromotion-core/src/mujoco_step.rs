@@ -158,9 +158,14 @@ fn off() -> bool {
     crate::fp_contract::contract_off()
 }
 
+/// 4.0.0 and 4.0.1 compile these helpers with no FMA. 3.13 stays on [`off`].
+fn unfused() -> bool {
+    off() || crate::fp_contract::oracle_4_0_schedules()
+}
+
 /// `a·b` as `mji_mulMatVec3` writes it: `(a0 b0 + a1 b1) + a2 b2`.
 fn dot3_row(a0: f64, b0: f64, a1: f64, b1: f64, a2: f64, b2: f64) -> f64 {
-    if off() { (a0 * b0 + a1 * b1) + a2 * b2 } else { a2.mul_add(b2, a0.mul_add(b0, a1 * b1)) }
+    if unfused() { (a0 * b0 + a1 * b1) + a2 * b2 } else { a2.mul_add(b2, a0.mul_add(b0, a1 * b1)) }
 }
 
 /// `mji_mulMatVec3`.
@@ -186,7 +191,7 @@ fn mat_t_mat3(a: &[f64; 9], b: &[f64; 9]) -> [f64; 9] {
 
 /// `mji_cross`: `a1 b2 − a2 b1`.
 fn cross3(a: &[f64; 3], b: &[f64; 3]) -> [f64; 3] {
-    if off() {
+    if unfused() {
         [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
     } else {
         [a[1].mul_add(b[2], -(a[2] * b[1])), a[2].mul_add(b[0], -(a[0] * b[2])), a[0].mul_add(b[1], -(a[1] * b[0]))]
@@ -195,7 +200,6 @@ fn cross3(a: &[f64; 3], b: &[f64; 3]) -> [f64; 3] {
 
 /// `freeBias_vel_blocks`: the two 3×3 blocks of a free body's gyroscopic derivative.
 fn free_bias_vel_blocks(mass: f64, r: &[f64; 9], xi: &[f64; 9], inertia: &[f64; 3], s: &[f64; 3], qvel_rot: &[f64; 3]) -> ([f64; 9], [f64; 9]) {
-    let w = mat_vec3(r, qvel_rot);
     let mut xi_i = [0.0; 9];
     for i in 0..3 {
         for k in 0..3 {
@@ -215,10 +219,16 @@ fn free_bias_vel_blocks(mass: f64, r: &[f64; 9], xi: &[f64; 9], inertia: &[f64; 
     iw[6] = iw[2];
     iw[5] = row(1, 2);
     iw[7] = iw[5];
+    free_bias_from_iw(mass, r, &iw, s, qvel_rot)
+}
+
+/// `freeBias_vel_blocks` once `Iw` is already the world inertia about the CoM.
+fn free_bias_from_iw(mass: f64, r: &[f64; 9], iw: &[f64; 9], s: &[f64; 3], qvel_rot: &[f64; 3]) -> ([f64; 9], [f64; 9]) {
+    let w = mat_vec3(r, qvel_rot);
     let ws = cross3(&w, s);
     let iww = mat_vec3(&iw, &w);
     let w_dot_s = dot3_row(w[0], s[0], w[1], s[1], w[2], s[2]);
-    let k = if off() {
+    let k = if unfused() {
         [s[0] * w[0] - w_dot_s, s[0] * w[1] - ws[2], s[0] * w[2] + ws[1], s[1] * w[0] + ws[2], s[1] * w[1] - w_dot_s, s[1] * w[2] - ws[0], s[2] * w[0] - ws[1], s[2] * w[1] + ws[0], s[2] * w[2] - w_dot_s]
     } else {
         [
@@ -236,7 +246,7 @@ fn free_bias_vel_blocks(mass: f64, r: &[f64; 9], xi: &[f64; 9], inertia: &[f64; 
     let lin = mat_mat3(&k, r);
     let mut c = [0.0; 9];
     for col in 0..3 {
-        let (sxk0, sxk1, sxk2, wxi0, wxi1, wxi2) = if off() {
+        let (sxk0, sxk1, sxk2, wxi0, wxi1, wxi2) = if unfused() {
             (s[1] * k[6 + col] - s[2] * k[3 + col], s[2] * k[col] - s[0] * k[6 + col], s[0] * k[3 + col] - s[1] * k[col], w[1] * iw[6 + col] - w[2] * iw[3 + col], w[2] * iw[col] - w[0] * iw[6 + col], w[0] * iw[3 + col] - w[1] * iw[col])
         } else {
             (
@@ -252,7 +262,7 @@ fn free_bias_vel_blocks(mass: f64, r: &[f64; 9], xi: &[f64; 9], inertia: &[f64; 
         let t1 = if col == 0 { -iww[2] } else if col == 2 { iww[0] } else { 0.0 };
         let t2 = if col == 0 { iww[1] } else if col == 1 { -iww[0] } else { 0.0 };
         // `(-mass)·(s×K) + (w×Iw) + t`.
-        let acc = |sxk, wxi, t| if off() { ((-mass) * sxk + wxi) + t } else { (-mass).mul_add(sxk, wxi) + t };
+        let acc = |sxk, wxi, t| if unfused() { ((-mass) * sxk + wxi) + t } else { (-mass).mul_add(sxk, wxi) + t };
         c[col] = acc(sxk0, wxi0, t0);
         c[3 + col] = acc(sxk1, wxi1, t1);
         c[6 + col] = acc(sxk2, wxi2, t2);
@@ -289,7 +299,7 @@ fn factor_lu6(a: &mut [f64; 36], pivot: &mut [usize; 6]) -> bool {
             let aik = a[i * 6 + k];
             for j in k + 1..6 {
                 // `a − aik·pivot`. `64156abe` subtracts the product.
-                a[i * 6 + j] = if off() { a[i * 6 + j] - aik * a[k * 6 + j] } else { (-aik).mul_add(a[k * 6 + j], a[i * 6 + j]) };
+                a[i * 6 + j] = if unfused() { a[i * 6 + j] - aik * a[k * 6 + j] } else { (-aik).mul_add(a[k * 6 + j], a[i * 6 + j]) };
             }
         }
     }
@@ -304,12 +314,12 @@ fn solve_lu6(lu: &[f64; 36], b: &[f64], pivot: &[usize; 6]) -> [f64; 6] {
             x.swap(i, pivot[i]);
         }
         for j in 0..i {
-            x[i] = if off() { x[i] - lu[i * 6 + j] * x[j] } else { (-lu[i * 6 + j]).mul_add(x[j], x[i]) };
+            x[i] = if unfused() { x[i] - lu[i * 6 + j] * x[j] } else { (-lu[i * 6 + j]).mul_add(x[j], x[i]) };
         }
     }
     for i in (0..6).rev() {
         for j in i + 1..6 {
-            x[i] = if off() { x[i] - lu[i * 6 + j] * x[j] } else { (-lu[i * 6 + j]).mul_add(x[j], x[i]) };
+            x[i] = if unfused() { x[i] - lu[i * 6 + j] * x[j] } else { (-lu[i * 6 + j]).mul_add(x[j], x[i]) };
         }
         x[i] /= lu[i * 6 + i];
     }
@@ -332,7 +342,9 @@ impl SmoothModel {
             n += 1;
             i += 1;
         }
-        n == 6 && self.body_subtreemass[b] == self.body_mass[b]
+        // 3.13 also requires the subtree mass to be the body's own. 4.0.0 and 4.0.1
+        // take any awake free joint whose tree is six dofs.
+        n == 6 && (crate::fp_contract::oracle_4_0_schedules() || self.body_subtreemass[b] == self.body_mass[b])
     }
 
     /// **`mj_implicitSkip` for `implicitfast`**: `qH = M − h·qDeriv` (actuator and dof-damping derivatives,
@@ -443,23 +455,43 @@ impl SmoothModel {
                 for c in 0..6 {
                     let q = if r == c { qderiv[diag(adr + r)] } else { 0.0 };
                     // `A −= h·qDeriv`. 4.0.0 and 4.0.1 `mjd_freeMhat` is not this 3.13 schedule.
-                    a[6 * r + c] = if off() { a[6 * r + c] - h * q } else { (-h).mul_add(q, a[6 * r + c]) };
+                    a[6 * r + c] = if unfused() { a[6 * r + c] - h * q } else { (-h).mul_add(q, a[6 * r + c]) };
                 }
             }
             let k = &sd.kin;
-            let s = [k.xipos[b][0] - k.xpos[b][0], k.xipos[b][1] - k.xpos[b][1], k.xipos[b][2] - k.xpos[b][2]];
-            let mass = self.body_mass[b];
-            let (lin, rot) = free_bias_vel_blocks(mass, &k.xmat[b], &k.ximat[b], &self.body_inertia[b], &s, &[st.qvel[adr + 3], st.qvel[adr + 4], st.qvel[adr + 5]]);
-            let h_mass = -h * mass;
-            for r in 0..3 {
-                for c in 0..3 {
-                    // `A += h_mass·lin` and `A += h·rot`. 4.0.0 and 4.0.1 `mjd_freeMhat` is not this 3.13 schedule.
-                    if off() {
-                        a[6 * r + 3 + c] += h_mass * lin[3 * r + c];
-                        a[6 * (3 + r) + 3 + c] += h * rot[3 * r + c];
-                    } else {
-                        a[6 * r + 3 + c] = h_mass.mul_add(lin[3 * r + c], a[6 * r + 3 + c]);
-                        a[6 * (3 + r) + 3 + c] = h.mul_add(rot[3 * r + c], a[6 * (3 + r) + 3 + c]);
+            if crate::fp_contract::oracle_4_0_schedules() {
+                // `mjd_freeBias_vel` in 4849b2dd and 5491d70f: mass is `crb[9]`, `Iw` is the
+                // composite about the subtree com, `s = subtree_com − xpos`. `mjd_freeMhat`
+                // then does `mju_addToScl(A, B, h, 36)`, which is `A + h·B` on every lane.
+                let com = sd.subtree_com[b];
+                let s = [com[0] - k.xpos[b][0], com[1] - k.xpos[b][1], com[2] - k.xpos[b][2]];
+                let crb = sd.crb[b];
+                let mass = crb[9];
+                let iw = [crb[0], crb[3], crb[4], crb[3], crb[1], crb[5], crb[4], crb[5], crb[2]];
+                let (lin, rot) = free_bias_from_iw(mass, &k.xmat[b], &iw, &s, &[st.qvel[adr + 3], st.qvel[adr + 4], st.qvel[adr + 5]]);
+                let mut bias = [0.0; 36];
+                for r in 0..3 {
+                    for c in 0..3 {
+                        bias[6 * r + 3 + c] = -mass * lin[3 * r + c];
+                        bias[6 * (r + 3) + 3 + c] = rot[3 * r + c];
+                    }
+                }
+                crate::mujoco_solver::add_to_scl(&mut a, &bias, h, 6);
+            } else {
+                let s = [k.xipos[b][0] - k.xpos[b][0], k.xipos[b][1] - k.xpos[b][1], k.xipos[b][2] - k.xpos[b][2]];
+                let mass = self.body_mass[b];
+                let (lin, rot) = free_bias_vel_blocks(mass, &k.xmat[b], &k.ximat[b], &self.body_inertia[b], &s, &[st.qvel[adr + 3], st.qvel[adr + 4], st.qvel[adr + 5]]);
+                let h_mass = -h * mass;
+                for r in 0..3 {
+                    for c in 0..3 {
+                        // `A += h_mass·lin` and `A += h·rot`. This is the 3.13 inlined form.
+                        if off() {
+                            a[6 * r + 3 + c] += h_mass * lin[3 * r + c];
+                            a[6 * (3 + r) + 3 + c] += h * rot[3 * r + c];
+                        } else {
+                            a[6 * r + 3 + c] = h_mass.mul_add(lin[3 * r + c], a[6 * r + 3 + c]);
+                            a[6 * (3 + r) + 3 + c] = h.mul_add(rot[3 * r + c], a[6 * (3 + r) + 3 + c]);
+                        }
                     }
                 }
             }

@@ -451,8 +451,8 @@ pub(crate) fn sol_noslip(p: &Dual, efclist: &[usize], ne: usize, nf: usize, forc
             let i = efclist[c];
             let res = p.residual(force, i, 1);
             let old = force[i];
-            // `force -= res·ARinv`. `solNoSlip` in 4849b2dd and 5491d70f is not this 3.13 schedule.
-            force[i] = if crate::fp_contract::contract_off() {
+            // `force -= res·ARinv`. Neither 4849b2dd nor 5491d70f uses an FMA here.
+            force[i] = if crate::fp_contract::contract_off() || crate::fp_contract::oracle_4_0_schedules() {
                 force[i] - res[0] * arinv[c]
             } else {
                 (-res[0]).mul_add(arinv[c], force[i])
