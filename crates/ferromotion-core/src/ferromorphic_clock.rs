@@ -20,10 +20,18 @@ pub const FERROMORPHIC_CLOCK_PATH: &str = "docs/contracts/ferromotion-clock.md";
 /// The schedule in that document was not executed in either repository.
 pub const JOINT_LOOP_EXECUTED: bool = false;
 
-/// Receipt text can round-trip without this becoming true.
-/// It stays false until their bind matches the procedure in the clock contract and that
-/// implementation is verified.
-pub const FERROMORPHIC_BIND_VERIFIED: bool = false;
+/// True for the bind contract in `tests/ferromorphic_bind_v2.rs`, tests (a) through (f),
+/// signed in `docs/acceptance/receipts/2026-11-20-bind-v2-signoff.md`.
+///
+/// `bind_v2_timestamps` is pure validation. A period above `2^53` is `InexactPeriod`.
+/// Epoch, origin, period, `dt_bits`, and the `t0` grid are refused. The next call
+/// revalidates. A forward-product mismatch is refused by `EpisodeEnvelope::try_new`
+/// before an envelope exists. Test (b) shows a zero-step bind leaves `Sim::state_bytes`
+/// unchanged, which covers the clock, mode, `exact_timing`, the ledger, the delivery
+/// ring, `inject`, `touched`, and `as_of`, and not `net` or `neurons`.
+///
+/// This flag is not [`JOINT_LOOP_EXECUTED`] and not [`EPISODE_ENVELOPE_INTEROPERABLE`].
+pub const FERROMORPHIC_BIND_VERIFIED: bool = true;
 
 /// `0.1_f64` as named by the peer receipt.
 pub const DT_POINT_ONE_BITS: u64 = 0x3fb9_9999_9999_999a;
@@ -389,8 +397,9 @@ pub fn tick_stamp_ns(origin_ns: u64, period_ns: u64, tick: u64) -> Result<u64, T
 ///
 /// `n_action_steps == 0` still runs those checks and stamps no index. The call does
 /// not read `tick` as authorization. A match does not run inference or a joint step
-/// and does not set [`EPISODE_ENVELOPE_INTEROPERABLE`]. Ferromorphic does not implement
-/// this function. [`FERROMORPHIC_BIND_VERIFIED`] stays false.
+/// and does not set [`EPISODE_ENVELOPE_INTEROPERABLE`]. This is ferromotion's copy.
+/// [`FERROMORPHIC_BIND_VERIFIED`] names the git crate's `bind_v2_timestamps`, not this
+/// function.
 pub fn bind_v2_timestamps(t0_ns: u64, step_duration_ns: u64, n_action_steps: u32, envelope: Option<EpisodeEnvelope>, clock: &BoundaryClock) -> Result<(), TimebaseError> {
     let Some(envelope) = envelope else {
         return Err(TimebaseError::MissingEpoch);
@@ -578,7 +587,7 @@ mod tests {
         assert_eq!(bind_dt(0.0, 0.0), Err(TimebaseError::BadTick));
         assert_eq!(bind_dt(f64::NAN, 0.1), Err(TimebaseError::BadTick));
         const { assert!(!JOINT_LOOP_EXECUTED); }
-        const { assert!(!FERROMORPHIC_BIND_VERIFIED); }
+        const { assert!(FERROMORPHIC_BIND_VERIFIED); }
         const { assert!(!EPISODE_ENVELOPE_INTEROPERABLE); }
         assert_eq!(FERROMORPHIC_CLOCK_REVISION, "1ceec2fc884668db16905bed190a8c05873423e7");
         assert_ne!(FERROMORPHIC_CLOCK_REVISION, crate::joint_acceptance::FERROMORPHIC_REVISION);
@@ -759,7 +768,7 @@ spike 4 1
         assert_eq!(clock.advance(), Err(TimebaseError::Overflow));
         assert_eq!(clock.tick, u64::MAX);
         const { assert!(!EPISODE_ENVELOPE_INTEROPERABLE); }
-        const { assert!(!FERROMORPHIC_BIND_VERIFIED); }
+        const { assert!(FERROMORPHIC_BIND_VERIFIED); }
         assert_eq!(TICK_ARITHMETIC, "checked_u64_fail_closed");
         assert_eq!(EPOCH_TICK0, 0);
     }
@@ -895,7 +904,7 @@ spike 4 1
         assert_eq!(nominal_seconds(NEXT), Err(TimebaseError::InexactPeriod));
         assert_eq!(nominal_seconds(u64::MAX), Err(TimebaseError::InexactPeriod));
         const { assert!(!EPISODE_ENVELOPE_INTEROPERABLE); }
-        const { assert!(!FERROMORPHIC_BIND_VERIFIED); }
+        const { assert!(FERROMORPHIC_BIND_VERIFIED); }
         const { assert!(!JOINT_LOOP_EXECUTED); }
     }
 }

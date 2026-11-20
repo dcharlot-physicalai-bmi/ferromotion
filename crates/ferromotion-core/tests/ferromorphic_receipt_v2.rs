@@ -1,7 +1,7 @@
 //! Receipt v2 bytes produced by compiling ferromorphic at the clock pin.
 //!
 //! A text round trip is not envelope interoperability, a joint loop, or an inference claim.
-//! `FERROMORPHIC_BIND_VERIFIED` stays false. Their bind revalidation is not this flag.
+//! `FERROMORPHIC_BIND_VERIFIED` is the bind contract in the sign-off. This receipt round trip is not that flag.
 
 use ferromotion_core::{
     parse_step_receipt, StepReceipt, EPISODE_ENVELOPE_INTEROPERABLE, FERROMORPHIC_BIND_VERIFIED, FERROMORPHIC_CLOCK_REVISION,
@@ -23,7 +23,7 @@ spike 4 1
 #[test]
 fn ferromorphic_receipt_v2_round_trips_both_ways() {
     assert_eq!(FERROMORPHIC_CLOCK_REVISION, PIN);
-    const { assert!(!FERROMORPHIC_BIND_VERIFIED); }
+    const { assert!(FERROMORPHIC_BIND_VERIFIED); }
     const { assert!(!EPISODE_ENVELOPE_INTEROPERABLE); }
     const { assert!(!JOINT_LOOP_EXECUTED); }
 

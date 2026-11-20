@@ -701,7 +701,7 @@ mod tests {
         assert!(crate::ferromorphic_clock::UNRESOLVED.contains(&crate::ferromorphic_clock::UnresolvedPolicy::AccumulatorRemainsInsideDynamicsLab));
         assert_eq!(crate::ferromorphic_clock::TICK_ARITHMETIC, "checked_u64_fail_closed");
         const { assert!(!crate::ferromorphic_clock::EPISODE_ENVELOPE_INTEROPERABLE); }
-        const { assert!(!crate::ferromorphic_clock::FERROMORPHIC_BIND_VERIFIED); }
+        const { assert!(crate::ferromorphic_clock::FERROMORPHIC_BIND_VERIFIED); }
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! `ferromorphic::sim::bind_v2_timestamps` at the pinned git revision.
 //!
-//! No path override. The three acceptance flags stay false. This file is not a sign-off.
+//! No path override. `FERROMORPHIC_BIND_VERIFIED` is true for this file's contract.
+//! `JOINT_LOOP_EXECUTED` and `EPISODE_ENVELOPE_INTEROPERABLE` stay false.
 
 use ferromorphic::NetBuilder;
 use ferromorphic::neuron::Lif;
@@ -16,7 +17,7 @@ use ferromotion_core::{
 const PIN: &str = "1ceec2fc884668db16905bed190a8c05873423e7";
 const PERIOD: u64 = 1_000;
 
-fn flags_stay_false() {
+fn flags() {
     assert_eq!(FERROMORPHIC_CLOCK_REVISION, PIN);
     const {
         assert!(!JOINT_LOOP_EXECUTED);
@@ -25,7 +26,7 @@ fn flags_stay_false() {
         assert!(!EPISODE_ENVELOPE_INTEROPERABLE);
     }
     const {
-        assert!(!FERROMORPHIC_BIND_VERIFIED);
+        assert!(FERROMORPHIC_BIND_VERIFIED);
     }
 }
 
@@ -50,7 +51,7 @@ fn pair(period_ns: u64) -> (EpisodeEnvelope, ClockSnapshot) {
 
 #[test]
 fn a_matching_snapshot_binds() {
-    flags_stay_false();
+    flags();
     let (envelope, clock) = pair(PERIOD);
     assert_eq!(
         bind_v2_timestamps(0, PERIOD, 2, Some(envelope), &clock),
@@ -115,7 +116,7 @@ fn sim_public_bytes(sim: &Sim<Lif>) -> Vec<u8> {
 
 #[test]
 fn a_zero_step_count_checks_and_stamps_nothing() {
-    flags_stay_false();
+    flags();
     let dt = nominal_seconds(PERIOD).unwrap();
     let mut builder = NetBuilder::new(2);
     builder.connect(0, 1, 1e-3, 1).unwrap();
@@ -143,7 +144,7 @@ fn a_zero_step_count_checks_and_stamps_nothing() {
 
 #[test]
 fn periods_above_2_pow_53_are_inexact_and_the_bound_is_accepted() {
-    flags_stay_false();
+    flags();
     let pow = 1u64 << 53;
     let (envelope, mut clock) = pair(PERIOD);
 
@@ -180,7 +181,7 @@ fn periods_above_2_pow_53_are_inexact_and_the_bound_is_accepted() {
 
 #[test]
 fn epoch_origin_period_dt_bits_and_the_t0_grid_are_refused() {
-    flags_stay_false();
+    flags();
     let (envelope, mut clock) = pair(PERIOD);
 
     clock.epoch = 9;
@@ -223,7 +224,7 @@ fn epoch_origin_period_dt_bits_and_the_t0_grid_are_refused() {
 
 #[test]
 fn a_snapshot_field_changed_after_a_good_bind_is_refused_on_the_next_call() {
-    flags_stay_false();
+    flags();
     let (envelope, mut clock) = pair(PERIOD);
     assert_eq!(
         bind_v2_timestamps(0, PERIOD, 1, Some(envelope), &clock),
@@ -241,7 +242,7 @@ fn a_snapshot_field_changed_after_a_good_bind_is_refused_on_the_next_call() {
 
 #[test]
 fn a_forward_product_mismatch_is_refused_before_an_envelope_exists() {
-    flags_stay_false();
+    flags();
     // `EpisodeEnvelope`'s fields are private. `try_new` is the only constructor, and it calls
     // `require_forward_product` before returning. `bind_v2_timestamps` therefore cannot be given
     // an envelope whose `dt` bits disagree with the period. The refusal is `DtPeriodMismatch`
