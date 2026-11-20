@@ -1129,8 +1129,9 @@ impl SmoothModel {
                         let mut s = (0.0f64, 0.0f64);
                         for &c in &chain {
                             if contract_off {
-                                s.0 = jd1[k][c] * qvel[c] + s.0;
-                                s.1 = jd2[k][c] * qvel[c] + s.1;
+                                // `(jac·qvel) + acc`. `+=` would write the accumulator on the left.
+                                s.0 = crate::mujoco_solver::add_left(jd1[k][c] * qvel[c], s.0);
+                                s.1 = crate::mujoco_solver::add_left(jd2[k][c] * qvel[c], s.1);
                             } else {
                                 s.0 = jd1[k][c].mul_add(qvel[c], s.0);
                                 s.1 = jd2[k][c].mul_add(qvel[c], s.1);

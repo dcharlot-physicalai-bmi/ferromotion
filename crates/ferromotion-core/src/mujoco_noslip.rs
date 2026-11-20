@@ -65,12 +65,14 @@ impl SmoothModel {
                     let wide = if separate && n >= 6 { n & !3 } else { 0 };
                     for k in 0..n {
                         let acc = ar[i * nefc + k];
+                        // Prefix lanes are `acc + (y·t)`. The tail is `(y·t) + acc`.
+                        // Those are different addend orders; `add_left` keeps each one.
                         ar[i * nefc + k] = if !separate {
                             y[k * nv + j].mul_add(t, acc)
                         } else if k < wide {
-                            acc + y[k * nv + j] * t
+                            crate::mujoco_solver::add_left(acc, y[k * nv + j] * t)
                         } else {
-                            y[k * nv + j] * t + acc
+                            crate::mujoco_solver::add_left(y[k * nv + j] * t, acc)
                         };
                     }
                 }

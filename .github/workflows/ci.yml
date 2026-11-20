@@ -10,7 +10,7 @@ env:
 
 jobs:
   test:
-    name: test + wasm
+    name: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -39,7 +39,7 @@ jobs:
       # Measured 2026-09-09 on an Apple M-series (Metal): 22 / 1 / 2 / 12 passed with the variable set,
       # so all four crates genuinely reach the hardware. A self-hosted GPU runner is what would make
       # this a gate rather than a documented boundary; until then the compile side is covered by the
-      # clippy step below, which does pass --all-features.
+      # clippy job, which does pass --all-features.
       - name: Benchmark (Ghia lid-driven cavity, release)
         run: cargo test -p ferromotion-fluid --release -- --ignored
       # Settles cantilevers to rest at dt = 3e-6 to pin the near-incompressible locking bias. Seconds in
@@ -66,6 +66,20 @@ jobs:
       # worse than no test at all, which is why the lane and the #[ignore] land together.
       - name: Robot working envelopes vs published reach (release)
         run: cargo test -p ferromotion-models --release -- --ignored
+
+  # These three jobs do not wait on `test`. The four published-default arm64 golden
+  # failures stay in that job and still fail it. A clippy, wasm, or docs failure
+  # fails its own job.
+  wasm:
+    name: wasm32
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.100.0
+        with:
+          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown, aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2.9.3
       # An EXCLUSION, not an enumeration. The enumerated list had silently omitted seven crates that do
       # build for wasm32 — including ferromotion-learn and ferromotion-fem, whose own READMEs advertise
       # "native + wasm32". A list of what to include drifts as crates are added; a list of what to skip
@@ -76,14 +90,34 @@ jobs:
       - name: Build (wasm32-unknown-unknown)
         run: cargo build --target wasm32-unknown-unknown --workspace --exclude ferromotion-viz
 
-      # Both of these were local-only discipline until 2026-08-15 and therefore enforced only by memory.
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.100.0
+        with:
+          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown, aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2.9.3
+      # --all-features is what compiles the GPU path on a runner with no adapter.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.100.0
+        with:
+          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown, aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2.9.3
       # The doc build catches a class nothing else does: intra-doc links to private or non-existent items,
       # which ship as broken links on docs.rs. Its first run found 22, one of which was a `pub fn` in a
       # private module that no external caller could reach at all.
       - name: Docs (broken intra-doc links are errors)
-        run: cargo doc --all-features --no-deps --workspace
+        run: cargo doc --workspace --all-features --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
