@@ -1,7 +1,7 @@
 //! `ferromorphic::sim::bind_v2_timestamps` at the pinned git revision.
 //!
 //! No path override. `FERROMORPHIC_BIND_VERIFIED` is true for this file's contract.
-//! `JOINT_LOOP_EXECUTED` is the panda episode, pending bmi-2 review.
+//! `JOINT_LOOP_EXECUTED` is the panda episode, signed off by bmi-2.
 //! `EPISODE_ENVELOPE_INTEROPERABLE` stays false.
 
 use ferromorphic::NetBuilder;

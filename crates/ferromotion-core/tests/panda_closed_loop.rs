@@ -2,7 +2,7 @@
 //!
 //! The plant is [`ferromotion_core::MjcfTree::step`]. The controller is ferromorphic
 //! `CurrentEncoder`, `Sim::try_step`, and `SpikeReadout`, then the agreed torque saturation.
-//! `JOINT_LOOP_EXECUTED` is this episode, pending bmi-2 review.
+//! `JOINT_LOOP_EXECUTED` is this episode, signed off by bmi-2.
 
 use ferromorphic::NetBuilder;
 use ferromorphic::neuron::Lif;

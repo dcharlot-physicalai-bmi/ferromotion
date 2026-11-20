@@ -17,9 +17,16 @@
 pub const FERROMORPHIC_CLOCK_REVISION: &str = "82211dc861af4ecc1afa9603c2caf20d52712b6d";
 pub const FERROMORPHIC_CLOCK_PATH: &str = "docs/contracts/ferromotion-clock.md";
 
-/// True for the 16-tick `panda_nohand` episode in `tests/panda_closed_loop.rs`,
-/// recorded in `docs/acceptance/receipts/2026-11-20-panda-closed-loop.md`.
-/// Pending bmi-2 review. This is not [`EPISODE_ENVELOPE_INTEROPERABLE`].
+/// Signed off by bmi-2 on 2026-11-20 in
+/// `docs/acceptance/receipts/2026-11-20-panda-closed-loop-signoff.md`,
+/// sha256 `83529316ddc99e7f48ee916be3e49d4cf258f0df4f717c3e48659e3a85a0d26c`.
+///
+/// The scope is a 16-tick executed loop on panda_nohand, contact-free dynamics
+/// only (ncon=0 on every tick, mesh-free collision geometry), x86_64,
+/// determinism within one host. It is not a task-competence claim and not a
+/// cross-arch claim.
+///
+/// This is not [`EPISODE_ENVELOPE_INTEROPERABLE`].
 pub const JOINT_LOOP_EXECUTED: bool = true;
 
 /// True for the bind contract in `tests/ferromorphic_bind_v2.rs`, tests (a) through (f),
