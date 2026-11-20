@@ -59,7 +59,7 @@ type V3 = Vector3<f64>;
 // `x + y + z` of products fuses each later product into the running sum; `s += a*b` is one fma.
 
 fn contract_off() -> bool {
-    crate::fp_contract::contract_off_family()
+    crate::fp_contract::contract_off_line()
 }
 
 /// `dot3` / `mju_dot3`.

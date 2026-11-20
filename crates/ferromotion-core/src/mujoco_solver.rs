@@ -59,7 +59,7 @@ fn norm(v: &[f64]) -> f64 {
 
 /// `64156abe` (`-ffp-contract=off`). `acc += a*b` rounds the product, then adds it on the right.
 fn oracle_axpy() -> bool {
-    crate::fp_contract::contract_off_family()
+    crate::fp_contract::contract_off_line()
 }
 
 fn axpy(acc: f64, a: f64, b: f64) -> f64 {

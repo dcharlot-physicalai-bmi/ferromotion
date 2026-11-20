@@ -335,12 +335,26 @@ pub fn sphere_box(margin: f64, p1: &GeomPose, r1: f64, p2: &GeomPose, size2: [f6
         let mut nearest: Vector3<f64> = Vector3::zeros();
         nearest[k / 2] = if k % 2 == 1 { -1.0 } else { 1.0 };
         let f = (r1 - closest) / 2.0;
-        pos = Vector3::from_fn(|i, _| nearest[i].mul_add(f, center[i]));
+        // `mji_addToScl3(pos, nearest, (r - closest) / 2)` is `(nearest * f) + center`.
+        pos = if contract_off() {
+            Vector3::from_fn(|i, _| (nearest[i] * f) + center[i])
+        } else {
+            Vector3::from_fn(|i, _| nearest[i].mul_add(f, center[i]))
+        };
         normal_local = nearest;
         dist = -closest;
     } else {
-        let deepest = Vector3::from_fn(|i, _| tmp[i].mul_add(r1, center[i]));
-        pos = Vector3::from_fn(|i, _| deepest[i].mul_add(0.5, clamped[i] * 0.5));
+        // `deepest = (normal * r) + center`, then `pos = (deepest * 0.5) + (clamped * 0.5)`.
+        let deepest = if contract_off() {
+            Vector3::from_fn(|i, _| (tmp[i] * r1) + center[i])
+        } else {
+            Vector3::from_fn(|i, _| tmp[i].mul_add(r1, center[i]))
+        };
+        pos = if contract_off() {
+            Vector3::from_fn(|i, _| (deepest[i] * 0.5) + (clamped[i] * 0.5))
+        } else {
+            Vector3::from_fn(|i, _| deepest[i].mul_add(0.5, clamped[i] * 0.5))
+        };
         normal_local = tmp;
     }
     Some(pre(dist - r1, mat_vec(&p2.mat, &pos) + p2.pos, mat_vec(&p2.mat, &normal_local), Vector3::zeros()))
@@ -356,7 +370,7 @@ const BOXBOX_MAXVERT: usize = 12;
 
 fn clip_half_plane(poly: &mut Vec<[f64; 3]>, coord: usize, sign: f64, limit: f64) {
     // `d = sign*coord - limit`, and a crossing is `p + t*(q-p)`.
-    let separate = crate::fp_contract::contract_off_family();
+    let separate = crate::fp_contract::contract_off_line();
     let d: Vec<f64> = poly.iter().map(|p| if separate { sign * p[coord] - limit } else { sign.mul_add(p[coord], -limit) }).collect();
     if d.iter().all(|&x| x <= 0.0) {
         return;
@@ -383,7 +397,7 @@ fn clip_half_plane(poly: &mut Vec<[f64; 3]>, coord: usize, sign: f64, limit: f64
 // `mujoco_ccd`): the LEFT product of `a*b + c*d` fused, each later product of a chain fused into the sum.
 
 fn contract_off() -> bool {
-    crate::fp_contract::contract_off_family()
+    crate::fp_contract::contract_off_line()
 }
 
 /// `mju_dot3`: `(az bz) + (ax bx + ay by)`.
@@ -395,19 +409,36 @@ fn dot3(a: &Vector3<f64>, b: &Vector3<f64>) -> f64 {
     }
 }
 
-/// `mji_mulMatVec3`: `mat · v`.
+/// `mju_mulMatVec3` (`0x14d790`). Rows 0 and 1 are `(m2 vz) + (m0 vx + m1 vy)`,
+/// except row 1's pair is `(m11 vy + m10 vx)`. Row 2 is `(m21 vy + m20 vx) + (m22 vz)`.
 fn mat_vec(m: &Matrix3<f64>, v: &Vector3<f64>) -> Vector3<f64> {
-    Vector3::from_fn(|r, _| m[(r, 2)].mul_add(v.z, m[(r, 0)].mul_add(v.x, m[(r, 1)] * v.y)))
+    if contract_off() {
+        Vector3::new(
+            (m[(0, 2)] * v.z) + (m[(0, 0)] * v.x + m[(0, 1)] * v.y),
+            (m[(1, 2)] * v.z) + (m[(1, 1)] * v.y + m[(1, 0)] * v.x),
+            (m[(2, 1)] * v.y + m[(2, 0)] * v.x) + (m[(2, 2)] * v.z),
+        )
+    } else {
+        Vector3::from_fn(|r, _| m[(r, 2)].mul_add(v.z, m[(r, 0)].mul_add(v.x, m[(r, 1)] * v.y)))
+    }
 }
 
-/// `mji_mulMatTVec3`: `matᵀ · v`.
+/// `mju_mulMatTVec3` (`0x14d810`): `(m2 vz) + (m1 vy + m0 vx)` on each column.
 fn mat_t_vec(m: &Matrix3<f64>, v: &Vector3<f64>) -> Vector3<f64> {
-    Vector3::from_fn(|c, _| m[(2, c)].mul_add(v.z, m[(0, c)].mul_add(v.x, m[(1, c)] * v.y)))
+    if contract_off() {
+        mat_t_vec_sep(m, v)
+    } else {
+        Vector3::from_fn(|c, _| m[(2, c)].mul_add(v.z, m[(0, c)].mul_add(v.x, m[(1, c)] * v.y)))
+    }
 }
 
-/// `mju_mulMatTMat3`: `aᵀ · b`.
+/// `mju_mulMatTMat3` (`0x14d9f0`): `(a2 b2) + (a1 b1 + a0 b0)`.
 fn mat_t_mat(a: &Matrix3<f64>, b: &Matrix3<f64>) -> Matrix3<f64> {
-    Matrix3::from_fn(|i, j| a[(2, i)].mul_add(b[(2, j)], a[(0, i)].mul_add(b[(0, j)], a[(1, i)] * b[(1, j)])))
+    if contract_off() {
+        mat_t_mat_sep(a, b)
+    } else {
+        Matrix3::from_fn(|i, j| a[(2, i)].mul_add(b[(2, j)], a[(0, i)].mul_add(b[(0, j)], a[(1, i)] * b[(1, j)])))
+    }
 }
 
 /// `mji_mulMatTVec3` as inlined in `mjc_BoxBox` (`64156abe`): `(m2 v2) + (m1 v1 + m0 v0)`.
@@ -434,7 +465,7 @@ fn normalize3_mj(v: &mut Vector3<f64>) {
 /// `mjc_BoxBox`: separating-axis test over 15 axes, then either one edge–edge contact or the incident
 /// face clipped to the reference face (up to 8 contacts).
 pub fn box_box(margin: f64, p1: &GeomPose, size1: [f64; 3], p2: &GeomPose, size2: [f64; 3]) -> Vec<PreContact> {
-    let separate = crate::fp_contract::contract_off_family();
+    let separate = crate::fp_contract::contract_off_line();
     let (pos21, pos12, rot) = if separate {
         (mat_t_vec_sep(&p1.mat, &(p2.pos - p1.pos)), mat_t_vec_sep(&p2.mat, &(p1.pos - p2.pos)), mat_t_mat_sep(&p1.mat, &p2.mat))
     } else {
@@ -699,8 +730,14 @@ pub fn capsule_box(margin: f64, p1: &GeomPose, size1: [f64; 2], p2: &GeomPose, s
     let pos = mat_t_vec(&p2.mat, &(p1.pos - p2.pos));
     let axis = mat_t_vec(&p2.mat, &p1.axis());
     let halfaxis = axis * halflength;
-    // `mji_addToScl3(v, halfaxis, s)` on a copy of `pos`: fused per component
-    let along = |s: f64| Vector3::from_fn(|k, _| halfaxis[k].mul_add(s, pos[k]));
+    // `mji_addToScl3` in `64156abe` is `(halfaxis * s) + pos`, each product rounded before the add.
+    let along = |s: f64| {
+        if contract_off() {
+            Vector3::from_fn(|k, _| (halfaxis[k] * s) + pos[k])
+        } else {
+            Vector3::from_fn(|k, _| halfaxis[k].mul_add(s, pos[k]))
+        }
+    };
     let mut axisdir = 0;
     if halfaxis[0] > 0.0 {
         axisdir += 1;
@@ -763,13 +800,14 @@ pub fn capsule_box(margin: f64, p1: &GeomPose, size1: [f64; 2], p2: &GeomPose, s
             let mc = size1[1] * size1[1];
             let u = -size2[j] * dif[j];
             let v = dot3(&halfaxis, &dif);
-            let det = ma.mul_add(mc, -(mb * mb));
+            // `(ma·mc) − (mb·mb)`, then `((mc·u) − (mb·v)) · idet` and `((ma·v) − (mb·u)) · idet`.
+            let det = if contract_off() { (ma * mc) - (mb * mb) } else { ma.mul_add(mc, -(mb * mb)) };
             if det.abs() < MINVAL {
                 continue;
             }
             let idet = 1.0 / det;
-            let mut x1 = mc.mul_add(u, -(mb * v)) * idet;
-            let mut x2 = ma.mul_add(v, -(mb * u)) * idet;
+            let mut x1 = if contract_off() { ((mc * u) - (mb * v)) * idet } else { mc.mul_add(u, -(mb * v)) * idet };
+            let mut x2 = if contract_off() { ((ma * v) - (mb * u)) * idet } else { ma.mul_add(v, -(mb * u)) * idet };
             let (mut s1, mut s2) = (1, 1);
             if x1 > 1.0 {
                 x1 = 1.0;
@@ -804,8 +842,13 @@ pub fn capsule_box(margin: f64, p1: &GeomPose, size1: [f64; 2], p2: &GeomPose, s
                 }
             }
             let dif0 = tmp3 - pos;
-            let mut dif = Vector3::from_fn(|k, _| halfaxis[k].mul_add(-x2, dif0[k]));
-            dif[j] = size2[j].mul_add(x1, dif[j]);
+            // `mji_addToScl3(dif, halfaxis, -x2)` then `dif[j] += size2[j] * x1`.
+            let mut dif = if contract_off() {
+                Vector3::from_fn(|k, _| (halfaxis[k] * -x2) + dif0[k])
+            } else {
+                Vector3::from_fn(|k, _| halfaxis[k].mul_add(-x2, dif0[k]))
+            };
+            dif[j] = if contract_off() { (size2[j] * x1) + dif[j] } else { size2[j].mul_add(x1, dif[j]) };
             let d2 = dot3(&dif, &dif);
             let c1 = s1 * 3 + s2;
             // the −MINVAL fixes an axis numerically parallel to the box (MuJoCo's comment)
@@ -953,7 +996,7 @@ pub fn capsule_box(margin: f64, p1: &GeomPose, size1: [f64; 2], p2: &GeomPose, s
 pub fn make_frame(normal: Vector3<f64>, tangent: Vector3<f64>) -> [Vector3<f64>; 3] {
     // Published path: clang fuses `mju_normalize3`, `mju_dot3` and `mji_cross`.
     // `64156abe` is the source: `(x*x + y*y) + z*z`, `(a0*b0 + a1*b1) + a2*b2`, and `a1*b2 - a2*b1`.
-    let separate = crate::fp_contract::contract_off_family();
+    let separate = crate::fp_contract::contract_off_line();
     let dot = |a: &Vector3<f64>, b: &Vector3<f64>| {
         if separate {
             (a.x * b.x + a.y * b.y) + a.z * b.z
@@ -1168,13 +1211,18 @@ pub fn hfield_convex(opts: &CollideOptions, margin: f64, hf_pose: &GeomPose, hf:
         return Vec::new();
     }
     // the sub-grid under the box
-    let cmin = (((xmin + size0) / (2.0 * size0) * (ncol - 1) as f64).floor() as i64).max(0);
-    let cmax = (((xmax + size0) / (2.0 * size0) * (ncol - 1) as f64).ceil() as i64).min(ncol - 1);
-    let rmin = (((ymin + size1) / (2.0 * size1) * (nrow - 1) as f64).floor() as i64).max(0);
-    let rmax = (((ymax + size1) / (2.0 * size1) * (nrow - 1) as f64).ceil() as i64).min(nrow - 1);
+    // `64156abe` `mjc_ConvexHField`: `2*size` is `size + size`, then
+    // `(xmin + size) / that * (ncol - 1)`. The cell is `(dx * c) - size`.
+    let separate = contract_off();
+    let two0 = if separate { size0 + size0 } else { 2.0 * size0 };
+    let two1 = if separate { size1 + size1 } else { 2.0 * size1 };
+    let cmin = (((xmin + size0) / two0 * (ncol - 1) as f64).floor() as i64).max(0);
+    let cmax = (((xmax + size0) / two0 * (ncol - 1) as f64).ceil() as i64).min(ncol - 1);
+    let rmin = (((ymin + size1) / two1 * (nrow - 1) as f64).floor() as i64).max(0);
+    let rmax = (((ymax + size1) / two1 * (nrow - 1) as f64).ceil() as i64).min(nrow - 1);
     obj2.margin = margin;
-    let dx = (2.0 * size0) / (ncol - 1) as f64;
-    let dy = (2.0 * size1) / (nrow - 1) as f64;
+    let dx = two0 / (ncol - 1) as f64;
+    let dy = two1 / (nrow - 1) as f64;
     for p in obj1.prism.iter_mut().take(3) {
         p[2] = -size3;
     }
@@ -1186,8 +1234,8 @@ pub fn hfield_convex(opts: &CollideOptions, margin: f64, hf_pose: &GeomPose, hf:
         pr[3] = pr[4];
         pr[4] = pr[5];
         let dr = 1 - i;
-        let x = dx.mul_add(c as f64, -size0);
-        let y = dy.mul_add((r + dr) as f64, -size1);
+        let x = if separate { dx * (c as f64) - size0 } else { dx.mul_add(c as f64, -size0) };
+        let y = if separate { dy * ((r + dr) as f64) - size1 } else { dy.mul_add((r + dr) as f64, -size1) };
         pr[2][0] = x;
         pr[5][0] = x;
         pr[2][1] = y;

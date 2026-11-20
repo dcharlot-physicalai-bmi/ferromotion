@@ -564,8 +564,12 @@ struct Qh {
 }
 
 fn dot3(a: &[f64; 3], b: &[f64; 3]) -> f64 {
-    // `a[0]*b[0] + a[1]*b[1] + a[2]*b[2]` as clang contracts it: the right product of the first sum rounds
-    a[2].mul_add(b[2], a[0].mul_add(b[0], a[1] * b[1]))
+    // Fused: the right product of the first sum rounds. `64156abe` adds left to right.
+    if crate::fp_contract::contract_off() {
+        (a[0] * b[0] + a[1] * b[1]) + a[2] * b[2]
+    } else {
+        a[2].mul_add(b[2], a[0].mul_add(b[0], a[1] * b[1]))
+    }
 }
 
 impl Qh {
@@ -643,10 +647,17 @@ impl Qh {
     // ------------------------------------------------------------------------------------ geometry
 
     /// `qh_distplane`, 3-d: `offset + p0·n0 + p1·n1 + p2·n2`, each product fused into the running sum.
+    /// `64156abe` specializes dimension 3: `offset + p0·n0`, then `(p1·n1) + that`, then `(p2·n2) + that`.
     fn distplane(&self, point: &[f64; 3], facet: usize) -> f64 {
         let f = &self.facets[facet];
         let n = f.normal.as_ref().expect("qh_distplane: facet without a normal");
-        point[2].mul_add(n[2], point[1].mul_add(n[1], point[0].mul_add(n[0], f.offset)))
+        if crate::fp_contract::contract_off() {
+            let t = f.offset + point[0] * n[0];
+            let t = (point[1] * n[1]) + t;
+            (point[2] * n[2]) + t
+        } else {
+            point[2].mul_add(n[2], point[1].mul_add(n[1], point[0].mul_add(n[0], f.offset)))
+        }
     }
 
     /// `qh_getcenter`: the mean of the facet's vertices, summed in set order.
@@ -670,21 +681,32 @@ impl Qh {
         let point = self.getcenter(&self.facets[facet].vertices);
         let dist = self.distplane(&point, facet);
         let n = self.facets[facet].normal.unwrap();
-        [(-dist).mul_add(n[0], point[0]), (-dist).mul_add(n[1], point[1]), (-dist).mul_add(n[2], point[2])]
+        // `qh_projectpoint` in `64156abe` is `point − dist·normal`.
+        if crate::fp_contract::contract_off() {
+            [point[0] - dist * n[0], point[1] - dist * n[1], point[2] - dist * n[2]]
+        } else {
+            [(-dist).mul_add(n[0], point[0]), (-dist).mul_add(n[1], point[1]), (-dist).mul_add(n[2], point[2])]
+        }
     }
 
     /// `qh_getangle`: the dot product accumulated from zero, each product fused.
+    /// `64156abe` adds each rounded product onto the sum.
     fn getangle(a: &[f64; 3], b: &[f64; 3]) -> f64 {
         let mut angle = 0.0f64;
         for k in 0..DIM {
-            angle = a[k].mul_add(b[k], angle);
+            angle = if crate::fp_contract::contract_off() { angle + a[k] * b[k] } else { a[k].mul_add(b[k], angle) };
         }
         angle
     }
 
     /// `qh_normalize2` for 3-d, `minnorm` unused.
     fn normalize2(&self, normal: &mut [f64; 3], toporient: bool) {
-        let mut norm = normal[2].mul_add(normal[2], normal[0].mul_add(normal[0], normal[1] * normal[1])).sqrt();
+        // `64156abe`: `sqrt(n2² + (n0² + n1²))`.
+        let mut norm = if crate::fp_contract::contract_off() {
+            ((normal[2] * normal[2]) + ((normal[0] * normal[0]) + (normal[1] * normal[1]))).sqrt()
+        } else {
+            normal[2].mul_add(normal[2], normal[0].mul_add(normal[0], normal[1] * normal[1])).sqrt()
+        };
         if norm > self.mindenom {
             if !toporient {
                 norm = -norm;
@@ -720,7 +742,9 @@ impl Qh {
         let dy = |i: usize, j: usize| rows[i][1] - rows[j][1];
         let dz = |i: usize, j: usize| rows[i][2] - rows[j][2];
         // det2_(a1, a2, b1, b2) = a1·b2 − a2·b1: the left product fused, the right one rounded
-        let det2 = |a1: f64, a2: f64, b1: f64, b2: f64| a1.mul_add(b2, -(a2 * b1));
+        let det2 = |a1: f64, a2: f64, b1: f64, b2: f64| {
+            if crate::fp_contract::contract_off() { (a1 * b2) - (a2 * b1) } else { a1.mul_add(b2, -(a2 * b1)) }
+        };
         normal[0] = det2(dy(2, 0), dz(2, 0), dy(1, 0), dz(1, 0));
         normal[1] = det2(dx(1, 0), dz(1, 0), dx(2, 0), dz(2, 0));
         normal[2] = det2(dx(2, 0), dy(2, 0), dx(1, 0), dy(1, 0));
@@ -758,7 +782,11 @@ impl Qh {
         self.normalize2(normal, true);
         *offset = -(point0[0] * normal[0]);
         for k in 1..DIM {
-            *offset = (-point0[k]).mul_add(normal[k], *offset);
+            *offset = if crate::fp_contract::contract_off() {
+                ((-point0[k]) * normal[k]) + *offset
+            } else {
+                (-point0[k]).mul_add(normal[k], *offset)
+            };
         }
         nearzero
     }
@@ -792,7 +820,11 @@ impl Qh {
             for i in k + 1..numrow {
                 let n = rows[i][k] / pivot;
                 for j in k + 1..numcol {
-                    rows[i][j] = (-n).mul_add(rows[k][j], rows[i][j]);
+                    rows[i][j] = if crate::fp_contract::contract_off() {
+                        rows[i][j] - n * rows[k][j]
+                    } else {
+                        (-n).mul_add(rows[k][j], rows[i][j])
+                    };
                 }
             }
         }
@@ -811,7 +843,11 @@ impl Qh {
             let npu = np as usize;
             normal[npu] = 0.0;
             for j in i + 1..numcol {
-                normal[npu] = (-rows[i][j]).mul_add(normal[npu + j - i], normal[npu]);
+                normal[npu] = if crate::fp_contract::contract_off() {
+                    normal[npu] - rows[i][j] * normal[npu + j - i]
+                } else {
+                    (-rows[i][j]).mul_add(normal[npu + j - i], normal[npu])
+                };
             }
             let diagonal = rows[i][i];
             if diagonal.abs() > self.mindenom_2 {
@@ -837,7 +873,9 @@ impl Qh {
 
     /// `qh_determinant` for 2-d and 3-d.
     fn determinant(&self, rows: &[[f64; 3]], dim: usize) -> (f64, bool) {
-        let det2 = |a1: f64, a2: f64, b1: f64, b2: f64| a1.mul_add(b2, -(a2 * b1));
+        let det2 = |a1: f64, a2: f64, b1: f64, b2: f64| {
+            if crate::fp_contract::contract_off() { (a1 * b2) - (a2 * b1) } else { a1.mul_add(b2, -(a2 * b1)) }
+        };
         if dim == 2 {
             let det = det2(rows[0][0], rows[0][1], rows[1][0], rows[1][1]);
             (det, det.abs() < 10.0 * self.near_zero[1])
@@ -847,7 +885,11 @@ impl Qh {
             let d2 = det2(a[1], a[2], c[1], c[2]);
             let d3 = det2(a[1], a[2], b[1], b[2]);
             // a1·D1 − b1·D2 + c1·D3, contracted as fma(c1, D3, fma(a1, D1, −(b1·D2)))
-            let det = c[0].mul_add(d3, a[0].mul_add(d1, -(b[0] * d2)));
+            let det = if crate::fp_contract::contract_off() {
+                (c[0] * d3) + ((a[0] * d1) - (b[0] * d2))
+            } else {
+                c[0].mul_add(d3, a[0].mul_add(d1, -(b[0] * d2)))
+            };
             (det, det.abs() < 10.0 * self.near_zero[2])
         }
     }
@@ -1269,20 +1311,41 @@ impl Qh {
         if maxdistsum > self.maxsumcoord {
             maxdistsum = self.maxsumcoord;
         }
-        self.distround = (maxdistsum * dim).mul_add(1.01, self.maxabs_coord) * REALEPS;
+        self.distround = if crate::fp_contract::contract_off() {
+            ((maxdistsum * dim) * 1.01 + self.maxabs_coord) * REALEPS
+        } else {
+            (maxdistsum * dim).mul_add(1.01, self.maxabs_coord) * REALEPS
+        };
         self.mindenom = self.mindenom_1 * self.maxabs_coord;
         self.mindenom_1_2 = (self.mindenom_1 * dim).sqrt();
         self.mindenom_2 = self.mindenom_1_2 * self.maxabs_coord;
         self.anglereound = dim * 1.01 * REALEPS;
-        self.premerge_centrum = 2.0f64.mul_add(self.distround, self.premerge_centrum);
-        let postmerge_centrum = 2.0f64.mul_add(self.distround, 0.0);
+        self.premerge_centrum = if crate::fp_contract::contract_off() {
+            (2.0 * self.distround) + self.premerge_centrum
+        } else {
+            2.0f64.mul_add(self.distround, self.premerge_centrum)
+        };
+        let postmerge_centrum = if crate::fp_contract::contract_off() { 2.0 * self.distround } else { 2.0f64.mul_add(self.distround, 0.0) };
         let maxangle: f64 = 1.0;
-        self.one_merge = (self.maxwidth * dim.sqrt()).mul_add((-maxangle).mul_add(maxangle, 1.0).sqrt(), self.distround);
-        let maxrho = dim.mul_add(self.premerge_centrum, self.distround);
+        self.one_merge = if crate::fp_contract::contract_off() {
+            let s = ((-maxangle) * maxangle) + 1.0;
+            ((self.maxwidth * dim.sqrt()) * s.sqrt()) + self.distround
+        } else {
+            (self.maxwidth * dim.sqrt()).mul_add((-maxangle).mul_add(maxangle, 1.0).sqrt(), self.distround)
+        };
+        let maxrho = if crate::fp_contract::contract_off() {
+            (dim * self.premerge_centrum) + self.distround
+        } else {
+            dim.mul_add(self.premerge_centrum, self.distround)
+        };
         if self.one_merge < maxrho {
             self.one_merge = maxrho;
         }
-        let maxrho = dim.mul_add(postmerge_centrum, self.distround);
+        let maxrho = if crate::fp_contract::contract_off() {
+            (dim * postmerge_centrum) + self.distround
+        } else {
+            dim.mul_add(postmerge_centrum, self.distround)
+        };
         if self.one_merge < maxrho {
             self.one_merge = maxrho;
         }
@@ -1332,7 +1395,8 @@ impl Qh {
     /// `qh_SEARCHdist`: `max_outside + 2·DISTround` fused, plus the larger of MINvisible and MAXcoplanar.
     fn search_dist(&self) -> f64 {
         let m = if self.min_visible < self.max_coplanar { self.max_coplanar } else { self.min_visible };
-        (self.distround.mul_add(2.0, self.max_outside) + m) * (if self.use_findbestnew() { 2.0 } else { 1.0 })
+        (if crate::fp_contract::contract_off() { (self.distround * 2.0) + self.max_outside } else { self.distround.mul_add(2.0, self.max_outside) } + m)
+            * (if self.use_findbestnew() { 2.0 } else { 1.0 })
     }
 
     /// `qh_initbuild`.

@@ -21,7 +21,7 @@ pub(crate) enum TendonObj {
 }
 
 fn contract_off() -> bool {
-    crate::fp_contract::contract_off_family()
+    crate::fp_contract::contract_off_line()
 }
 
 /// `mju_dot3`: `(a2 b2) + (a0 b0 + a1 b1)`.
@@ -207,14 +207,36 @@ fn wrap_inside(end: &[f64; 4], radius: f64) -> Option<([f64; 4], f64)> {
     normalize2(&mut mid);
     let fallback = [mid[0] * radius, mid[1] * radius, mid[0] * radius, mid[1] * radius];
     let (a, b) = (radius / len0, radius / len1);
-    let cos_g = (len0.mul_add(len0, len1 * len1) - dd) / (2.0 * len0 * len1);
+    // `64156abe` `mju_wrap` inside wrap. `dd` is `(dif1²) + (dif0²)`.
+    // `cosG` is `((len1² + len0²) - dd) / ((len0 + len0) · len1)`.
+    // The residual at the initial `z` adds the baked `-2·asin(z)` (`0x3550a0`);
+    // later residuals subtract `asin(z) + asin(z)`. The derivative is
+    // `((B / √(1-B²z²)) + (A / √(1-A²z²))) - (2 / √(1-z²))`, each square
+    // `((z²)·c)·c`. The point is `radius · (cos·v − sin·swap(v))`
+    // via `addsubpd`, so `y` is `(cos·vy) + (sin·vx)`.
+    let off = contract_off();
+    let cos_g = if off {
+        let dd = dif[1] * dif[1] + dif[0] * dif[0];
+        ((len1 * len1 + len0 * len0) - dd) / ((len0 + len0) * len1)
+    } else {
+        (len0.mul_add(len0, len1 * len1) - dd) / (2.0 * len0 * len1)
+    };
     if cos_g < -1.0 + MJ_MINVAL {
         return None;
     } else if cos_g > 1.0 - MJ_MINVAL {
         return Some((fallback, 0.0));
     }
     let g = cos_g.acos();
-    let fz = |z: f64| (a * z).asin() + (b * z).asin() - 2.0 * z.asin() + g;
+    // rodata `-2·asin(1 - 1e-7)`, added (not subtracted) into the first residual
+    const NEG_TWO_ASIN_ZINIT: f64 = f64::from_bits(0xc00920266447a7fa);
+    let fz = |z: f64| {
+        if off {
+            let sum = (b * z).asin() + (a * z).asin();
+            if z.to_bits() == ZINIT.to_bits() { (sum + NEG_TWO_ASIN_ZINIT) + g } else { (sum - (z.asin() + z.asin())) + g }
+        } else {
+            (a * z).asin() + (b * z).asin() - 2.0 * z.asin() + g
+        }
+    };
     let mut z = ZINIT;
     let mut f = fz(z);
     if f > 0.0 {
@@ -223,7 +245,13 @@ fn wrap_inside(end: &[f64; 4], radius: f64) -> Option<([f64; 4], f64)> {
     let mut iter = 0;
     while iter < MAXITER && f.abs() > TOLERANCE {
         let fmax = |x: f64| if MJ_MINVAL >= x { MJ_MINVAL } else { x };
-        let df = a / fmax((-(z * z * a)).mul_add(a, 1.0).sqrt()) + b / fmax((-(z * z * b)).mul_add(b, 1.0).sqrt()) - 2.0 / fmax((-z).mul_add(z, 1.0).sqrt());
+        let df = if off {
+            let zz = z * z;
+            let term = |c: f64| c / fmax((1.0 - (zz * c) * c).sqrt());
+            (term(b) + term(a)) - (2.0 / fmax((1.0 - zz).sqrt()))
+        } else {
+            a / fmax((-(z * z * a)).mul_add(a, 1.0).sqrt()) + b / fmax((-(z * z * b)).mul_add(b, 1.0).sqrt()) - 2.0 / fmax((-z).mul_add(z, 1.0).sqrt())
+        };
         if df > -MJ_MINVAL {
             return Some((fallback, 0.0));
         }
@@ -241,10 +269,15 @@ fn wrap_inside(end: &[f64; 4], radius: f64) -> Option<([f64; 4], f64)> {
     if iter >= MAXITER {
         return Some((fallback, 0.0));
     }
-    let (mut vec, ang) = if end[0].mul_add(end[3], -(end[1] * end[2])) > 0.0 { ([end[0], end[1]], z.asin() - (a * z).asin()) } else { ([end[2], end[3]], z.asin() - (b * z).asin()) };
+    let cross = if off { end[0] * end[3] - end[1] * end[2] } else { end[0].mul_add(end[3], -(end[1] * end[2])) };
+    let (mut vec, ang) = if cross > 0.0 { ([end[0], end[1]], z.asin() - (a * z).asin()) } else { ([end[2], end[3]], z.asin() - (b * z).asin()) };
     normalize2(&mut vec);
     let (sn, cs) = crate::mujoco_kinematics::sincos(ang);
-    let p = [radius * cs.mul_add(vec[0], -(sn * vec[1])), radius * sn.mul_add(vec[0], cs * vec[1])];
+    let p = if off {
+        [radius * (cs * vec[0] - sn * vec[1]), radius * (cs * vec[1] + sn * vec[0])]
+    } else {
+        [radius * cs.mul_add(vec[0], -(sn * vec[1])), radius * sn.mul_add(vec[0], cs * vec[1])]
+    };
     Some(([p[0], p[1], p[0], p[1]], 0.0))
 }
 
@@ -301,12 +334,23 @@ fn wrap(x0: &[f64; 3], x1: &[f64; 3], xpos: &[f64; 3], xmat: &[f64; 9], radius: 
         }
     }
     if cylinder {
-        let l0 = (p0[0] - res[0]).mul_add(p0[0] - res[0], (p0[1] - res[1]) * (p0[1] - res[1])).sqrt();
-        let l1 = (p1[0] - res[3]).mul_add(p1[0] - res[3], (p1[1] - res[4]) * (p1[1] - res[4])).sqrt();
-        res[2] = p0[2] + (p1[2] - p0[2]) * l0 / (l0 + wlen + l1);
-        res[5] = p0[2] + (p1[2] - p0[2]) * (l0 + wlen) / (l0 + wlen + l1);
-        let height = (res[5] - res[2]).abs();
-        wlen = wlen.mul_add(wlen, height * height).sqrt();
+        // `64156abe` `mju_wrap`, cylinder correction. Each horizontal length is
+        // `sqrt(dy² + dx²)` (`mulpd`, `unpckhpd`, `addsd`, `sqrtsd`). The
+        // denominator is `L1 + (wlen + L0)`. The corrected length is
+        // `sqrt(height² + wlen²)`.
+        let (dx0, dy0) = (p0[0] - res[0], p0[1] - res[1]);
+        let (dx1, dy1) = (p1[0] - res[3], p1[1] - res[4]);
+        let (l0, l1) = if contract_off() {
+            ((dy0 * dy0 + dx0 * dx0).sqrt(), (dy1 * dy1 + dx1 * dx1).sqrt())
+        } else {
+            (dx0.mul_add(dx0, dy0 * dy0).sqrt(), dx1.mul_add(dx1, dy1 * dy1).sqrt())
+        };
+        let denom = if contract_off() { l1 + (wlen + l0) } else { l0 + wlen + l1 };
+        let dz = p1[2] - p0[2];
+        res[2] = p0[2] + dz * l0 / denom;
+        res[5] = p0[2] + dz * (wlen + l0) / denom;
+        let height = res[5] - res[2];
+        wlen = if contract_off() { (height * height + wlen * wlen).sqrt() } else { wlen.mul_add(wlen, height * height).sqrt() };
     }
     let w0 = mat_vec3(xmat, &[res[0], res[1], res[2]]);
     let w1 = mat_vec3(xmat, &[res[3], res[4], res[5]]);
@@ -375,11 +419,14 @@ impl SmoothModel {
                 TendonObj::Site(s1) => (None, s1, 1),
             };
             let x1 = self.obj_frame(k, s1).0;
+            // `64156abe` `mj_tendon` stores `(segment / divisor) + L`. A wrap is
+            // `dist2 + (wlen + dist1)` before that division.
             let nseg = match wrapped {
                 None => {
                     wpnt[1] = x1;
                     wbody[1] = s1.body;
-                    len += dist3(&wpnt[0], &wpnt[1]) / divisor;
+                    let sum = dist3(&wpnt[0], &wpnt[1]);
+                    len = if contract_off() { (sum / divisor) + len } else { len + sum / divisor };
                     1
                 }
                 Some(((w, wlen), gbody)) => {
@@ -389,7 +436,10 @@ impl SmoothModel {
                     wbody[1] = gbody;
                     wbody[2] = gbody;
                     wbody[3] = s1.body;
-                    len += (dist3(&wpnt[0], &wpnt[1]) + wlen + dist3(&wpnt[2], &wpnt[3])) / divisor;
+                    let d1 = dist3(&wpnt[0], &wpnt[1]);
+                    let d2 = dist3(&wpnt[2], &wpnt[3]);
+                    let sum = if contract_off() { d2 + (wlen + d1) } else { d1 + wlen + d2 };
+                    len = if contract_off() { (sum / divisor) + len } else { len + sum / divisor };
                     3
                 }
             };
@@ -403,20 +453,21 @@ impl SmoothModel {
                 if chain.is_empty() {
                     continue;
                 }
-                // `mju_mulMatTVec(tmp, jacdif, dif, 3, NV)`
+                // `mj_tendon` calls `mju_mulMatTVec`. In `64156abe` that symbol
+                // vectorises at `n >= 4`: `res + scl*x` on the 4-wide prefix and
+                // `scl*x + res` on the tail (`mulpd`/`addpd`, then `mulsd`/`addsd`).
                 let mut tmp = vec![0.0f64; chain.len()];
                 for r in 0..3 {
                     if dif[r] != 0.0 {
-                        for (t, row) in tmp.iter_mut().zip(&jd[r]) {
-                            *t = row.mul_add(dif[r], *t);
-                        }
+                        crate::mujoco_solver::add_to_scl(&mut tmp, &jd[r], dif[r], 4);
                     }
                 }
-                // `mju_combineSparseInc(J, tmp, nv, 1, 1/divisor, …)`
+                // `mju_combineSparseInc`. The identical-pattern tail is `(src*b) + (dst*a)`
+                // and the merge is `(b*src) + dst`. `a` is 1 here.
                 let b = 1.0 / divisor;
                 if chain.as_slice() == colind {
                     for (x, t) in jrow.iter_mut().zip(&tmp) {
-                        *x = x.mul_add(1.0, t * b);
+                        *x = if contract_off() { (t * b) + *x } else { x.mul_add(1.0, t * b) };
                     }
                 } else {
                     let mut si = 0;
@@ -425,7 +476,7 @@ impl SmoothModel {
                             si += 1;
                         }
                         if si < chain.len() && chain[si] == c {
-                            jrow[di] = b.mul_add(tmp[si], jrow[di]);
+                            jrow[di] = if contract_off() { (b * tmp[si]) + jrow[di] } else { b.mul_add(tmp[si], jrow[di]) };
                             si += 1;
                         }
                     }

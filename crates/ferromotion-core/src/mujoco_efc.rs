@@ -38,7 +38,7 @@ pub(crate) const CONTACT_ELLIPTIC: i32 = 7;
 pub(crate) fn dot(a: &[f64], b: &[f64]) -> f64 {
     // `mju_mulMatVec` and `mju_cholFactor` call the out-of-line `mju_dot` in 64156abe.
     // That symbol is the SSE schedule in `dot_contract_off` (`mulpd`/`addpd`, no FMA).
-    if crate::fp_contract::contract_off_family() {
+    if crate::fp_contract::contract_off_line() {
         return dot_contract_off(a, b);
     }
     let n = a.len();
@@ -75,7 +75,7 @@ pub(crate) fn dot(a: &[f64], b: &[f64]) -> f64 {
 /// copies in `_mju_cholFactor` and `_mj_solPrimal`.
 pub(crate) fn dot_self(a: &[f64]) -> f64 {
     // `mju_norm` and the Cholesky diagonal call `mju_dot(v, v)`, the same SSE symbol.
-    if crate::fp_contract::contract_off_family() {
+    if crate::fp_contract::contract_off_line() {
         return dot_contract_off(a, a);
     }
     let n = a.len();
@@ -139,7 +139,7 @@ impl NativeEq {
 }
 
 fn oracle_identity() -> bool {
-    crate::fp_contract::contract_off_family()
+    crate::fp_contract::contract_off_line()
 }
 
 /// `mji_mulMatVec3`. Published rows are fused from the right. `64156abe` is
@@ -738,13 +738,41 @@ impl SmoothModel {
                     let (cols, vals, cpos) = match j2 {
                         Some((dof2, qadr2, ref2)) => {
                             let dif = qpos[*qadr2] - ref2;
-                            let p = d[1].mul_add(dif, d[2] * dif * dif);
-                            let p = (d[3] * dif * dif).mul_add(dif, p);
-                            let p = (d[4] * dif * dif * dif).mul_add(dif, p);
-                            let cpos = pos0 - ref1 - d[0] - p;
-                            let deriv = (2.0 * d[2]).mul_add(dif, d[1]);
-                            let deriv = (3.0 * d[3] * dif).mul_add(dif, deriv);
-                            let deriv = (4.0 * d[4] * dif * dif).mul_add(dif, deriv);
+                            // `64156abe` `mj_instantiateEquality`. The position poly adds
+                            // `(coef*dif^k) + acc`, powers by successive `mulsd dif`.
+                            // The derivative is `data[1] + ((data[2]+data[2])*dif)`, then
+                            // `((3*data[3])*dif)*dif` and `(((4*data[4])*dif)*dif)*dif`,
+                            // each added as `term + acc`.
+                            let (p, deriv) = if oracle_identity() {
+                                let d1 = d[1] * dif;
+                                let d2 = (d[2] * dif) * dif;
+                                let mut acc = d2 + d1;
+                                let d3 = ((d[3] * dif) * dif) * dif;
+                                acc = d3 + acc;
+                                let d4 = (((d[4] * dif) * dif) * dif) * dif;
+                                let p = d4 + acc;
+                                let mut t = d[2] + d[2];
+                                t *= dif;
+                                let mut deriv = d[1] + t;
+                                let mut t3 = 3.0 * d[3];
+                                t3 *= dif;
+                                t3 *= dif;
+                                deriv = t3 + deriv;
+                                let mut t4 = 4.0 * d[4];
+                                t4 *= dif;
+                                t4 *= dif;
+                                t4 *= dif;
+                                (p, t4 + deriv)
+                            } else {
+                                let p = d[1].mul_add(dif, d[2] * dif * dif);
+                                let p = (d[3] * dif * dif).mul_add(dif, p);
+                                let p = (d[4] * dif * dif * dif).mul_add(dif, p);
+                                let deriv = (2.0 * d[2]).mul_add(dif, d[1]);
+                                let deriv = (3.0 * d[3] * dif).mul_add(dif, deriv);
+                                let deriv = (4.0 * d[4] * dif * dif).mul_add(dif, deriv);
+                                (p, deriv)
+                            };
+                            let cpos = ((pos0 - ref1) - d[0]) - p;
                             if sparse {
                                 // `mju_combineSparse`: the two sorted chains merged
                                 let mut entries = [(dof1, 1.0f64), (*dof2, -deriv)];
@@ -1072,7 +1100,7 @@ impl SmoothModel {
             .collect();
         // Published path keeps the fused form. The contract-off identity uses
         // `mj_referenceConstraint` with `shift = 0`: `-B*vel - K*I*(pos-margin)`.
-        let contract_off = crate::fp_contract::contract_off_family();
+        let contract_off = crate::fp_contract::contract_off_line();
         e.aref = (0..nefc)
             .map(|i| {
                 let k = &e.kbip[i];
@@ -1097,10 +1125,16 @@ impl SmoothModel {
                 let chain = if sparse { self.merge_chain_all(b1, b2) } else { Vec::new() };
                 for k in 0..3 {
                     let (v1, v2) = if sparse {
+                        // `mju_dotSparseX3`: `(jac·qvel) + acc`, unfused in `64156abe`.
                         let mut s = (0.0f64, 0.0f64);
                         for &c in &chain {
-                            s.0 = jd1[k][c].mul_add(qvel[c], s.0);
-                            s.1 = jd2[k][c].mul_add(qvel[c], s.1);
+                            if contract_off {
+                                s.0 = jd1[k][c] * qvel[c] + s.0;
+                                s.1 = jd2[k][c] * qvel[c] + s.1;
+                            } else {
+                                s.0 = jd1[k][c].mul_add(qvel[c], s.0);
+                                s.1 = jd2[k][c].mul_add(qvel[c], s.1);
+                            }
                         }
                         s
                     } else {
