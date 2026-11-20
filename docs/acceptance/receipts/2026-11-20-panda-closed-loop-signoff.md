@@ -43,4 +43,16 @@ the 3 published-default mjcf_tree failures are in `--lib`, so cargo stops before
 
 ## Envelope
 
-bmi-2's half of EPISODE_ENVELOPE_INTEROPERABLE, dated 2026-11-20: both directions round-trip byte for byte through ferromorphic::sim::EpisodeEnvelope::from_text and through ours, and envelope 170e9795 reproduced on bmi-2's machine. The flag stays false until bmi-3 signs off.
+bmi-2's half of the envelope text, dated 2026-11-20: both directions round-trip byte for byte through ferromorphic::sim::EpisodeEnvelope::from_text and through ours, and envelope 170e9795 reproduced on bmi-2's machine.
+
+## Envelope text sign-off
+
+Flag: ferromorphic↔ferromotion envelope text interop. SIGNED by bmi-3 (ferric review) 2026-11-20 ~10:56 ET. Scope: EpisodeEnvelope text exchange between ferromorphic and ferromotion only. Not ferric interop; EPISODE_ENVELOPE_INTEROPERABLE stays false, gated on (a)–(d).
+
+bmi-3 verified this from fresh clones, read-only:
+
+* ferromotion `31ad06a202af982af2564b1497d7ce4d779c9c00`, receipt sha256 `853bb5ecb56a3425f2553224e6ab18d8e318a0f0f0c03731885effefc13bc837`, log sha256 `e67a826f1af8349df5fe983da0102c7ae10c94a3ee07180d539f51d15cd48cd6`, Cargo.lock sha256 `7a0ddbf92a1233fcc17f57ca5e5ae2f060096c33a60a4b94082779219b2653e9` (unchanged after the `--locked` run)
+* ferromorphic `82211dc861af4ecc1afa9603c2caf20d52712b6d`
+* the envelope is 96 ASCII bytes, built at `crates/ferromotion-core/tests/panda_closed_loop.rs` lines 211–212, sha256 `170e9795fc32875de5a6f6a531e5efd51760b73013e2b1b4fc5e9ab7d4f8091a`
+* `cargo +1.100.0 test --locked -p ferromotion-core --test panda_closed_loop` on rustc 1.100.0 (`0ef1bc386`, LLVM 23.1.5, `x86_64-unknown-linux-gnu`): 1 passed, and every hash reproduced, including the 16 tick hashes in the table above
+* an independent byte-for-byte round trip in both directions

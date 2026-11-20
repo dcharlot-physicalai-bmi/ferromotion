@@ -113,10 +113,26 @@ pub enum UnresolvedPolicy {
 pub const UNRESOLVED: [UnresolvedPolicy; 1] = [UnresolvedPolicy::AccumulatorRemainsInsideDynamicsLab];
 
 /// Outer episode envelope. Version 1 is a proposal. It is not codec v2 and it
-/// is not part of the v2 digest. Peers have not accepted it. Receipt v2 text
-/// matching the pinned ferromorphic bytes is not this flag.
+/// is not part of the v2 digest. Ferric has not accepted a binding to it.
+/// That accept is [`EPISODE_ENVELOPE_INTEROPERABLE`]. Receipt v2 text matching
+/// the pinned ferromorphic bytes is not that flag.
 pub const EPISODE_ENVELOPE_VERSION: u32 = 1;
+
+/// Ferric interop: a Ferric v2 action chunk bound to an episode.
+///
+/// Stays false until bmi-3 signs points (a)–(d) in
+/// `docs/design/ferric-episode-binding.md`. Envelope text between ferromorphic
+/// and ferromotion is [`FERROMORPHIC_ENVELOPE_TEXT_INTEROPERABLE`], not this flag.
 pub const EPISODE_ENVELOPE_INTEROPERABLE: bool = false;
+
+/// ferromorphic↔ferromotion envelope text interop.
+///
+/// Both directions round-trip byte for byte through
+/// `ferromorphic::sim::EpisodeEnvelope::from_text` and ours, at `31ad06a2`
+/// and envelope `170e9795fc32875de5a6f6a531e5efd51760b73013e2b1b4fc5e9ab7d4f8091a`.
+/// bmi-2 signed 2026-11-20. bmi-3's signature is pending.
+/// Not ferric interop.
+pub const FERROMORPHIC_ENVELOPE_TEXT_INTEROPERABLE: bool = false;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Spike {
@@ -980,6 +996,7 @@ spike 4 1
         assert_eq!(EpisodeEnvelope::from_text(&text).unwrap().to_text(), text);
         assert_eq!(EpisodeEnvelope::from_text("ferromorphic-episode 1\n"), Err(TimebaseError::BadTick));
         const { assert!(!EPISODE_ENVELOPE_INTEROPERABLE); }
+        const { assert!(!FERROMORPHIC_ENVELOPE_TEXT_INTEROPERABLE); }
         const { assert!(JOINT_LOOP_EXECUTED); }
     }
 }
