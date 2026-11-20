@@ -1319,7 +1319,7 @@ fn witness_on_face(v: &V3, p: &V3, n: &V3, dir: &V3) -> (V3, V3, f64) {
 /// the four of largest area when only four are wanted.
 ///
 /// Returns whether it produced witness points; `false` leaves `st` holding EPA's single pair untouched.
-fn polygon_clip(st: &mut CcdStatus, face1: &[V3], face2: &[V3], n: &V3, dir: &V3) -> bool {
+fn polygon_clip(st: &mut CcdStatus, face1: &[V3], face2: &[V3], n: &V3, dir: &V3, keep: f64) -> bool {
     let nface1 = face1.len();
     if nface1 < 3 {
         return false;
@@ -1361,7 +1361,8 @@ fn polygon_clip(st: &mut CcdStatus, face1: &[V3], face2: &[V3], n: &V3, dir: &V3
         }
         polygon = clipped;
     }
-    let polygon: Vec<V3> = polygon.into_iter().filter(|p| dot3(&(p - face1[0]), n) <= 0.0).collect();
+    // `5491d70f` keeps a vertex when `dot(p − face, n) <= margin`. 3.13 uses 0.
+    let polygon: Vec<V3> = polygon.into_iter().filter(|p| dot3(&(p - face1[0]), n) <= keep).collect();
     if polygon.is_empty() {
         return false;
     }
@@ -1644,6 +1645,31 @@ fn aligned_faces(n1: &[(V3, usize)], n2: &[(V3, usize)]) -> Option<(usize, usize
     None
 }
 
+/// `alignedFaces` in `5491d70f` / `4849b2dd`. A normal is skipped unless it faces
+/// `dir` (`dot >= -edge_tol·‖dir‖` on the first geom, `dot <= edge_tol·‖dir‖` on
+/// the second). Among the pairs that clear `-0.996`, the most anti-aligned wins.
+fn aligned_faces_4(n1: &[(V3, usize)], n2: &[(V3, usize)], dir: &V3) -> Option<(usize, usize)> {
+    let dir_tol = EDGE_TOL * norm3(dir);
+    let mut best = -FACE_TOL;
+    let mut found = None;
+    for (i, a) in n1.iter().enumerate() {
+        if dot3(&a.0, dir) >= -dir_tol {
+            continue;
+        }
+        for (j, b) in n2.iter().enumerate() {
+            if dot3(&b.0, dir) <= dir_tol {
+                continue;
+            }
+            let tmp = dot3(&a.0, &b.0);
+            if tmp < best {
+                best = tmp;
+                found = Some((i, j));
+            }
+        }
+    }
+    found
+}
+
 fn aligned_face_edge(edges: &[(V3, V3)], faces: &[(V3, usize)], dir: &V3) -> Option<(usize, usize)> {
     for (i, f) in faces.iter().enumerate() {
         if dot3(&f.0, dir) <= MINVAL {
@@ -1697,28 +1723,55 @@ fn multicontact(pt: &Polytope, fi: usize, st: &mut CcdStatus, o1: &CcdObj, o2: &
     let mut edgecon2 = false;
     let mut e1: Vec<(V3, V3)> = Vec::new();
     let mut e2: Vec<(V3, V3)> = Vec::new();
-    let (i, j) = match aligned_faces(&n1, &n2) {
-        Some(r) => r,
-        None => {
-            if nface1 < 3 && nface1 <= nface2 {
+    let four = crate::fp_contract::oracle_4_0_schedules();
+    let (i, j) = if let Some(r) = if four { aligned_faces_4(&n1, &n2, &dir) } else { aligned_faces(&n1, &n2) } {
+        r
+    } else if four {
+        // both features may be edges; try the smaller one first, then the other
+        let mut order = [1, 2];
+        if (nface2 < nface1 || n2.is_empty()) && nface2 < 3 && !n1.is_empty() {
+            order = [2, 1];
+        }
+        let mut picked = None;
+        for k in order {
+            if k == 1 && nface1 < 3 && !n2.is_empty() {
                 e1 = edge_normals(o1, nface1, &v1, v1i[0]);
-                n1.clear();
-                let Some(r) = aligned_face_edge(&e1, &n2, &dir) else { return };
-                edgecon1 = true;
-                r
-            } else if nface2 < 3 {
+                if let Some(r) = aligned_face_edge(&e1, &n2, &dir) {
+                    edgecon1 = true;
+                    picked = Some(r);
+                    break;
+                }
+            } else if k == 2 && nface2 < 3 && !n1.is_empty() {
                 e2 = edge_normals(o2, nface2, &v2, v2i[0]);
-                n2.clear();
-                let Some(r) = aligned_face_edge(&e2, &n1, &dir_neg) else { return };
-                edgecon2 = true;
-                r
-            } else {
-                return;
+                if let Some(r) = aligned_face_edge(&e2, &n1, &dir_neg) {
+                    edgecon2 = true;
+                    picked = Some(r);
+                    break;
+                }
             }
         }
+        let Some(r) = picked else { return };
+        r
+    } else if nface1 < 3 && nface1 <= nface2 {
+        e1 = edge_normals(o1, nface1, &v1, v1i[0]);
+        n1.clear();
+        let Some(r) = aligned_face_edge(&e1, &n2, &dir) else { return };
+        edgecon1 = true;
+        r
+    } else if nface2 < 3 {
+        e2 = edge_normals(o2, nface2, &v2, v2i[0]);
+        n2.clear();
+        let Some(r) = aligned_face_edge(&e2, &n1, &dir_neg) else { return };
+        edgecon2 = true;
+        r
+    } else {
+        return;
     };
     let face1: Vec<V3> = if edgecon1 { vec![v1[0], e1[i].1] } else { face_vertices(o1, if edgecon2 { n1[j].1 } else { n1[i].1 }) };
     let face2: Vec<V3> = if edgecon2 { vec![v2[0], e2[i].1] } else { face_vertices(o2, n2[j].1) };
+    // half the geom margin, and none of a capsule's (its radius is already in the witness)
+    let half = |o: &CcdObj| if four && o.kind != GeomType::Capsule { 0.5 * o.margin } else { 0.0 };
+    let keep = half(o1) + half(o2);
     if edgecon1 {
         // the faces go in reversed, so the witness points come out belonging to the other geom.
         //
@@ -1728,19 +1781,19 @@ fn multicontact(pt: &Polytope, fi: usize, st: &mut CcdStatus, o1: &CcdObj, o2: &
         // backwards). This is a port of MuJoCo, so it does the same.
         let wit_dir = n2[j].0 * -1.0;
         let nrm = n2[j].0;
-        polygon_clip(st, &face2, &face1, &nrm, &wit_dir);
+        polygon_clip(st, &face2, &face1, &nrm, &wit_dir, keep);
         std::mem::swap(&mut st.x1, &mut st.x2);
         return;
     }
     if edgecon2 {
         let wit_dir = n1[j].0 * -1.0;
         let nrm = n1[j].0;
-        polygon_clip(st, &face1, &face2, &nrm, &wit_dir);
+        polygon_clip(st, &face1, &face2, &nrm, &wit_dir, keep);
         return;
     }
     let wit_dir = n2[j].0;
     let nrm = n1[i].0;
-    polygon_clip(st, &face1, &face2, &nrm, &wit_dir);
+    polygon_clip(st, &face1, &face2, &nrm, &wit_dir, keep);
 }
 
 fn inflate(st: &mut CcdStatus, margin1: f64, margin2: f64) {
