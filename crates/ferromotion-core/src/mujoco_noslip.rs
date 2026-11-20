@@ -423,7 +423,12 @@ pub(crate) fn sol_noslip(p: &Dual, efclist: &[usize], ne: usize, nf: usize, forc
             let i = efclist[c];
             let res = p.residual(force, i, 1);
             let old = force[i];
-            force[i] = (-res[0]).mul_add(arinv[c], force[i]);
+            // `force -= res·ARinv`. `64156abe` subtracts the product.
+            force[i] = if crate::fp_contract::contract_off() {
+                force[i] - res[0] * arinv[c]
+            } else {
+                (-res[0]).mul_add(arinv[c], force[i])
+            };
             if force[i] < -floss[i] {
                 force[i] = -floss[i];
             } else if force[i] > floss[i] {
