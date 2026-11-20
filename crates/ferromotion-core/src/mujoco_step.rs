@@ -442,8 +442,8 @@ impl SmoothModel {
             for r in 0..6 {
                 for c in 0..6 {
                     let q = if r == c { qderiv[diag(adr + r)] } else { 0.0 };
-                    // `A −= h·qDeriv`.
-                    a[6 * r + c] = if separate { a[6 * r + c] - h * q } else { (-h).mul_add(q, a[6 * r + c]) };
+                    // `A −= h·qDeriv`. 4.0.0 and 4.0.1 `mjd_freeMhat` is not this 3.13 schedule.
+                    a[6 * r + c] = if off() { a[6 * r + c] - h * q } else { (-h).mul_add(q, a[6 * r + c]) };
                 }
             }
             let k = &sd.kin;
@@ -453,8 +453,8 @@ impl SmoothModel {
             let h_mass = -h * mass;
             for r in 0..3 {
                 for c in 0..3 {
-                    // `A += h_mass·lin` and `A += h·rot`.
-                    if separate {
+                    // `A += h_mass·lin` and `A += h·rot`. 4.0.0 and 4.0.1 `mjd_freeMhat` is not this 3.13 schedule.
+                    if off() {
                         a[6 * r + 3 + c] += h_mass * lin[3 * r + c];
                         a[6 * (3 + r) + 3 + c] += h * rot[3 * r + c];
                     } else {

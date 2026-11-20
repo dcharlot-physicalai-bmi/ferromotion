@@ -257,6 +257,7 @@ fn cost_change(a: &[f64], force: &mut [f64], old: &[f64], res: &[f64], dim: usiz
 fn qcqp2(ain: &[f64], bin: &[f64], d: &[f64], r: f64) -> ([f64; 5], bool) {
     let (b1, b2) = (bin[0] * d[0], bin[1] * d[1]);
     let (a11, a22, a12) = (ain[0] * d[0] * d[0], ain[3] * d[1] * d[1], ain[1] * d[0] * d[1]);
+    // `mju_QCQP2` matches in 4849b2dd and 5491d70f, but this schedule dropped one `efc_state` on both.
     let separate = crate::fp_contract::contract_off();
     let (mut la, mut v1, mut v2) = (0.0f64, 0.0f64, 0.0f64);
     for _ in 0..20 {
@@ -297,7 +298,8 @@ fn qcqp3(ain: &[f64], bin: &[f64], d: &[f64], r: f64) -> ([f64; 5], bool) {
     let (b1, b2, b3) = (bin[0] * d[0], bin[1] * d[1], bin[2] * d[2]);
     let (a11, a22, a33) = (ain[0] * d[0] * d[0], ain[4] * d[1] * d[1], ain[8] * d[2] * d[2]);
     let (a12, a13, a23) = (ain[1] * d[0] * d[1], ain[2] * d[0] * d[2], ain[5] * d[1] * d[2]);
-    let separate = crate::fp_contract::contract_off();
+    // `mju_QCQP3` matches in 64156abe, 4849b2dd, and 5491d70f apart from relocation.
+    let separate = crate::fp_contract::contract_off_line();
     let (mut la, mut v1, mut v2, mut v3) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     for _ in 0..20 {
         // `mju_QCQP3` in `64156abe`: each product is separate, sums run left to right.
@@ -449,7 +451,7 @@ pub(crate) fn sol_noslip(p: &Dual, efclist: &[usize], ne: usize, nf: usize, forc
             let i = efclist[c];
             let res = p.residual(force, i, 1);
             let old = force[i];
-            // `force -= res·ARinv`. `64156abe` subtracts the product.
+            // `force -= res·ARinv`. `solNoSlip` in 4849b2dd and 5491d70f is not this 3.13 schedule.
             force[i] = if crate::fp_contract::contract_off() {
                 force[i] - res[0] * arinv[c]
             } else {
