@@ -1935,7 +1935,8 @@ fn hull4f(verts: &[V3], idx: &[usize], a: usize) -> Vec<usize> {
 // the driver's use of it (mjc_Convex / mjc_penetration / maxContacts)
 // ------------------------------------------------------------------------------------------------
 
-/// `maxContacts`: how many contacts MuJoCo asks the CCD for.
+/// `maxContacts` as 3.13 compiles it: a positive margin forces a single contact, and a face pair
+/// (box, mesh, cylinder) asks for four when `multiccd` is on.
 pub fn max_contacts(k1: GeomType, k2: GeomType, margin: f64, multiccd: bool) -> usize {
     if margin > 0.0 {
         return 1;
@@ -1946,6 +1947,23 @@ pub fn max_contacts(k1: GeomType, k2: GeomType, margin: f64, multiccd: bool) -> 
     let poly = |k: GeomType| matches!(k, GeomType::Box | GeomType::Mesh | GeomType::Cylinder);
     if poly(k1) && poly(k2) {
         return if multiccd { 4 } else { 1 };
+    }
+    1
+}
+
+/// `maxContacts` as `4849b2dd` and `5491d70f` compile it. Margin is ignored. A face pair asks for
+/// four contacts; a capsule edge against a face or another edge asks for two. `multiccd` off is one.
+pub fn max_contacts_4(k1: GeomType, k2: GeomType, multiccd: bool) -> usize {
+    if !multiccd {
+        return 1;
+    }
+    let face = |k: GeomType| matches!(k, GeomType::Box | GeomType::Mesh | GeomType::Cylinder);
+    let edge = |k: GeomType| k == GeomType::Capsule;
+    if face(k1) && face(k2) {
+        return 4;
+    }
+    if (edge(k1) && face(k2)) || (face(k1) && edge(k2)) || (edge(k1) && edge(k2)) {
+        return 2;
     }
     1
 }
@@ -1970,7 +1988,11 @@ pub fn convex_pair(o1: &mut CcdObj, o2: &mut CcdObj, margin: f64, ccd_tolerance:
     let (rbound1, rbound2) = (o1.rbound(), o2.rbound());
     o1.margin = margin;
     o2.margin = margin;
-    let maxc = max_contacts(o1.kind, o2.kind, margin, multiccd);
+    let maxc = if crate::fp_contract::oracle_4_0_schedules() {
+        max_contacts_4(o1.kind, o2.kind, multiccd)
+    } else {
+        max_contacts(o1.kind, o2.kind, margin, multiccd)
+    };
     let config = CcdConfig { max_iterations: ccd_iterations, tolerance: ccd_tolerance, max_contacts: maxc, dist_cutoff: 0.0 };
     let mut con = penetration(&config, o1, o2, margin);
     if maxc > 1 {
