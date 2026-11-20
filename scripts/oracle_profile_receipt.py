@@ -101,8 +101,8 @@ def main() -> int:
     step_sha = sha256_file(args.step_log)
     native_dump_sha = sha256_file(args.native_dump)
     step_dump_sha = sha256_file(args.step_dump)
-    rustc = tool_version(["rustc", "+1.99.1", "-vV"])
-    cargo = tool_version(["cargo", "+1.99.1", "-vV"])
+    rustc = tool_version(["rustc", "+1.100.0", "-vV"])
+    cargo = tool_version(["cargo", "+1.100.0", "-vV"])
     rel = f"docs/acceptance/receipts/{args.stem or commit}.md"
     out = ROOT / rel
     body = "\n".join(
@@ -139,7 +139,7 @@ def main() -> int:
             f"export FERROMOTION_BUILD_POLICY={args.oracle_id}",
             f"export FERROMOTION_ORACLE_SHA256={lib_sha}",
             "unset FERROMOTION_CONTRACT_SITES",
-            "cargo +1.99.1 build --release -p ferromotion-core --example menagerie_native --example menagerie_native_step",
+            "cargo +1.100.0 build --release -p ferromotion-core --example menagerie_native --example menagerie_native_step",
             "target/release/examples/menagerie_native <menagerie> <x86-native.txt>",
             "MENAGERIE_LEDGER=<ledger> target/release/examples/menagerie_native_step <menagerie> <x86-step.txt>",
             "```",
