@@ -99,10 +99,10 @@ fn controller() -> (Sim<Lif>, SpikeReadout, CurrentEncoder) {
     .unwrap();
     assert_eq!(sim.episode_start(0, PERIOD_NS).unwrap(), 1);
     let encoder = CurrentEncoder::try_new(
-        &vec![5e-9; NEURONS],
-        &vec![3e-9; NEURONS],
-        &vec![-1e-6; NEURONS],
-        &vec![1e-6; NEURONS],
+        &[5e-9; NEURONS],
+        &[3e-9; NEURONS],
+        &[-1e-6; NEURONS],
+        &[1e-6; NEURONS],
     )
     .unwrap();
     let inputs = WINDOW * NEURONS;
@@ -119,7 +119,7 @@ fn controller() -> (Sim<Lif>, SpikeReadout, CurrentEncoder) {
         }
     }
     let readout =
-        SpikeReadout::try_new(WINDOW as u64, inputs, &weights, &vec![0.0; 7], &lo, &hi).unwrap();
+        SpikeReadout::try_new(WINDOW as u64, inputs, &weights, &[0.0; 7], &lo, &hi).unwrap();
     (sim, readout, encoder)
 }
 
