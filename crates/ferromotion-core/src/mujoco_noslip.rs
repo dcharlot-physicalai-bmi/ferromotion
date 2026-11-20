@@ -37,7 +37,12 @@ impl SmoothModel {
                 if xi != 0.0 {
                     for adr in start..end {
                         let c = off + self.m_colind[adr];
-                        y[c] = (-sd.qld[adr]).mul_add(xi, y[c]);
+                        // `x -= L·xᵢ`. `64156abe` subtracts the product; it does not fuse `(-L)·xᵢ + x`.
+                        y[c] = if crate::fp_contract::contract_off() {
+                            y[c] - sd.qld[adr] * xi
+                        } else {
+                            (-sd.qld[adr]).mul_add(xi, y[c])
+                        };
                     }
                 }
             }
@@ -48,12 +53,25 @@ impl SmoothModel {
             }
         }
         let mut ar = vec![0.0; nefc * nefc];
+        // `mju_sqrMatTD` calls `mju_addToScl` on the lower prefix of length `i+1`. At n >= 6 and with
+        // no alias, `64156abe` does the groups of four as `res + (scl·x)` and the tail as `(scl·x) + res`.
+        // Shorter prefixes are entirely `(scl·x) + res`.
+        let separate = crate::fp_contract::contract_off();
         for i in 0..nefc {
             for j in 0..nv {
                 let t = y[i * nv + j];
                 if t != 0.0 {
-                    for k in 0..=i {
-                        ar[i * nefc + k] = y[k * nv + j].mul_add(t, ar[i * nefc + k]);
+                    let n = i + 1;
+                    let wide = if separate && n >= 6 { n & !3 } else { 0 };
+                    for k in 0..n {
+                        let acc = ar[i * nefc + k];
+                        ar[i * nefc + k] = if !separate {
+                            y[k * nv + j].mul_add(t, acc)
+                        } else if k < wide {
+                            acc + y[k * nv + j] * t
+                        } else {
+                            y[k * nv + j] * t + acc
+                        };
                     }
                 }
             }
@@ -138,7 +156,12 @@ impl Dual<'_> {
                 };
         }
         for j in 0..dim {
-            res[j] = (-self.e.r[i + j]).mul_add(force[i + j], res[j]);
+            // `res -= R·f`. `64156abe` subtracts the product.
+            res[j] = if crate::fp_contract::contract_off() {
+                res[j] - self.e.r[i + j] * force[i + j]
+            } else {
+                (-self.e.r[i + j]).mul_add(force[i + j], res[j])
+            };
         }
         res
     }
@@ -234,21 +257,32 @@ fn cost_change(a: &[f64], force: &mut [f64], old: &[f64], res: &[f64], dim: usiz
 fn qcqp2(ain: &[f64], bin: &[f64], d: &[f64], r: f64) -> ([f64; 5], bool) {
     let (b1, b2) = (bin[0] * d[0], bin[1] * d[1]);
     let (a11, a22, a12) = (ain[0] * d[0] * d[0], ain[3] * d[1] * d[1], ain[1] * d[0] * d[1]);
+    let separate = crate::fp_contract::contract_off();
     let (mut la, mut v1, mut v2) = (0.0f64, 0.0f64, 0.0f64);
     for _ in 0..20 {
-        let det = (a11 + la).mul_add(a22 + la, -(a12 * a12));
+        // `det = (a11+λ)(a22+λ) − a12²`, then `v = −A⁻¹b`, `val = v·v − r²`. No FMA in `64156abe`.
+        let det = if separate { (a11 + la) * (a22 + la) - a12 * a12 } else { (a11 + la).mul_add(a22 + la, -(a12 * a12)) };
         if det < 1e-10 {
             return ([0.0; 5], false);
         }
         let detinv = 1.0 / det;
         let (p11, p22, p12) = ((a22 + la) * detinv, (a11 + la) * detinv, -a12 * detinv);
-        v1 = (-p11).mul_add(b1, -(p12 * b2));
-        v2 = (-p12).mul_add(b1, -(p22 * b2));
-        let val = (-r).mul_add(r, v1.mul_add(v1, v2 * v2));
+        if separate {
+            v1 = (-p11) * b1 - p12 * b2;
+            v2 = (-p12) * b1 - p22 * b2;
+        } else {
+            v1 = (-p11).mul_add(b1, -(p12 * b2));
+            v2 = (-p12).mul_add(b1, -(p22 * b2));
+        }
+        let val = if separate { (v1 * v1 + v2 * v2) - r * r } else { (-r).mul_add(r, v1.mul_add(v1, v2 * v2)) };
         if val < 1e-10 {
             break;
         }
-        let deriv = -2.0 * (p22 * v2).mul_add(v2, (p11 * v1).mul_add(v1, 2.0 * p12 * v1 * v2));
+        let deriv = if separate {
+            -2.0 * ((p22 * v2) * v2 + ((p11 * v1) * v1 + (2.0 * p12 * v1) * v2))
+        } else {
+            -2.0 * (p22 * v2).mul_add(v2, (p11 * v1).mul_add(v1, 2.0 * p12 * v1 * v2))
+        };
         let delta = -val / deriv;
         if delta < 1e-10 {
             break;
