@@ -3979,6 +3979,65 @@ pub(crate) fn eig3_mujoco(mat: &Matrix3<f64>) -> ([f64; 3], [f64; 4]) {
     (eigval, quat)
 }
 
+/// `mjuu_eig3` as `4849b2dd` and `5491d70f` compile it. The rotation is
+/// `h = t / (1 + √(1+t²))`, `q0 = 1/√(1+h²)`, and the axis component is `±h·q0`.
+/// `reltol` is `1e-7` for a mesh inertia and `4e-15` everywhere else.
+pub(crate) fn eig3_mujoco_4(mat: &Matrix3<f64>, reltol: f64) -> ([f64; 3], [f64; 4]) {
+    const TOL: f64 = 4e-15;
+    const SWAP: f64 = 1e-12;
+    let (quat2mat, normalize, mulquat) = (uu_quat2mat, uu_normvec4, uu_mulquat);
+    let mut scale = 0.0f64;
+    for c in 0..3 {
+        for r in 0..3 {
+            scale = scale.max(mat[(r, c)].abs());
+        }
+    }
+    let tol = scale * reltol.max(TOL);
+    let eps = scale * reltol.max(SWAP);
+    let mut quat = [1.0, 0.0, 0.0, 0.0];
+    let mut eigval = [0.0; 3];
+    for _ in 0..500 {
+        let ev = quat2mat(&quat);
+        let d = uu_mulmat(&uu_mulmat(&ev.transpose(), mat), &ev);
+        eigval = [d[(0, 0)], d[(1, 1)], d[(2, 2)]];
+        let (rk, ck, rotk) = if d[(0, 1)].abs() > d[(0, 2)].abs() && d[(0, 1)].abs() > d[(1, 2)].abs() {
+            (0, 1, 2)
+        } else if d[(0, 2)].abs() > d[(1, 2)].abs() {
+            (0, 2, 1)
+        } else {
+            (1, 2, 0)
+        };
+        if d[(rk, ck)].abs() <= tol {
+            break;
+        }
+        let tau = (d[(ck, ck)] - d[(rk, rk)]) / (2.0 * d[(rk, ck)]);
+        let t = if tau >= 0.0 { 1.0 / (tau + (1.0 + tau * tau).sqrt()) } else { -1.0 / (-tau + (1.0 + tau * tau).sqrt()) };
+        let h = t / (1.0 + (1.0 + t * t).sqrt());
+        let mut tmp = [0.0; 4];
+        tmp[0] = 1.0 / (1.0 + h * h).sqrt();
+        tmp[rotk + 1] = (if rotk == 1 { h } else { -h }) * tmp[0];
+        quat = mulquat(&quat, &tmp);
+        normalize(&mut quat);
+    }
+    for j in 0..3 {
+        let j1 = j % 2;
+        if eigval[j1] + eps < eigval[j1 + 1] {
+            eigval.swap(j1, j1 + 1);
+            #[allow(clippy::approx_constant)]
+            let mut tmp = [0.707106781186548, 0.0, 0.0, 0.0];
+            tmp[(j1 + 2) % 3 + 1] = tmp[0];
+            quat = mulquat(&quat, &tmp);
+            normalize(&mut quat);
+        }
+    }
+    (eigval, quat)
+}
+
+/// The eigendecomposition the active profile compiles. 3.13 keeps the absolute tolerance.
+fn eig3_profile(mat: &Matrix3<f64>, reltol: f64) -> ([f64; 3], [f64; 4]) {
+    if crate::fp_contract::oracle_4_0_schedules() { eig3_mujoco_4(mat, reltol) } else { eig3_mujoco(mat) }
+}
+
 /// Rotation matrix of a MuJoCo `(w x y z)` quaternion, columns = axes: `mjuu_quat2mat`.
 #[cfg(test)]
 pub(crate) fn quat_to_rotation(q: &[f64; 4]) -> Matrix3<f64> {
@@ -4939,7 +4998,7 @@ fn inertial_of(el: &El, c: &Compiler) -> Result<BodyInertial, String> {
         if v.len() != 6 {
             return Err("fullinertia needs 6 numbers (xx yy zz xy xz yz)".into());
         }
-        let (eig, q) = eig3_mujoco(&Matrix3::new(v[0], v[3], v[4], v[3], v[1], v[5], v[4], v[5], v[2]));
+        let (eig, q) = eig3_profile(&Matrix3::new(v[0], v[3], v[4], v[3], v[1], v[5], v[4], v[5], v[2]), 4e-15);
         if eig[2] < 1e-14 {
             return Err("error 'inertia must have positive eigenvalues' in fullinertia".into());
         }
@@ -5842,7 +5901,8 @@ impl Walk<'_> {
         }
         self.mesh_raw.insert(name.to_string(), mesh.clone());
         let (volume, com, unit) = mesh_inertia_mujoco(&mesh, asset.inertia).map_err(|e| format!("mesh '{name}': {e}"))?;
-        let (eigval, quat) = eig3_mujoco(&unit);
+        // vertices are float32, so 4.x stops the Jacobi iteration at 1e-7 relative
+        let (eigval, quat) = eig3_profile(&unit, 1e-7);
         if eigval[2] <= 0.0 {
             return Err(format!("mesh '{name}': eigenvalue of mesh inertia must be positive"));
         }
@@ -5943,7 +6003,7 @@ impl Walk<'_> {
                         toti[j] = toti[j] + i0[j] + i1[j];
                     }
                 }
-                let (eig, quat) = eig3_mujoco(&Matrix3::new(toti[0], toti[3], toti[4], toti[3], toti[1], toti[5], toti[4], toti[5], toti[2]));
+                let (eig, quat) = eig3_profile(&Matrix3::new(toti[0], toti[3], toti[4], toti[3], toti[1], toti[5], toti[4], toti[5], toti[2]), 4e-15);
                 if eig[2] < 1e-14 {
                     return Err(format!("body '{body}': error 'inertia must have positive eigenvalues' in alternative for principal axes"));
                 }
