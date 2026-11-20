@@ -21,14 +21,18 @@ pub const FERROMORPHIC_CLOCK_PATH: &str = "docs/contracts/ferromotion-clock.md";
 pub const JOINT_LOOP_EXECUTED: bool = false;
 
 /// True for the bind contract in `tests/ferromorphic_bind_v2.rs`, tests (a) through (f),
-/// signed in `docs/acceptance/receipts/2026-11-20-bind-v2-signoff.md`.
+/// signed in `docs/acceptance/receipts/2026-11-20-bind-v2-signoff.md` against receipt
+/// `cfc22d8e` at ferromorphic `1ceec2fc`.
+///
+/// The verified scope is clock and delivery state, not net or neuron state.
+/// `Sim::state_bytes` is that clock and delivery state: the clock, mode, `exact_timing`,
+/// the ledger, the delivery ring, `inject`, `touched`, and `as_of`. It does not include
+/// `net` or `neurons`.
 ///
 /// `bind_v2_timestamps` is pure validation. A period above `2^53` is `InexactPeriod`.
 /// Epoch, origin, period, `dt_bits`, and the `t0` grid are refused. The next call
 /// revalidates. A forward-product mismatch is refused by `EpisodeEnvelope::try_new`
-/// before an envelope exists. Test (b) shows a zero-step bind leaves `Sim::state_bytes`
-/// unchanged, which covers the clock, mode, `exact_timing`, the ledger, the delivery
-/// ring, `inject`, `touched`, and `as_of`, and not `net` or `neurons`.
+/// before an envelope exists.
 ///
 /// This flag is not [`JOINT_LOOP_EXECUTED`] and not [`EPISODE_ENVELOPE_INTEROPERABLE`].
 pub const FERROMORPHIC_BIND_VERIFIED: bool = true;
