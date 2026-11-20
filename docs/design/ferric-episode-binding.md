@@ -1,55 +1,94 @@
-# Binding a Ferric v2 chunk to an episode
+# Binding a Ferric chunk to an episode
 
-agreed by bmi-2 and bmi-4 2026-11-20; bmi-3 pending
+revision 3, agreed by bmi-2, bmi-3 and bmi-4 2026-11-20
 
-Proposal only. The envelope and `bind_v2_timestamps` are unchanged in this commit. `EPISODE_ENVELOPE_INTEROPERABLE` stays false until bmi-3 signs (a)–(d). `predict_action_chunk` still returns `ContractError::ProposedEntryInvoked` at `crates/ferric-accept/src/smolvla.rs:486-487` on `cursor/toolchain-1.100`. A live-output episode needs that unblocked. Until then the chunks are fixtures.
+Proposal only. The envelope parser and `bind_v2_timestamps` are unchanged in this commit. `EPISODE_ENVELOPE_INTEROPERABLE` stays false. `predict_action_chunk` still returns `ContractError::ProposedEntryInvoked` at `crates/ferric-accept/src/smolvla.rs:486-487` on `cursor/toolchain-1.100`, so a live-output episode uses fixtures until that refusal is gone.
 
-## (a) Period follows the chunk
+## (1) Plant
 
-The envelope period is the chunk's `step_duration_ns`. The plant holds that command for its substeps.
+The plant is `trs_so_arm100/so_arm100.xml` at Menagerie `4d038b3feae26ec82b46a4d586379114012a8ac7`. `robotstudio_so101/so101.xml` is in that tree and is not this plant. `ctrl` is the position target in radians, sent through the file's own `<position>` actuators. No gain is invented.
 
-Integer nanoseconds are the authority. `substeps = period_ns / plant_ns`. `period_ns` must divide by `plant_ns` with no remainder. Construction refuses a remainder the way `InexactPeriod` refuses a period above `2^53`. The count is never computed from `f64`.
+Joint order is the file order. Ranges are radians. Every actuator is `<position>` with `inheritrange="1"`, and the class `so_arm100` sets `kp="50"`, `dampratio="1"`, and `forcerange="-3.5 3.5"`.
 
-The MJCF timestep's bits must equal the bits of the `plant_ns` conversion, `(plant_ns as f64) * 1e-9`. For `panda_nohand` that plant period is `2_000_000` ns and the fixture control period is `20_000_000` ns, so `substeps` is 10.
+| order | name | range (rad) |
+|---|---|---|
+| 1 | Rotation | −1.92 … 1.92 |
+| 2 | Pitch | −3.32 … 0.174 |
+| 3 | Elbow | −0.174 … 3.14 |
+| 4 | Wrist_Pitch | −1.66 … 1.66 |
+| 5 | Wrist_Roll | −2.79 … 2.79 |
+| 6 | Jaw | −0.174 … 1.75 |
 
-`period_ns` must be an exact multiple of the ferromorphic `dt` named by `dt_bits`. Neural steps per action are that quotient. They are derived, never a free parameter.
+`lerobot/smolvla_base` at commit `5e8d12a6e297` has `output_features.action.shape` `[6]` and `normalization_mapping.ACTION` `MEAN_STD`. The stats file `policy_preprocessor_step_5_normalizer_processor.safetensors` hashes to `490ab239d96e263687c0b2e386a0afbc235a2eceb9857c36ed32f2f162a3e7c8`. The named key is `so100.buffer.action`. Its f32 mean is `[1.5959141254425049, 119.9442367553711, 109.769775390625, 56.70551300048828, -27.422693252563477, 12.002785682678223]` and its f32 std is `[26.39177894592285, 52.41140365600586, 49.85380554199219, 36.9983024597168, 59.35995101928711, 19.039955139160156]`. The preprocessor's `eps` is `1e-8`. De-normalization is `physical = normalized * (std + eps) + mean`.
 
-Resampling onto the plant grid is rejected. The fixture never published those intermediate values.
+`lerobot/svla_so100_pickplace` `meta/info.json` records `fps` 30 and `robot_type` `so100`. LeRobot `src/lerobot/robots/so_follower/so_follower.py` at `326484d77d2ac90379e84222dfad21fe4acf1f71` (file sha256 `56cd915ab5d180dc858bbbcf10eb13e4669252d4109b868036a352a41e4aa2ea`) sets the five arm motors to `MotorNormMode.DEGREES`, the gripper to `MotorNormMode.RANGE_0_100`, and writes `Goal_Position`. That file is the unit source. Arm degrees become radians by `deg * π / 180`. The gripper's 0–100 maps linearly onto the Jaw range: `jaw = -0.174 + (p / 100) * (1.75 - -0.174)`.
 
-`bind_v2_timestamps` still checks `t0_ns` against `origin_ns + chunk_index * period_ns`, with `step_duration_ns == period_ns`. A fixture with `t0_ns = 1_000_000_000` and `step_duration_ns = 20_000_000` binds when the envelope period is `20_000_000` ns.
+The chunk's unit token is `deg` on Rotation, Pitch, Elbow, Wrist_Pitch, and Wrist_Roll, and `pct` on Jaw. `pct` means the closed interval 0–100. A name, order, or unit mismatch is an error. Nothing is remapped. A Panda retarget is out of scope unless it has its own receipted contract.
 
-## (b) Chunk binding, not an envelope field
+A target outside the actuator `ctrlrange` (the inherited joint range) saturates to that range. Each saturated component is counted on that tick and recorded on the receipt.
 
-The envelope stays version 1. It does not gain `chunk_sha256`. Its fields stay `version`, `epoch`, `dt_bits`, `period_ns`, and `origin_ns`, and its header stays `ferromorphic-episode 1`.
+## (2) Period
 
-A separate ferromorphic record, header `ferromorphic-chunk-binding 1`, has these fields in order:
+The rate is 30 Hz. The period is the reduced rational `100000000/3` nanoseconds. `1e9/30` is not an integer. The grid is checked in integer arithmetic.
 
-1. `envelope_sha256`, SHA-256 of the exact version-1 envelope text, 64 lowercase hex digits
+Rationals are reduced form only, with checked `u128` arithmetic. Overflow or a non-reduced input is refused. Equality of two rationals is exact on that reduced pair. There is no rounding step in a refusal.
+
+The plant step and the neural step are both `5000000/3` ns, which is `1/600` s. `period / plant = 20` exactly, so one action is 20 plant substeps and 20 neural steps. Those counts are the quotients. They are not free parameters.
+
+The round-to-nearest-even `f64` of `1/600` has bits `3f5b4e81b4e81b4f`. The harness sets the MJCF timestep to that value and records the resulting model hash and the timestep bits. The Menagerie file is not edited. The receiver refuses unless those timestep bits are `3f5b4e81b4e81b4f`. A 2 ms plant step is not this path. `dt_bits` on the envelope must equal the round-to-nearest-even `f64` of `dt_num_ns/dt_den`, or the envelope is refused.
+
+## (3) Envelope v2
+
+Header `ferromorphic-episode 2`. Fields, in order: `version`, `epoch`, `dt_num_ns`, `dt_den`, `dt_bits`, `period_num_ns`, `period_den`, `origin_ns`, `episode_nonce`. `episode_nonce` is 32 bytes, written as 64 lowercase hex digits.
+
+For 30 Hz, `dt_num_ns/dt_den` is `5000000/3` and `period_num_ns/period_den` is `100000000/3`. `dt_bits` is the `f64` bits of that neural step.
+
+`episode_nonce` is an explicit constructor input. The harness generates it and records it on the receipt. The library does not draw it from the operating system. The same nonce makes the envelope text byte-identical on a rerun. A fresh nonce changes `envelope_sha256`. Envelope `170e9795fc32875de5a6f6a531e5efd51760b73013e2b1b4fc5e9ab7d4f8091a` is version 1 and has no nonce, so it is identical on every run. The nonce has to live on the envelope: it is part of the episode identity, and putting it only on the binding would leave that envelope hash reusable across episodes.
+
+Version 1 stays parseable forever, under the versioning rules below.
+
+## (4) Chunk binding
+
+Header `ferromorphic-chunk-binding 1`. Fields, in order:
+
+1. `envelope_sha256`, SHA-256 of the exact envelope text, 64 lowercase hex digits
 2. `epoch`
 3. `chunk_index`
-4. `t0_ns`
-5. `step_duration_ns`, equal to the envelope `period_ns`
-6. `n_action_steps`
-7. `chunk_sha256`, SHA-256 of the Ferric v2 body bytes exactly as delivered, 64 lowercase hex digits
+4. `t0_num_ns`
+5. `t0_den`
+6. `period_num_ns`
+7. `period_den`
+8. `n_action_steps`
+9. `chunk_sha256`, 64 lowercase hex digits
 
-The chain runs one way, from the chunk binding to the envelope. The envelope is the clock for the whole episode. A chunk hash inside it would force a new envelope for every chunk, and the envelope hash inside the binding would then cycle. `bind_v2_timestamps` keeps checking `t0_ns` against `origin_ns + chunk_index * period_ns` on that one clock.
+`chunk_sha256` is Ferric's `digest_sha256` over the full canonical chunk bytes, header included. The version-2 goldens, on the `20000000/1` grid only, are `6d668d7e25c89249c890d895ef15b8fdcbb97dab7a1339a0a97605c6e1172d86` and the empty chunk `6295818fa11b85b37ad8054c75e0a1935b0c0cbb5d7e419090c2520a17b1744e`. The version-3 goldens at `100000000/3` come later with Ferric chunk v3.
 
-The SHA-256 of the binding text is stamped on every `StepReceipt` that consumes the chunk.
+The chain runs one way, from the binding to the envelope. The envelope is the clock for the whole episode. A chunk hash inside it would force a new envelope per chunk, and the binding's `envelope_sha256` would then cycle. `bind_v2_timestamps` still checks `t0` against `origin_ns + chunk_index * period` on that clock, in the integer arithmetic of the reduced rationals.
 
-Versioning for every text format: the version lives only in the header. There are no optional fields, so any field change is a new version. A strict parser refuses an unknown version, an unknown field, a missing field, uppercase hex, a missing final newline, and trailing bytes. Old parsers are kept forever. Nothing silently upgrades.
+The receiver decodes the chunk and hands `(t0, period, n)` to the ferromorphic verifier. The verifier refuses a mismatch, a `chunk_index` that is not strictly increasing, and an earlier `t0` (`Late`). The SHA-256 of the binding text is stamped on every `StepReceipt` that consumes the chunk.
 
-bmi-2 implements `ChunkBinding` in ferromorphic. ferromotion and ferric then pin to that revision.
+The receiver also refuses unless all of these hold: the binding period equals both the envelope period and the chunk period, `t0` is on the grid, and the binding's `n` equals the chunk's `n`, with `n ≤ 50`. It refuses if the MJCF timestep bits are not `3f5b4e81b4e81b4f`.
 
-## (c) Panda command
+Ferric will publish chunk v3. It carries `t0` and the period as a reduced `(num_ns, den)`, because version 2's integer `t0_ns` cannot express `100000000/3`. It also carries the SO-100 joint names and units, a named and hashed `so100` stats key, and real stats and noise hashes. Version 2 stays parseable forever. The receiver targets chunk v3. Its pin waits for bmi-3's chunk-v3 SHA. That SHA supersedes a plain re-pin to the green toolchain head.
 
-The joints are `joint1` through `joint7` in file order from `franka_emika_panda/panda_nohand.xml`. The command is torque on `qfrc_applied`. The unit token is exactly `N.m`. `rad` is refused on this path. A name or order mismatch is an error, never a remap.
+## (5) Receiver policy
 
-Torque outside the actuator `forcerange` saturates the way that range saturates: ±87 N·m for joints 1–4 and ±12 N·m for joints 5–7. Every saturated value is counted per tick and recorded in the receipt.
+Before the first chunk, the target is the `home` keyframe `qpos` (`0 -1.57 1.57 1.57 -1.57 0` in `so_arm100.xml`). The receipt source is `home`.
 
-Ferric `JointMeta` stores `name`, `unit`, and `frame` and does not convert them (`crates/ferric-accept/src/smolvla.rs` on `cursor/toolchain-1.100`). The protocol fixture's `j0` and `j1` with `dataset_label_a` and `dataset_label_b` are not this path.
+At the end of a chunk, and for `n = 0`, the receiver holds the last target. The receipt source is `hold`, and each tick increments a held count.
 
-## (d) Pins stay until the green Ferric SHA
+A hold longer than one chunk duration, `n_action_steps` times the period, without a new binding is `Stale` and ends the episode.
 
-`smolvla_receiver.rs` line 15, `FERRIC_CONTRACT_REVISION`, is `3ee11c015e3478c7c4aa0409499346f79ab1c8ce`. Line 49, `FERRIC_EMPTY_FIXTURE_REVISION`, is `c05228929efc3bcb4210b475dd959370fa69893a`. Neither is re-pinned here.
+A new chunk supersedes the rest of the current chunk from its `t0`.
 
-Re-pinning waits until bmi-3 sends the green Ferric SHA and the hashes. `cursor/toolchain-1.100` head `2706d1b9d6c4a15194429463057de2100841bb4a` is CI-red on purpose, waiting on the `det_tanh` re-receipt. The contract (`8a92d996…`) and the fixture hashes (chunk `7dc00166…`, empty `d84e270d…`) arrive with that green SHA.
+Executed-step counts and superseded-step counts are stamped on the `StepReceipt`s.
+
+## Versioning
+
+The version lives only in the header. There are no optional fields, so any field change is a new version. A strict parser refuses an unknown version, an unknown field, a missing field, uppercase hex, a missing final newline, and trailing bytes. Old parsers are kept forever. Nothing silently upgrades.
+
+bmi-2 implements `ChunkBinding` and envelope v2 in ferromorphic. ferromotion and ferric then pin to that revision.
+
+## (d) Pins
+
+`smolvla_receiver.rs` line 15, `FERRIC_CONTRACT_REVISION`, is `3ee11c015e3478c7c4aa0409499346f79ab1c8ce`. Line 49, `FERRIC_EMPTY_FIXTURE_REVISION`, is `c05228929efc3bcb4210b475dd959370fa69893a`. Neither moves until bmi-3 sends the chunk-v3 SHA. `cursor/toolchain-1.100` head `2706d1b9d6c4a15194429463057de2100841bb4a` is not that pin.
