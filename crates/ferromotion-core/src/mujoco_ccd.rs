@@ -1311,8 +1311,18 @@ fn halfspace(a: &V3, n: &V3, p: &V3) -> bool {
 }
 
 fn witness_on_face(v: &V3, p: &V3, n: &V3, dir: &V3) -> (V3, V3, f64) {
-    let dist = dot3(&(v - p), n);
-    (add_scl3(v, dir, -dist.abs()), *v, dist)
+    if crate::fp_contract::oracle_4_0_schedules() {
+        // `5491d70f` `witnessOnFace`: project `v` onto the face along `n`
+        // (`(−n·(v−p))·n + v` is `(s·n) + v`), then the gap `w1 − v` along `dir`.
+        let delta = v - p;
+        let w1 = add_scl3(v, n, -dot3(&delta, n));
+        let gap = w1 - v;
+        let dist = dot3(&gap, dir);
+        (w1, add_scl3(&w1, dir, -dist), dist)
+    } else {
+        let dist = dot3(&(v - p), n);
+        (add_scl3(v, dir, -dist.abs()), *v, dist)
+    }
 }
 
 /// `polygonClip`: clip `face2` against the prism of `face1`, keep points below `face1`'s plane, reduce to
@@ -1771,7 +1781,13 @@ fn multicontact(pt: &Polytope, fi: usize, st: &mut CcdStatus, o1: &CcdObj, o2: &
     let face2: Vec<V3> = if edgecon2 { vec![v2[0], e2[i].1] } else { face_vertices(o2, n2[j].1) };
     // half the geom margin, and none of a capsule's (its radius is already in the witness)
     let half = |o: &CcdObj| if four && o.kind != GeomType::Capsule { 0.5 * o.margin } else { 0.0 };
-    let keep = half(o1) + half(o2);
+    let (m1, m2) = (half(o1), half(o2));
+    let keep = m1 + m2;
+    let finish = |st: &mut CcdStatus, normal: &V3| {
+        if four {
+            inflate_along(st, m1, m2, normal);
+        }
+    };
     if edgecon1 {
         // the faces go in reversed, so the witness points come out belonging to the other geom.
         //
@@ -1781,19 +1797,43 @@ fn multicontact(pt: &Polytope, fi: usize, st: &mut CcdStatus, o1: &CcdObj, o2: &
         // backwards). This is a port of MuJoCo, so it does the same.
         let wit_dir = n2[j].0 * -1.0;
         let nrm = n2[j].0;
-        polygon_clip(st, &face2, &face1, &nrm, &wit_dir, keep);
-        std::mem::swap(&mut st.x1, &mut st.x2);
+        if polygon_clip(st, &face2, &face1, &nrm, &wit_dir, keep) {
+            std::mem::swap(&mut st.x1, &mut st.x2);
+            finish(st, &wit_dir);
+        } else if !four {
+            std::mem::swap(&mut st.x1, &mut st.x2);
+        }
         return;
     }
     if edgecon2 {
         let wit_dir = n1[j].0 * -1.0;
         let nrm = n1[j].0;
-        polygon_clip(st, &face1, &face2, &nrm, &wit_dir, keep);
+        if polygon_clip(st, &face1, &face2, &nrm, &wit_dir, keep) {
+            finish(st, &nrm);
+        }
         return;
     }
     let wit_dir = n2[j].0;
     let nrm = n1[i].0;
-    polygon_clip(st, &face1, &face2, &nrm, &wit_dir, keep);
+    if polygon_clip(st, &face1, &face2, &nrm, &wit_dir, keep) {
+        finish(st, &(-wit_dir));
+    }
+}
+
+/// `inflate` after `mjc_multicontact`: shift every witness along `normal` and deepen `dist`.
+fn inflate_along(st: &mut CcdStatus, margin1: f64, margin2: f64, normal: &V3) {
+    if margin1 == 0.0 && margin2 == 0.0 {
+        return;
+    }
+    for i in 0..st.x1.len() {
+        if margin1 != 0.0 {
+            st.x1[i] = add_scl3(&st.x1[i], normal, margin1);
+        }
+        if margin2 != 0.0 {
+            st.x2[i] = add_scl3(&st.x2[i], normal, -margin2);
+        }
+        st.dist[i] -= margin1 + margin2;
+    }
 }
 
 fn inflate(st: &mut CcdStatus, margin1: f64, margin2: f64) {
