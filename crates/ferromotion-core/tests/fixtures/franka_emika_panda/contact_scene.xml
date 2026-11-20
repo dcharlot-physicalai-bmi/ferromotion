@@ -1,0 +1,7 @@
+<mujoco model="panda nohand contact">
+  <include file="panda_nohand.xml"/>
+  <worldbody>
+    <!-- The plane cuts the real link0 collision mesh. The Menagerie assets are not edited. -->
+    <geom name="floor" type="plane" pos="0 0 0.2" size="0 0 0.05"/>
+  </worldbody>
+</mujoco>

@@ -1,0 +1,18 @@
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+binary: rustc
+commit-hash: 0ef1bc386059596dada8fb65b50425aab2ea637a
+commit-date: 2026-11-09
+host: x86_64-unknown-linux-gnu
+release: 1.100.0
+LLVM version: 23.1.5
+cargo 1.100.0 (3acc79c0c 2026-11-05)
+7a0ddbf92a1233fcc17f57ca5e5ae2f060096c33a60a4b94082779219b2653e9  Cargo.lock
+   Compiling ferromotion-core v0.73.0 (/agent/repos/ferromotion/crates/ferromotion-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.84s
+     Running tests/panda_contact_loop.rs (target/debug/build/ferromotion-core/1eeb144653c93338/out/panda_contact_loop-1eeb144653c93338)
+
+running 1 test
+test panda_contact_episode_touches_and_differs_from_zero_torque ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.50s
+
