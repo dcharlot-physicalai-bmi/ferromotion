@@ -8,7 +8,7 @@ use ferromotion_core::{
     JOINT_LOOP_EXECUTED,
 };
 
-const PIN: &str = "a6722b49ff7dc770b1cb062adac21aa5c7155401";
+const PIN: &str = "1ceec2fc884668db16905bed190a8c05873423e7";
 
 const PINNED_SAMPLE: &str = "\
 ferromorphic-step 2

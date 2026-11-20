@@ -13,7 +13,7 @@ use ferromotion_core::{
     JOINT_LOOP_EXECUTED,
 };
 
-const PIN: &str = "a6722b49ff7dc770b1cb062adac21aa5c7155401";
+const PIN: &str = "1ceec2fc884668db16905bed190a8c05873423e7";
 const PERIOD: u64 = 1_000;
 
 fn flags_stay_false() {
@@ -58,9 +58,10 @@ fn a_matching_snapshot_binds() {
     );
 }
 
-/// Public `Sim` fields, little-endian. `ring`, `inject`, `touched`, and `as_of` are private and
-/// have no byte export. `bind_v2_timestamps` is not given `&mut Sim`, so those fields are not
-/// written by the call either.
+/// Public `Sim` fields the caller can already read: clock, mode, ledger, and neuron parameters.
+/// `Sim::state_bytes` is the separate export of the private remainder (`ring`, `inject`,
+/// `touched`, `as_of`, `exact_timing`) plus the clock and the ledger. It does not include
+/// `net` or `neurons`. Both are checked around the zero-step bind.
 fn sim_public_bytes(sim: &Sim<Lif>) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend(sim.dt.to_bits().to_le_bytes());
@@ -124,7 +125,8 @@ fn a_zero_step_count_checks_and_stamps_nothing() {
     let fired = sim.try_step(&[]).unwrap();
     let receipt = StepReceipt::from_step(sim.epoch, tick, sim.dt, sim.mode, &fired);
     let receipt_bytes = receipt.to_text().into_bytes();
-    let state_bytes = sim_public_bytes(&sim);
+    let public_bytes = sim_public_bytes(&sim);
+    let owned_bytes = sim.state_bytes();
     let (envelope, clock) = pair(PERIOD);
     let clock_before = clock;
     assert_eq!(clock.dt_bits, sim.dt.to_bits());
@@ -134,7 +136,8 @@ fn a_zero_step_count_checks_and_stamps_nothing() {
     );
     assert_eq!(clock, clock_before);
     assert_eq!(receipt.to_text().into_bytes(), receipt_bytes);
-    assert_eq!(sim_public_bytes(&sim), state_bytes);
+    assert_eq!(sim_public_bytes(&sim), public_bytes);
+    assert_eq!(sim.state_bytes(), owned_bytes);
     assert_eq!(StepReceipt::from_text(&receipt.to_text()).unwrap(), receipt);
 }
 
