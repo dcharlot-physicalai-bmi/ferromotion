@@ -1258,7 +1258,7 @@ dependencies = [
 [[package]]
 name = "ferromorphic"
 version = "0.23.2"
-source = "git+https://github.com/dcharlot-physicalai-bmi/ferromorphic.git?rev=1ceec2fc884668db16905bed190a8c05873423e7#1ceec2fc884668db16905bed190a8c05873423e7"
+source = "git+https://github.com/dcharlot-physicalai-bmi/ferromorphic.git?rev=82211dc861af4ecc1afa9603c2caf20d52712b6d#82211dc861af4ecc1afa9603c2caf20d52712b6d"
 
 [[package]]
 name = "ferromotion"

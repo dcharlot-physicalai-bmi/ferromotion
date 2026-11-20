@@ -1,7 +1,7 @@
 //! Integer-tick boundary for the ferromorphic clock contract.
 //!
 //! Read from `docs/contracts/ferromotion-clock.md` at ferromorphic
-//! `1ceec2fc884668db16905bed190a8c05873423e7`. That document is a draft exchange.
+//! `82211dc861af4ecc1afa9603c2caf20d52712b6d`. That document is a draft exchange.
 //! Nothing here runs `Sim::step`, `DynamicsLab::step`, or a joint loop.
 //!
 //! `DynamicsLab::time` stays an accumulated `f64` inside ferromotion-wasm. This
@@ -14,7 +14,7 @@
 
 /// Clock-contract document pin. Not the older joint-acceptance pin
 /// `8dabe3a45e589908f524b595da09bbadbc8aa103`.
-pub const FERROMORPHIC_CLOCK_REVISION: &str = "1ceec2fc884668db16905bed190a8c05873423e7";
+pub const FERROMORPHIC_CLOCK_REVISION: &str = "82211dc861af4ecc1afa9603c2caf20d52712b6d";
 pub const FERROMORPHIC_CLOCK_PATH: &str = "docs/contracts/ferromotion-clock.md";
 
 /// The schedule in that document was not executed in either repository.
@@ -593,7 +593,7 @@ mod tests {
         const { assert!(!JOINT_LOOP_EXECUTED); }
         const { assert!(FERROMORPHIC_BIND_VERIFIED); }
         const { assert!(!EPISODE_ENVELOPE_INTEROPERABLE); }
-        assert_eq!(FERROMORPHIC_CLOCK_REVISION, "1ceec2fc884668db16905bed190a8c05873423e7");
+        assert_eq!(FERROMORPHIC_CLOCK_REVISION, "82211dc861af4ecc1afa9603c2caf20d52712b6d");
         assert_ne!(FERROMORPHIC_CLOCK_REVISION, crate::joint_acceptance::FERROMORPHIC_REVISION);
     }
 
