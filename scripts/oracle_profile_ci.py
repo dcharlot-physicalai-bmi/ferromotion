@@ -33,6 +33,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PIN_PATH = ROOT / "conformance" / "oracle_x86_contract_off.json"
 RECEIPTS = ROOT / "docs" / "acceptance" / "receipts"
 COMMIT_RE = re.compile(r"ferromotion commit `([0-9a-f]{40})`")
+ORACLE_RE = re.compile(r"^\* oracle id `([^`]+)`$", re.M)
 BULLET_RE = re.compile(r"^\* `([^`]+)`$")
 
 
@@ -256,9 +257,14 @@ def receipt_rank(code_time: int, file_time: int, name: str) -> tuple[int, int, s
 
 def latest_receipt(directory: Path | None = None) -> Path:
     directory = directory or RECEIPTS
+    oracle = json.loads(PIN_PATH.read_text())["oracle_id"]
     ranked: list[tuple[tuple[int, int, str], Path]] = []
     for path in sorted(directory.glob("*.md")):
-        sha = receipt_commit(path.read_text())
+        text = path.read_text()
+        named = ORACLE_RE.search(text)
+        if named is not None and named.group(1) != oracle:
+            continue
+        sha = receipt_commit(text)
         if sha is None:
             continue
         when = commit_time(sha)

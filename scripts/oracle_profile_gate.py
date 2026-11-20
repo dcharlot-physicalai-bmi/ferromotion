@@ -28,6 +28,7 @@ STEP_RE = re.compile(
 FIELD_RE = re.compile(r"^\s*(mjData|mjModel)\s+(\S+)\s+(\d+) of (\d+)\s*(?:worst\b.*)?$")
 ORACLE_RE = re.compile(r"^\* oracle id `([^`]+)`$")
 UTC_RE = re.compile(r"^\* UTC `([^`]+)` through `([^`]+)`$")
+WRITTEN_RE = re.compile(r"^\* (?:native|step) log written `([^`]+)`$")
 SET_RE = re.compile(r"^\* exact model set sha256 `([0-9a-f]{64})`$")
 COUNT_RE = re.compile(r"^20-step bit-exact models: (\d+) of (\d+)\. Loader refusals: (\d+)\.$")
 LIB_RE = re.compile(r"^\* libmujoco sha256 pin `([0-9a-f]{64})`$")
@@ -121,6 +122,7 @@ def load_receipt(path: Path) -> Receipt:
         raise SystemExit(f"receipt sidecar does not hash {rel}")
     text = path.read_text()
     oracle = UTC = stated = None
+    written: list[str] = []
     count = None
     lib = None
     dumps: dict[str, tuple[str, int]] = {}
@@ -131,6 +133,8 @@ def load_receipt(path: Path) -> Receipt:
             oracle = m.group(1)
         elif m := UTC_RE.match(line):
             UTC = m.group(2)
+        elif m := WRITTEN_RE.match(line):
+            written.append(m.group(1))
         elif m := SET_RE.match(line):
             stated = m.group(1)
         elif m := COUNT_RE.match(line):
@@ -145,6 +149,8 @@ def load_receipt(path: Path) -> Receipt:
             in_models = False
         elif in_models and (m := MODEL_RE.match(line)):
             models.append(m.group(1))
+    if UTC is None and written:
+        UTC = max(written)
     if oracle is None or UTC is None or count is None or lib is None:
         raise SystemExit(f"receipt {path} is missing oracle id, UTC, count, or lib hash")
     if len(models) != count[0]:
