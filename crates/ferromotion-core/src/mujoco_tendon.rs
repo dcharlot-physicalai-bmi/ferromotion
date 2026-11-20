@@ -335,53 +335,96 @@ fn wrap_inside(end: &[f64; 4], radius: f64) -> Option<([f64; 4], f64)> {
         return Some((fallback, 0.0));
     }
     let g = cos_g.acos();
-    // rodata `-2·asin(1 - 1e-7)`, added (not subtracted) into the first residual
-    const NEG_TWO_ASIN_ZINIT: f64 = f64::from_bits(0xc00920266447a7fa);
-    let fz = |z: f64| {
-        if off {
+    // `5491d70f` `wrap_inside` iterates `phi`, with `z = sin(phi)`. The first
+    // residual is `((asin(B) + asin(A)) + (−π)) + G` at `phi = π/2` (`z` is the
+    // constant 1, not a `sin` call). Later residuals are
+    // `((asin(Bz) + asin(Az)) − (phi + phi)) + G`. The derivative is
+    // `cos(phi)·(Bterm + Aterm) + (−2)`, and each term's square is `(z²·c)·c`.
+    // `64156abe` still iterates `z` from `1 - 1e-7` and adds the baked
+    // `−2·asin` (`0x3550a0`) into that first residual only.
+    let (z, ang_base) = if four {
+        const NEG_PI: f64 = f64::from_bits(0xc00921fb54442d18);
+        const PHI0: f64 = f64::from_bits(0x3ff921fb54442d18);
+        let mut phi = PHI0;
+        let mut z = 1.0;
+        let residual = |phi: f64, z: f64, first: bool| {
             let sum = (b * z).asin() + (a * z).asin();
-            if z.to_bits() == ZINIT.to_bits() { (sum + NEG_TWO_ASIN_ZINIT) + g } else { (sum - (z.asin() + z.asin())) + g }
-        } else if four {
-            let sum = (b * z).asin() + (a * z).asin();
-            (sum - (z.asin() + z.asin())) + g
-        } else {
-            (a * z).asin() + (b * z).asin() - 2.0 * z.asin() + g
-        }
-    };
-    let mut z = ZINIT;
-    let mut f = fz(z);
-    if f > 0.0 {
-        return Some((fallback, 0.0));
-    }
-    let mut iter = 0;
-    while iter < MAXITER && f.abs() > TOLERANCE {
-        let fmax = |x: f64| if MJ_MINVAL >= x { MJ_MINVAL } else { x };
-        let df = if separate {
-            let zz = z * z;
-            let term = |c: f64| c / fmax((1.0 - (zz * c) * c).sqrt());
-            (term(b) + term(a)) - (2.0 / fmax((1.0 - zz).sqrt()))
-        } else {
-            a / fmax((-(z * z * a)).mul_add(a, 1.0).sqrt()) + b / fmax((-(z * z * b)).mul_add(b, 1.0).sqrt()) - 2.0 / fmax((-z).mul_add(z, 1.0).sqrt())
+            if first { (sum + NEG_PI) + g } else { (sum - (phi + phi)) + g }
         };
-        if df > -MJ_MINVAL {
+        let mut f = residual(phi, z, true);
+        if f > 0.0 {
             return Some((fallback, 0.0));
         }
-        let z1 = z - f / df;
-        if z1 > z {
+        let mut iter = 0;
+        while iter < MAXITER && f.abs() > TOLERANCE {
+            let zz = z * z;
+            let term = |c: f64| c / MJ_MINVAL.max((1.0 - (zz * c) * c).sqrt());
+            let df = phi.cos() * (term(b) + term(a)) + (-2.0);
+            if df > -MJ_MINVAL {
+                return Some((fallback, 0.0));
+            }
+            let phi1 = phi - f / df;
+            if phi1 > phi {
+                return Some((fallback, 0.0));
+            }
+            phi = phi1;
+            z = phi.sin();
+            f = residual(phi, z, false);
+            if f > TOLERANCE {
+                return Some((fallback, 0.0));
+            }
+            iter += 1;
+        }
+        if iter >= MAXITER {
             return Some((fallback, 0.0));
         }
-        z = z1;
-        f = fz(z);
-        if f > TOLERANCE {
+        (z, phi)
+    } else {
+        const NEG_TWO_ASIN_ZINIT: f64 = f64::from_bits(0xc00920266447a7fa);
+        let fz = |z: f64| {
+            if off {
+                let sum = (b * z).asin() + (a * z).asin();
+                if z.to_bits() == ZINIT.to_bits() { (sum + NEG_TWO_ASIN_ZINIT) + g } else { (sum - (z.asin() + z.asin())) + g }
+            } else {
+                (a * z).asin() + (b * z).asin() - 2.0 * z.asin() + g
+            }
+        };
+        let mut z = ZINIT;
+        let mut f = fz(z);
+        if f > 0.0 {
             return Some((fallback, 0.0));
         }
-        iter += 1;
-    }
-    if iter >= MAXITER {
-        return Some((fallback, 0.0));
-    }
+        let mut iter = 0;
+        while iter < MAXITER && f.abs() > TOLERANCE {
+            let fmax = |x: f64| if MJ_MINVAL >= x { MJ_MINVAL } else { x };
+            let df = if separate {
+                let zz = z * z;
+                let term = |c: f64| c / fmax((1.0 - (zz * c) * c).sqrt());
+                (term(b) + term(a)) - (2.0 / fmax((1.0 - zz).sqrt()))
+            } else {
+                a / fmax((-(z * z * a)).mul_add(a, 1.0).sqrt()) + b / fmax((-(z * z * b)).mul_add(b, 1.0).sqrt()) - 2.0 / fmax((-z).mul_add(z, 1.0).sqrt())
+            };
+            if df > -MJ_MINVAL {
+                return Some((fallback, 0.0));
+            }
+            let z1 = z - f / df;
+            if z1 > z {
+                return Some((fallback, 0.0));
+            }
+            z = z1;
+            f = fz(z);
+            if f > TOLERANCE {
+                return Some((fallback, 0.0));
+            }
+            iter += 1;
+        }
+        if iter >= MAXITER {
+            return Some((fallback, 0.0));
+        }
+        (z, z.asin())
+    };
     let cross = if separate { end[0] * end[3] - end[1] * end[2] } else { end[0].mul_add(end[3], -(end[1] * end[2])) };
-    let (mut vec, ang) = if cross > 0.0 { ([end[0], end[1]], z.asin() - (a * z).asin()) } else { ([end[2], end[3]], z.asin() - (b * z).asin()) };
+    let (mut vec, ang) = if cross > 0.0 { ([end[0], end[1]], ang_base - (a * z).asin()) } else { ([end[2], end[3]], ang_base - (b * z).asin()) };
     normalize2(&mut vec);
     let (sn, cs) = crate::mujoco_kinematics::sincos(ang);
     let p = if separate {
