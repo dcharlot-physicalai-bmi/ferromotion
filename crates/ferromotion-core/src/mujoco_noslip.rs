@@ -297,15 +297,29 @@ fn qcqp3(ain: &[f64], bin: &[f64], d: &[f64], r: f64) -> ([f64; 5], bool) {
     let (b1, b2, b3) = (bin[0] * d[0], bin[1] * d[1], bin[2] * d[2]);
     let (a11, a22, a33) = (ain[0] * d[0] * d[0], ain[4] * d[1] * d[1], ain[8] * d[2] * d[2]);
     let (a12, a13, a23) = (ain[1] * d[0] * d[1], ain[2] * d[0] * d[2], ain[5] * d[1] * d[2]);
+    let separate = crate::fp_contract::contract_off();
     let (mut la, mut v1, mut v2, mut v3) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     for _ in 0..20 {
-        let mut p11 = (a22 + la).mul_add(a33 + la, -(a23 * a23));
-        let mut p22 = (a11 + la).mul_add(a33 + la, -(a13 * a13));
-        let mut p33 = (a11 + la).mul_add(a22 + la, -(a12 * a12));
-        let mut p12 = a13.mul_add(a23, -(a12 * (a33 + la)));
-        let mut p13 = a12.mul_add(a23, -(a13 * (a22 + la)));
-        let mut p23 = a12.mul_add(a13, -(a23 * (a11 + la)));
-        let det = a13.mul_add(p13, (a11 + la).mul_add(p11, a12 * p12));
+        // `mju_QCQP3` in `64156abe`: each product is separate, sums run left to right.
+        let (mut p11, mut p22, mut p33, mut p12, mut p13, mut p23, det) = if separate {
+            let p11 = (a22 + la) * (a33 + la) - a23 * a23;
+            let p22 = (a11 + la) * (a33 + la) - a13 * a13;
+            let p33 = (a11 + la) * (a22 + la) - a12 * a12;
+            let p12 = a13 * a23 - a12 * (a33 + la);
+            let p13 = a12 * a23 - a13 * (a22 + la);
+            let p23 = a12 * a13 - a23 * (a11 + la);
+            let det = ((a11 + la) * p11 + a12 * p12) + a13 * p13;
+            (p11, p22, p33, p12, p13, p23, det)
+        } else {
+            let p11 = (a22 + la).mul_add(a33 + la, -(a23 * a23));
+            let p22 = (a11 + la).mul_add(a33 + la, -(a13 * a13));
+            let p33 = (a11 + la).mul_add(a22 + la, -(a12 * a12));
+            let p12 = a13.mul_add(a23, -(a12 * (a33 + la)));
+            let p13 = a12.mul_add(a23, -(a13 * (a22 + la)));
+            let p23 = a12.mul_add(a13, -(a23 * (a11 + la)));
+            let det = a13.mul_add(p13, (a11 + la).mul_add(p11, a12 * p12));
+            (p11, p22, p33, p12, p13, p23, det)
+        };
         if det < 1e-10 {
             return ([0.0; 5], false);
         }
@@ -316,16 +330,28 @@ fn qcqp3(ain: &[f64], bin: &[f64], d: &[f64], r: f64) -> ([f64; 5], bool) {
         p12 *= detinv;
         p13 *= detinv;
         p23 *= detinv;
-        v1 = (-p13).mul_add(b3, (-p11).mul_add(b1, -(p12 * b2)));
-        v2 = (-p23).mul_add(b3, (-p12).mul_add(b1, -(p22 * b2)));
-        v3 = (-p33).mul_add(b3, (-p13).mul_add(b1, -(p23 * b2)));
-        let val = (-r).mul_add(r, v3.mul_add(v3, v1.mul_add(v1, v2 * v2)));
+        if separate {
+            v1 = (-p11) * b1 - p12 * b2 - p13 * b3;
+            v2 = (-p12) * b1 - p22 * b2 - p23 * b3;
+            v3 = (-p13) * b1 - p23 * b2 - p33 * b3;
+        } else {
+            v1 = (-p13).mul_add(b3, (-p11).mul_add(b1, -(p12 * b2)));
+            v2 = (-p23).mul_add(b3, (-p12).mul_add(b1, -(p22 * b2)));
+            v3 = (-p33).mul_add(b3, (-p13).mul_add(b1, -(p23 * b2)));
+        }
+        let val = if separate { ((v1 * v1 + v2 * v2) + v3 * v3) - r * r } else { (-r).mul_add(r, v3.mul_add(v3, v1.mul_add(v1, v2 * v2))) };
         if val < 1e-10 {
             break;
         }
-        let s = (p33 * v3).mul_add(v3, (p11 * v1).mul_add(v1, p22 * v2 * v2));
-        let t = (p23 * v2).mul_add(v3, (p12 * v1).mul_add(v2, p13 * v1 * v3));
-        let deriv = (-2.0f64).mul_add(s, -4.0 * t);
+        let deriv = if separate {
+            let s = (p11 * v1 * v1 + p22 * v2 * v2) + p33 * v3 * v3;
+            let t = (p12 * v1 * v2 + p13 * v1 * v3) + p23 * v2 * v3;
+            (-2.0) * s - 4.0 * t
+        } else {
+            let s = (p33 * v3).mul_add(v3, (p11 * v1).mul_add(v1, p22 * v2 * v2));
+            let t = (p23 * v2).mul_add(v3, (p12 * v1).mul_add(v2, p13 * v1 * v3));
+            (-2.0f64).mul_add(s, -4.0 * t)
+        };
         let delta = -val / deriv;
         if delta < 1e-10 {
             break;
