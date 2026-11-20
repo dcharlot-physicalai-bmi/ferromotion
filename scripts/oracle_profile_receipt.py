@@ -69,6 +69,7 @@ def main() -> int:
     parser.add_argument("--ledger", type=Path, required=True)
     parser.add_argument("--started", required=True)
     parser.add_argument("--finished", required=True)
+    parser.add_argument("--stem", help="receipt filename stem; the default is the code commit")
     args = parser.parse_args()
 
     const = LIB_CONST[args.oracle_id]
@@ -102,7 +103,7 @@ def main() -> int:
     step_dump_sha = sha256_file(args.step_dump)
     rustc = tool_version(["rustc", "+1.99.1", "-vV"])
     cargo = tool_version(["cargo", "+1.99.1", "-vV"])
-    rel = f"docs/acceptance/receipts/{commit}.md"
+    rel = f"docs/acceptance/receipts/{args.stem or commit}.md"
     out = ROOT / rel
     body = "\n".join(
         [
