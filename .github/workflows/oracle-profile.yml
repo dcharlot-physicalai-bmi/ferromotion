@@ -32,8 +32,37 @@ jobs:
           python-version: "3.12"
       - name: Contract-off toolchain
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang-18 cmake g++-14 python3-venv
+          set -euo pipefail
+          ubuntu_indexes() {
+            find /var/lib/apt/lists -type f \( -name '*archive.ubuntu.com*' -o -name '*security.ubuntu.com*' \) | grep -q .
+          }
+          updated=0
+          for attempt in 1 2 3; do
+            echo "apt-get update attempt ${attempt}"
+            if sudo apt-get update -o Acquire::Retries=5 && ubuntu_indexes; then
+              candidate=$(apt-cache policy cmake | awk '/Candidate:/ {print $2}')
+              if [ -n "$candidate" ] && [ "$candidate" != "(none)" ]; then
+                updated=1
+                break
+              fi
+              echo "Ubuntu indexes are present but cmake has no install candidate (attempt ${attempt})" >&2
+            else
+              echo "apt-get update did not publish Ubuntu indexes (attempt ${attempt})" >&2
+            fi
+            echo "apt lists:" >&2
+            ls -1 /var/lib/apt/lists >&2 || true
+            sleep 5
+          done
+          if [ "$updated" != 1 ]; then
+            echo "Ubuntu package indexes are missing after 3 apt-get update attempts" >&2
+            exit 1
+          fi
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -o Acquire::Retries=5 clang-18 cmake ninja-build python3-numpy g++-14 python3-venv
+          command -v cmake
+          cmake --version
+          command -v ninja
+          ninja --version
+          python3 -c 'import numpy; print(numpy.__file__)'
           sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
           sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
       - name: Build libmujoco 64156abe and the native dump
@@ -60,8 +89,37 @@ jobs:
           python-version: "3.12"
       - name: Contract-off toolchain
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang-18 cmake g++-14 python3-venv
+          set -euo pipefail
+          ubuntu_indexes() {
+            find /var/lib/apt/lists -type f \( -name '*archive.ubuntu.com*' -o -name '*security.ubuntu.com*' \) | grep -q .
+          }
+          updated=0
+          for attempt in 1 2 3; do
+            echo "apt-get update attempt ${attempt}"
+            if sudo apt-get update -o Acquire::Retries=5 && ubuntu_indexes; then
+              candidate=$(apt-cache policy cmake | awk '/Candidate:/ {print $2}')
+              if [ -n "$candidate" ] && [ "$candidate" != "(none)" ]; then
+                updated=1
+                break
+              fi
+              echo "Ubuntu indexes are present but cmake has no install candidate (attempt ${attempt})" >&2
+            else
+              echo "apt-get update did not publish Ubuntu indexes (attempt ${attempt})" >&2
+            fi
+            echo "apt lists:" >&2
+            ls -1 /var/lib/apt/lists >&2 || true
+            sleep 5
+          done
+          if [ "$updated" != 1 ]; then
+            echo "Ubuntu package indexes are missing after 3 apt-get update attempts" >&2
+            exit 1
+          fi
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -o Acquire::Retries=5 clang-18 cmake ninja-build python3-numpy g++-14 python3-venv
+          command -v cmake
+          cmake --version
+          command -v ninja
+          ninja --version
+          python3 -c 'import numpy; print(numpy.__file__)'
           sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
           sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
       - name: Build libmujoco 64156abe and the step dump

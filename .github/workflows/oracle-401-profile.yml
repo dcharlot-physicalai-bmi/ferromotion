@@ -27,8 +27,36 @@ jobs:
       - name: Compiler and archiver
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y clang-18 cmake ninja-build python3-numpy g++-14 binutils
+          ubuntu_indexes() {
+            find /var/lib/apt/lists -type f \( -name '*archive.ubuntu.com*' -o -name '*security.ubuntu.com*' \) | grep -q .
+          }
+          updated=0
+          for attempt in 1 2 3; do
+            echo "apt-get update attempt ${attempt}"
+            if sudo apt-get update -o Acquire::Retries=5 && ubuntu_indexes; then
+              candidate=$(apt-cache policy cmake | awk '/Candidate:/ {print $2}')
+              if [ -n "$candidate" ] && [ "$candidate" != "(none)" ]; then
+                updated=1
+                break
+              fi
+              echo "Ubuntu indexes are present but cmake has no install candidate (attempt ${attempt})" >&2
+            else
+              echo "apt-get update did not publish Ubuntu indexes (attempt ${attempt})" >&2
+            fi
+            echo "apt lists:" >&2
+            ls -1 /var/lib/apt/lists >&2 || true
+            sleep 5
+          done
+          if [ "$updated" != 1 ]; then
+            echo "Ubuntu package indexes are missing after 3 apt-get update attempts" >&2
+            exit 1
+          fi
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -o Acquire::Retries=5 clang-18 cmake ninja-build python3-numpy g++-14 binutils
+          command -v cmake
+          cmake --version
+          command -v ninja
+          ninja --version
+          python3 -c 'import numpy; print(numpy.__file__)'
           /usr/lib/llvm-18/bin/clang --version
           test -x /usr/bin/ld.gold
           ld.gold --version | head -1 | grep -q '1.16'
