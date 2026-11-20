@@ -130,9 +130,11 @@ pub const EPISODE_ENVELOPE_INTEROPERABLE: bool = false;
 /// Both directions round-trip byte for byte through
 /// `ferromorphic::sim::EpisodeEnvelope::from_text` and ours, at `31ad06a2`
 /// and envelope `170e9795fc32875de5a6f6a531e5efd51760b73013e2b1b4fc5e9ab7d4f8091a`.
-/// bmi-2 signed 2026-11-20. bmi-3's signature is pending.
-/// Not ferric interop.
-pub const FERROMORPHIC_ENVELOPE_TEXT_INTEROPERABLE: bool = false;
+/// bmi-2 signed 2026-11-20 and bmi-3 signed 2026-11-20.
+/// Sign-off file `docs/acceptance/receipts/2026-11-20-panda-closed-loop-signoff.md`,
+/// sha256 `05c0d17f1219c399c03cba2fc23a14bb2fa5d00a534b0be82968f3801dcd028b`.
+/// Not ferric interop. [`EPISODE_ENVELOPE_INTEROPERABLE`] stays false.
+pub const FERROMORPHIC_ENVELOPE_TEXT_INTEROPERABLE: bool = true;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Spike {
@@ -996,7 +998,7 @@ spike 4 1
         assert_eq!(EpisodeEnvelope::from_text(&text).unwrap().to_text(), text);
         assert_eq!(EpisodeEnvelope::from_text("ferromorphic-episode 1\n"), Err(TimebaseError::BadTick));
         const { assert!(!EPISODE_ENVELOPE_INTEROPERABLE); }
-        const { assert!(!FERROMORPHIC_ENVELOPE_TEXT_INTEROPERABLE); }
+        const { assert!(FERROMORPHIC_ENVELOPE_TEXT_INTEROPERABLE); }
         const { assert!(JOINT_LOOP_EXECUTED); }
     }
 }
