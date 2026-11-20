@@ -697,7 +697,7 @@ mod tests {
             crate::ferromorphic_clock::map_chunk_index_to_tick(u64::MAX, true, 0),
             Err(crate::ferromorphic_clock::TimebaseError::Overflow)
         );
-        const { assert!(!crate::ferromorphic_clock::JOINT_LOOP_EXECUTED); }
+        const { assert!(crate::ferromorphic_clock::JOINT_LOOP_EXECUTED); }
         assert!(crate::ferromorphic_clock::UNRESOLVED.contains(&crate::ferromorphic_clock::UnresolvedPolicy::AccumulatorRemainsInsideDynamicsLab));
         assert_eq!(crate::ferromorphic_clock::TICK_ARITHMETIC, "checked_u64_fail_closed");
         const { assert!(!crate::ferromorphic_clock::EPISODE_ENVELOPE_INTEROPERABLE); }

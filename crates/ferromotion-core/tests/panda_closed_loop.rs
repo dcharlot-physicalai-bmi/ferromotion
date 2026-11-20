@@ -2,7 +2,7 @@
 //!
 //! The plant is [`ferromotion_core::MjcfTree::step`]. The controller is ferromorphic
 //! `CurrentEncoder`, `Sim::try_step`, and `SpikeReadout`, then the agreed torque saturation.
-//! `JOINT_LOOP_EXECUTED` stays false until the receipt commit that follows this test.
+//! `JOINT_LOOP_EXECUTED` is this episode, pending bmi-2 review.
 
 use ferromorphic::NetBuilder;
 use ferromorphic::neuron::Lif;
@@ -295,7 +295,7 @@ fn panda_nohand_episode_is_byte_identical_on_a_second_run() {
         assert!(FERROMORPHIC_BIND_VERIFIED);
     }
     const {
-        assert!(!JOINT_LOOP_EXECUTED);
+        assert!(JOINT_LOOP_EXECUTED);
     }
     const {
         assert!(!EPISODE_ENVELOPE_INTEROPERABLE);

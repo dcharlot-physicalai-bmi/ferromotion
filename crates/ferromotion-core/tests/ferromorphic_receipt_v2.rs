@@ -25,7 +25,7 @@ fn ferromorphic_receipt_v2_round_trips_both_ways() {
     assert_eq!(FERROMORPHIC_CLOCK_REVISION, PIN);
     const { assert!(FERROMORPHIC_BIND_VERIFIED); }
     const { assert!(!EPISODE_ENVELOPE_INTEROPERABLE); }
-    const { assert!(!JOINT_LOOP_EXECUTED); }
+    const { assert!(JOINT_LOOP_EXECUTED); }
 
     let sample = ferromorphic::sim::StepReceipt {
         epoch: 0,

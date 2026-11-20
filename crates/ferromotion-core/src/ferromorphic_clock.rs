@@ -17,8 +17,10 @@
 pub const FERROMORPHIC_CLOCK_REVISION: &str = "82211dc861af4ecc1afa9603c2caf20d52712b6d";
 pub const FERROMORPHIC_CLOCK_PATH: &str = "docs/contracts/ferromotion-clock.md";
 
-/// The schedule in that document was not executed in either repository.
-pub const JOINT_LOOP_EXECUTED: bool = false;
+/// True for the 16-tick `panda_nohand` episode in `tests/panda_closed_loop.rs`,
+/// recorded in `docs/acceptance/receipts/2026-11-20-panda-closed-loop.md`.
+/// Pending bmi-2 review. This is not [`EPISODE_ENVELOPE_INTEROPERABLE`].
+pub const JOINT_LOOP_EXECUTED: bool = true;
 
 /// True for the bind contract in `tests/ferromorphic_bind_v2.rs`, tests (a) through (f),
 /// signed in `docs/acceptance/receipts/2026-11-20-bind-v2-signoff.md` against receipt
@@ -640,7 +642,7 @@ mod tests {
         assert_eq!(bind_dt(0.1, 0.1 + f64::EPSILON), Err(TimebaseError::DtMismatch));
         assert_eq!(bind_dt(0.0, 0.0), Err(TimebaseError::BadTick));
         assert_eq!(bind_dt(f64::NAN, 0.1), Err(TimebaseError::BadTick));
-        const { assert!(!JOINT_LOOP_EXECUTED); }
+        const { assert!(JOINT_LOOP_EXECUTED); }
         const { assert!(FERROMORPHIC_BIND_VERIFIED); }
         const { assert!(!EPISODE_ENVELOPE_INTEROPERABLE); }
         assert_eq!(FERROMORPHIC_CLOCK_REVISION, "82211dc861af4ecc1afa9603c2caf20d52712b6d");
@@ -721,7 +723,7 @@ mod tests {
     fn proposed_joint_step_is_not_executed_and_spikes_wait_one_tick_plus_delay() {
         let step = propose_joint_step(4, 0);
         assert!(!step.executed);
-        const { assert!(!JOINT_LOOP_EXECUTED); }
+        const { assert!(JOINT_LOOP_EXECUTED); }
         assert_eq!(step.sense_at, 4);
         assert_eq!(step.control_uses_spikes_before, 4);
         assert!(step.torque_held_one_dt);
@@ -959,7 +961,7 @@ spike 4 1
         assert_eq!(nominal_seconds(u64::MAX), Err(TimebaseError::InexactPeriod));
         const { assert!(!EPISODE_ENVELOPE_INTEROPERABLE); }
         const { assert!(FERROMORPHIC_BIND_VERIFIED); }
-        const { assert!(!JOINT_LOOP_EXECUTED); }
+        const { assert!(JOINT_LOOP_EXECUTED); }
     }
 
     #[test]
@@ -971,6 +973,6 @@ spike 4 1
         assert_eq!(EpisodeEnvelope::from_text(&text).unwrap().to_text(), text);
         assert_eq!(EpisodeEnvelope::from_text("ferromorphic-episode 1\n"), Err(TimebaseError::BadTick));
         const { assert!(!EPISODE_ENVELOPE_INTEROPERABLE); }
-        const { assert!(!JOINT_LOOP_EXECUTED); }
+        const { assert!(JOINT_LOOP_EXECUTED); }
     }
 }
