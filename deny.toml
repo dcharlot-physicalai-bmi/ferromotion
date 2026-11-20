@@ -4,6 +4,7 @@ unmaintained = "all"
 unsound = "all"
 ignore = [
     { id = "RUSTSEC-2024-0436", reason = "Upstream-blocked. paste 1.0.15 has no fixed upgrade (https://rustsec.org/advisories/RUSTSEC-2024-0436). faer 0.24.4, the latest release, still pulls it through gemm 0.19.0." },
+    { id = "RUSTSEC-2026-0543", reason = "Upstream-blocked. chrono 0.4.45 is the latest release and the advisory covers every version (https://rustsec.org/advisories/RUSTSEC-2026-0543). rerun 0.43.2, the latest release, still pulls it through arrow 58.4.2." },
 ]
 
 [licenses]
