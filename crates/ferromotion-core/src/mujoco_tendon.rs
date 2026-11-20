@@ -122,8 +122,112 @@ fn length_circle(p0: &[f64; 2], p1: &[f64; 2], ind: usize, radius: f64) -> f64 {
     radius * angle
 }
 
+/// Signed angle swept from `p` to `q` around the origin, in (−π, π]. `mju_atan2(p×q, p·q)`.
+fn winding_angle(p: &[f64], q: &[f64]) -> f64 {
+    (p[0] * q[1] - p[1] * q[0]).atan2(p[0] * q[0] + p[1] * q[1])
+}
+
+/// `is_intersect` as `4849b2dd` and `5491d70f` compile it: the determinant's sign
+/// folds both parameters, and the far endpoint of each segment is open.
+fn is_intersect_4(p1: &[f64], p2: &[f64], p3: &[f64], p4: &[f64]) -> bool {
+    let u = [p2[0] - p1[0], p2[1] - p1[1]];
+    let v = [p4[0] - p3[0], p4[1] - p3[1]];
+    let det = v[1] * u[0] - v[0] * u[1];
+    if det.abs() < MJ_MINVAL {
+        return false;
+    }
+    let s = if det > 0.0 { 1.0 } else { -1.0 };
+    let w = [p1[0] - p3[0], p1[1] - p3[1]];
+    let d = [p2[0] - p4[0], p2[1] - p4[1]];
+    let a0 = (v[0] * w[1] - v[1] * w[0]) * s;
+    let a1 = (v[0] * d[1] - v[1] * d[0]) * s;
+    let b0 = (u[0] * w[1] - u[1] * w[0]) * s;
+    let b1 = (u[0] * d[1] - u[1] * d[0]) * s;
+    a0 >= 0.0 && a1 < 0.0 && b0 >= 0.0 && b1 < 0.0
+}
+
+/// `length_circle` via `atan2(|p×q|, p·q)`, with the flip only when the angle exceeds 1e-6.
+fn length_circle_4(p0: &[f64; 2], p1: &[f64; 2], ind: usize, radius: f64) -> f64 {
+    let cross = p0[1] * p1[0] - p0[0] * p1[1];
+    let mut angle = cross.abs().atan2(dot2(p0, p1));
+    if angle > 1e-6 && ((cross > 0.0 && ind != 0) || (cross < 0.0 && ind == 0)) {
+        angle = 2.0 * std::f64::consts::PI - angle;
+    }
+    radius * angle
+}
+
+/// `wrap_circle` as `4849b2dd` and `5491d70f` compile it. A side site picks the
+/// wrap by the polyline's winding, and the arc is that winding minus the two
+/// straight runs. The segment is clear of the circle only when that winding
+/// matches the direct segment's.
+fn wrap_circle_4(end: &[f64; 4], side: Option<&[f64; 2]>, radius: f64) -> Option<([f64; 4], f64)> {
+    let sqlen0 = end[0] * end[0] + end[1] * end[1];
+    let sqlen1 = end[2] * end[2] + end[3] * end[3];
+    let sqrad = radius * radius;
+    if sqlen0 < sqrad || sqlen1 < sqrad || radius < MJ_MINVAL {
+        return None;
+    }
+    let dif = [end[2] - end[0], end[3] - end[1]];
+    let dd = dif[0] * dif[0] + dif[1] * dif[1];
+    if dd < MJ_MINVAL {
+        return None;
+    }
+    let mut a = -(dif[0] * end[0] + dif[1] * end[1]) / dd;
+    if a < 0.0 {
+        a = 0.0;
+    } else if a > 1.0 {
+        a = 1.0;
+    }
+    let tmp = [a * dif[0] + end[0], a * dif[1] + end[1]];
+    let clear = tmp[0] * tmp[0] + tmp[1] * tmp[1] > sqrad;
+    let (ccw, wside) = if let Some(s) = side {
+        let wside = winding_angle(end, s) + winding_angle(s, &end[2..4]);
+        if clear && (wside - winding_angle(end, &end[2..4])).abs() < std::f64::consts::PI {
+            return None;
+        }
+        (wside > 0.0, wside)
+    } else {
+        if clear {
+            return None;
+        }
+        (false, 0.0)
+    };
+    let sqrt0 = (sqlen0 - sqrad).sqrt();
+    let sqrt1 = (sqlen1 - sqrad).sqrt();
+    let mut sol = [[[0.0f64; 2]; 2]; 2];
+    let mut good = [0.0f64; 2];
+    for i in 0..2 {
+        let sgn = if i == 0 { 1.0 } else { -1.0 };
+        let arm = |e0: f64, e1: f64, sq: f64, srad: f64| (e0 * sqrad + sgn * radius * e1 * srad) / sq;
+        sol[i][0][0] = arm(end[0], end[1], sqlen0, sqrt0);
+        sol[i][0][1] = arm(end[1], -end[0], sqlen0, sqrt0);
+        sol[i][1][0] = arm(end[2], -end[3], sqlen1, sqrt1);
+        sol[i][1][1] = arm(end[3], end[2], sqlen1, sqrt1);
+        let t = [sol[i][0][0] - sol[i][1][0], sol[i][0][1] - sol[i][1][1]];
+        good[i] = -(t[0] * t[0] + t[1] * t[1]);
+        if is_intersect_4(&end[0..2], &sol[i][0], &end[2..4], &sol[i][1]) {
+            good[i] = -10000.0;
+        }
+    }
+    let i = if side.is_some() { usize::from(ccw) } else if good[0] > good[1] { 0 } else { 1 };
+    let pnt = [sol[i][0][0], sol[i][0][1], sol[i][1][0], sol[i][1][1]];
+    if is_intersect_4(&end[0..2], &pnt[0..2], &end[2..4], &pnt[2..4]) {
+        return None;
+    }
+    let len = if side.is_some() {
+        let arc = wside - winding_angle(end, &pnt[0..2]) - winding_angle(&pnt[2..4], &end[2..4]);
+        radius * arc.abs()
+    } else {
+        length_circle_4(&sol[i][0], &sol[i][1], i, radius)
+    };
+    Some((pnt, len))
+}
+
 /// `wrap_circle`: the two tangent points and the arc's length, or `None` (MuJoCo's −1).
 fn wrap_circle(end: &[f64; 4], side: Option<&[f64; 2]>, radius: f64) -> Option<([f64; 4], f64)> {
+    if crate::fp_contract::oracle_4_0_schedules() {
+        return wrap_circle_4(end, side, radius);
+    }
     let off = contract_off();
     let sqlen0 = if off { end[0] * end[0] + end[1] * end[1] } else { end[0].mul_add(end[0], end[1] * end[1]) };
     let sqlen1 = if off { end[2] * end[2] + end[3] * end[3] } else { end[2].mul_add(end[2], end[3] * end[3]) };
