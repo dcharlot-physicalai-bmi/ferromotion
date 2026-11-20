@@ -564,8 +564,12 @@ struct Qh {
 }
 
 fn dot3(a: &[f64; 3], b: &[f64; 3]) -> f64 {
-    // `a[0]*b[0] + a[1]*b[1] + a[2]*b[2]` as clang contracts it: the right product of the first sum rounds
-    a[2].mul_add(b[2], a[0].mul_add(b[0], a[1] * b[1]))
+    // Fused: the right product of the first sum rounds. `64156abe` adds left to right.
+    if crate::fp_contract::contract_off() {
+        (a[0] * b[0] + a[1] * b[1]) + a[2] * b[2]
+    } else {
+        a[2].mul_add(b[2], a[0].mul_add(b[0], a[1] * b[1]))
+    }
 }
 
 impl Qh {
@@ -816,7 +820,11 @@ impl Qh {
             for i in k + 1..numrow {
                 let n = rows[i][k] / pivot;
                 for j in k + 1..numcol {
-                    rows[i][j] = (-n).mul_add(rows[k][j], rows[i][j]);
+                    rows[i][j] = if crate::fp_contract::contract_off() {
+                        rows[i][j] - n * rows[k][j]
+                    } else {
+                        (-n).mul_add(rows[k][j], rows[i][j])
+                    };
                 }
             }
         }
@@ -835,7 +843,11 @@ impl Qh {
             let npu = np as usize;
             normal[npu] = 0.0;
             for j in i + 1..numcol {
-                normal[npu] = (-rows[i][j]).mul_add(normal[npu + j - i], normal[npu]);
+                normal[npu] = if crate::fp_contract::contract_off() {
+                    normal[npu] - rows[i][j] * normal[npu + j - i]
+                } else {
+                    (-rows[i][j]).mul_add(normal[npu + j - i], normal[npu])
+                };
             }
             let diagonal = rows[i][i];
             if diagonal.abs() > self.mindenom_2 {
@@ -1308,15 +1320,32 @@ impl Qh {
         self.mindenom_1_2 = (self.mindenom_1 * dim).sqrt();
         self.mindenom_2 = self.mindenom_1_2 * self.maxabs_coord;
         self.anglereound = dim * 1.01 * REALEPS;
-        self.premerge_centrum = 2.0f64.mul_add(self.distround, self.premerge_centrum);
-        let postmerge_centrum = 2.0f64.mul_add(self.distround, 0.0);
+        self.premerge_centrum = if crate::fp_contract::contract_off() {
+            (2.0 * self.distround) + self.premerge_centrum
+        } else {
+            2.0f64.mul_add(self.distround, self.premerge_centrum)
+        };
+        let postmerge_centrum = if crate::fp_contract::contract_off() { 2.0 * self.distround } else { 2.0f64.mul_add(self.distround, 0.0) };
         let maxangle: f64 = 1.0;
-        self.one_merge = (self.maxwidth * dim.sqrt()).mul_add((-maxangle).mul_add(maxangle, 1.0).sqrt(), self.distround);
-        let maxrho = dim.mul_add(self.premerge_centrum, self.distround);
+        self.one_merge = if crate::fp_contract::contract_off() {
+            let s = ((-maxangle) * maxangle) + 1.0;
+            ((self.maxwidth * dim.sqrt()) * s.sqrt()) + self.distround
+        } else {
+            (self.maxwidth * dim.sqrt()).mul_add((-maxangle).mul_add(maxangle, 1.0).sqrt(), self.distround)
+        };
+        let maxrho = if crate::fp_contract::contract_off() {
+            (dim * self.premerge_centrum) + self.distround
+        } else {
+            dim.mul_add(self.premerge_centrum, self.distround)
+        };
         if self.one_merge < maxrho {
             self.one_merge = maxrho;
         }
-        let maxrho = dim.mul_add(postmerge_centrum, self.distround);
+        let maxrho = if crate::fp_contract::contract_off() {
+            (dim * postmerge_centrum) + self.distround
+        } else {
+            dim.mul_add(postmerge_centrum, self.distround)
+        };
         if self.one_merge < maxrho {
             self.one_merge = maxrho;
         }
@@ -1366,7 +1395,8 @@ impl Qh {
     /// `qh_SEARCHdist`: `max_outside + 2·DISTround` fused, plus the larger of MINvisible and MAXcoplanar.
     fn search_dist(&self) -> f64 {
         let m = if self.min_visible < self.max_coplanar { self.max_coplanar } else { self.min_visible };
-        (self.distround.mul_add(2.0, self.max_outside) + m) * (if self.use_findbestnew() { 2.0 } else { 1.0 })
+        (if crate::fp_contract::contract_off() { (self.distround * 2.0) + self.max_outside } else { self.distround.mul_add(2.0, self.max_outside) } + m)
+            * (if self.use_findbestnew() { 2.0 } else { 1.0 })
     }
 
     /// `qh_initbuild`.

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build the pinned contract-off library, point Python at it, and write one dump.
-# Usage: oracle_profile_prepare.sh native|step
+# Usage: oracle_profile_prepare.sh native|step|graph
+# `native` also writes x86-mesh-graph.txt. That file is not the 75-field dump.
 set -euo pipefail
 phase="${1:?native or step}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -53,6 +54,10 @@ ln -s "$out/lib/libmujoco.so.3.13.0" "$pkg/libmujoco.so.3.13.0"
 
 if [[ "$phase" == "native" ]]; then
   "$venv/bin/python" "$ROOT/scripts/mujoco_native_oracle.py" "$menagerie" "$out/x86-native.txt" 3
+  # Separate from the pinned 75-field dump. mesh_graph and mesh_graphadr live here.
+  "$venv/bin/python" "$ROOT/scripts/mujoco_mesh_graph_oracle.py" "$menagerie" "$out/x86-mesh-graph.txt"
+elif [[ "$phase" == "graph" ]]; then
+  "$venv/bin/python" "$ROOT/scripts/mujoco_mesh_graph_oracle.py" "$menagerie" "$out/x86-mesh-graph.txt"
 else
   "$venv/bin/python" "$ROOT/scripts/mujoco_native_step_oracle.py" "$menagerie" "$out/x86-step.txt" 20
 fi

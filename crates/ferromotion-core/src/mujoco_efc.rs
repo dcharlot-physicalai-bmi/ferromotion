@@ -1125,10 +1125,16 @@ impl SmoothModel {
                 let chain = if sparse { self.merge_chain_all(b1, b2) } else { Vec::new() };
                 for k in 0..3 {
                     let (v1, v2) = if sparse {
+                        // `mju_dotSparseX3`: `(jac·qvel) + acc`, unfused in `64156abe`.
                         let mut s = (0.0f64, 0.0f64);
                         for &c in &chain {
-                            s.0 = jd1[k][c].mul_add(qvel[c], s.0);
-                            s.1 = jd2[k][c].mul_add(qvel[c], s.1);
+                            if contract_off {
+                                s.0 = jd1[k][c] * qvel[c] + s.0;
+                                s.1 = jd2[k][c] * qvel[c] + s.1;
+                            } else {
+                                s.0 = jd1[k][c].mul_add(qvel[c], s.0);
+                                s.1 = jd2[k][c].mul_add(qvel[c], s.1);
+                            }
                         }
                         s
                     } else {
