@@ -4643,16 +4643,19 @@ impl Defaults {
     /// COMPOSES two rotations that were never meant to meet. Returns the winning layer's attributes.
     /// The orientation attribute that decides an element's frame, as MuJoCo's reader and compiler decide it.
     ///
-    /// ⛔ MuJoCo keeps `quat` and ONE alternative (`axisangle`, `euler`, `xyaxes` or `zaxis`) in separate
-    /// slots, each inherited through the class chain on its own, and the alternative is resolved AFTER the
-    /// quaternion — so a class's `euler` beats an element's own `quat`. `anybotics_anymal_b`'s shank boxes
-    /// state `quat="1 0 1 0"` under a class with `euler="0 1.57079632679 0"`, and MuJoCo places them by the
-    /// Euler angles (6.9e-12 apart). Only on ONE element is more than one specifier refused
-    /// (`ReadAlternative`), which is why an element's own list is returned whole when it has several.
+    /// `quat` and one alternative (`axisangle`, `euler`, `xyaxes` or `zaxis`) are separate slots. The
+    /// compiler resolves the alternative after the quaternion, so an inherited `euler` beats an inherited
+    /// `quat`. 3.13 also keeps a class `euler` when the element itself states `quat`. 4.x
+    /// `ReadAlternative` clears that inherited alternative: a `quat` on the element replaces it. The
+    /// `anybotics_anymal_b` shank boxes state `quat="1 0 1 0"` under `euler="0 1.57079632679 0"`. Two
+    /// specifiers on the same element are still refused, so that element's own list is returned whole.
     fn orientation_attrs(&self, el: &El, kind: &str, childclass: Option<&str>) -> Vec<(String, String)> {
         const ALT: [&str; 4] = ["axisangle", "euler", "xyaxes", "zaxis"];
         let own: Vec<(String, String)> = ["quat", "axisangle", "euler", "xyaxes", "zaxis"].iter().filter_map(|k| el.attr(k).map(|v| ((*k).to_string(), v.to_string()))).collect();
         if own.len() > 1 {
+            return own;
+        }
+        if crate::fp_contract::oracle_4_0_schedules() && el.attr("quat").is_some() {
             return own;
         }
         // the nearest source — the element, then its classes from the most specific up — of any of `keys`
