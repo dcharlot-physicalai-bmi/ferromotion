@@ -1,3 +1,7 @@
+# Superseded
+
+Superseded by `docs/acceptance/receipts/2026-11-20-panda-closed-loop-2.md`. The hashes below are the episode before the spike and torque gates, the zero-torque control, the readout-limit assert, and the per-tick contact count. Do not use them as the current episode.
+
 # Panda closed loop, 2026-11-20
 
 Pending the commit that sets `JOINT_LOOP_EXECUTED`. This receipt is the episode. `EPISODE_ENVELOPE_INTEROPERABLE` stays false until bmi-2 and bmi-3 (Ferric) sign off.
