@@ -248,6 +248,56 @@ impl EpisodeEnvelope {
     pub fn origin_ns(self) -> u64 {
         self.origin_ns
     }
+
+    /// Canonical text. The header is `ferromorphic-episode 1`, then `version`, `epoch`,
+    /// `dt_bits` as 16 lowercase hex digits, `period_ns`, and `origin_ns`, in that order.
+    /// Ferromorphic `EpisodeEnvelope::from_text` at the pinned revision accepts this shape.
+    pub fn to_text(self) -> String {
+        format!(
+            "ferromorphic-episode 1\nversion {}\nepoch {}\ndt_bits {:016x}\nperiod_ns {}\norigin_ns {}\n",
+            self.version, self.epoch, self.dt_bits, self.period_ns, self.origin_ns
+        )
+    }
+
+    /// Parse [`EpisodeEnvelope::to_text`] and pass the fields through [`EpisodeEnvelope::try_new`].
+    /// A missing, extra, or reordered line is [`TimebaseError::BadTick`].
+    pub fn from_text(text: &str) -> Result<Self, TimebaseError> {
+        let mut lines = text.lines();
+        if lines.next() != Some("ferromorphic-episode 1") {
+            return Err(TimebaseError::BadTick);
+        }
+        let version = parse_decimal(lines.next(), "version")?;
+        let epoch = parse_decimal(lines.next(), "epoch")?;
+        let hex = keyed(lines.next(), "dt_bits")?;
+        if hex.len() != 16 || !hex.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
+            return Err(TimebaseError::BadTick);
+        }
+        let dt_bits = u64::from_str_radix(hex, 16).map_err(|_| TimebaseError::BadTick)?;
+        let period_ns = parse_decimal(lines.next(), "period_ns")?;
+        let origin_ns = parse_decimal(lines.next(), "origin_ns")?;
+        if lines.next().is_some() {
+            return Err(TimebaseError::BadTick);
+        }
+        let version = u32::try_from(version).map_err(|_| TimebaseError::BadTick)?;
+        Self::try_new(version, epoch, dt_bits, period_ns, origin_ns)
+    }
+}
+
+fn keyed<'a>(line: Option<&'a str>, key: &str) -> Result<&'a str, TimebaseError> {
+    let line = line.ok_or(TimebaseError::BadTick)?;
+    let rest = line.strip_prefix(key).and_then(|s| s.strip_prefix(' ')).ok_or(TimebaseError::BadTick)?;
+    if rest.is_empty() || rest.contains(' ') {
+        return Err(TimebaseError::BadTick);
+    }
+    Ok(rest)
+}
+
+fn parse_decimal(line: Option<&str>, key: &str) -> Result<u64, TimebaseError> {
+    let rest = keyed(line, key)?;
+    if !rest.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(TimebaseError::BadTick);
+    }
+    rest.parse().map_err(|_| TimebaseError::BadTick)
 }
 
 /// `period_ns > 2^53` is refused. Every integer through [`MAX_EXACT_PERIOD_NS`] has its own `f64`.
@@ -909,6 +959,18 @@ spike 4 1
         assert_eq!(nominal_seconds(u64::MAX), Err(TimebaseError::InexactPeriod));
         const { assert!(!EPISODE_ENVELOPE_INTEROPERABLE); }
         const { assert!(FERROMORPHIC_BIND_VERIFIED); }
+        const { assert!(!JOINT_LOOP_EXECUTED); }
+    }
+
+    #[test]
+    fn episode_envelope_text_round_trips_the_same_bytes() {
+        let dt_bits = nominal_seconds(1_000).unwrap().to_bits();
+        let envelope = EpisodeEnvelope::try_new(1, 4, dt_bits, 1_000, 2_000).unwrap();
+        let text = envelope.to_text();
+        assert_eq!(EpisodeEnvelope::from_text(&text).unwrap(), envelope);
+        assert_eq!(EpisodeEnvelope::from_text(&text).unwrap().to_text(), text);
+        assert_eq!(EpisodeEnvelope::from_text("ferromorphic-episode 1\n"), Err(TimebaseError::BadTick));
+        const { assert!(!EPISODE_ENVELOPE_INTEROPERABLE); }
         const { assert!(!JOINT_LOOP_EXECUTED); }
     }
 }

@@ -1,0 +1,50 @@
+rustc -Vv
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+binary: rustc
+commit-hash: 0ef1bc386059596dada8fb65b50425aab2ea637a
+commit-date: 2026-11-09
+host: x86_64-unknown-linux-gnu
+release: 1.100.0
+LLVM version: 23.1.5
+cargo -V
+cargo 1.100.0 (3acc79c0c 2026-11-05)
+Cargo.lock 7a0ddbf92a1233fcc17f57ca5e5ae2f060096c33a60a4b94082779219b2653e9  Cargo.lock
+   Compiling ferromotion-core v0.73.0 (/agent/repos/ferromotion/crates/ferromotion-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 24.64s
+     Running unittests src/lib.rs (target/debug/build/ferromotion-core/758aafb8f7e9e007/out/ferromotion_core-758aafb8f7e9e007)
+
+running 1 test
+test ferromorphic_clock::tests::episode_envelope_text_round_trips_the_same_bytes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 999 filtered out; finished in 0.00s
+
+ENVELOPE_EXIT:0
+   Compiling ferromotion-core v0.73.0 (/agent/repos/ferromotion/crates/ferromotion-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.69s
+     Running tests/panda_closed_loop.rs (target/debug/build/ferromotion-core/72404aec6c540033/out/panda_closed_loop-72404aec6c540033)
+
+running 1 test
+ENVELOPE 170e9795fc32875de5a6f6a531e5efd51760b73013e2b1b4fc5e9ab7d4f8091a
+STATE b2bfb4081bcd7e2de05fcd249c65b2c5a5cfe7817850eac854467df32ea3a126
+PLANT b6ed1ec1ca5d2086865d82a056ed16871198f2ebdeb233d6115670b028a3b6e0
+TICK 0 f0b6b4fb27384ea9a4e0542655028a603843f1f59af19c50fe81980cd849a283
+TICK 1 83f9efd472fbf0bd43d08904c11580962ea431ebac6f4e183640c3c997c0d0b2
+TICK 2 d11a0f8df3e32895691c2a66b76df76cae9d26e70444f5a66fce5197067eee91
+TICK 3 0209e8e7a701d680e84b47ca35483ec3aeadd52c56a7c44a187db1bc6899e967
+TICK 4 26208d19502d98025ee87b190f2ce46353a1fa7d330b0e08257905d40d076fde
+TICK 5 8fdb5964ddd56242e6610cf655413809d23ae93f2d2e09d4008134563cf9f684
+TICK 6 e5e4f23c7d2f314f842f7ae07a8041468d5f19140170fc5bc4ff56847b8e53a2
+TICK 7 49cf979a2df2daca9e6d421447fcda78ea14b7e2970fe5c091025dd95a90622a
+TICK 8 0d5320f40dc92c1d90876f0b05dd65294e702a942c05c82c02a5c9fb40f9a01a
+TICK 9 4f7625d7fc8f30d7173af1b66cc442dcf36b8297a538b621284deae5962278db
+TICK 10 acfa06a0f20580e9bbcde7bf422613b34b920beb7d3152845fb987ced8958186
+TICK 11 4d2a4ef4b517315322450382fce0690a74cf6b7bebaa11b33af64ab88c639c9a
+TICK 12 c9fa92c1ae74ddf07ff8cc32baf5a8b127b2e85e676f7b426c0b320f0c288163
+TICK 13 96636dc808673c50532a4cb985afd64102073a33e62dadbdfb7f3089e79067c0
+TICK 14 ae78d91d1b6f11f69c1d272b760538949de8e32c97c1e9b0bb0e38baacd0434e
+TICK 15 ef87fb1942a177b548a0d6c4b83a4c6bd49bb07a7db7a19af2dce17b8968b0ae
+test panda_nohand_episode_is_byte_identical_on_a_second_run ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+PANDA_EXIT:0
