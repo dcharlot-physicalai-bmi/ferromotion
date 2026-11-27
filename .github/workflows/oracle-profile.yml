@@ -74,3 +74,7 @@ jobs:
         run: bash scripts/oracle_profile_prepare.sh step
       - name: 20-step comparison
         run: python3 scripts/oracle_profile_ci.py --phase step --lib "$RUNNER_TEMP/oracle/lib/libmujoco.so.3.13.0" --menagerie "$RUNNER_TEMP/menagerie" --dump "$RUNNER_TEMP/oracle/x86-step.txt"
+      - name: Non-zero qfrc_applied
+        run: |
+          "$RUNNER_TEMP/oracle-venv/bin/python" scripts/qfrc_applied_oracle.py "$RUNNER_TEMP/oracle/qfrc-applied.txt" "$RUNNER_TEMP/oracle/qfrc-applied.xml"
+          cargo run --locked --release -p ferromotion-core --example qfrc_applied_oracle -- "$RUNNER_TEMP/oracle/qfrc-applied.xml" "$RUNNER_TEMP/oracle/qfrc-applied.txt"

@@ -360,7 +360,6 @@ fn panda_reach_contact_moves_the_arm() {
         second.ticks.iter().map(|t| &t.hash).collect::<Vec<_>>()
     );
     assert_eq!(first.plant, second.plant);
-    assert!(first.spikes > 0, "spikes {}", first.spikes);
     assert_eq!(first.nonzero_tau, (1..N).collect::<Vec<_>>());
     let floor_link7 = ("world/floor".to_string(), "link7/geom59".to_string());
     for (k, tick) in first.ticks.iter().enumerate() {
@@ -393,14 +392,77 @@ fn panda_reach_contact_moves_the_arm() {
     assert_eq!(zero.plant, zero_again.plant);
     assert_ne!(zero.plant, first.plant);
     assert!(zero.nonzero_tau.is_empty());
+    let floor_link7_zero = ("world/floor".to_string(), "link7/geom59".to_string());
+    let zero_min_bits: [u64; 16] = [
+        0xbf50_624d_d2ee_f860,
+        0xbf50_3799_9123_d0c0,
+        0xbf4f_d71c_6727_b040,
+        0xbf4f_0bdb_0f94_5480,
+        0xbf4e_1a40_8665_9c40,
+        0xbf4d_0cdb_aca1_c080,
+        0xbf4b_ec56_88ab_0f00,
+        0xbf4a_bfc4_bc90_3d80,
+        0xbf49_8ce5_3b59_8940,
+        0xbf48_5859_6120_7e00,
+        0xbf47_25d3_3ced_7980,
+        0xbf45_f83c_8cde_1340,
+        0xbf44_d1d7_a853_88c0,
+        0xbf43_b45b_59d0_c380,
+        0xbf42_a10a_7a5a_bb00,
+        0xbf41_98c7_f981_7180,
+    ];
+    for (k, tick) in zero.ticks.iter().enumerate() {
+        assert_eq!(tick.obs_clamps, 0, "zero tick {k} joint-limit clamps");
+        assert_eq!(tick.enc_clamps, 0, "zero tick {k} encoder clamps");
+        assert_eq!(tick.read_clamps, 0, "zero tick {k} readout clamps");
+        assert_eq!(tick.forcerange_binds, 0, "zero tick {k} forcerange");
+        assert_eq!(tick.ncon, 3, "zero tick {k}");
+        assert_eq!(tick.ncon_moving, 3, "zero tick {k}");
+        assert_eq!(
+            tick.pairs,
+            vec![floor_link7_zero.clone(); 3],
+            "zero tick {k}"
+        );
+        let dist = tick.min_dist.expect("zero tick has a contact");
+        assert_eq!(
+            dist.to_bits(),
+            zero_min_bits[k],
+            "zero tick {k} min distance"
+        );
+        assert!(dist < 0.0, "zero tick {k} dist {dist}");
+        if k > 0 {
+            let prev = zero.ticks[k - 1].min_dist.unwrap();
+            assert!(
+                dist > prev,
+                "zero tick {k} is not separating: {dist} <= {prev}"
+            );
+        }
+        if k == 0 {
+            assert_eq!(
+                tick.qfrc.map(f64::to_bits),
+                first.ticks[0].qfrc.map(f64::to_bits),
+                "tick 0 qfrc_constraint"
+            );
+        } else {
+            assert_ne!(
+                tick.qfrc.map(f64::to_bits),
+                first.ticks[k].qfrc.map(f64::to_bits),
+                "tick {k} qfrc_constraint matches the zero-torque run"
+            );
+        }
+    }
     let open = run(true, true);
     let open_again = run(true, true);
     assert_eq!(open.plant, open_again.plant);
-    assert!(
-        open.ticks
-            .iter()
-            .all(|t| t.ncon == 0 && t.min_dist.is_none())
-    );
+    for (k, tick) in open.ticks.iter().enumerate() {
+        assert_eq!(tick.ncon, 0, "open tick {k}");
+        assert!(tick.min_dist.is_none(), "open tick {k}");
+        assert!(tick.pairs.is_empty(), "open tick {k}");
+        assert_eq!(tick.obs_clamps, 0, "open tick {k} joint-limit clamps");
+        assert_eq!(tick.enc_clamps, 0, "open tick {k} encoder clamps");
+        assert_eq!(tick.read_clamps, 0, "open tick {k} readout clamps");
+        assert_eq!(tick.forcerange_binds, 0, "open tick {k} forcerange");
+    }
     assert_ne!(open.plant, first.plant);
     assert_eq!(first.spikes, 54);
     assert_eq!(first.first_spike, Some(1));
