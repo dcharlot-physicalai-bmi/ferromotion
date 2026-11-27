@@ -1530,9 +1530,21 @@ impl SmoothModel {
             let ar = self.efc_ar(sd, &jd, &e.r);
             let ar_cols = sparse.then(|| self.ar_pattern(e));
             let dual = crate::mujoco_noslip::Dual { ar: &ar, ar_cols, efc_b: &out.efc_b, e, contacts };
-            let scale = 1.0 / (opt.meaninertia * nv.max(1) as f64);
+            // `64156abe`: `1 / (stat.meaninertia · nv)` for the whole model.
+            // `5491d70f` `inertiaScale`: `1 / trace(M)` over the island's dofs.
+            let legacy = 1.0 / (opt.meaninertia * nv.max(1) as f64);
+            let four = crate::fp_contract::oracle_4_0_schedules();
             let (mut force, mut state) = (out.efc_force.clone(), out.efc_state.clone());
             for (isl, efcs) in island_efcs.iter().enumerate() {
+                let scale = if four {
+                    let mut trace = 0.0;
+                    for &d in &island_dofs[isl] {
+                        trace += sd.m[self.m_rowadr[d] + self.m_rownnz[d] - 1];
+                    }
+                    1.0 / trace.max(MJ_MINVAL)
+                } else {
+                    legacy
+                };
                 let ne = efcs.iter().filter(|&&c| e.typ[c] == EQUALITY).count();
                 let nf = efcs.iter().filter(|&&c| e.typ[c] == FRICTION_DOF || e.typ[c] == FRICTION_TENDON).count();
                 out.solver_niter[isl] += crate::mujoco_noslip::sol_noslip(&dual, efcs, ne, nf, &mut force, &mut state, scale, opt.noslip_iterations, opt.noslip_tolerance);
