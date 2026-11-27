@@ -1,0 +1,23 @@
+Copied from github.com/dcharlot-physicalai-bmi/ferric
+path docs/acceptance/contracts/smolvla-ferromotion-v3.md
+
+sha256 bc5f67f054b1a84226d0438f959750697fea7a9c9eeca417b134b39a3e5c19fd
+size 21831 bytes
+git blob b178ba4dfa051412653a9694211d383e2fa049c6
+
+The same bytes are at both commits:
+
+branch cursor/toolchain-1.100
+commit 9b0a2ffab2dcf902e0bec726cf30c437c69a6e84
+
+branch cursor/fleet-energy-harness-65da
+commit 13ffe43a30ade6f514697286a2af00f0bbbc6c2a
+
+The codec version 2 pins stay, and are superseded as the contract-document pin.
+They are not deleted:
+
+contract 3ee11c015e3478c7c4aa0409499346f79ab1c8ce
+empty fixture c05228929efc3bcb4210b475dd959370fa69893a
+
+This copy is the contract text only. The version 3 codec is not in this tree.
+No codec verdict is claimed.

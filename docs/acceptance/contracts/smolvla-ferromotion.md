@@ -1,7 +1,8 @@
 # SmolVLA receiver, codec version 2
 
-Codec version 1 is withdrawn. This note follows the Ferric contract at
-`3ee11c015e3478c7c4aa0409499346f79ab1c8ce`:
+Codec version 1 is withdrawn. The codec in this tree is still version 2. Its
+contract pin, superseded as the contract-document pin by the version-3 text
+below, is `3ee11c015e3478c7c4aa0409499346f79ab1c8ce`:
 
 * <https://github.com/dcharlot-physicalai-bmi/ferric/blob/3ee11c015e3478c7c4aa0409499346f79ab1c8ce/docs/acceptance/contracts/smolvla-ferromotion.md>
 * fixture `docs/acceptance/contracts/fixtures/smolvla-chunk-v2.json` in that commit
@@ -75,22 +76,29 @@ are refused before the `pixel * 2 - 1` map. Aloha joint deltas are refused.
 ## Clock envelope
 
 Version 2 timestamps stay `t0_ns` and `step_duration_ns` inside the v2 body.
-The episode epoch is an outer version-1 envelope (`dt_bits`, `period_ns`,
-`origin_ns`) with tick 0 fixed, described in `ferromotion-clock.md`. It is a
-proposal to Ferric and ferromorphic. It is not interoperable until both confirm
-it, and it does not change the golden v2 digest. A missing or disagreeing
-epoch, a timestamp off the nanosecond grid, or a `dt` whose bits are not
-`((period_ns as f64) * 1e-9).to_bits()` is refused. There is no ratio exemption.
-A 1000 ns period is valid only with forward-product bits `0x3eb0c6f7a0b5ed8e`.
-The public `BoundaryClock` is an untrusted snapshot. Bind reads it again on
-every call and does not keep a validity bit. The published empty-body file is
-still the `c052289` fixture. The receiver refuses those bytes: `parse_chunk`,
+The episode clock is envelope v2, described in `ferromotion-clock.md`: any
+reduced rational `dt` and period, the period a positive multiple of `dt`, and
+an `episode_nonce`. That parser does not require 30 Hz. The 30 Hz restriction
+is the ferric SO-100 profile, lines 246–250 of the version-3 contract. Binding
+1 maps `n = 0` from `Horizon` to `NoActionSteps`. The published empty-body file
+is still the `c052289` fixture. The receiver refuses those bytes: `parse_chunk`,
 `encode`, `verify_chunk`, and `authorize_rollout` return `Horizon`. That refusal
 is not an end-of-chunk hold. Asking for action index 0 of a zero-step count
 returns `TimestampIndex { index: 0, steps: 0 }`. A zero `step_duration_ns` is
 `StepDuration` (Ferric's fixture spells that case `StepDurationAbsent`).
 These tests are not inference and not a joint step.
 No inference receipt exists. `DynamicsLab::step` is unchanged.
+
+## Contract v3 pin
+
+The signed-off contract text is
+`docs/acceptance/contracts/fixtures/ferric-9b0a2ffa/smolvla-ferromotion-v3.md`,
+sha256 `bc5f67f054b1a84226d0438f959750697fea7a9c9eeca417b134b39a3e5c19fd`,
+21831 bytes, git blob `b178ba4dfa051412653a9694211d383e2fa049c6`. It is ferric
+`cursor/toolchain-1.100` at `9b0a2ffab2dcf902e0bec726cf30c437c69a6e84` and
+`cursor/fleet-energy-harness-65da` at `13ffe43a30ade6f514697286a2af00f0bbbc6c2a`.
+The version-2 pins above are superseded as the contract-document pin and are
+kept. The version-3 codec is not in this tree. This pin claims no codec verdict.
 
 Real weight, stats, and noise sha256 values for `lerobot/smolvla_base` are not
 in the fixture. The hashes there are synthetic.

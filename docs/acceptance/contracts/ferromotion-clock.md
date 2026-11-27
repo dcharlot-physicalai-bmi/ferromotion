@@ -1,109 +1,67 @@
-# Ferromotion side of the ferromorphic step clock
+# Ferromotion clock: envelope v2
 
-Read-only source: [ferromorphic `docs/contracts/ferromotion-clock.md`](https://github.com/dcharlot-physicalai-bmi/ferromorphic/blob/a6722b49ff7dc770b1cb062adac21aa5c7155401/docs/contracts/ferromotion-clock.md)
-at `a6722b49ff7dc770b1cb062adac21aa5c7155401`.
+The episode clock implemented in `crates/ferromotion-core/src/episode_v2.rs` is envelope v2. Durations are reduced integer rationals in nanoseconds. The grid test is checked `u128` arithmetic. `dt_bits` is one round-to-nearest-even of that rational, by binary long division, not an `f64` division.
 
-That pin is the clock document. It is not `FERROMORPHIC_REVISION` in
-`joint_acceptance` (`8dabe3a45e589908f524b595da09bbadbc8aa103`). No peer repository
-was modified.
+Two documents are the sources for this text:
 
-The adapter is `crates/ferromotion-core/src/ferromorphic_clock.rs`. It does not
-call `Sim::step` or `DynamicsLab::step`. `JOINT_LOOP_EXECUTED` is false.
-`EPISODE_ENVELOPE_INTEROPERABLE` is false. `FERROMORPHIC_BIND_VERIFIED` is false.
-A receipt-v2 text round trip is none of those three claims, and it does not authorize
-inference or physical actuation.
+* ferromorphic `docs/contracts/ferromotion-clock.md` at `30812e26027cafa50e17c848e5afe57b1f246838`, the envelope v2 and binding 1 section.
+* ferric `docs/acceptance/contracts/smolvla-ferromotion-v3.md`, sha256 `bc5f67f054b1a84226d0438f959750697fea7a9c9eeca417b134b39a3e5c19fd`, lines 246–250. That file is pinned at ferric `9b0a2ffab2dcf902e0bec726cf30c437c69a6e84` and `13ffe43a30ade6f514697286a2af00f0bbbc6c2a`. The 30 Hz restriction lives there, in the SO-100 profile, and not in this parser.
 
-## What is implemented
+`EPISODE_ENVELOPE_INTEROPERABLE` stays false. `FERROMORPHIC_BIND_VERIFIED` stays false. `JOINT_LOOP_EXECUTED` stays false. Parsing an envelope or accepting a binding does not run inference and does not run a joint step.
 
-* `same_dt` / `bind_dt`: both values finite and positive, and `to_bits` equal. `0.1` and `0.1 + f64::EPSILON` do not match. `0.1_f64` bits are `3fb999999999999a`.
-* `step_seconds(step, dt)` is one multiply `step as f64 * dt`.
-* `accumulated_f64` is the repeated addition `DynamicsLab` uses. Ten additions of `0.1` are not the bits of `10 as f64 * 0.1`. The lab function is unchanged.
-* Delivery is checked `step + 1 + delay`. Delay 0 is the next tick. Delay 5 from step 4 is step 10. Overflow is `TimebaseError::Overflow`, not a wrap.
-* `accept_event_step` accepts `clock..=clock+max_delay`. Earlier is `Late`. Later is `BeyondHorizon`. A horizon that does not fit in `u64` is `Overflow`. It does not read an episode identity. `accept_event` refuses a different identity with `StaleEpoch`, then calls `accept_event_step`. This adapter has no ring, so `max_delay` stays a caller argument.
-* Spike order is `(t, source)`, stable for equal keys.
-* `reset_state` clears the neuron and ring flags and leaves tick, ledger, epoch, period, origin, and `dt` bits unchanged.
-* Refractory length is `ceil(t_ref / dt)` ticks.
-* Receipt v2 parses. The pinned sample below is the bytes of ferromorphic `StepReceipt::to_text` at this pin. A decreasing `(t, source)` is `Unordered`. A spike tick other than the receipt step is `StampMismatch` on this receiver. Their `from_text` reports that second case as `Unordered`. Valid records use the same bytes either way.
-* `meter_reading()` is `Unmetered`. Mechanical `T + U` from `DynamicsLab::energy` is not that reading.
+## Envelope v2
 
-## Epoch identity
-
-The episode identity is one monotonic `u64`. `BoundaryClock::new` opens identity `0` and installs no period. `episode_start` advances it by one with checked addition. `u64::MAX` is `EpochOverflow` and changes nothing. `reset_state` does not write it. Tick `0` (`EPOCH_TICK0`) is the origin of every episode and is not the identity. The earlier form, unset or `Some(0)` only, is withdrawn.
-
-## Receipt v2
-
-The only accepted header is `ferromorphic-step 2`. The following lines are required, in order: `epoch <u64>`, `step <u64>`, `dt_bits <hex>`, `mode clocked` or `mode event`, then zero or more `spike <t> <source>` lines. `dt_bits` is emitted as 16 lowercase hex digits. Version 1 is refused. That version had no epoch line. `crates/ferromotion-core/tests/ferromorphic_receipt_v2.rs` compiles ferromorphic at this pin and round-trips the bytes both ways.
+`EpisodeEnvelopeV2::to_text` writes the header `ferromorphic-episode 2` and then nine `key value` lines, in this order: `version`, `epoch`, `dt_num_ns`, `dt_den`, `dt_bits`, `period_num_ns`, `period_den`, `origin_ns`, `episode_nonce`. Every line ends in `\n`. `dt_bits` is 16 lowercase hex digits. `episode_nonce` is 64 lowercase hex digits, 32 bytes.
 
 ```text
-ferromorphic-step 2
-epoch 0
-step 4
-dt_bits 3fb999999999999a
-mode clocked
-spike 4 0
-spike 4 1
+ferromorphic-episode 2
+version 2
+epoch 1
+dt_num_ns 5000000
+dt_den 3
+dt_bits 3f5b4e81b4e81b4f
+period_num_ns 100000000
+period_den 3
+origin_ns 0
+episode_nonce 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
 ```
 
-## episode_start
+Rules:
 
-`episode_start(origin_ns, period_ns)` does not take `dt` and does not write `dt_bits`. The bits already stored must equal `((period_ns as f64) * 1e-9).to_bits()`. It sets `tick` to `0`, stores the origin and the period, clears the neuron and ring flags, and keeps the spike ledger. It is the only call that advances the episode identity. There is no `tick0` argument. A refusal leaves every field unchanged.
+1. `dt` and the period are nanoseconds as reduced rationals. `den > 0`, `num > 0`, and `gcd(num, den) = 1`. A non-reduced value is `NotReduced`. Any reduced pair is accepted. This parser does not restrict the clock to 30 Hz.
+2. `dt_bits` is one round-to-nearest-even of `dt_num_ns / (dt_den * 10^9)` seconds, from `rne_f64_seconds`. A mismatch is `DtBitsMismatch`. `5000000/3` (1/600 s) is `3f5b4e81b4e81b4f`. `2000000/1` (2 ms) is `3f60624dd2f1a9fc`. `100000000/3` (1/30 s) is `3fa1111111111111`.
+3. `period / dt` must be a positive integer. The check is `period_num_ns * dt_den` divisible by `period_den * dt_num_ns`, in checked `u128`. Otherwise `PeriodNotMultipleOfDt`. `steps_per_action` is that quotient: 30 Hz over 1/600 s is 20, and 20 ms over 2 ms is 10.
+4. `episode_nonce` is a 32-byte constructor input. The library reads no OS randomness and no clock. The same inputs give the same text.
+5. A product that does not fit in `u128` is `Overflow`. Nothing wraps.
+6. The parser refuses an unknown header version, a `version` line other than 2, an unknown, missing, duplicated or reordered line, uppercase hex, a sign, a leading zero other than `0` itself, an empty value, a missing final newline, and trailing bytes. A decimal above `u64::MAX` is `Overflow` at parse time. `to_text(from_text(x)) == x` for every accepted `x`.
 
-`BoundaryClock::new` stores a finite positive `dt` and no period, so it has no pair to compare. Forming the pair is `episode_start` and `EpisodeEnvelope::try_new`. Both require the forward product. That is the construction check. It is not a ratio exemption. `bind_v2_timestamps` repeats it on every call.
+## Binding 1
 
-`period_ns > 2^53` is `InexactPeriod` at that construction, at `episode_start`, and on every bind. `2^53` is accepted. Every integer through `2^53` has its own `f64`, so two accepted periods cannot share `(period_ns as f64) * 1e-9`. `2^53 + 1` and `u64::MAX` are refused. The same refusal applies to a clock `period_ns` or a `step_duration_ns` above `2^53` on every bind, including a period written onto the public snapshot after `episode_start`.
+`ChunkBinding::to_text` writes the header `ferromorphic-chunk-binding 1` and nine lines: `envelope_sha256`, `epoch`, `chunk_index`, `t0_num_ns`, `t0_den`, `period_num_ns`, `period_den`, `n_action_steps`, `chunk_sha256`. The text rules are the envelope's. `envelope_sha256` is the SHA-256 of the exact v2 envelope text. `t0` may be `0/1`. Every other rational in the record is positive.
 
-`reset_state` only clears neuron and ring flags. It leaves `tick`, the epoch, `period_ns`, `origin_ns`, `dt` bits, and the ledger unchanged.
+`verify_chunk_binding` refuses, in this order:
 
-`dt` is the canonical dynamics step, stored as `f64` bits. Two engines match only when those bits are equal and both values are finite and positive. `period_ns` is the integer scheduling period and must be nonzero. Envelope v1 has no ratio exemption. A 1000 ns period is accepted when `dt` already has bits `0x3eb0c6f7a0b5ed8e`. `dt = 0.1` with 1000 ns, `dt = 0.1` with 20 ms, and the one-bit-off 20 ms pattern `0x3f947ae147ae147c` are `DtPeriodMismatch`. Fields of the envelope are private, so a struct literal cannot skip that check.
+1. `EnvelopeHashMismatch`
+2. `EpochMismatch`
+3. `PeriodNotEnvelope`
+4. `PeriodNotChunk`
+5. `T0NotChunk`
+6. `StepsNotChunk`
+7. `NoActionSteps` when `n = 0`, and `TooManyActionSteps` when `n > 50`
+8. The grid check: `BeforeOrigin`, `OffGrid`, or `Overflow`
+9. `ForeignPrevious` when the previous state names another envelope or epoch
+10. `ChunkIndexNotIncreasing` when the index is not strictly greater
+11. `RepeatedT0` when `t0` equals the previous `t0`
+12. `Late` when `t0` is earlier than the previous `t0`
 
-## Bind procedure ferromorphic still has to implement
+The grid identity is `t0_num_ns * period_den == (origin_ns * period_den + k * period_num_ns) * t0_den` for some integer `k >= 0`. The implementation uses the divisibility form: `d = t0_num_ns * period_den - origin_ns * period_den * t0_den` must be `>= 0`, and `period_num_ns * t0_den` must divide `d`. Every product is checked `u128`. `d < 0` is `BeforeOrigin`. A non-zero remainder is `OffGrid`. A product that does not fit is `Overflow`.
 
-Ferromotion implements `bind_v2_timestamps`. Ferromorphic does not. Their `require_forward_product` runs at `Schedule::try_new` and `Sim::episode_start` only. A later write to their public `dt`, `t`, `epoch`, `origin_ns`, or `period_ns` is not rechecked. `FERROMORPHIC_BIND_VERIFIED` stays false until they implement the procedure below and that implementation is verified against it.
+`n = 0` on a chunk body is `CodecError::Horizon`. On a binding, `verify_chunk_binding` calls `check_horizon` and maps that same refusal to `EpisodeError::NoActionSteps`. `n > 50` is `Horizon` on the chunk body and `TooManyActionSteps` on the binding. Identifiers are internal. Hold is a receiver state: no chunk yet, source `home`, or the current chunk has no steps left, source `hold`. It is not an `n = 0` binding.
 
-The clock argument is an untrusted per-call snapshot. The function stores no validity bit. A previous `Ok` is not reused. The call does not write the clock and does not read `tick` as authorization. `EpisodeEnvelope` version 1 carries `epoch`, `dt_bits`, `period_ns`, and `origin_ns` beside a codec v2 chunk. The envelope is not written into the v2 canonical bytes and it is not part of the v2 digest. Codec v2 stays. Codec v1 stays withdrawn.
+## Where 30 Hz is required
 
-On every call, in this order:
+Envelope v2 accepts any reduced `dt` and period that satisfy the rules above. Ferric's SO-100 profile, lines 246–250 of the pinned v3 contract, is what refuses anything else. For that profile the only legal clock is 30 Hz with 20 substeps: period `100000000/3`, dt `5000000/3`. This crate does not apply that profile.
 
-1. No envelope: `MissingEpoch`.
-2. Envelope version other than 1, or envelope `period_ns == 0`: `OffGrid`.
-3. `period_ns > 2^53` on the envelope is `InexactPeriod`. Otherwise `dt_bits == ((period_ns as f64) * 1e-9).to_bits()`. No ratio exemption. Failure is `BadTick`, `InexactPeriod`, or `DtPeriodMismatch`.
-4. Clock `period_ns`, when set, or `step_duration_ns` above `2^53`: `InexactPeriod`.
-5. Clock `period_ns` or `origin_ns` unset: `MissingEpoch`. Identity 0 with no period is not a bindable episode.
-6. `clock.epoch != envelope.epoch`: `StaleEpoch`.
-7. Clock origin or period differs from the envelope: `AmbiguousEpoch`.
-8. `clock.dt_bits != envelope.dt_bits`: `DtMismatch`.
-9. `step_duration_ns != period_ns`, or `t0_ns < origin_ns`, or `(t0_ns - origin_ns)` is not a multiple of `period_ns`: `OffGrid`.
-10. For each `k` in `0..n_action_steps`, checked `t0_ns + k * step_duration_ns` equals `origin_ns + ((t0_ns - origin_ns) / period_ns + k) * period_ns`. Overflow is `Overflow`. A mismatch is `OffGrid`.
-11. `n_action_steps == 0` still runs steps 1–9 and stamps no index. It is not a horizon success and it does not authorize a rollout.
-12. `Ok` does not set `EPISODE_ENVELOPE_INTEROPERABLE`, does not run inference, and does not run a joint step.
+## Earlier adapter
 
-A later write to `epoch`, `dt_bits`, `period_ns`, `origin_ns`, or `tick` is seen on the next call. Changing `tick` alone does not fail a bind that otherwise matches. A matching digest or a matching bind does not authorize inference or physical actuation.
-
-## Proposed joint step, not run
-
-At step `k` the peer schedule is: sense the plant at `k`; control with spikes `t < k`; hold torque for one shared `dt`; run `Sim::step` for tick `k`. Spikes stamped `k` become visible at `k + 1 + delay`. `propose_joint_step` returns that schedule with `executed: false`.
-
-Tick phases recorded, and not simulated, are deliveries, neuron updates, enqueue at `t + 1 + delay`, then increment.
-
-## Still open
-
-`DynamicsLab::time` remains the sum of the `dt` values passed to `DynamicsLab::step`. That accumulator is not the shared tick. Replacing it is not part of this decision.
-
-The SmolVLA receiver refuses `n_action_steps == 0` with `Horizon`. That is not an end-of-chunk hold and not a chunk binding. `bind_v2_timestamps` with `n_action_steps == 0` still runs steps 1–9 and stamps no index; that clock call is not a binding. Asking for action index 0 of a zero-step count is `TimestampIndex`. `accept_event_step` is a different helper: a zero `max_delay` accepts only an event equal to the clock. It does not encode a chunk and it does not run a joint step.
-
-A scheduling period above `2^53` is `InexactPeriod`. It is not installed and it is not bound. Integer stamps of an accepted period remain `origin_ns + tick * period_ns` in `u64`. The forward product of an accepted period is still `(period_ns as f64) * 1e-9`, with no ratio exemption. That product is not interoperability.
-
-## Action-chunk index
-
-Codec v2 timestamps are `t0_ns + k * step_duration_ns` with checked multiplication. That nanosecond index is not `Sim::t`. After `episode_start`, the episode tick is 0. `map_chunk_index_to_tick` counts from that 0 when the caller says an episode has started, and returns `EpochUnresolved` when it has not. Overflow of `tick + 1 + delay` is `Overflow`. `EPISODE_ENVELOPE_INTEROPERABLE` stays false until ferromorphic's bind exists and is verified and both Ferric and ferromorphic accept this version. A receipt-text round trip is not that accept.
-
-## What remains on the ferromorphic side
-
-* Implement the bind procedure in the section above, including per-call revalidation of the public snapshot, no cached validity bit, and `InexactPeriod` for `period_ns > 2^53`. At their current pin, `2^53` and `2^53 + 1` both pass `Schedule::try_new`. This repository does not claim that work is done.
-* They do not parse Ferric codec v2. The outer envelope has to keep the inner v2 bytes unchanged. This adapter does not write the envelope into those bytes.
-* Their `from_text` returns `Unordered` when a spike tick is not the receipt step. This receiver returns `StampMismatch`. Valid receipt bytes already match. The error name is not required for that match.
-* No joint loop has been run in either repository. Inference stays unexecuted. `model_executed` stays false.
-
-## Not claimed
-
-No end-to-end loop ran. No spike train was produced by a network. No joule sample was taken. Receipt v2 text matching this pin is not interoperability of the two clocks.
+`crates/ferromotion-core/src/ferromorphic_clock.rs` still parses receipt v2 and the version-1 envelope (`dt_bits`, integer `period_ns`, `origin_ns`) and still runs `bind_v2_timestamps`. That path is not envelope v2. Its flags stay false. It is not the grammar in `episode_v2.rs`.

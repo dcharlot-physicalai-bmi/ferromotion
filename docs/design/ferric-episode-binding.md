@@ -67,13 +67,13 @@ The chain runs one way, from the binding to the envelope. The envelope is the cl
 
 The receiver decodes the chunk and hands `(t0, period, n)` to the ferromorphic verifier. The verifier refuses a mismatch, a `chunk_index` that is not strictly increasing, and an earlier `t0` (`Late`). The SHA-256 of the binding text is stamped on every `StepReceipt` that consumes the chunk.
 
-The receiver also refuses unless all of these hold: the binding period equals both the envelope period and the chunk period, `t0` is on the grid, and the binding's `n` equals the chunk's `n`, with `1 ≤ n ≤ 50`. It refuses `n_action_steps == 0`. It refuses if the MJCF timestep bits are not `3f5b4e81b4e81b4f`.
+The receiver also refuses unless all of these hold: the binding period equals both the envelope period and the chunk period, `t0` is on the grid, and the binding's `n` equals the chunk's `n`, with `1 ≤ n ≤ 50`. It refuses `n_action_steps == 0`. Envelope v2 itself accepts any reduced period and dt. The 30 Hz clock, period `100000000/3` and dt `5000000/3` (`dt_bits` `3f5b4e81b4e81b4f`), is the ferric SO-100 profile.
 
-Ferric will publish chunk v3. It carries `t0` and the period as a reduced `(num_ns, den)`, because version 2's integer `t0_ns` cannot express `100000000/3`. It also carries the SO-100 joint names and units, a named and hashed `so100` stats key, and real stats and noise hashes. Version 2 stays parseable forever. The receiver targets chunk v3. Its pin waits for bmi-3's chunk-v3 SHA. That SHA supersedes a plain re-pin to the green toolchain head.
+Ferric's signed-off chunk-v3 contract is `docs/acceptance/contracts/smolvla-ferromotion-v3.md`, sha256 `bc5f67f054b1a84226d0438f959750697fea7a9c9eeca417b134b39a3e5c19fd`, at `9b0a2ffab2dcf902e0bec726cf30c437c69a6e84` and `13ffe43a30ade6f514697286a2af00f0bbbc6c2a`. It carries `t0` and the period as a reduced `(num_ns, den)`, because version 2's integer `t0_ns` cannot express `100000000/3`. The version-3 codec is not in this tree. No codec verdict is claimed. Version 2 stays the codec this receiver parses.
 
 ## (5) Receiver policy
 
-`hold` is a receiver state. It is not a binding, and it is not `n_action_steps == 0`. Binding 1 (`ferromorphic-chunk-binding 1`) and Ferric chunk v3 (`931ee2af`, line 60) both refuse `n_action_steps == 0`, so a chunk with that `n` cannot be bound.
+`hold` is a receiver state. It is not a binding, and it is not `n_action_steps == 0`. Binding 1 (`ferromorphic-chunk-binding 1`) and Ferric chunk v3 (contract `bc5f67f054b1a84226d0438f959750697fea7a9c9eeca417b134b39a3e5c19fd`, line 60) both refuse `n_action_steps == 0`, so a chunk with that `n` cannot be bound.
 
 The state is one of these:
 
@@ -94,4 +94,6 @@ bmi-2 implements `ChunkBinding` and envelope v2 in ferromorphic. ferromotion and
 
 ## (d) Pins
 
-`smolvla_receiver.rs` line 15, `FERRIC_CONTRACT_REVISION`, is `3ee11c015e3478c7c4aa0409499346f79ab1c8ce`. Line 49, `FERRIC_EMPTY_FIXTURE_REVISION`, is `c05228929efc3bcb4210b475dd959370fa69893a`. Neither moves until bmi-3 sends the chunk-v3 SHA. `cursor/toolchain-1.100` head `2706d1b9d6c4a15194429463057de2100841bb4a` is not that pin.
+`FERRIC_CONTRACT_REVISION` stays `3ee11c015e3478c7c4aa0409499346f79ab1c8ce`. `FERRIC_EMPTY_FIXTURE_REVISION` stays `c05228929efc3bcb4210b475dd959370fa69893a`. Those are the codec version 2 pins. They are superseded as the contract-document pin and are not deleted.
+
+`FERRIC_V3_CONTRACT_REVISION` is `9b0a2ffab2dcf902e0bec726cf30c437c69a6e84`. `FERRIC_V3_CONTRACT_FLEET_REVISION` is `13ffe43a30ade6f514697286a2af00f0bbbc6c2a`. Both name the contract file whose sha256 is `bc5f67f054b1a84226d0438f959750697fea7a9c9eeca417b134b39a3e5c19fd` and whose git blob is `b178ba4dfa051412653a9694211d383e2fa049c6`. That pin is the contract text only.

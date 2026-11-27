@@ -1,6 +1,11 @@
 //! Independent receiver for Ferric SmolVLA codec version 2.
 //!
-//! The contract document and the protocol fixture were read from
+//! The codec in this file is still version 2. Its contract pin and empty-fixture
+//! pin are the superseded revisions below. The signed-off chunk-v3 contract text
+//! is a separate pin, [`FERRIC_V3_CONTRACT_REVISION`]. That codec is not in this
+//! tree, and this file claims no version-3 verdict.
+//!
+//! The version-2 contract and the protocol fixture were read from
 //! `dcharlot-physicalai-bmi/ferric` at `3ee11c015e3478c7c4aa0409499346f79ab1c8ce`
 //! (`docs/acceptance/contracts/smolvla-ferromotion.md` and
 //! `docs/acceptance/contracts/fixtures/smolvla-chunk-v2.json`). The empty-horizon
@@ -12,8 +17,23 @@
 //! a rollout, load weights, or record a measurement. The entry
 //! `ferric.smolvla.predict_action_chunk.v1` remains proposed.
 
-/// Contract document pin. Not a statement that the entry has been released.
+/// Codec version 2 contract pin. Superseded as the contract-document pin by
+/// [`FERRIC_V3_CONTRACT_REVISION`]. The codec in this file is still version 2.
 pub const FERRIC_CONTRACT_REVISION: &str = "3ee11c015e3478c7c4aa0409499346f79ab1c8ce";
+
+/// Ferric commit of the signed-off chunk-v3 contract text on `cursor/toolchain-1.100`.
+/// The same bytes are at [`FERRIC_V3_CONTRACT_FLEET_REVISION`]. Not a codec pin.
+pub const FERRIC_V3_CONTRACT_REVISION: &str = "9b0a2ffab2dcf902e0bec726cf30c437c69a6e84";
+
+/// Fleet branch commit that carries the same chunk-v3 contract bytes.
+pub const FERRIC_V3_CONTRACT_FLEET_REVISION: &str = "13ffe43a30ade6f514697286a2af00f0bbbc6c2a";
+
+/// sha256 of `docs/acceptance/contracts/smolvla-ferromotion-v3.md` at both commits above.
+pub const FERRIC_V3_CONTRACT_SHA256: &str =
+    "bc5f67f054b1a84226d0438f959750697fea7a9c9eeca417b134b39a3e5c19fd";
+
+/// Git blob of that file. 21831 bytes.
+pub const FERRIC_V3_CONTRACT_BLOB: &str = "b178ba4dfa051412653a9694211d383e2fa049c6";
 pub const PROPOSED_FERRIC_ENTRY: &str = "ferric.smolvla.predict_action_chunk.v1";
 pub const PREDICT_ACTION_CHUNK: &str = "predict_action_chunk";
 pub const SELECT_ACTION_IS_NOT_THE_ENTRY: &str = "select_action";
