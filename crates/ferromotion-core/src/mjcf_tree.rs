@@ -1820,7 +1820,7 @@ impl MjcfTree {
         const B: [f64; 4] = [1.0 / 6.0, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 6.0];
         let sm = self.smooth_model();
         let (nv, na, h) = (st.qvel.len(), st.act.len(), sm.timestep);
-        let separate = crate::fp_contract::contract_off();
+        let separate = compiler_separate();
         let mut x = vec![(st.qpos.clone(), st.qvel.clone(), st.act.clone())];
         let mut f = vec![(sol.qacc.clone(), sd.act_dot.clone())];
         // `mju_addToScl` of each tableau weight. Velocity is one call of length `nv`. Acceleration and
@@ -3822,7 +3822,7 @@ pub(crate) fn mesh_inertia_mujoco(mesh: &crate::TriMesh3, method: MeshInertia) -
     let (mut facecen, mut total_area) = (Vector3::zeros(), 0.0);
     for t in &mesh.tris {
         let (_, c, area) = tri(v(t[0]), v(t[1]), v(t[2]));
-        facecen = if crate::fp_contract::contract_off() {
+        facecen = if compiler_separate() {
             Vector3::new(facecen.x + area * c.x, facecen.y + area * c.y, facecen.z + area * c.z)
         } else {
             Vector3::new(area.mul_add(c.x, facecen.x), area.mul_add(c.y, facecen.y), area.mul_add(c.z, facecen.z))
@@ -3847,7 +3847,7 @@ pub(crate) fn mesh_inertia_mujoco(mesh: &crate::TriMesh3, method: MeshInertia) -
         vol += volume;
         // `CoM += volume * (center * 3.0 / 4.0 + facecen / 4.0)`
         let x = |k: usize| c[k] * 3.0 / 4.0 + facecen[k] / 4.0;
-        com = if crate::fp_contract::contract_off() {
+        com = if compiler_separate() {
             Vector3::new(com.x + volume * x(0), com.y + volume * x(1), com.z + volume * x(2))
         } else {
             Vector3::new(volume.mul_add(x(0), com.x), volume.mul_add(x(1), com.y), volume.mul_add(x(2), com.z))
@@ -3873,7 +3873,7 @@ pub(crate) fn mesh_inertia_mujoco(mesh: &crate::TriMesh3, method: MeshInertia) -
         }
         total += volume;
         for (j, &(a, b)) in k.iter().enumerate() {
-            if crate::fp_contract::contract_off() {
+            if compiler_separate() {
                 // `P += volume/C * (2*(DD + EE + FF) + DE + ED + DF + FD + EF + FE)`, no FMA.
                 let (dd, ee, ff) = (d[a] * d[b], e[a] * e[b], f[a] * f[b]);
                 let mut sum = 2.0 * ((dd + ee) + ff);
@@ -3906,9 +3906,17 @@ pub(crate) fn mesh_inertia_mujoco(mesh: &crate::TriMesh3, method: MeshInertia) -
 // product of a chain into the running sum, `s += a*b`). A stored mesh vertex is a double rounded to `f32`:
 // one ulp in the centre of mass can move a whole binade of vertices to the neighbouring float.
 
+/// Separate products only for a contract-off id. The published default stays fused.
+/// Same split as `ee3b238959d3c55e1469d992e97da46d6685ca40` (`compiler_separate` /
+/// `contract_off_line` on the versioned-oracle branch). This tree has no 4.x id, so
+/// [`crate::fp_contract::contract_off`] is that predicate.
+fn compiler_separate() -> bool {
+    crate::fp_contract::contract_off()
+}
+
 /// `mjuu_dot3`. Published default fuses. The contract-off compiler leaves `(a0*b0 + a1*b1) + a2*b2`.
 fn uu_dot3(a: &Vector3<f64>, b: &Vector3<f64>) -> f64 {
-    if crate::fp_contract::contract_off() {
+    if compiler_separate() {
         (a.x * b.x + a.y * b.y) + a.z * b.z
     } else {
         a.z.mul_add(b.z, a.x.mul_add(b.x, a.y * b.y))
@@ -3917,7 +3925,7 @@ fn uu_dot3(a: &Vector3<f64>, b: &Vector3<f64>) -> f64 {
 
 /// `mjuu_crossvec` (`b × c`). Published default fuses. Contract-off uses separate products.
 fn uu_cross(b: &Vector3<f64>, c: &Vector3<f64>) -> Vector3<f64> {
-    if crate::fp_contract::contract_off() {
+    if compiler_separate() {
         Vector3::new(b.y * c.z - b.z * c.y, b.z * c.x - b.x * c.z, b.x * c.y - b.y * c.x)
     } else {
         Vector3::new(b.y.mul_add(c.z, -(b.z * c.y)), b.z.mul_add(c.x, -(b.x * c.z)), b.x.mul_add(c.y, -(b.y * c.x)))
@@ -3930,7 +3938,7 @@ fn uu_cross(b: &Vector3<f64>, c: &Vector3<f64>) -> Vector3<f64> {
 fn uu_normvec(v: &mut [f64]) -> f64 {
     let mut n2 = 0.0f64;
     for x in v.iter() {
-        n2 = if crate::fp_contract::contract_off() { n2 + *x * *x } else { x.mul_add(*x, n2) };
+        n2 = if compiler_separate() { n2 + *x * *x } else { x.mul_add(*x, n2) };
     }
     if n2 < 1e-14 {
         return 0.0;
@@ -3965,7 +3973,7 @@ fn uu_quat2mat(q: &[f64; 4]) -> Matrix3<f64> {
 
 /// `mjuu_mulquat`, then `mjuu_normvec`. Published default fuses. Contract-off multiplies, then adds.
 fn uu_mulquat(a: &[f64; 4], b: &[f64; 4]) -> [f64; 4] {
-    let mut r = if crate::fp_contract::contract_off() {
+    let mut r = if compiler_separate() {
         [
             ((a[0] * b[0] - a[1] * b[1]) - a[2] * b[2]) - a[3] * b[3],
             ((a[0] * b[1] + a[1] * b[0]) + a[2] * b[3]) - a[3] * b[2],
@@ -3986,7 +3994,7 @@ fn uu_mulquat(a: &[f64; 4], b: &[f64; 4]) -> [f64; 4] {
 
 /// `mjuu_mulmat` (3×3). Published default fuses. Contract-off is `((a0*b0 + a1*b1) + a2*b2)`.
 fn uu_mulmat(a: &Matrix3<f64>, b: &Matrix3<f64>) -> Matrix3<f64> {
-    if crate::fp_contract::contract_off() {
+    if compiler_separate() {
         Matrix3::from_fn(|i, j| (a[(i, 0)] * b[(0, j)] + a[(i, 1)] * b[(1, j)]) + a[(i, 2)] * b[(2, j)])
     } else {
         Matrix3::from_fn(|i, j| a[(i, 2)].mul_add(b[(2, j)], a[(i, 0)].mul_add(b[(0, j)], a[(i, 1)] * b[(1, j)])))
@@ -3995,7 +4003,7 @@ fn uu_mulmat(a: &Matrix3<f64>, b: &Matrix3<f64>) -> Matrix3<f64> {
 
 /// `mjuu_mulvecmat`: `mat · vec`.
 fn uu_mulvecmat(v: &Vector3<f64>, m: &Matrix3<f64>) -> Vector3<f64> {
-    if crate::fp_contract::contract_off() {
+    if compiler_separate() {
         Vector3::from_fn(|k, _| (m[(k, 0)] * v.x + m[(k, 1)] * v.y) + m[(k, 2)] * v.z)
     } else {
         Vector3::from_fn(|k, _| m[(k, 2)].mul_add(v.z, m[(k, 0)].mul_add(v.x, m[(k, 1)] * v.y)))
@@ -4004,7 +4012,7 @@ fn uu_mulvecmat(v: &Vector3<f64>, m: &Matrix3<f64>) -> Vector3<f64> {
 
 /// `mjuu_mulvecmatT`: `matᵀ · vec`.
 fn uu_mulvecmat_t(v: &Vector3<f64>, m: &Matrix3<f64>) -> Vector3<f64> {
-    if crate::fp_contract::contract_off() {
+    if compiler_separate() {
         Vector3::from_fn(|k, _| (m[(0, k)] * v.x + m[(1, k)] * v.y) + m[(2, k)] * v.z)
     } else {
         Vector3::from_fn(|k, _| m[(2, k)].mul_add(v.z, m[(0, k)].mul_add(v.x, m[(1, k)] * v.y)))
@@ -4041,24 +4049,24 @@ pub(crate) fn eig3_mujoco(mat: &Matrix3<f64>) -> ([f64; 3], [f64; 4]) {
             break;
         }
         let tau = (d[(ck, ck)] - d[(rk, rk)]) / (2.0 * d[(rk, ck)]);
-        let t = if crate::fp_contract::contract_off() {
+        let t = if compiler_separate() {
             if tau >= 0.0 { 1.0 / (tau + (1.0 + tau * tau).sqrt()) } else { -1.0 / (-tau + (1.0 + tau * tau).sqrt()) }
         } else if tau >= 0.0 {
             1.0 / (tau + tau.mul_add(tau, 1.0).sqrt())
         } else {
             -1.0 / (-tau + tau.mul_add(tau, 1.0).sqrt())
         };
-        let c = if crate::fp_contract::contract_off() { 1.0 / (1.0 + t * t).sqrt() } else { 1.0 / t.mul_add(t, 1.0).sqrt() };
+        let c = if compiler_separate() { 1.0 / (1.0 + t * t).sqrt() } else { 1.0 / t.mul_add(t, 1.0).sqrt() };
         if c > 1.0 - EPS {
             break;
         }
         let mut tmp = [0.0; 4];
-        let half = if crate::fp_contract::contract_off() { (0.5 - 0.5 * c).sqrt() } else { (-0.5f64).mul_add(c, 0.5).sqrt() };
+        let half = if compiler_separate() { (0.5 - 0.5 * c).sqrt() } else { (-0.5f64).mul_add(c, 0.5).sqrt() };
         tmp[rotk + 1] = if tau >= 0.0 { -half } else { half };
         if rotk == 1 {
             tmp[rotk + 1] = -tmp[rotk + 1];
         }
-        tmp[0] = if crate::fp_contract::contract_off() {
+        tmp[0] = if compiler_separate() {
             (1.0 - tmp[rotk + 1] * tmp[rotk + 1]).sqrt()
         } else {
             (-tmp[rotk + 1]).mul_add(tmp[rotk + 1], 1.0).sqrt()
@@ -5065,7 +5073,7 @@ fn uu_globalinertia(local: &[f64; 3], quat: &[f64; 4]) -> [f64; 6] {
     let mm = |k: usize| m[(k / 3, k % 3)];
     let t = [mm(0) * local[0], mm(3) * local[0], mm(6) * local[0], mm(1) * local[1], mm(4) * local[1], mm(7) * local[1], mm(2) * local[2], mm(5) * local[2], mm(8) * local[2]];
     let row = |a: usize, b: usize, c: usize, x: usize, y: usize, z: usize| {
-        if crate::fp_contract::contract_off() {
+        if compiler_separate() {
             (mm(a) * t[x] + mm(b) * t[y]) + mm(c) * t[z]
         } else {
             mm(c).mul_add(t[z], mm(a).mul_add(t[x], mm(b) * t[y]))
@@ -5077,9 +5085,9 @@ fn uu_globalinertia(local: &[f64; 3], quat: &[f64; 4]) -> [f64; 6] {
 /// `mjuu_offcenter`: `mass * (y*y + z*z)` and the three products, no FMA.
 fn uu_offcenter(mass: f64, v: &[f64; 3]) -> [f64; 6] {
     [
-        if crate::fp_contract::contract_off() { mass * (v[1] * v[1] + v[2] * v[2]) } else { mass * v[1].mul_add(v[1], v[2] * v[2]) },
-        if crate::fp_contract::contract_off() { mass * (v[0] * v[0] + v[2] * v[2]) } else { mass * v[0].mul_add(v[0], v[2] * v[2]) },
-        if crate::fp_contract::contract_off() { mass * (v[0] * v[0] + v[1] * v[1]) } else { mass * v[0].mul_add(v[0], v[1] * v[1]) },
+        if compiler_separate() { mass * (v[1] * v[1] + v[2] * v[2]) } else { mass * v[1].mul_add(v[1], v[2] * v[2]) },
+        if compiler_separate() { mass * (v[0] * v[0] + v[2] * v[2]) } else { mass * v[0].mul_add(v[0], v[2] * v[2]) },
+        if compiler_separate() { mass * (v[0] * v[0] + v[1] * v[1]) } else { mass * v[0].mul_add(v[0], v[1] * v[1]) },
         -mass * v[0] * v[1],
         -mass * v[0] * v[2],
         -mass * v[1] * v[2],
@@ -5812,7 +5820,7 @@ impl Walk<'_> {
             "capsule" => {
                 need(2)?;
                 let (r, h) = (size[0], 2.0 * size[1]);
-                if crate::fp_contract::contract_off() { pi * (r * r * h + 4.0 * r * r * r / 3.0) } else { pi * (r * r).mul_add(h, 4.0 * r * r * r / 3.0) }
+                if compiler_separate() { pi * (r * r * h + 4.0 * r * r * r / 3.0) } else { pi * (r * r).mul_add(h, 4.0 * r * r * r / 3.0) }
             }
             "cylinder" => {
                 need(2)?;
@@ -5865,20 +5873,20 @@ impl Walk<'_> {
             }
             "capsule" => {
                 let (r, h) = (size[0], 2.0 * size[1]);
-                let sphere_mass = if crate::fp_contract::contract_off() {
+                let sphere_mass = if compiler_separate() {
                     mass * 4.0 * r / (4.0 * r + 3.0 * h)
                 } else {
                     mass * 4.0 * r / 4.0f64.mul_add(r, 3.0 * h)
                 };
                 let cylinder_mass = mass - sphere_mass;
-                let side = if crate::fp_contract::contract_off() {
+                let side = if compiler_separate() {
                     cylinder_mass * (3.0 * r * r + h * h) / 12.0
                 } else {
                     cylinder_mass * (3.0 * r).mul_add(r, h * h) / 12.0
                 };
                 let mut i = [side, side, cylinder_mass * r * r / 2.0];
                 let sphere_inertia = 2.0 * sphere_mass * r * r / 5.0;
-                let shift = if crate::fp_contract::contract_off() {
+                let shift = if compiler_separate() {
                     sphere_mass * h * (3.0 * r + 2.0 * h) / 8.0
                 } else {
                     sphere_mass * h * 3.0f64.mul_add(r, 2.0 * h) / 8.0
@@ -5890,7 +5898,7 @@ impl Walk<'_> {
             }
             "cylinder" => {
                 let (r, h) = (size[0], 2.0 * size[1]);
-                let side = if crate::fp_contract::contract_off() {
+                let side = if compiler_separate() {
                     mass * (3.0 * r * r + h * h) / 12.0
                 } else {
                     mass * (3.0 * r).mul_add(r, h * h) / 12.0
@@ -5905,7 +5913,7 @@ impl Walk<'_> {
             // the mesh's equivalent inertia box, in the mesh's principal frame (already the geom's)
             _ => {
                 let b = boxsz;
-                if crate::fp_contract::contract_off() {
+                if compiler_separate() {
                     [mass * (b[1] * b[1] + b[2] * b[2]) / 3.0, mass * (b[0] * b[0] + b[2] * b[2]) / 3.0, mass * (b[0] * b[0] + b[1] * b[1]) / 3.0]
                 } else {
                     [mass * b[1].mul_add(b[1], b[2] * b[2]) / 3.0, mass * b[0].mul_add(b[0], b[2] * b[2]) / 3.0, mass * b[0].mul_add(b[0], b[1] * b[1]) / 3.0]
@@ -6058,7 +6066,7 @@ impl Walk<'_> {
                 for p in &sel {
                     mass += p.mass;
                     for (k, c) in com.iter_mut().enumerate() {
-                        *c = if crate::fp_contract::contract_off() {
+                        *c = if compiler_separate() {
                             *c + p.mass * p.pose.pos[k]
                         } else {
                             p.mass.mul_add(p.pose.pos[k], *c)
@@ -9093,6 +9101,28 @@ mod tests {
     #[test]
     fn the_mesh_compiler_stores_mujocos_frame_and_vertices_bit_for_bit() {
         const PRISM: &str = "v 0 0 0\nv 0.3 0 0\nv 0.05 0.2 0\nv 0 0 0.12\nv 0.3 0 0.12\nv 0.05 0.2 0.12\nv 0.1 0.05 0.06\nf 1 3 2\nf 4 5 6\nf 1 2 5\nf 1 5 4\nf 2 3 6\nf 2 6 5\nf 3 1 4\nf 3 4 6\n";
+        let load = |attrs: &str| {
+            let xml = format!(r#"<mujoco><asset><mesh name="p" file="prism.obj" {attrs}/></asset><worldbody><body><freejoint/><geom type="mesh" mesh="p"/></body></worldbody></mujoco>"#);
+            tree_from_mjcf(&xml, &|p: &str| (p == "prism.obj").then(|| PRISM.as_bytes().to_vec())).unwrap()
+        };
+        // Published compiler, fused. These are the bits at 6093ba89, MuJoCo's arm64 wheel.
+        // The contract-off products stay on that id, as in ee3b238.
+        let published: [(&str, [f64; 3], [f64; 4], [u32; 21]); 5] = [
+            (r#"scale="1 1 1""#, [0.11666667088866235, 0.06666666766007741, 0.0599999986588955], [0.1435361039704115, 0.6923852878686818, -0.1435361039704115, 0.6923852878686818], [0xbd75c28f, 0x3ddc43b8, 0xbda4f77d, 0xbd75c28f, 0xbc3fd1b1, 0x3e476670, 0xbd75c28f, 0xbdc44982, 0xbde9d562, 0x3d75c28f, 0x3ddc43b8, 0xbda4f77d, 0x3d75c28f, 0xbc3fd1b1, 0x3e476670, 0x3d75c28f, 0xbdc44982, 0xbde9d562, 0xa3111111, 0x3cb38ebc, 0xbc0e02de]),
+            (r#"scale="-1 1 1""#, [-0.11666667088866235, 0.06666666766007741, 0.0599999986588955], [-0.14353610397041147, 0.6923852878686818, 0.14353610397041147, 0.6923852878686818], [0xbd75c28f, 0x3ddc43b8, 0x3da4f77d, 0xbd75c28f, 0xbc3fd1b1, 0xbe476670, 0xbd75c28f, 0xbdc44982, 0x3de9d562, 0x3d75c28f, 0x3ddc43b8, 0x3da4f77d, 0x3d75c28f, 0xbc3fd1b1, 0xbe476670, 0x3d75c28f, 0xbdc44982, 0x3de9d562, 0xa2ddddde, 0x3cb38ebc, 0x3c0e02de]),
+            (r#"scale="0.5 -2 1.5""#, [0.05833333544433117, -0.1333333353201548, 0.08999999798834324], [0.7054104385769813, 0.7054104385769813, -0.04895010874994723, -0.04895010874994723], [0xbd9c099b, 0xbdb851eb, 0xbdfdf2e3, 0x3d9437d8, 0xbdb851eb, 0xbe143088, 0x3b7a3868, 0xbdb851eb, 0x3e8994fd, 0xbd9c099b, 0x3db851eb, 0xbdfdf2e3, 0x3d9437d8, 0x3db851eb, 0xbe143088, 0x3b7a3868, 0x3db851eb, 0x3e8994fd, 0xbc52a811, 0x00000000, 0xbd0282a0]),
+            (r#"refquat="1 -1 0.3 0" refpos="0.01 0.02 -0.03""#, [0.05824561799328291, -0.11473684199118726, 0.07140351099236919], [0.5233267598406292, 0.6080047538712383, 0.4345389905553699, 0.4094327629682389], [0x3d75c28a, 0xbddc43ba, 0xbda4f77d, 0x3d75c290, 0x3c3fd1a6, 0x3e476670, 0x3d75c293, 0x3dc44981, 0xbde9d562, 0xbd75c294, 0xbddc43b7, 0xbda4f77d, 0xbd75c28e, 0x3c3fd1bc, 0x3e476670, 0xbd75c28b, 0x3dc44983, 0xbde9d562, 0xb17e90f7, 0xbcb38ebc, 0xbc0e02de]),
+            (r#"scale="1 1 -1" refquat="0.9 0.1 0.2 0.3""#, [0.10649123216668764, 0.010175436735153203, -0.10105263218283654], [0.30406589296972475, 0.7519565609609825, -0.38723438184744163, 0.4383546471471347], [0x3d75c28f, 0x3ddc43b8, 0xbda4f77d, 0x3d75c28f, 0xbc3fd1b1, 0x3e476670, 0x3d75c28f, 0xbdc44982, 0xbde9d562, 0xbd75c28f, 0x3ddc43b8, 0xbda4f77d, 0xbd75c28f, 0xbc3fd1b1, 0x3e476670, 0xbd75c28f, 0xbdc44982, 0xbde9d562, 0x29d97476, 0x3cb38ebc, 0xbc0e02de]),
+        ];
+        for (attrs, pos, quat, vert) in published {
+            let t = load(attrs);
+            let d = &t.mesh_props["p"];
+            assert_eq!([d.com.x, d.com.y, d.com.z], pos, "{attrs}: published mesh_pos");
+            assert_eq!(d.quat, quat, "{attrs}: published mesh_quat");
+            let got: Vec<u32> = t.mesh_hulls["p"].verts.iter().flat_map(|v| [v.x as f32, v.y as f32, v.z as f32]).map(f32::to_bits).collect();
+            assert_eq!(got, vert, "{attrs}: published mesh_vert");
+        }
+        crate::fp_contract::install_policy(crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID, crate::fp_contract::ORACLE_X86_CONTRACT_OFF_SHA256, "").unwrap();
         #[allow(clippy::type_complexity)]
         let cases: [(&str, [u64; 3], [u64; 4], [u32; 21]); 5] = [
             (r#"scale="1 1 1""#, [4593071140271816704, 4589468260337276245, 4588807732127072257], [4594339453445378288, 4604411671794160834, 13817711490300154096, 4604411671794160834], [0xbd75c28f, 0x3ddc43b8, 0xbda4f77d, 0xbd75c28f, 0xbc3fd1b1, 0x3e476670, 0xbd75c28f, 0xbdc44982, 0xbde9d562, 0x3d75c28f, 0x3ddc43b8, 0xbda4f77d, 0x3d75c28f, 0xbc3fd1b1, 0x3e476670, 0x3d75c28f, 0xbdc44982, 0xbde9d562, 0xa3111111, 0x3cb38ebc, 0xbc0e02de]),
@@ -9102,14 +9132,14 @@ mod tests {
             (r#"scale="1 1 -1" refquat="0.9 0.1 0.2 0.3""#, [4592337922639230840, 4577019361696415747, 13815318067064235622], [4599149184087004035, 4604948242120761775, 13824019451243854462, 4601568315220097765], [0x3d75c28f, 0x3ddc43b8, 0xbda4f77d, 0x3d75c28f, 0xbc3fd1b1, 0x3e476670, 0x3d75c28f, 0xbdc44982, 0xbde9d562, 0xbd75c28f, 0x3ddc43b8, 0xbda4f77d, 0xbd75c28f, 0xbc3fd1b1, 0x3e476670, 0xbd75c28f, 0xbdc44982, 0xbde9d562, 0x29d97600, 0x3cb38ebc, 0xbc0e02de]),
         ];
         for (attrs, pos, quat, vert) in cases {
-            let xml = format!(r#"<mujoco><asset><mesh name="p" file="prism.obj" {attrs}/></asset><worldbody><body><freejoint/><geom type="mesh" mesh="p"/></body></worldbody></mujoco>"#);
-            let t = tree_from_mjcf(&xml, &|p: &str| (p == "prism.obj").then(|| PRISM.as_bytes().to_vec())).unwrap();
+            let t = load(attrs);
             let d = &t.mesh_props["p"];
-            assert_eq!([d.com.x.to_bits(), d.com.y.to_bits(), d.com.z.to_bits()], pos, "{attrs}: mesh_pos");
-            assert_eq!(d.quat.map(f64::to_bits), quat, "{attrs}: mesh_quat");
+            assert_eq!([d.com.x.to_bits(), d.com.y.to_bits(), d.com.z.to_bits()], pos, "{attrs}: contract-off mesh_pos");
+            assert_eq!(d.quat.map(f64::to_bits), quat, "{attrs}: contract-off mesh_quat");
             let got: Vec<u32> = t.mesh_hulls["p"].verts.iter().flat_map(|v| [v.x as f32, v.y as f32, v.z as f32]).map(f32::to_bits).collect();
-            assert_eq!(got, vert, "{attrs}: mesh_vert");
+            assert_eq!(got, vert, "{attrs}: contract-off mesh_vert");
         }
+        crate::fp_contract::reset_policy();
     }
 
     /// **Body inertia and element frames exactly as MuJoCo's compiler leaves them.** A capsule so small that
@@ -9122,8 +9152,9 @@ mod tests {
     ///
     /// Undone, each of these fails here: the single-geom copy, `x / 180.0 * π`, the sameframe snap, the
     /// parallel-axis term and centre-of-mass sum, the Euler composition order, and a `fullinertia`'s
-    /// eigenframe replacing the stated orientation. The `pair` bits are `mjuu_*` as compiled by
-    /// `libmujoco.so.3.13.0` sha256 `64156abe…` (`-ffp-contract=off`), not the fused products.
+    /// eigenframe replacing the stated orientation. The published `pair` bits are the fused
+    /// `mjuu_*` products from `6093ba89`. The separate products are checked only after the
+    /// contract-off id is installed, as in `ee3b238`.
     #[test]
     fn body_inertia_and_frames_match_mujocos_compiler_bit_for_bit() {
         const MODEL: &str = r#"<mujoco>
@@ -9154,7 +9185,13 @@ mod tests {
     </body>
   </worldbody>
 </mujoco>"#;
-        let want: [(&str, [f64; 11]); 4] = [
+        let published: [(&str, [f64; 11]); 4] = [
+            ("tiny", [3.343386009704378e-06, 5.297288492289184e-12, 5.297288492289184e-12, 4.0483328182308983e-13, 0.5889040235618007, 0.7567440281846111, 0.28377901056922916, -0.0, -0.00030000000000000003, 0.0004999999999999999, 0.00075]),
+            ("pair", [1.3883952591438333, 0.0054157787576827035, 0.004444959626535254, 0.002163181855674452, 0.7535891875991336, 0.23131982243392565, -0.0790689882846118, 0.610198796438066, 0.004111408683855843, 0.005306650499568431, -0.004145572778944047]),
+            ("full", [1.7, 0.02175572069593266, 0.017060856629607813, 0.012183422674459531, 0.9787378415042712, 0.13658524460465873, 0.1186397093384105, 0.09665054543013765, 0.01, 0.02, 0.03]),
+            ("snap", [0.5, 0.001, 0.002, 0.0025, 0.9233805168766387, 0.10259783520851541, 0.20519567041703082, 0.3077935056255462, 0.02, 0.03, 0.04]),
+        ];
+        let contract_off: [(&str, [f64; 11]); 4] = [
             ("tiny", [3.343386009704378e-06, 5.297288492289184e-12, 5.297288492289184e-12, 4.0483328182308983e-13, 0.5889040235618007, 0.7567440281846111, 0.28377901056922916, -0.0, -0.00030000000000000003, 0.0004999999999999999, 0.00075]),
             ("pair", [
                 f64::from_bits(4608931595544370043),
@@ -9184,13 +9221,21 @@ mod tests {
             ]),
             ("snap", [0.5, 0.001, 0.002, 0.0025, 0.9233805168766387, 0.10259783520851541, 0.20519567041703082, 0.3077935056255462, 0.02, 0.03, 0.04]),
         ];
+        let check = |t: &MjcfTree, want: &[(&str, [f64; 11])], label: &str| {
+            for (body, w) in want {
+                let (i, q, p) = (t.body_iinertia[*body], t.body_iquat_wxyz[*body], t.body_ipos[*body]);
+                let got = [t.body_mass[*body], i[0], i[1], i[2], q[0], q[1], q[2], q[3], p[0], p[1], p[2]];
+                let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+                assert_eq!(bits(&got), bits(w), "{label} {body}: {got:?}\n   MuJoCo {w:?}");
+            }
+        };
         let t = tree_from_mjcf_str(MODEL).unwrap();
-        for (body, w) in want {
-            let (i, q, p) = (t.body_iinertia[body], t.body_iquat_wxyz[body], t.body_ipos[body]);
-            let got = [t.body_mass[body], i[0], i[1], i[2], q[0], q[1], q[2], q[3], p[0], p[1], p[2]];
-            let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
-            assert_eq!(bits(&got), bits(&w), "{body}: {got:?}\n   MuJoCo {w:?}");
-        }
+        check(&t, &published, "published");
+        crate::fp_contract::install_policy(crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID, crate::fp_contract::ORACLE_X86_CONTRACT_OFF_SHA256, "").unwrap();
+        let t = tree_from_mjcf_str(MODEL).unwrap();
+        check(&t, &contract_off, "contract-off");
+        crate::fp_contract::reset_policy();
+        let t = tree_from_mjcf_str(MODEL).unwrap();
         // geom_xpos at qpos0: the near-inertial box sits ON xipos, the near-body sphere ON xpos
         let frames = crate::tree_frames(&t.tree, &vec![0.0; t.tree.joints.len()]);
         for (name, xpos) in [("near_inertial", [0.02, -0.37, 1.04]), ("near_body", [0.0, -0.4, 1.0])] {
