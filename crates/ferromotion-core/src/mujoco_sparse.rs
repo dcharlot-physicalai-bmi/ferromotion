@@ -4,9 +4,9 @@
 //! `mju_cholFactorSymbolic`/`…Numeric`, solved by `mju_cholSolveSparse` and updated rank-one by
 //! `mju_cholUpdateSparse` (`engine_util_sparse.c`, `engine_util_solve.c`, MuJoCo 3.13.0).
 //!
-//! Rows are `(columns, values)`, columns ascending. The supernode batching MuJoCo uses to speed these up
-//! changes no arithmetic — every entry is accumulated over the same constraints in the same order — so it
-//! is not reproduced.
+//! Rows are `(columns, values)`, columns ascending. `64156abe` factors and solves one row at a time.
+//! `5491d70f` and `4849b2dd` merge up to three rows into a supernode (`L_super`) and factor and solve
+//! those rows together; that changes the rounding, so the 4.x path does it.
 
 use crate::mujoco_smooth::dot_sparse;
 
@@ -95,6 +95,9 @@ pub(crate) fn hessian(j: &Rows, jt: &Rows, d: &[f64], m: &Rows) -> Rows {
             // `64156abe` `mju_sqrMatTDSparseNumeric`: `scale = vt * D`, then
             // `(J * scale) + acc` (`mulsd` with `J` as the destination, `addsd` of the accumulator).
             // 4.0.0 and 4.0.1 `mju_sqrMatTDSparseNumeric` is not this 3.13 schedule.
+            // `64156abe`: `scale = vt * D`, then `(J * scale) + acc`.
+            // `5491d70f`: `scale = D * vt`, then `acc + (scale * J)`.
+            let four = crate::fp_contract::oracle_4_0_schedules();
             let scale = if crate::fp_contract::contract_off() { vt * d[k] } else { d[k] * vt };
             if scale == 0.0 {
                 continue;
@@ -103,7 +106,13 @@ pub(crate) fn hessian(j: &Rows, jt: &Rows, d: &[f64], m: &Rows) -> Rows {
                 if c > r {
                     break;
                 }
-                buffer[c] = if crate::fp_contract::contract_off() { (v * scale) + buffer[c] } else { scale.mul_add(v, buffer[c]) };
+                buffer[c] = if crate::fp_contract::contract_off() {
+                    (v * scale) + buffer[c]
+                } else if four {
+                    buffer[c] + scale * v
+                } else {
+                    scale.mul_add(v, buffer[c])
+                };
             }
         }
         let vals: Vec<f64> = cols.iter().map(|&c| std::mem::take(&mut buffer[c])).collect();
@@ -145,6 +154,8 @@ pub(crate) struct Chol {
     pub(crate) l_colind: Vec<Vec<usize>>,
     pub(crate) l: Vec<Vec<f64>>,
     lt: Vec<Vec<(usize, usize)>>,
+    /// `5491d70f` `L_super`: rows merged downward from this row, at most 3. `64156abe` leaves this at 1.
+    l_super: Vec<usize>,
     /// the cone-fold gate's inputs: each row's nonzeros summed along its reverse elimination-tree path, and
     /// the factor's squared row counts summed
     pub(crate) pathcost: Vec<u64>,
@@ -169,15 +180,21 @@ impl Chol {
         let mut rev_cols: Vec<Vec<usize>> = vec![Vec::new(); n];
         // LT column r: (row i, index of r in row i counted from the END of i's off-diagonals)
         let mut lt_raw: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n];
+        // nodes of LT[r+1] also reached while walking row r (`5491d70f` overlap)
+        let mut overlap_next = vec![0usize; n];
         for r in (0..n).rev() {
             parent[r] = -1;
             flag[r] = r;
+            let mut overlap = 0usize;
             for &i0 in &upper[r] {
                 if i0 <= r {
                     continue;
                 }
                 let mut i = i0;
                 while flag[i] != r {
+                    if r + 1 < n && flag[i] == r + 1 {
+                        overlap += 1;
+                    }
                     if parent[i] == -1 {
                         parent[i] = r as i64;
                     }
@@ -187,6 +204,7 @@ impl Chol {
                     i = parent[i] as usize;
                 }
             }
+            overlap_next[r] = overlap;
         }
         let mut l_colind: Vec<Vec<usize>> = Vec::with_capacity(n);
         for (r, rc) in rev_cols.iter().enumerate() {
@@ -195,7 +213,7 @@ impl Chol {
             l_colind.push(cols);
         }
         // the diagonal leads each LT column, then the rows as the walk found them
-        let lt = (0..n)
+        let lt: Vec<Vec<(usize, usize)>> = (0..n)
             .map(|r| {
                 let mut col = vec![(r, l_colind[r].len() - 1)];
                 for &(i, from_end) in &lt_raw[r] {
@@ -210,16 +228,36 @@ impl Chol {
         let mut lflops = 0u64;
         for r in 0..n {
             let nnz = l_colind[r].len();
-            let parent = if nnz >= 2 { Some(l_colind[r][nnz - 2]) } else { None };
-            pathcost[r] = nnz as u64 + parent.map_or(0, |p| pathcost[p]);
+            let parent_col = if nnz >= 2 { Some(l_colind[r][nnz - 2]) } else { None };
+            pathcost[r] = nnz as u64 + parent_col.map_or(0, |p| pathcost[p]);
             lflops += (nnz * nnz) as u64;
         }
-        Chol { l_colind, l, lt, pathcost, lflops }
+        // `L_super[r+1] = 1` when row r+1 merges into r. Then each top row's size is
+        // `1 + merge + (merge && the row below also merges)`, at most 3.
+        let mut l_super = vec![0usize; n];
+        for r in 0..n.saturating_sub(1) {
+            let child = r + 1;
+            let merges = parent[child] == r as i64
+                && l_colind[r].len() + 1 == l_colind[child].len()
+                && lt[r].len() == lt[child].len() + 1
+                && overlap_next[r] == lt[child].len();
+            l_super[child] = usize::from(merges);
+        }
+        for r in (0..n).rev() {
+            let merge = l_super[r];
+            let extra = merge == 1 && r > 0 && l_super[r - 1] == 1;
+            l_super[r] = 1 + merge + usize::from(extra);
+        }
+        Chol { l_colind, l, lt, l_super, pathcost, lflops }
     }
 
     /// `mju_cholFactorNumeric`: rows from the last back, each one's `H` row less `L[c][r]·L[c][..=r]` for the
     /// rows `c` below it, diagonal floored at `mindiag`; returns the rank.
+    /// `5491d70f` factors supernodes of 2 or 3 rows in one step.
     pub(crate) fn numeric(&mut self, h: &Rows, mindiag: f64) -> usize {
+        if crate::fp_contract::oracle_4_0_schedules() {
+            return self.numeric_super(h, mindiag);
+        }
         let n = h.len();
         let mut rank = n;
         let mut dense = vec![0.0f64; n];
@@ -260,7 +298,11 @@ impl Chol {
     }
 
     /// `mju_cholSolveSparse`: `L'·L·x = vec`.
+    /// `5491d70f` fuses a 2- or 3-row supernode into one backward and one forward step.
     pub(crate) fn solve(&self, vec: &[f64]) -> Vec<f64> {
+        if crate::fp_contract::oracle_4_0_schedules() {
+            return self.solve_super(vec);
+        }
         let n = vec.len();
         let mut res = vec.to_vec();
         for i in (0..n).rev() {
@@ -290,6 +332,366 @@ impl Chol {
                 res[i] -= dot;
             }
             res[i] /= self.l[i][nnz - 1];
+        }
+        res
+    }
+
+    /// `5491d70f` `mju_cholFactorNumeric`: leaf rows scale `H` directly; every other row is a supernode
+    /// of 1, 2, or 3. Descendant updates are subtracted before the supernode is scaled, and scaling row
+    /// `r` immediately eliminates it from rows `r-1` and `r-2`.
+    fn numeric_super(&mut self, h: &Rows, mindiag: f64) -> usize {
+        let n = h.len();
+        let mut rank = n;
+        let mut dense = vec![0.0f64; n];
+        let mut r_i = n as isize - 1;
+        while r_i >= 0 {
+            let r = r_i as usize;
+            let l_nnz = self.l_colind[r].len();
+            let lt_nnz = self.lt[r].len();
+            let h_nofill = h[r].0.len() >= l_nnz && h[r].0[l_nnz - 1] == r;
+            if lt_nnz == 1 && h_nofill {
+                let mut diag = h[r].1[l_nnz - 1];
+                if !(diag >= mindiag) {
+                    diag = mindiag;
+                    rank -= 1;
+                    for i in 0..l_nnz - 1 {
+                        self.l[r][i] = 0.0;
+                    }
+                } else {
+                    let inv = 1.0 / diag.sqrt();
+                    for i in 0..l_nnz - 1 {
+                        self.l[r][i] = h[r].1[i] * inv;
+                    }
+                }
+                self.l[r][l_nnz - 1] = diag.sqrt();
+                r_i -= 1;
+                continue;
+            }
+            let ns = self.l_super.get(r).copied().unwrap_or(1).clamp(1, 3).min(r + 1);
+            rank -= self.factor_supernode(h, r, ns, mindiag, &mut dense);
+            r_i -= ns as isize;
+        }
+        rank
+    }
+
+    /// One `cholFactorSupernode` call. `r` is the highest row of the supernode.
+    fn factor_supernode(&mut self, h: &Rows, r: usize, ns: usize, mindiag: f64, dense: &mut [f64]) -> usize {
+        let l_nnz = self.l_colind[r].len();
+        let cols = self.l_colind[r].clone();
+        let lt = self.lt[r].clone();
+        let mut rows: Vec<Vec<f64>> = (0..ns).map(|s| vec![0.0; l_nnz - s]).collect();
+        let mut used_dense = false;
+        for s in 0..ns {
+            let row = r - s;
+            let nnz_s = l_nnz - s;
+            let (hc, hv) = (&h[row].0, &h[row].1);
+            if hc.len() >= nnz_s && hc[nnz_s - 1] == row {
+                rows[s][..nnz_s].copy_from_slice(&hv[..nnz_s]);
+            } else if ns == 1 {
+                for i in 0..nnz_s {
+                    rows[s][i] = 0.0;
+                }
+                for (&c, &v) in hc.iter().zip(hv) {
+                    if c > row {
+                        break;
+                    }
+                    dense[c] = v;
+                }
+                used_dense = true;
+            } else {
+                for (&c, &v) in hc.iter().zip(hv) {
+                    if c > row {
+                        break;
+                    }
+                    dense[c] = v;
+                }
+                for i in 0..nnz_s {
+                    let c = cols[i];
+                    rows[s][i] = dense[c];
+                    dense[c] = 0.0;
+                }
+            }
+        }
+        let max_batch = if ns == 3 { 3 } else { 4 };
+        let mut k = 1usize;
+        while k < lt.len() {
+            let (c0, idx0) = lt[k];
+            let num_cols = idx0 + 1;
+            let col0 = self.l_colind[c0][0];
+            let is_suffix = cols[l_nnz - num_cols] == col0;
+            let mut batch = 1usize;
+            let mut cs = [c0, 0, 0, 0];
+            let mut idxs = [idx0, 0, 0, 0];
+            if is_suffix || ns == 1 {
+                let mut prev_c = c0;
+                while k + batch < lt.len() && batch < max_batch {
+                    let (next_c, next_idx) = lt[k + batch];
+                    if next_idx + 1 != num_cols {
+                        break;
+                    }
+                    if is_suffix {
+                        if self.l_colind[next_c][0] != col0 {
+                            break;
+                        }
+                    } else {
+                        let (hi, lo) = if next_c > prev_c { (next_c, prev_c) } else { (prev_c, next_c) };
+                        let lo_nnz = self.l_colind[lo].len();
+                        if lo_nnz >= self.l_colind[hi].len() || self.l_colind[hi][lo_nnz - 1] != lo {
+                            break;
+                        }
+                        prev_c = next_c;
+                    }
+                    cs[batch] = next_c;
+                    idxs[batch] = next_idx;
+                    batch += 1;
+                }
+            }
+            if is_suffix {
+                let off = l_nnz - num_cols;
+                let nlead = num_cols - (ns - 1);
+                let mut scale = [[0.0f64; 4]; 3];
+                for t in 0..ns {
+                    for b in 0..batch {
+                        scale[t][b] = self.l[cs[b]][idxs[b] - t];
+                    }
+                }
+                for i in 0..nlead {
+                    let mut v = [0.0f64; 4];
+                    for b in 0..batch {
+                        v[b] = self.l[cs[b]][i];
+                    }
+                    for b in 0..batch {
+                        rows[0][off + i] -= scale[0][b] * v[b];
+                    }
+                    if ns >= 2 {
+                        for b in 0..batch {
+                            rows[1][off + i] -= scale[1][b] * v[b];
+                        }
+                    }
+                    if ns >= 3 {
+                        for b in 0..batch {
+                            rows[2][off + i] -= scale[2][b] * v[b];
+                        }
+                    }
+                }
+                for u in 0..ns.saturating_sub(1) {
+                    let idx = nlead + u;
+                    let mut v = [0.0f64; 4];
+                    for b in 0..batch {
+                        v[b] = self.l[cs[b]][idx];
+                    }
+                    for b in 0..batch {
+                        rows[0][off + idx] -= scale[0][b] * v[b];
+                    }
+                    if u == 0 && ns >= 3 {
+                        for b in 0..batch {
+                            rows[1][off + idx] -= scale[1][b] * v[b];
+                        }
+                    }
+                }
+            } else {
+                used_dense = true;
+                let mut scale = [0.0f64; 4];
+                for b in 0..batch {
+                    scale[b] = self.l[cs[b]][idxs[b]];
+                }
+                let colptr = self.l_colind[c0].clone();
+                for i in 0..num_cols {
+                    let col = colptr[i];
+                    let mut acc = dense[col] - scale[0] * self.l[cs[0]][i];
+                    if batch >= 2 {
+                        acc -= scale[1] * self.l[cs[1]][i];
+                    }
+                    if batch >= 3 {
+                        acc -= scale[2] * self.l[cs[2]][i];
+                    }
+                    if batch >= 4 {
+                        acc -= scale[3] * self.l[cs[3]][i];
+                    }
+                    dense[col] = acc;
+                }
+            }
+            k += batch;
+        }
+        if used_dense {
+            for s in 0..ns {
+                if s > 0 {
+                    for j in 1..lt.len() {
+                        let (c0, idx0) = lt[j];
+                        let num_cols = idx0 + 1;
+                        if cols[l_nnz - num_cols] != self.l_colind[c0][0] {
+                            let scale = self.l[c0][idx0 - s];
+                            for i in 0..num_cols - s {
+                                let col = self.l_colind[c0][i];
+                                dense[col] -= scale * self.l[c0][i];
+                            }
+                        }
+                    }
+                }
+                let nnz_s = l_nnz - s;
+                for i in 0..nnz_s {
+                    let c = cols[i];
+                    rows[s][i] += dense[c];
+                    dense[c] = 0.0;
+                }
+            }
+        }
+        let mut rank_dec = 0usize;
+        let n_off = l_nnz - ns;
+        for s in 0..ns {
+            let nnz_s = l_nnz - s;
+            let mut diag = rows[s][nnz_s - 1];
+            let deficient = !(diag >= mindiag);
+            if deficient {
+                diag = mindiag;
+                rank_dec += 1;
+            }
+            let lrr = diag.sqrt();
+            if deficient {
+                for i in 0..nnz_s - 1 {
+                    rows[s][i] = 0.0;
+                }
+            } else {
+                let inv = 1.0 / lrr;
+                let mut s_st = [0.0f64; 3];
+                for t in (s + 1)..ns {
+                    rows[s][l_nnz - 1 - t] *= inv;
+                    s_st[t] = rows[s][l_nnz - 1 - t];
+                }
+                for i in 0..n_off {
+                    rows[s][i] *= inv;
+                    let l_si = rows[s][i];
+                    if s + 1 < ns {
+                        rows[s + 1][i] -= s_st[s + 1] * l_si;
+                    }
+                    if s + 2 < ns {
+                        rows[s + 2][i] -= s_st[s + 2] * l_si;
+                    }
+                }
+                for t in (s + 1)..ns {
+                    for u in t..ns {
+                        rows[t][l_nnz - 1 - u] -= s_st[t] * s_st[u];
+                    }
+                }
+            }
+            rows[s][nnz_s - 1] = lrr;
+        }
+        for s in 0..ns {
+            let nnz_s = l_nnz - s;
+            self.l[r - s][..nnz_s].copy_from_slice(&rows[s][..nnz_s]);
+        }
+        rank_dec
+    }
+
+    /// `5491d70f` `mju_cholSolveSparse`: a detected 2- or 3-row supernode is one substitution.
+    fn solve_super(&self, vec: &[f64]) -> Vec<f64> {
+        let n = vec.len();
+        let mut res = vec.to_vec();
+        let mut i = n as isize - 1;
+        while i >= 0 {
+            let iu = i as usize;
+            let nnz = self.l[iu].len();
+            if iu > 0 && nnz >= 2 && self.l[iu - 1].len() == nnz - 1 && self.l_colind[iu][nnz - 2] == iu - 1 {
+                let row0 = self.l[iu].clone();
+                let row1 = self.l[iu - 1].clone();
+                let ci = self.l_colind[iu].clone();
+                if iu > 1 && nnz >= 3 && self.l[iu - 2].len() == nnz - 2 && ci[nnz - 3] == iu - 2 {
+                    let nob = nnz - 3;
+                    let row2 = self.l[iu - 2].clone();
+                    let x0 = {
+                        res[iu] /= row0[nob + 2];
+                        res[iu]
+                    };
+                    let x1 = {
+                        res[iu - 1] = (res[iu - 1] - row0[nob + 1] * x0) / row1[nob + 1];
+                        res[iu - 1]
+                    };
+                    let x2 = {
+                        res[iu - 2] = ((res[iu - 2] - row0[nob] * x0) - row1[nob] * x1) / row2[nob];
+                        res[iu - 2]
+                    };
+                    if x0 != 0.0 || x1 != 0.0 || x2 != 0.0 {
+                        for j in 0..nob {
+                            let c = ci[j];
+                            res[c] = ((res[c] - row0[j] * x0) - row1[j] * x1) - row2[j] * x2;
+                        }
+                    }
+                    i -= 3;
+                    continue;
+                }
+                let nob = nnz - 2;
+                let x0 = {
+                    res[iu] /= row0[nob + 1];
+                    res[iu]
+                };
+                let x1 = {
+                    res[iu - 1] = (res[iu - 1] - row0[nob] * x0) / row1[nob];
+                    res[iu - 1]
+                };
+                if x0 != 0.0 || x1 != 0.0 {
+                    for j in 0..nob {
+                        let c = ci[j];
+                        res[c] = (res[c] - row0[j] * x0) - row1[j] * x1;
+                    }
+                }
+                i -= 2;
+                continue;
+            }
+            if res[iu] != 0.0 {
+                let tmp = {
+                    res[iu] /= self.l[iu][nnz - 1];
+                    res[iu]
+                };
+                for j in 0..nnz - 1 {
+                    let c = self.l_colind[iu][j];
+                    res[c] -= self.l[iu][j] * tmp;
+                }
+            }
+            i -= 1;
+        }
+        let mut i = 0usize;
+        while i < n {
+            let nnz = self.l[i].len();
+            if i + 1 < n && self.l[i + 1].len() == nnz + 1 && self.l_colind[i + 1][nnz - 1] == i {
+                let nob = nnz - 1;
+                let row0 = &self.l[i];
+                let row1 = &self.l[i + 1];
+                let ci = &self.l_colind[i];
+                if i + 2 < n && self.l[i + 2].len() == nnz + 2 && self.l_colind[i + 2][nnz - 1] == i {
+                    let row2 = &self.l[i + 2];
+                    let mut s0 = 0.0;
+                    let mut s1 = 0.0;
+                    let mut s2 = 0.0;
+                    for j in 0..nob {
+                        let y = res[ci[j]];
+                        s0 += row0[j] * y;
+                        s1 += row1[j] * y;
+                        s2 += row2[j] * y;
+                    }
+                    res[i] = (res[i] - s0) / row0[nob];
+                    res[i + 1] = ((res[i + 1] - s1) - row1[nob] * res[i]) / row1[nob + 1];
+                    res[i + 2] = (((res[i + 2] - s2) - row2[nob] * res[i]) - row2[nob + 1] * res[i + 1]) / row2[nob + 2];
+                    i += 3;
+                    continue;
+                }
+                let mut s0 = 0.0;
+                let mut s1 = 0.0;
+                for j in 0..nob {
+                    let y = res[ci[j]];
+                    s0 += row0[j] * y;
+                    s1 += row1[j] * y;
+                }
+                res[i] = (res[i] - s0) / row0[nob];
+                res[i + 1] = ((res[i + 1] - s1) - row1[nob] * res[i]) / row1[nob + 1];
+                i += 2;
+                continue;
+            }
+            if nnz > 1 {
+                let dot = chol_solve_dot(&self.l[i][..nnz - 1], &res, &self.l_colind[i][..nnz - 1]);
+                res[i] -= dot;
+            }
+            res[i] /= self.l[i][nnz - 1];
+            i += 1;
         }
         res
     }
