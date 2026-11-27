@@ -14,6 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Oracle direct-pull SHA256SUMS
+        run: bash scripts/arm_oracle/direct-pull/tests/sha256sums-match.sh
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
