@@ -401,12 +401,19 @@ fn lincomb(coef: &[f64], vs: &[V3]) -> V3 {
             0 => 0.0,
             1 => coef[0] * vs[0][k],
             2 => {
-                if contract_off() { coef[0] * vs[0][k] + coef[1] * vs[1][k] } else { coef[0].mul_add(vs[0][k], coef[1] * vs[1][k]) }
+                if crate::fp_contract::oracle_4_0_schedules() {
+                    // `5491d70f` `lincomb` (VA `0x8aaa0`): `(c1·v1) + (c0·v0)`.
+                    coef[1] * vs[1][k] + coef[0] * vs[0][k]
+                } else if contract_off() {
+                    coef[0] * vs[0][k] + coef[1] * vs[1][k]
+                } else {
+                    coef[0].mul_add(vs[0][k], coef[1] * vs[1][k])
+                }
             }
             3 => {
                 if crate::fp_contract::oracle_4_0_schedules() {
-                    // `5491d70f` sums the third term first: `c0·v0 + (c1·v1 + c2·v2)`.
-                    coef[0] * vs[0][k] + (coef[1] * vs[1][k] + coef[2] * vs[2][k])
+                    // `(c2·v2) + ((c1·v1) + (c0·v0))`.
+                    coef[2] * vs[2][k] + (coef[1] * vs[1][k] + coef[0] * vs[0][k])
                 } else if contract_off() {
                     (coef[0] * vs[0][k] + coef[1] * vs[1][k]) + coef[2] * vs[2][k]
                 } else {
@@ -414,7 +421,10 @@ fn lincomb(coef: &[f64], vs: &[V3]) -> V3 {
                 }
             }
             _ => {
-                if contract_off() {
+                if crate::fp_contract::oracle_4_0_schedules() {
+                    // `(c3·v3) + ((c2·v2) + ((c1·v1) + (c0·v0)))`.
+                    coef[3] * vs[3][k] + (coef[2] * vs[2][k] + (coef[1] * vs[1][k] + coef[0] * vs[0][k]))
+                } else if contract_off() {
                     ((coef[0] * vs[0][k] + coef[1] * vs[1][k]) + coef[2] * vs[2][k]) + coef[3] * vs[3][k]
                 } else {
                     coef[3].mul_add(vs[3][k], coef[2].mul_add(vs[2][k], coef[0].mul_add(vs[0][k], coef[1] * vs[1][k])))
@@ -684,8 +694,173 @@ fn gjk_intersect(st: &mut CcdStatus, o1: &mut CcdObj, o2: &mut CcdObj) -> i32 {
     -1
 }
 
+/// `5491d70f` `projectOriginLine` returns the degenerate case to `lincomb`.
+fn project_origin_line_4(v1: &V3, v2: &V3) -> Option<V3> {
+    let diff = v2 - v1;
+    let dd = dot3(&diff, &diff);
+    if dd < MINVAL2 {
+        return None;
+    }
+    let scl = -(dot3(v2, &diff) / dd);
+    Some(add_scl3(v2, &diff, scl))
+}
+
+/// `5491d70f` `projectOriginPlane`. The third cross product also rejects a zero normal.
+fn project_origin_plane_4(v1: &V3, v2: &V3, v3: &V3) -> Option<V3> {
+    let diff21 = v2 - v1;
+    let diff31 = v3 - v1;
+    let diff32 = v3 - v2;
+    let n = cross3(&diff32, &diff21);
+    let (nv, nn) = (dot3(&n, v2), dot3(&n, &n));
+    if nn == 0.0 {
+        return None;
+    }
+    if nv != 0.0 && nn > MINVAL {
+        return Some(n * (nv / nn));
+    }
+    let n = cross3(&diff21, &diff31);
+    let (nv, nn) = (dot3(&n, v1), dot3(&n, &n));
+    if nn == 0.0 {
+        return None;
+    }
+    if nv != 0.0 && nn > MINVAL {
+        return Some(n * (nv / nn));
+    }
+    let n = cross3(&diff31, &diff32);
+    let (nv, nn) = (dot3(&n, v3), dot3(&n, &n));
+    if nn == 0.0 {
+        return None;
+    }
+    Some(n * (nv / nn))
+}
+
+/// `5491d70f` `gjk` (VA `0x84b00`). A reduced sphere or capsule counts as discrete, the search
+/// point is the origin's projection on the simplex edge or face, and the Frank-Wolfe gap is
+/// checked only after the first support.
+fn gjk_4(st: &mut CcdStatus, o1: &mut CcdObj, o2: &mut CcdObj) {
+    let get_dist = st.dist_cutoff > 0.0;
+    let mut simplex = [Vertex::default(); 4];
+    let mut n = 0usize;
+    let mut k = 0usize;
+    let kmax = st.max_iterations;
+    let mut x1_k = st.x1[0];
+    let mut x2_k = st.x2[0];
+    let mut lambda = [0.0; 4];
+    let tol2 = st.tolerance * st.tolerance;
+    st.separated = false;
+    let discrete_one = |o: &CcdObj| {
+        if o.margin != 0.0 {
+            return false;
+        }
+        matches!(o.reduced, Some(Reduced::Point | Reduced::Line))
+            || matches!(o.kind, GeomType::Mesh | GeomType::Box | GeomType::HField)
+    };
+    let discrete = discrete_one(o1) && discrete_one(o2);
+    let epsilon = if discrete { 0.0 } else { 0.5 * tol2 };
+    let min_norm = if discrete || get_dist { MINVAL } else { st.tolerance };
+    let mut x_k = x1_k - x2_k;
+    let mut x_norm = norm3(&x_k);
+    if x_norm < MINVAL {
+        x_k = Vector3::x();
+        x_norm = 1.0;
+    }
+    while k < kmax {
+        let dir_neg = x_k * (1.0 / x_norm);
+        simplex[n] = mink_support(o1, o2, &(-dir_neg), &dir_neg);
+        let s_k = simplex[n].vert;
+        let lower = dot3(&x_k, &s_k);
+        if !get_dist {
+            if lower > 0.0 {
+                st.separated = true;
+                st.gjk_iterations = k;
+                st.nsimplex = 0;
+                st.dist = vec![MAX_LIMIT];
+                return;
+            }
+        } else if lower > 0.0 {
+            st.separated = true;
+            if st.dist_cutoff < MAX_LIMIT && lower >= st.dist_cutoff * x_norm {
+                st.gjk_iterations = k;
+                st.nsimplex = 0;
+                st.dist = vec![MAX_LIMIT];
+                return;
+            }
+        }
+        if k > 0 {
+            let diff = x_k - s_k;
+            if dot3(&x_k, &diff) < epsilon {
+                break;
+            }
+        }
+        let lam = subdistance(n + 1, &simplex);
+        let mut m = 0usize;
+        for i in 0..4 {
+            if lam[i] == 0.0 {
+                continue;
+            }
+            if m != i {
+                simplex[m] = simplex[i];
+            }
+            lambda[m] = lam[i];
+            m += 1;
+        }
+        n = m;
+        if n < 1 {
+            st.gjk_iterations = k;
+            st.nsimplex = 0;
+            st.dist = vec![MAX_LIMIT];
+            st.separated = true;
+            return;
+        }
+        if n == 4 {
+            if !st.separated {
+                x_norm = 0.0;
+            }
+            break;
+        }
+        let verts = [simplex[0].vert, simplex[1].vert, simplex[2].vert, simplex[3].vert];
+        let projected = if n == 3 {
+            project_origin_plane_4(&verts[0], &verts[1], &verts[2])
+        } else if n == 2 {
+            project_origin_line_4(&verts[0], &verts[1])
+        } else {
+            None
+        };
+        let x_next = projected.unwrap_or_else(|| lincomb(&lambda[..n], &verts[..n]));
+        let x_next_norm = norm3(&x_next);
+        let tol = if n > 1 { min_norm } else { MINVAL };
+        x_k = x_next;
+        if x_next_norm < tol || (k > 0 && (x_next_norm - x_norm).abs() < MINVAL) {
+            x_norm = x_next_norm;
+            break;
+        }
+        x_norm = x_next_norm;
+        k += 1;
+    }
+    if n > 0 {
+        x1_k = lincomb(&lambda[..n], &[simplex[0].vert1, simplex[1].vert1, simplex[2].vert1, simplex[3].vert1][..n]);
+        x2_k = lincomb(&lambda[..n], &[simplex[0].vert2, simplex[1].vert2, simplex[2].vert2, simplex[3].vert2][..n]);
+    }
+    if !st.separated && n < 4 && x_norm >= MINVAL {
+        let dir_neg = x_k * (1.0 / x_norm);
+        let tmp = mink_support(o1, o2, &(-dir_neg), &dir_neg);
+        if dot3(&x_k, &tmp.vert) > 0.0 {
+            st.separated = true;
+        }
+    }
+    st.x1 = vec![x1_k];
+    st.x2 = vec![x2_k];
+    st.gjk_iterations = k;
+    st.nsimplex = n;
+    st.simplex = simplex;
+    st.dist = vec![x_norm];
+}
+
 /// `gjk`: the distance query; leaves the simplex and witness points in `st`.
 fn gjk(st: &mut CcdStatus, o1: &mut CcdObj, o2: &mut CcdObj) {
+    if crate::fp_contract::oracle_4_0_schedules() {
+        return gjk_4(st, o1, o2);
+    }
     let get_dist = st.dist_cutoff > 0.0;
     let mut backup_gjk = !get_dist;
     let mut simplex = [Vertex::default(); 4];
@@ -1660,6 +1835,19 @@ fn edge_normals(obj: &CcdObj, dim: usize, v: &[V3; 3], vi: &[i64; 3]) -> Vec<(V3
 // the 16-gon tables are MuJoCo's verbatim 15-digit constants (note the 547/548 last digits), which decide the
 // last-bit ties in the polygon pruning; the library constants would change the answer
 #[allow(clippy::approx_constant)]
+/// `5491d70f` `cylinderEdge`: the cylinder side parallel to its axis, facing `normal`.
+fn cylinder_edge(obj: &CcdObj, normal: &V3) -> Option<[V3; 2]> {
+    let axis = obj.pose.axis();
+    let proj = add_scl3(normal, &axis, -dot3(normal, &axis));
+    let n = norm3(&proj);
+    if n < MINVAL {
+        return None;
+    }
+    let center = add_scl3(&obj.pose.pos, &proj, -obj.size[0] / n);
+    let half = obj.size[1];
+    Some([add_scl3(&center, &axis, -half), add_scl3(&center, &axis, half)])
+}
+
 fn face_vertices(obj: &CcdObj, idx: usize) -> Vec<V3> {
     let pose = &obj.pose;
     match obj.kind {
@@ -1853,8 +2041,27 @@ fn multicontact(pt: &Polytope, fi: usize, st: &mut CcdStatus, o1: &CcdObj, o2: &
     } else {
         return;
     };
-    let face1: Vec<V3> = if edgecon1 { vec![cap1.unwrap_or(v1[0]), e1[i].1] } else { face_vertices(o1, if edgecon2 { n1[j].1 } else { n1[i].1 }) };
-    let face2: Vec<V3> = if edgecon2 { vec![cap2.unwrap_or(v2[0]), e2[i].1] } else { face_vertices(o2, n2[j].1) };
+    let cylinder_side = crate::fp_contract::oracle_4_0_1();
+    let face1: Vec<V3> = if edgecon1 {
+        if cylinder_side && o1.kind == GeomType::Cylinder {
+            let Some(edge) = cylinder_edge(o1, &n2[j].0) else { return };
+            edge.to_vec()
+        } else {
+            vec![cap1.unwrap_or(v1[0]), e1[i].1]
+        }
+    } else {
+        face_vertices(o1, if edgecon2 { n1[j].1 } else { n1[i].1 })
+    };
+    let face2: Vec<V3> = if edgecon2 {
+        if cylinder_side && o2.kind == GeomType::Cylinder {
+            let Some(edge) = cylinder_edge(o2, &n1[j].0) else { return };
+            edge.to_vec()
+        } else {
+            vec![cap2.unwrap_or(v2[0]), e2[i].1]
+        }
+    } else {
+        face_vertices(o2, n2[j].1)
+    };
     // half the geom margin, and none of a capsule's (its radius is already in the witness)
     let half = |o: &CcdObj| if four && o.kind != GeomType::Capsule { 0.5 * o.margin } else { 0.0 };
     let (m1, m2) = (half(o1), half(o2));

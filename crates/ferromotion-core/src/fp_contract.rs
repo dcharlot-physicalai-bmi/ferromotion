@@ -99,6 +99,11 @@ pub fn oracle_4_0() -> bool {
     active_policy().id == ORACLE_4_0_ID
 }
 
+/// True only for the 4.0.1 identity. 4.0.0 keeps the schedules it shares with 4.0.1.
+pub fn oracle_4_0_1() -> bool {
+    active_policy().id == ORACLE_4_0_1_ID
+}
+
 /// `d9972b33` and `6f3db612` schedules. Both the 4.0.0 and 4.0.1 libraries have them.
 pub fn oracle_4_0_schedules() -> bool {
     oracle_4_0() || active_policy().id == ORACLE_4_0_1_ID

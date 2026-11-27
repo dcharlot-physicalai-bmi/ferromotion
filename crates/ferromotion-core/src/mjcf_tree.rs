@@ -9257,6 +9257,53 @@ mod tests {
         assert_eq!(head(crate::fp_contract::ORACLE_4_0_ID, crate::fp_contract::ORACLE_4_0_SHA256), four);
     }
 
+    /// `5491d70f` `gjk` (VA `0x84b00`) projects the origin onto the simplex edge or face and
+    /// counts a reduced sphere as a discrete point. `64156abe` keeps the barycentric combination
+    /// and the smooth-sphere tolerance. `64156abe` matches this pair's whole contact. The 4.x
+    /// profiles match its distance.
+    #[test]
+    fn a_4x_sphere_mesh_uses_the_projected_search_point() {
+        const MESH: &str = "v 0 0 0\nv 1 0 0.02\nv 0.1 1 0\nv 0.05 0.08 1\nv 0.7 0.4 0.3\nf 1 2 3\nf 1 3 4\nf 1 4 5\n";
+        const MODEL: &str = r#"<mujoco>
+  <option timestep="0.002"/>
+  <asset>
+    <mesh name="a" file="a.obj"/>
+  </asset>
+  <worldbody>
+    <geom type="mesh" mesh="a"/>
+    <body pos="0.35 0.22 0.18">
+      <freejoint/>
+      <geom type="sphere" size="0.12"/>
+    </body>
+  </worldbody>
+</mujoco>"#;
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::fp_contract::reset_policy();
+            }
+        }
+        let _reset = Reset;
+        let bits = |id: &str, sha: &str| {
+            crate::fp_contract::install_policy(id, sha, "").unwrap();
+            let t = tree_from_mjcf(MODEL, &|p: &str| (p == "a.obj").then(|| MESH.as_bytes().to_vec())).unwrap();
+            let c = t.collide_qpos(&t.qpos0());
+            assert_eq!(c.contacts.len(), 1, "{:?}", c.contacts);
+            let r = &c.contacts[0].record;
+            let mut out = vec![r.dist.to_bits()];
+            out.extend(r.pos.iter().map(|x| x.to_bits()));
+            out.extend(r.frame[0].iter().map(|x| x.to_bits()));
+            out
+        };
+        assert_eq!(
+            bits(crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID, crate::fp_contract::ORACLE_X86_CONTRACT_OFF_SHA256),
+            vec![0xbfd2c725aa664900, 0x3fd66f54f8481184, 0x3fcc2799ccd5f907, 0x3fc39f6f9d2537fb, 0xbf9479d10a99fd7c, 0x3f60617930139182, 0x3feffe58811bb29a]
+        );
+        let four = 0xbfd2c725aa66a9a1;
+        assert_eq!(bits(crate::fp_contract::ORACLE_4_0_1_ID, crate::fp_contract::ORACLE_4_0_1_SHA256)[0], four);
+        assert_eq!(bits(crate::fp_contract::ORACLE_4_0_ID, crate::fp_contract::ORACLE_4_0_SHA256)[0], four);
+    }
+
     /// `setDampRatio` in `5491d70f` / `4849b2dd` reflects `1 / (J M⁻¹ J')`. `64156abe` sums
     /// `dof_M0 / trn²`. The 4.x product is `(dampratio * -2) * sqrt(mass * kp)`.
     #[test]
