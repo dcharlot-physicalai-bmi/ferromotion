@@ -8976,6 +8976,51 @@ mod tests {
         crate::fp_contract::reset_policy();
     }
 
+    /// `agility_cassie/cassie.xml` step 2 `qpos[24]`, the `right-achilles-rod` ball joint.
+    /// `5491d70f` and `4849b2dd` pair the inlined `mju_quatIntegrate` product as
+    /// `(-yy - zz) + (ww - xx)`. `64156abe` subtracts left to right. One ulp on `w` and on `x`.
+    #[test]
+    fn cassie_achilles_quaternion_uses_the_4x_product_pairing() {
+        const MODEL: &str = r#"<mujoco>
+  <option timestep="0.0005" gravity="0 0 0"/>
+  <worldbody>
+    <body>
+      <joint type="ball"/>
+      <geom type="sphere" size="0.05" mass="1"/>
+    </body>
+  </worldbody>
+</mujoco>"#;
+        let bits = |xs: &[u64]| xs.iter().copied().map(f64::from_bits).collect::<Vec<_>>();
+        let qpos = bits(&[0x3feffffc9920c27d, 0xbef24ebb569723ff, 0x3f2c99ba47a7ebf0, 0xbf5d4ab226fe2fee]);
+        let qvel = bits(&[0xbfad80d0b9f47bb1, 0x3ff4894bc63b01f2, 0xc02f410a8dd883c8]);
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::fp_contract::reset_policy();
+            }
+        }
+        let _reset = Reset;
+        let step = |id: &str, sha: &str| {
+            crate::fp_contract::install_policy(id, sha, "").unwrap();
+            let t = tree_from_mjcf_str(MODEL).unwrap();
+            let mut q = qpos.clone();
+            t.smooth_model().integrate_pos(&mut q, &qvel, t.timestep);
+            q.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            step(crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID, crate::fp_contract::ORACLE_X86_CONTRACT_OFF_SHA256),
+            vec![0x3fefffddb0d3c284, 0xbf00da478fb824b4, 0x3f41a9c937a8b596, 0xbf77532d998b87ca]
+        );
+        assert_eq!(
+            step(crate::fp_contract::ORACLE_4_0_1_ID, crate::fp_contract::ORACLE_4_0_1_SHA256),
+            vec![0x3fefffddb0d3c283, 0xbf00da478fb824b3, 0x3f41a9c937a8b596, 0xbf77532d998b87ca]
+        );
+        assert_eq!(
+            step(crate::fp_contract::ORACLE_4_0_ID, crate::fp_contract::ORACLE_4_0_SHA256),
+            vec![0x3fefffddb0d3c283, 0xbf00da478fb824b3, 0x3f41a9c937a8b596, 0xbf77532d998b87ca]
+        );
+    }
+
     /// **`RK4`, against MuJoCo's own trajectory.** A damped double pendulum (whose accelerations depend
     /// strongly on position, so a stage evaluated at the wrong position shows) beside a spinning free body
     /// (so every stage composes a quaternion). One step to 1e-13, twenty-five to 1e-10.

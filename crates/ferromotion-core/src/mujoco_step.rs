@@ -128,7 +128,9 @@ impl SmoothModel {
 
 /// `mju_quatIntegrate` as `64156abe` inlines it. The axis norm is `(y y + x x) + z z`.
 /// The multiply is `mju_mulQuat` except lane 1, which adds the cross term on the left:
-/// `(p23 + (p10 + p01)) - p32`. There is no second normalize after the multiply.
+/// `(p23 + (p10 + p01)) - p32`. `5491d70f` and `4849b2dd` pair each lane the other way,
+/// inside `mju_quatIntegrate` rather than through `mju_mulQuat`. There is no second
+/// normalize after the multiply.
 fn quat_integrate_off(q: &mut [f64], vel: &[f64], scale: f64) {
     let norm = ((vel[1] * vel[1] + vel[0] * vel[0]) + vel[2] * vel[2]).sqrt();
     let axis = if norm < 1e-15 {
@@ -145,12 +147,13 @@ fn quat_integrate_off(q: &mut [f64], vel: &[f64], scale: f64) {
     let (p01, p10, p23, p32) = (a[0] * b[1], a[1] * b[0], a[2] * b[3], a[3] * b[2]);
     let (p02, p13, p20, p31) = (a[0] * b[2], a[1] * b[3], a[2] * b[0], a[3] * b[1]);
     let (p03, p12, p21, p30) = (a[0] * b[3], a[1] * b[2], a[2] * b[1], a[3] * b[0]);
-    let out = [
-        ((p00 - p11) - p22) - p33,
-        (p23 + (p10 + p01)) - p32,
-        ((p02 - p13) + p20) + p31,
-        ((p12 + p03) - p21) + p30,
-    ];
+    // `5491d70f` and `4849b2dd` inline the product in `mju_quatIntegrate` and pair the
+    // terms the other way. `64156abe` keeps the left-associated differences below.
+    let out = if crate::fp_contract::oracle_4_0_schedules() {
+        [(-p22 - p33) + (p00 - p11), (p23 - p32) + (p10 + p01), (p31 + p20) + (p02 - p13), (p30 - p21) + (p12 + p03)]
+    } else {
+        [((p00 - p11) - p22) - p33, (p23 + (p10 + p01)) - p32, ((p02 - p13) + p20) + p31, ((p12 + p03) - p21) + p30]
+    };
     q.copy_from_slice(&out);
 }
 
