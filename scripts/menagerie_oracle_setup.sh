@@ -24,7 +24,7 @@ if [ ! -x oracle-venv/bin/python ]; then
   [ -n "$PY" ] || { echo "no runnable python3.12 found" >&2; exit 1; }
   rm -rf oracle-venv
   uv venv -p "$PY" oracle-venv
-  VIRTUAL_ENV="$WORK/oracle-venv" uv pip install -q "mujoco==$MJ" numpy
+  VIRTUAL_ENV="$WORK/oracle-venv" uv pip install -q "mujoco==$MJ" "numpy==2.5.4"
 fi
 PYBIN="$WORK/oracle-venv/bin/python"
 "$PYBIN" -c "import platform, mujoco; print('python', platform.machine(), 'mujoco', mujoco.__version__)"

@@ -37,7 +37,12 @@ impl SmoothModel {
                 if xi != 0.0 {
                     for adr in start..end {
                         let c = off + self.m_colind[adr];
-                        y[c] = (-sd.qld[adr]).mul_add(xi, y[c]);
+                        // `x -= L·xᵢ`. `64156abe` subtracts the product; it does not fuse `(-L)·xᵢ + x`.
+                        y[c] = if crate::fp_contract::contract_off() {
+                            y[c] - sd.qld[adr] * xi
+                        } else {
+                            (-sd.qld[adr]).mul_add(xi, y[c])
+                        };
                     }
                 }
             }
@@ -48,12 +53,27 @@ impl SmoothModel {
             }
         }
         let mut ar = vec![0.0; nefc * nefc];
+        // `mju_sqrMatTD` calls `mju_addToScl` on the lower prefix of length `i+1`. At n >= 6 and with
+        // no alias, `64156abe` does the groups of four as `res + (scl·x)` and the tail as `(scl·x) + res`.
+        // Shorter prefixes are entirely `(scl·x) + res`.
+        let separate = crate::fp_contract::contract_off();
         for i in 0..nefc {
             for j in 0..nv {
                 let t = y[i * nv + j];
                 if t != 0.0 {
-                    for k in 0..=i {
-                        ar[i * nefc + k] = y[k * nv + j].mul_add(t, ar[i * nefc + k]);
+                    let n = i + 1;
+                    let wide = if separate && n >= 6 { n & !3 } else { 0 };
+                    for k in 0..n {
+                        let acc = ar[i * nefc + k];
+                        // Prefix lanes are `acc + (y·t)`. The tail is `(y·t) + acc`.
+                        // Those are different addend orders; `add_left` keeps each one.
+                        ar[i * nefc + k] = if !separate {
+                            y[k * nv + j].mul_add(t, acc)
+                        } else if k < wide {
+                            crate::mujoco_solver::add_left(acc, y[k * nv + j] * t)
+                        } else {
+                            crate::mujoco_solver::add_left(y[k * nv + j] * t, acc)
+                        };
                     }
                 }
             }
@@ -138,7 +158,12 @@ impl Dual<'_> {
                 };
         }
         for j in 0..dim {
-            res[j] = (-self.e.r[i + j]).mul_add(force[i + j], res[j]);
+            // `res -= R·f`. `64156abe` subtracts the product.
+            res[j] = if crate::fp_contract::contract_off() {
+                res[j] - self.e.r[i + j] * force[i + j]
+            } else {
+                (-self.e.r[i + j]).mul_add(force[i + j], res[j])
+            };
         }
         res
     }
@@ -234,21 +259,32 @@ fn cost_change(a: &[f64], force: &mut [f64], old: &[f64], res: &[f64], dim: usiz
 fn qcqp2(ain: &[f64], bin: &[f64], d: &[f64], r: f64) -> ([f64; 5], bool) {
     let (b1, b2) = (bin[0] * d[0], bin[1] * d[1]);
     let (a11, a22, a12) = (ain[0] * d[0] * d[0], ain[3] * d[1] * d[1], ain[1] * d[0] * d[1]);
+    let separate = crate::fp_contract::contract_off();
     let (mut la, mut v1, mut v2) = (0.0f64, 0.0f64, 0.0f64);
     for _ in 0..20 {
-        let det = (a11 + la).mul_add(a22 + la, -(a12 * a12));
+        // `det = (a11+λ)(a22+λ) − a12²`, then `v = −A⁻¹b`, `val = v·v − r²`. No FMA in `64156abe`.
+        let det = if separate { (a11 + la) * (a22 + la) - a12 * a12 } else { (a11 + la).mul_add(a22 + la, -(a12 * a12)) };
         if det < 1e-10 {
             return ([0.0; 5], false);
         }
         let detinv = 1.0 / det;
         let (p11, p22, p12) = ((a22 + la) * detinv, (a11 + la) * detinv, -a12 * detinv);
-        v1 = (-p11).mul_add(b1, -(p12 * b2));
-        v2 = (-p12).mul_add(b1, -(p22 * b2));
-        let val = (-r).mul_add(r, v1.mul_add(v1, v2 * v2));
+        if separate {
+            v1 = (-p11) * b1 - p12 * b2;
+            v2 = (-p12) * b1 - p22 * b2;
+        } else {
+            v1 = (-p11).mul_add(b1, -(p12 * b2));
+            v2 = (-p12).mul_add(b1, -(p22 * b2));
+        }
+        let val = if separate { (v1 * v1 + v2 * v2) - r * r } else { (-r).mul_add(r, v1.mul_add(v1, v2 * v2)) };
         if val < 1e-10 {
             break;
         }
-        let deriv = -2.0 * (p22 * v2).mul_add(v2, (p11 * v1).mul_add(v1, 2.0 * p12 * v1 * v2));
+        let deriv = if separate {
+            -2.0 * ((p22 * v2) * v2 + ((p11 * v1) * v1 + (2.0 * p12 * v1) * v2))
+        } else {
+            -2.0 * (p22 * v2).mul_add(v2, (p11 * v1).mul_add(v1, 2.0 * p12 * v1 * v2))
+        };
         let delta = -val / deriv;
         if delta < 1e-10 {
             break;
@@ -263,15 +299,29 @@ fn qcqp3(ain: &[f64], bin: &[f64], d: &[f64], r: f64) -> ([f64; 5], bool) {
     let (b1, b2, b3) = (bin[0] * d[0], bin[1] * d[1], bin[2] * d[2]);
     let (a11, a22, a33) = (ain[0] * d[0] * d[0], ain[4] * d[1] * d[1], ain[8] * d[2] * d[2]);
     let (a12, a13, a23) = (ain[1] * d[0] * d[1], ain[2] * d[0] * d[2], ain[5] * d[1] * d[2]);
+    let separate = crate::fp_contract::contract_off();
     let (mut la, mut v1, mut v2, mut v3) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     for _ in 0..20 {
-        let mut p11 = (a22 + la).mul_add(a33 + la, -(a23 * a23));
-        let mut p22 = (a11 + la).mul_add(a33 + la, -(a13 * a13));
-        let mut p33 = (a11 + la).mul_add(a22 + la, -(a12 * a12));
-        let mut p12 = a13.mul_add(a23, -(a12 * (a33 + la)));
-        let mut p13 = a12.mul_add(a23, -(a13 * (a22 + la)));
-        let mut p23 = a12.mul_add(a13, -(a23 * (a11 + la)));
-        let det = a13.mul_add(p13, (a11 + la).mul_add(p11, a12 * p12));
+        // `mju_QCQP3` in `64156abe`: each product is separate, sums run left to right.
+        let (mut p11, mut p22, mut p33, mut p12, mut p13, mut p23, det) = if separate {
+            let p11 = (a22 + la) * (a33 + la) - a23 * a23;
+            let p22 = (a11 + la) * (a33 + la) - a13 * a13;
+            let p33 = (a11 + la) * (a22 + la) - a12 * a12;
+            let p12 = a13 * a23 - a12 * (a33 + la);
+            let p13 = a12 * a23 - a13 * (a22 + la);
+            let p23 = a12 * a13 - a23 * (a11 + la);
+            let det = ((a11 + la) * p11 + a12 * p12) + a13 * p13;
+            (p11, p22, p33, p12, p13, p23, det)
+        } else {
+            let p11 = (a22 + la).mul_add(a33 + la, -(a23 * a23));
+            let p22 = (a11 + la).mul_add(a33 + la, -(a13 * a13));
+            let p33 = (a11 + la).mul_add(a22 + la, -(a12 * a12));
+            let p12 = a13.mul_add(a23, -(a12 * (a33 + la)));
+            let p13 = a12.mul_add(a23, -(a13 * (a22 + la)));
+            let p23 = a12.mul_add(a13, -(a23 * (a11 + la)));
+            let det = a13.mul_add(p13, (a11 + la).mul_add(p11, a12 * p12));
+            (p11, p22, p33, p12, p13, p23, det)
+        };
         if det < 1e-10 {
             return ([0.0; 5], false);
         }
@@ -282,16 +332,28 @@ fn qcqp3(ain: &[f64], bin: &[f64], d: &[f64], r: f64) -> ([f64; 5], bool) {
         p12 *= detinv;
         p13 *= detinv;
         p23 *= detinv;
-        v1 = (-p13).mul_add(b3, (-p11).mul_add(b1, -(p12 * b2)));
-        v2 = (-p23).mul_add(b3, (-p12).mul_add(b1, -(p22 * b2)));
-        v3 = (-p33).mul_add(b3, (-p13).mul_add(b1, -(p23 * b2)));
-        let val = (-r).mul_add(r, v3.mul_add(v3, v1.mul_add(v1, v2 * v2)));
+        if separate {
+            v1 = (-p11) * b1 - p12 * b2 - p13 * b3;
+            v2 = (-p12) * b1 - p22 * b2 - p23 * b3;
+            v3 = (-p13) * b1 - p23 * b2 - p33 * b3;
+        } else {
+            v1 = (-p13).mul_add(b3, (-p11).mul_add(b1, -(p12 * b2)));
+            v2 = (-p23).mul_add(b3, (-p12).mul_add(b1, -(p22 * b2)));
+            v3 = (-p33).mul_add(b3, (-p13).mul_add(b1, -(p23 * b2)));
+        }
+        let val = if separate { ((v1 * v1 + v2 * v2) + v3 * v3) - r * r } else { (-r).mul_add(r, v3.mul_add(v3, v1.mul_add(v1, v2 * v2))) };
         if val < 1e-10 {
             break;
         }
-        let s = (p33 * v3).mul_add(v3, (p11 * v1).mul_add(v1, p22 * v2 * v2));
-        let t = (p23 * v2).mul_add(v3, (p12 * v1).mul_add(v2, p13 * v1 * v3));
-        let deriv = (-2.0f64).mul_add(s, -4.0 * t);
+        let deriv = if separate {
+            let s = (p11 * v1 * v1 + p22 * v2 * v2) + p33 * v3 * v3;
+            let t = (p12 * v1 * v2 + p13 * v1 * v3) + p23 * v2 * v3;
+            (-2.0) * s - 4.0 * t
+        } else {
+            let s = (p33 * v3).mul_add(v3, (p11 * v1).mul_add(v1, p22 * v2 * v2));
+            let t = (p23 * v2).mul_add(v3, (p12 * v1).mul_add(v2, p13 * v1 * v3));
+            (-2.0f64).mul_add(s, -4.0 * t)
+        };
         let delta = -val / deriv;
         if delta < 1e-10 {
             break;
@@ -389,7 +451,12 @@ pub(crate) fn sol_noslip(p: &Dual, efclist: &[usize], ne: usize, nf: usize, forc
             let i = efclist[c];
             let res = p.residual(force, i, 1);
             let old = force[i];
-            force[i] = (-res[0]).mul_add(arinv[c], force[i]);
+            // `force -= res·ARinv`. `64156abe` subtracts the product.
+            force[i] = if crate::fp_contract::contract_off() {
+                force[i] - res[0] * arinv[c]
+            } else {
+                (-res[0]).mul_add(arinv[c], force[i])
+            };
             if force[i] < -floss[i] {
                 force[i] = -floss[i];
             } else if force[i] > floss[i] {

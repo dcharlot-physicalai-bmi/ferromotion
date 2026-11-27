@@ -9,8 +9,10 @@
 //! decides which corner, or which side, from the last bits of the geom poses, and MuJoCo then reports a
 //! different contact. The collision pass therefore takes its geom poses from here when it has `qpos`.
 //!
-//! ⛔ Every helper is contracted as clang contracts MuJoCo's C on arm64 (see [`crate::mujoco_ccd`]): the left
-//! product of `a*b + c*d` is fused, each later product of a chain is fused into the running sum.
+//! `mul_quat` is the first call site with an explicit contraction policy ([`crate::fp_contract::MUL_QUAT`]).
+//! The selected policy is the published `mul_add` chain. Other helpers keep that same published chain.
+//! Neither fact is a recovered `-ffp-contract` or `-mfma` flag for the arm64 goldens. Those flags are
+//! unproven provenance (`docs/acceptance/oracles/manifest.json`).
 
 /// `sin` and `cos` of ONE argument as MuJoCo's Apple build computes them.
 ///
@@ -30,13 +32,22 @@ pub(crate) fn sincos(x: f64) -> (f64, f64) {
     }
     // SAFETY: a pure libm function of one double, returning two doubles in registers (an HFA)
     let r = unsafe { __sincos_stret(x) };
+    crate::fp_contract::record_op("sincos", &[x], &[r.sin, r.cos]);
     (r.sin, r.cos)
 }
 
-/// `sin` and `cos` of one argument; off Apple platforms, the two libm calls.
+/// `sin` and `cos` of one argument, off Apple platforms.
+///
+/// This is the host libm pair (`sin` then `cos`). It is not Apple `__sincos_stret`, and matching
+/// host libm is not the arm64 reference the unit-test oracles were captured from. Replacing `cos`
+/// with `copysign(sqrt(1 − sin²), cos)` whenever `sin² + cos²` is not already 1 hits one arm64
+/// `fromto` cosine and moves a small Euler half-angle whose host pair is already Pythagorean.
+/// That is a fixture adjustment, not a port of the arm64 function, so it is not used.
 #[cfg(not(target_vendor = "apple"))]
 pub(crate) fn sincos(x: f64) -> (f64, f64) {
-    (x.sin(), x.cos())
+    let out = (x.sin(), x.cos());
+    crate::fp_contract::record_op("sincos", &[x], &[out.0, out.1]);
+    out
 }
 
 /// `mjtSameFrame`: where [`mj_local2global`] takes an element's frame from instead of composing it.
@@ -105,42 +116,52 @@ pub(crate) struct MjKinematics {
 /// A frame in the world as `mjData` holds it: position and row-major rotation matrix.
 pub(crate) type XFrame = ([f64; 3], [f64; 9]);
 
-/// `mji_mulMatVec3`, contracted.
+/// `mji_mulMatVec3`. The published path fuses each row. The contract-off identity uses
+/// the source order `(m0*v0 + m1*v1) + m2*v2`. Naming the site is still refused.
 fn mul_mat_vec3(m: &[f64; 9], v: &[f64; 3]) -> [f64; 3] {
-    [m[2].mul_add(v[2], m[0].mul_add(v[0], m[1] * v[1])), m[5].mul_add(v[2], m[3].mul_add(v[0], m[4] * v[1])), m[8].mul_add(v[2], m[6].mul_add(v[0], m[7] * v[1]))]
+    let mode = if crate::fp_contract::contract_off() {
+        crate::fp_contract::Contraction::Unfused
+    } else {
+        crate::fp_contract::Contraction::Contracted
+    };
+    let out = crate::fp_contract::mul_mat_vec3_with(mode, m, v);
+    let mut inputs = [0.0; 12];
+    inputs[..9].copy_from_slice(m);
+    inputs[9..].copy_from_slice(v);
+    crate::fp_contract::record_op("mul_mat_vec3", &inputs, &out);
+    out
 }
 
-/// `mji_mulQuat` / `mju_mulQuat` (no normalisation), contracted.
+/// `mji_mulQuat` / `mju_mulQuat` (no normalisation).
+/// The body is [`crate::fp_contract::mul_quat`], which follows [`crate::fp_contract::MUL_QUAT`].
 pub(crate) fn mul_quat(a: &[f64; 4], b: &[f64; 4]) -> [f64; 4] {
-    [
-        (-a[3]).mul_add(b[3], (-a[2]).mul_add(b[2], a[0].mul_add(b[0], -(a[1] * b[1])))),
-        (-a[3]).mul_add(b[2], a[2].mul_add(b[3], a[0].mul_add(b[1], a[1] * b[0]))),
-        a[3].mul_add(b[1], a[2].mul_add(b[0], a[0].mul_add(b[2], -(a[1] * b[3])))),
-        a[3].mul_add(b[0], (-a[2]).mul_add(b[1], a[0].mul_add(b[3], a[1] * b[2]))),
-    ]
+    crate::fp_contract::mul_quat(a, b)
 }
 
 /// `mji_rotVecQuat`, contracted (no zero-vector shortcut, unlike `mju_rotVecQuat`).
 fn rot_vec_quat(v: &[f64; 3], q: &[f64; 4]) -> [f64; 3] {
     if q[0] == 1.0 && q[1] == 0.0 && q[2] == 0.0 && q[3] == 0.0 {
+        let mut inputs = [0.0; 7];
+        inputs[..3].copy_from_slice(v);
+        inputs[3..].copy_from_slice(q);
+        crate::fp_contract::record_op("rot_vec_quat", &inputs, v);
         return *v;
     }
-    let t = [
-        (-q[3]).mul_add(v[1], q[0].mul_add(v[0], q[2] * v[2])),
-        (-q[1]).mul_add(v[2], q[0].mul_add(v[1], q[3] * v[0])),
-        (-q[2]).mul_add(v[0], q[0].mul_add(v[2], q[1] * v[1])),
-    ];
-    [
-        2.0f64.mul_add(q[2].mul_add(t[2], -(q[3] * t[1])), v[0]),
-        2.0f64.mul_add(q[3].mul_add(t[0], -(q[1] * t[2])), v[1]),
-        2.0f64.mul_add(q[1].mul_add(t[1], -(q[2] * t[0])), v[2]),
-    ]
+    let out = crate::fp_contract::rot_vec_quat_with(crate::fp_contract::active_policy().rot_vec_quat, v, q);
+    let mut inputs = [0.0; 7];
+    inputs[..3].copy_from_slice(v);
+    inputs[3..].copy_from_slice(q);
+    crate::fp_contract::record_op("rot_vec_quat", &inputs, &out);
+    out
 }
 
-/// `mju_normalize4`: below `mjMINVAL` the unit quaternion; within `mjMINVAL` of 1 left alone; otherwise
-/// MULTIPLIED by the reciprocal of the norm.
+/// `mju_normalize4` as the contract-off compiler builds `mju_sqrt(v0*v0 + v1*v1 + v2*v2 + v3*v3)`.
+/// The sum is left-associated and not an FMA. Below `mjMINVAL` the unit quaternion; within
+/// `mjMINVAL` of 1 left alone; otherwise each component is multiplied by the reciprocal of the norm.
+/// This is not a contraction-policy site. `mul_quat` stays contracted.
 pub(crate) fn normalize4(q: &mut [f64; 4]) {
-    let norm = q[3].mul_add(q[3], q[2].mul_add(q[2], q[0].mul_add(q[0], q[1] * q[1]))).sqrt();
+    let before = *q;
+    let norm = (((q[0] * q[0] + q[1] * q[1]) + q[2] * q[2]) + q[3] * q[3]).sqrt();
     if norm < 1e-15 {
         *q = [1.0, 0.0, 0.0, 0.0];
     } else if (norm - 1.0).abs() > 1e-15 {
@@ -149,36 +170,46 @@ pub(crate) fn normalize4(q: &mut [f64; 4]) {
             *x *= inv;
         }
     }
+    crate::fp_contract::record_op("normalize4", &before, q);
 }
 
 /// `mju_quat2Mat` (its products are separate statements, so nothing fuses).
 pub(crate) fn quat2mat(q: &[f64; 4]) -> [f64; 9] {
-    if q[0] == 1.0 && q[1] == 0.0 && q[2] == 0.0 && q[3] == 0.0 {
-        return [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
-    }
-    let (q00, q01, q02, q03) = (q[0] * q[0], q[0] * q[1], q[0] * q[2], q[0] * q[3]);
-    let (q11, q12, q13) = (q[1] * q[1], q[1] * q[2], q[1] * q[3]);
-    let (q22, q23, q33) = (q[2] * q[2], q[2] * q[3], q[3] * q[3]);
-    [
-        q00 + q11 - q22 - q33,
-        2.0 * (q12 - q03),
-        2.0 * (q13 + q02),
-        2.0 * (q12 + q03),
-        q00 - q11 + q22 - q33,
-        2.0 * (q23 - q01),
-        2.0 * (q13 - q02),
-        2.0 * (q23 + q01),
-        q00 - q11 - q22 + q33,
-    ]
+    let out = if q[0] == 1.0 && q[1] == 0.0 && q[2] == 0.0 && q[3] == 0.0 {
+        [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    } else {
+        let (q00, q01, q02, q03) = (q[0] * q[0], q[0] * q[1], q[0] * q[2], q[0] * q[3]);
+        let (q11, q12, q13) = (q[1] * q[1], q[1] * q[2], q[1] * q[3]);
+        let (q22, q23, q33) = (q[2] * q[2], q[2] * q[3], q[3] * q[3]);
+        [
+            q00 + q11 - q22 - q33,
+            2.0 * (q12 - q03),
+            2.0 * (q13 + q02),
+            2.0 * (q12 + q03),
+            q00 - q11 + q22 - q33,
+            2.0 * (q23 - q01),
+            2.0 * (q13 - q02),
+            2.0 * (q23 + q01),
+            q00 - q11 - q22 + q33,
+        ]
+    };
+    crate::fp_contract::record_op("quat2mat", q, &out);
+    out
 }
 
 /// `mji_axisAngle2Quat`.
 pub(crate) fn axis_angle2quat(axis: &[f64; 3], angle: f64) -> [f64; 4] {
-    if angle == 0.0 {
-        return [1.0, 0.0, 0.0, 0.0];
-    }
-    let (s, c) = sincos(angle * 0.5);
-    [c, axis[0] * s, axis[1] * s, axis[2] * s]
+    let out = if angle == 0.0 {
+        [1.0, 0.0, 0.0, 0.0]
+    } else {
+        let (s, c) = sincos(angle * 0.5);
+        [c, axis[0] * s, axis[1] * s, axis[2] * s]
+    };
+    let mut inputs = [0.0; 4];
+    inputs[..3].copy_from_slice(axis);
+    inputs[3] = angle;
+    crate::fp_contract::record_op("axis_angle2quat", &inputs, &out);
+    out
 }
 
 /// `mj_local2Global`: an element's world frame from its body's, as its `sameframe` tag says.
@@ -256,7 +287,13 @@ impl MjKinematics {
                     match j.kind {
                         KinJointKind::Slide => {
                             let s = qpos[j.qposadr] - j.qpos0;
-                            p = [xaxis[0].mul_add(s, p[0]), xaxis[1].mul_add(s, p[1]), xaxis[2].mul_add(s, p[2])];
+                            // Published default keeps the fused `mul_add`. The contract-off oracle
+                            // compiles `mji_addToScl3` as `p += axis * s` (mulpd then add, no FMA).
+                            p = if crate::fp_contract::contract_off() {
+                                [p[0] + xaxis[0] * s, p[1] + xaxis[1] * s, p[2] + xaxis[2] * s]
+                            } else {
+                                [xaxis[0].mul_add(s, p[0]), xaxis[1].mul_add(s, p[1]), xaxis[2].mul_add(s, p[2])]
+                            };
                         }
                         KinJointKind::Ball | KinJointKind::Hinge => {
                             let qloc = if j.kind == KinJointKind::Ball {
@@ -310,6 +347,53 @@ pub(crate) struct KinState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One quaternion whose fused sum of squares is off by an ulp from
+    /// `libmujoco.so.3.13.0` sha256 `64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc`.
+    #[test]
+    fn normalize4_matches_the_contract_off_library_sum() {
+        let mut q = [
+            -0.6991825490104397,
+            1.4818849284346185,
+            -1.2357316339904378,
+            0.27004296248268744,
+        ];
+        normalize4(&mut q);
+        assert_eq!(
+            q.map(f64::to_bits),
+            [
+                0xbfd59e14acaee7c2,
+                0x3fe6e89d102b3a71,
+                0xbfe31a73f1c7f17b,
+                0x3fc0b2d1c454ae00,
+            ]
+        );
+        let mut unit = [1.0, 0.0, 0.0, 0.0];
+        normalize4(&mut unit);
+        assert_eq!(unit, [1.0, 0.0, 0.0, 0.0]);
+        let mut tiny = [1e-20, 0.0, 0.0, 0.0];
+        normalize4(&mut tiny);
+        assert_eq!(tiny, [1.0, 0.0, 0.0, 0.0]);
+    }
+
+    /// Host `sincos` stays on libm. The Pythagorean reconstruction matches one arm64 fromto cosine
+    /// (`0x3fe833ad8be0fb0b`) and disagrees with a small Euler half-angle whose host pair already
+    /// sums to 1. Neither fact is a general `__sincos_stret`.
+    #[test]
+    #[cfg(not(target_vendor = "apple"))]
+    fn host_sincos_is_libm_not_a_pythagorean_repair() {
+        let half = f64::from_bits(0x3fe6d214bbbba928);
+        let (s, c) = sincos(half);
+        assert_eq!((s.to_bits(), c.to_bits()), (half.sin().to_bits(), half.cos().to_bits()));
+        assert_eq!(half.cos().to_bits(), 0x3fe833ad8be0fb0a);
+        let rebuilt = (1.0 - s * s).max(0.0).sqrt().copysign(c);
+        assert_eq!(rebuilt.to_bits(), 0x3fe833ad8be0fb0b);
+        assert_ne!(c.to_bits(), rebuilt.to_bits());
+        let small = 0.3f64.to_radians() / 2.0;
+        let (s, c) = sincos(small);
+        assert_eq!(s * s + c * c, 1.0);
+        assert_ne!(c.to_bits(), (1.0 - s * s).sqrt().copysign(c).to_bits());
+    }
 
     /// The one argument this port was caught out by: `euler="-1.397059993 …"` halves to −0.6985299965, and
     /// there `__sincos_stret`'s sine is one ulp from `sin`'s. MuJoCo's arm64 build gets the former, so a

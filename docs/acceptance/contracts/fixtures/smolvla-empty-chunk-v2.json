@@ -1,0 +1,71 @@
+{
+  "kind": "protocol_test",
+  "not_model_evidence": true,
+  "not_rollout_evidence": true,
+  "not_energy_evidence": true,
+  "model_status": "proposed",
+  "codec_version": 2,
+  "domain": "ferric.smolvla.action-chunk",
+  "lerobot_commit": "a0eb860d1e4d566157dd0eba11b5c86f9ea7d07a",
+  "note": "Synthetic protocol vector for the v2 empty horizon. Not a SmolVLA output, a rollout, or an energy measurement. Identity pins match smolvla-chunk-v2.json except n_action_steps is 0 and values_time_major is empty.",
+  "schema": {
+    "identity_fields": [
+      "model_id",
+      "weight_sha256",
+      "stats_sha256",
+      "noise_sha256",
+      "embodiment",
+      "t0_ns",
+      "step_duration_ns",
+      "n_action_steps",
+      "action_dim",
+      "joints"
+    ],
+    "joint_fields": ["name", "unit", "frame", "min", "max"],
+    "value_order": "time-major, then joint order",
+    "clock": "t0_ns plus index times step_duration_ns; no fps field"
+  },
+  "horizon_checks": [
+    {"n_action_steps": 0, "chunk_size": 50, "ok": true},
+    {"n_action_steps": 0, "chunk_size": 0, "ok": true}
+  ],
+  "golden": {
+    "model_id": "lerobot/smolvla_base",
+    "weight_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "stats_sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+    "noise_sha256": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+    "embodiment": "protocol-test-embodiment",
+    "t0_ns": 1000000000,
+    "step_duration_ns": 20000000,
+    "n_action_steps": 0,
+    "action_dim": 2,
+    "joints": [
+      {
+        "name": "j0",
+        "unit": "dataset_label_a",
+        "frame": "embodiment_joint",
+        "min": -1.0,
+        "max": 1.0
+      },
+      {
+        "name": "j1",
+        "unit": "dataset_label_b",
+        "frame": "embodiment_joint",
+        "min": -1.0,
+        "max": 1.0
+      }
+    ],
+    "values_time_major": [],
+    "execution_error": "ProposedEntryInvoked",
+    "timestamp_index_zero": "TimestampIndex",
+    "digest_sha256": "6295818fa11b85b37ad8054c75e0a1935b0c0cbb5d7e419090c2520a17b1744e",
+    "canonical_hex": "4645525249432d534d4f4c564c412d4348554e4b00020000002800000061306562383630643165346435363631353764643065626131316235633836663965613764303761140000006c65726f626f742f736d6f6c766c615f626173653031323334353637383961626364656630313233343536373839616263646566303132333435363738396162636465663031323334353637383961626364656666656463626139383736353433323130666564636261393837363534333231306665646362613938373635343332313066656463626139383736353433323130303031313232333334343535363637373838393961616262636364646565666630303131323233333434353536363737383839396161626263636464656566661800000070726f746f636f6c2d746573742d656d626f64696d656e7400ca9a3b00000000002d310100000000000000000200000002000000020000006a300f000000646174617365745f6c6162656c5f6110000000656d626f64696d656e745f6a6f696e74000080bf0000803f020000006a310f000000646174617365745f6c6162656c5f6210000000656d626f64696d656e745f6a6f696e74000080bf0000803f0101"
+  },
+  "negative_cases": [
+    {"case": "missing_weight_provenance", "field": "weight_sha256", "value": "", "error": "MissingWeightProvenance"},
+    {"case": "missing_stats_provenance", "field": "stats_sha256", "value": "", "error": "MissingStatsProvenance"},
+    {"case": "missing_noise_provenance", "field": "noise_sha256", "value": "", "error": "MissingNoiseProvenance"},
+    {"case": "nonempty_values_at_zero_horizon", "values_time_major": [0.0], "try_new_error": "ChunkShape"},
+    {"case": "zero_step_duration", "step_duration_ns": 0, "error": "StepDurationAbsent"}
+  ]
+}

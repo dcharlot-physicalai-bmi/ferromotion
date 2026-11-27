@@ -1,0 +1,21 @@
+{
+  "menagerie_repo": "https://github.com/google-deepmind/mujoco_menagerie",
+  "menagerie_sha": "4d038b3feae26ec82b46a4d586379114012a8ac7",
+  "menagerie_sha_subject": "add new thumbnail for robotis omy 3m (#326)",
+  "menagerie_sha_date": "2026-09-29T19:08:06Z",
+  "mujoco_version": "3.13.0",
+  "precision": "f64",
+  "equality": "bit_exact_f64_to_bits",
+  "step_count": 20,
+  "step_seed": 20260928,
+  "step_initialization": "qpos0, then each hinge and slide drawn uniformly inside its range (or [-0.5, 0.5] if unlimited), every dof velocity uniform in [-0.5, 0.5], every control uniform in its ctrlrange (or [-1, 1]), every activation uniform in [0, 1]",
+  "solver": "each model's own MuJoCo option block, unchanged",
+  "native_states": 3,
+  "native_seed": 20260927,
+  "native_state_0": "qpos0, zero velocity, zero control, zero activation",
+  "expected_xml": 217,
+  "expected_mujoco_loadable": 212,
+  "expected_step_comparisons": 212,
+  "expected_native_state_rows": 636,
+  "prior_claim": "Unverified author claim at ferromotion 5daca8aac1b513a18c54792383d021cf1d27af56: 212 of 212 models bit-exact on every one of 20 mj_step steps, and efc_J/qacc bit-exact on 636 of 636 states. This pin is the Menagerie commit contemporaneous with that claim. 212 is the number of */*.xml files MuJoCo 3.13.0 loads there, counted by this script, not a subset chosen to fit the claim. Five further XML files in the same tree do not load and stay in the ledger as load errors."
+}

@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "cursor/**"]
   pull_request:
 
 env:
@@ -10,16 +10,25 @@ env:
 
 jobs:
   test:
-    name: test + wasm
+    name: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
+          components: clippy, rustfmt
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+      # The three published-default arm64 goldens are not in this step. They run,
+      # unchanged, in `known-gap: published-default arm64 goldens (3)`. This step
+      # skips those three names only, so any other failure is red here.
+      # See docs/menagerie-conformance.md.
       - name: Test (native)
-        run: cargo test --workspace
+        run: |
+          cargo test --workspace -- --exact \
+            --skip mjcf_tree::tests::geom_frames_match_mujocos_kinematics_bit_for_bit \
+            --skip mjcf_tree::tests::spatial_tendons_step_as_mujoco_does_bit_for_bit \
+            --skip mjcf_tree::tests::the_native_mass_matrix_and_bias_are_mujocos_bit_for_bit
       # ⛔ THIS DOES NOT COVER THE GPU PATH, and the runner cannot. `cargo test --workspace` enables no
       # features, so the 28 tests behind `--features gpu` in ferromotion-core, -control, -fem and
       # -fluid are not even compiled into a test binary here; and ubuntu-latest has no adapter, so
@@ -38,7 +47,7 @@ jobs:
       # Measured 2026-09-09 on an Apple M-series (Metal): 22 / 1 / 2 / 12 passed with the variable set,
       # so all four crates genuinely reach the hardware. A self-hosted GPU runner is what would make
       # this a gate rather than a documented boundary; until then the compile side is covered by the
-      # clippy step below, which does pass --all-features.
+      # clippy job, which does pass --all-features.
       - name: Benchmark (Ghia lid-driven cavity, release)
         run: cargo test -p ferromotion-fluid --release -- --ignored
       # Settles cantilevers to rest at dt = 3e-6 to pin the near-incompressible locking bias. Seconds in
@@ -65,6 +74,71 @@ jobs:
       # worse than no test at all, which is why the lane and the #[ignore] land together.
       - name: Robot working envelopes vs published reach (release)
         run: cargo test -p ferromotion-models --release -- --ignored
+
+  # Known gap. docs/menagerie-conformance.md records these three published-default
+  # arm64 goldens: the bits are the MuJoCo 3.13.0 arm64 dylib, and they disagree
+  # with this host. They are not ignored, not hidden, and not weakened. This job
+  # runs them exactly and stays red until they pass. The native test job skips
+  # these three names only.
+  known-gap-arm64-goldens:
+    name: "known-gap: published-default arm64 goldens (3)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.100.0
+        with:
+          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Published-default arm64 goldens
+        run: |
+          cargo test -p ferromotion-core --lib -- --exact \
+            mjcf_tree::tests::geom_frames_match_mujocos_kinematics_bit_for_bit \
+            mjcf_tree::tests::spatial_tendons_step_as_mujoco_does_bit_for_bit \
+            mjcf_tree::tests::the_native_mass_matrix_and_bias_are_mujocos_bit_for_bit
+
+  # These jobs do not wait on `test`. Brought over from the clock-receipt CI
+  # layout at 6093ba89, which split integration tests, wasm, clippy, and docs
+  # the same way.
+  integration:
+    name: integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.100.0
+        with:
+          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      # `--test '*'` is the integration-test targets only. `--lib` is the other job.
+      # `--no-fail-fast` keeps the remaining integration tests running if one fails.
+      - name: Integration tests
+        run: |
+          set -euo pipefail
+          status=0
+          found=0
+          for dir in crates/*/tests; do
+            if ! compgen -G "$dir/*.rs" > /dev/null; then
+              continue
+            fi
+            found=1
+            pkg=$(basename "$(dirname "$dir")")
+            echo "cargo test --locked -p ${pkg} --test '*'"
+            cargo test --locked -p "$pkg" --test '*' --no-fail-fast || status=1
+          done
+          test "$found" = 1
+          exit "$status"
+
+  wasm:
+    name: wasm32
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.100.0
+        with:
+          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
       # An EXCLUSION, not an enumeration. The enumerated list had silently omitted seven crates that do
       # build for wasm32 — including ferromotion-learn and ferromotion-fem, whose own READMEs advertise
       # "native + wasm32". A list of what to include drifts as crates are added; a list of what to skip
@@ -73,16 +147,36 @@ jobs:
       # ferromotion-viz is the one genuine exception: it pulls a tokio feature set that is not supported on
       # wasm ("Only features sync,macros,io-util,rt,time are supported on wasm").
       - name: Build (wasm32-unknown-unknown)
-        run: cargo build --target wasm32-unknown-unknown --workspace --exclude ferromotion-viz
+        run: cargo build --locked --target wasm32-unknown-unknown --workspace --exclude ferromotion-viz
 
-      # Both of these were local-only discipline until 2026-08-15 and therefore enforced only by memory.
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.100.0
+        with:
+          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      # --all-features is what compiles the GPU path on a runner with no adapter.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.100.0
+        with:
+          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
       # The doc build catches a class nothing else does: intra-doc links to private or non-existent items,
       # which ship as broken links on docs.rs. Its first run found 22, one of which was a `pub fn` in a
       # private module that no external caller could reach at all.
       - name: Docs (broken intra-doc links are errors)
-        run: cargo doc --all-features --no-deps --workspace
+        run: cargo doc --workspace --all-features --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings

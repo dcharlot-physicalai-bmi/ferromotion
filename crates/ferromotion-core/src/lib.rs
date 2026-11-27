@@ -209,6 +209,10 @@ mod catmull_rom;
 mod cfd_contact;
 mod chomp;
 mod closed_loop;
+mod joint_acceptance;
+mod external_oracles;
+mod smolvla_receiver;
+mod ferromorphic_clock;
 mod collision;
 mod constraint;
 mod constraints;
@@ -347,7 +351,9 @@ mod transport;
 pub mod transport_geometry;
 mod mjcf;
 mod mjcf_tree;
+mod obj_earclip_oracle;
 pub mod qhull;
+pub(crate) mod fp_contract;
 pub(crate) mod mujoco_kinematics;
 pub(crate) mod mujoco_midphase;
 pub(crate) mod mujoco_smooth;
@@ -357,6 +363,12 @@ pub(crate) mod mujoco_sparse;
 pub(crate) mod mujoco_tendon;
 pub(crate) mod mujoco_solver;
 pub(crate) mod mujoco_step;
+pub use fp_contract::{
+    active_policy, capture_ops, install_policy, install_policy_from_env, mul_mat_vec3_with, mul_quat_with, policy_receipt,
+    record_op, reset_policy, rot_vec_quat_with, BuildPolicy, Contraction, OpSample, PolicyError, DEFAULT_POLICY, MUL_QUAT,
+    ORACLE_AARCH64_CONTRACT_OFF_ID, ORACLE_AARCH64_CONTRACT_OFF_SHA256,
+    ORACLE_X86_CONTRACT_OFF_ID, ORACLE_X86_CONTRACT_OFF_SHA256,
+};
 pub use mujoco_step::MjNativeState;
 pub(crate) mod png;
 pub mod mjcf_sensor;
@@ -392,6 +404,29 @@ pub use camera::{calibrate, PinholeCamera};
 pub use catmull_rom::CatmullRom;
 pub use chomp::{Chomp, ChompResult};
 pub use closed_loop::{Pin, PlanarLoop};
+pub use joint_acceptance::{decide, pinned_task, ClosedLoopTask, Decision, EnergyTrace, EvidenceKind, JointReceipt, ResourceBound, PINNED_CLOSED_LOOP_TASK};
+pub use external_oracles::{
+    inference_claim, reject_action, warp_newton_probe, warp_oracle, newton_oracle, ActionReject, InferenceClaim,
+    OracleCell, SmolVlaContract, UpstreamOracle, WarpNewtonProbe,
+};
+pub use smolvla_receiver::{
+    accept_for_control, accepts_entry, action_timestamp_ns, authorize_rollout, check_horizon, digest_sha256, encode,
+    normalize_forward, normalize_inverse, pad_state, parse_chunk, protocol_receipt, refuse_aloha_delta, refuse_pixel,
+    refuse_token_len, verify_chunk, ActionChunk, ChunkV2, CodecError, ControlReject, InferenceFidelity, JointSpec,
+    ProtocolReceipt, CODEC_V1_WITHDRAWN, CODEC_VERSION,
+    DIGEST_DOMAIN, EMPTY_GOLDEN_DIGEST, FERRIC_CONTRACT_REVISION, FERRIC_EMPTY_FIXTURE_REVISION, GOLDEN_DIGEST,
+    IMAGE_ALIGN_CORNERS, IMAGE_INTERPOLATION, IMAGE_PAD_LEFT,
+    IMAGE_PAD_TOP, IMAGE_SIDE, LEROBOT_UPSTREAM, PREDICT_ACTION_CHUNK, PREPROCESS_STEPS, PRE_UNPAD_STEPS,
+    PRE_UNPAD_WIDTH, PROPOSED_FERRIC_ENTRY, SELECT_ACTION_IS_NOT_THE_ENTRY, SMOLVLA_HUB_ID, STATE_WIDTH, TOKEN_MAX,
+};
+pub use ferromorphic_clock::{
+    accept_event_step, accumulated_f64, bind_dt, bind_v2_timestamps, delivery_step, finite_positive, nominal_seconds,
+    map_chunk_index_to_tick, meter_reading, order_spikes, parse_step_receipt, propose_joint_step, refractory_ticks,
+    same_dt, step_seconds, tick_stamp_ns, BoundaryClock, ChunkTickMap, EpisodeEnvelope, Meter, ProposedJointStep, Spike,
+    StepReceipt, TickPhase, TimebaseError, UnresolvedPolicy, DT_POINT_ONE_BITS, EPOCH_TICK0, EPISODE_ENVELOPE_INTEROPERABLE,
+    EPISODE_ENVELOPE_VERSION, FERROMORPHIC_CLOCK_PATH, FERROMORPHIC_CLOCK_REVISION, JOINT_LOOP_EXECUTED, TICK_ARITHMETIC,
+    TICK_PHASES, UNRESOLVED,
+};
 pub use collision::{CapsuleCollisionCost, PlaneCollisionCost, SphereCollisionCost};
 pub use cosserat::CosseratRod;
 pub use foci::{collision_cost, collision_grad_p, collision_kernel, overlap_integral, plan as foci_plan, FociPlan, Gaussian3, RobotSplat};
