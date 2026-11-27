@@ -351,7 +351,9 @@ mod transport;
 pub mod transport_geometry;
 mod mjcf;
 mod mjcf_tree;
+mod obj_earclip_oracle;
 pub mod qhull;
+pub(crate) mod fp_contract;
 pub(crate) mod mujoco_kinematics;
 pub(crate) mod mujoco_midphase;
 pub(crate) mod mujoco_smooth;
@@ -361,6 +363,12 @@ pub(crate) mod mujoco_sparse;
 pub(crate) mod mujoco_tendon;
 pub(crate) mod mujoco_solver;
 pub(crate) mod mujoco_step;
+pub use fp_contract::{
+    active_policy, capture_ops, install_policy, install_policy_from_env, mul_mat_vec3_with, mul_quat_with, policy_receipt,
+    record_op, reset_policy, rot_vec_quat_with, BuildPolicy, Contraction, OpSample, PolicyError, DEFAULT_POLICY, MUL_QUAT,
+    ORACLE_AARCH64_CONTRACT_OFF_ID, ORACLE_AARCH64_CONTRACT_OFF_SHA256,
+    ORACLE_X86_CONTRACT_OFF_ID, ORACLE_X86_CONTRACT_OFF_SHA256,
+};
 pub use mujoco_step::MjNativeState;
 pub(crate) mod png;
 pub mod mjcf_sensor;

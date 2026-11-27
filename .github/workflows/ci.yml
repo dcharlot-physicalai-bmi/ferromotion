@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, "cursor/**"]
+    branches: [main, "cursor/**", "chore/**"]
   pull_request:
 
 env:
@@ -17,7 +17,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: clippy, rustfmt
-          targets: wasm32-unknown-unknown
+          targets: wasm32-unknown-unknown, aarch64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
       # The three published-default failures stay in this step and still fail it:
       # mjcf_tree::tests::geom_frames_match_mujocos_kinematics_bit_for_bit,
@@ -83,7 +83,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: clippy, rustfmt
-          targets: wasm32-unknown-unknown
+          targets: wasm32-unknown-unknown, aarch64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
       # `--test '*'` is the integration-test targets only. `--lib` is the other job.
       # `--no-fail-fast` keeps the remaining integration tests running if one fails.
@@ -104,6 +104,7 @@ jobs:
           test "$found" = 1
           exit "$status"
 
+  # wasm, clippy, and docs do not wait on `test`. A failure fails its own job.
   wasm:
     name: wasm32
     runs-on: ubuntu-latest
@@ -112,7 +113,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: clippy, rustfmt
-          targets: wasm32-unknown-unknown
+          targets: wasm32-unknown-unknown, aarch64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
       # An EXCLUSION, not an enumeration. The enumerated list had silently omitted seven crates that do
       # build for wasm32 — including ferromotion-learn and ferromotion-fem, whose own READMEs advertise
@@ -132,7 +133,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: clippy, rustfmt
-          targets: wasm32-unknown-unknown
+          targets: wasm32-unknown-unknown, aarch64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
       # --all-features is what compiles the GPU path on a runner with no adapter.
       - name: Clippy
@@ -146,7 +147,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: clippy, rustfmt
-          targets: wasm32-unknown-unknown
+          targets: wasm32-unknown-unknown, aarch64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
       # The doc build catches a class nothing else does: intra-doc links to private or non-existent items,
       # which ship as broken links on docs.rs. Its first run found 22, one of which was a `pub fn` in a

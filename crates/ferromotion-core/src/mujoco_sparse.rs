@@ -10,6 +10,44 @@
 
 use crate::mujoco_smooth::dot_sparse;
 
+fn oracle_contract_off() -> bool {
+    crate::fp_contract::contract_off()
+}
+
+/// Forward dot inside `mju_cholSolveSparse` (`64156abe`).
+///
+/// For four or more entries, pairs accumulate as `(p0, p1)` and `(p2, p3)`, then
+/// `high + low` of their sum. The tail is `acc + product`. Shorter dots are only that tail.
+fn chol_solve_dot(l: &[f64], res: &[f64], ind: &[usize]) -> f64 {
+    let n = l.len();
+    if n < 4 {
+        let mut acc = 0.0;
+        for i in 0..n {
+            acc += l[i] * res[ind[i]];
+        }
+        return acc;
+    }
+    let mut a01 = [0.0, 0.0];
+    let mut a23 = [0.0, 0.0];
+    let prefix = n & !3;
+    let mut i = 0;
+    while i < prefix {
+        a01[0] += l[i] * res[ind[i]];
+        a01[1] += l[i + 1] * res[ind[i + 1]];
+        a23[0] += l[i + 2] * res[ind[i + 2]];
+        a23[1] += l[i + 3] * res[ind[i + 3]];
+        i += 4;
+    }
+    let low = a01[0] + a23[0];
+    let high = a01[1] + a23[1];
+    let mut acc = high + low;
+    while i < n {
+        acc += l[i] * res[ind[i]];
+        i += 1;
+    }
+    acc
+}
+
 /// A sparse matrix, row by row.
 pub(crate) type Rows = Vec<(Vec<usize>, Vec<f64>)>;
 
@@ -54,7 +92,10 @@ pub(crate) fn hessian(j: &Rows, jt: &Rows, d: &[f64], m: &Rows) -> Rows {
         }
         // values
         for (&k, &vt) in jt[r].0.iter().zip(&jt[r].1) {
-            let scale = d[k] * vt;
+            // `64156abe` `mju_sqrMatTDSparseNumeric`: `scale = vt * D`, then
+            // `(J * scale) + acc` (`mulsd` with `J` as the destination, `addsd` of the accumulator).
+            // `D * vt` is the same product.
+            let scale = vt * d[k];
             if scale == 0.0 {
                 continue;
             }
@@ -62,7 +103,7 @@ pub(crate) fn hessian(j: &Rows, jt: &Rows, d: &[f64], m: &Rows) -> Rows {
                 if c > r {
                     break;
                 }
-                buffer[c] = scale.mul_add(v, buffer[c]);
+                buffer[c] = if oracle_contract_off() { (v * scale) + buffer[c] } else { scale.mul_add(v, buffer[c]) };
             }
         }
         let vals: Vec<f64> = cols.iter().map(|&c| std::mem::take(&mut buffer[c])).collect();
@@ -191,7 +232,12 @@ impl Chol {
                 let lcr = self.l[c][idx];
                 for i in 0..=idx {
                     let col = self.l_colind[c][i];
-                    dense[col] = (-lcr).mul_add(self.l[c][i], dense[col]);
+                    // `64156abe`: `mulsd` then `subsd`, `dense - L·Lrow`.
+                    dense[col] = if oracle_contract_off() {
+                        dense[col] - lcr * self.l[c][i]
+                    } else {
+                        (-lcr).mul_add(self.l[c][i], dense[col])
+                    };
                 }
             }
             let mut diag = dense[r];
@@ -224,14 +270,24 @@ impl Chol {
                 let tmp = res[i];
                 for j in 0..nnz - 1 {
                     let c = self.l_colind[i][j];
-                    res[c] = (-self.l[i][j]).mul_add(tmp, res[c]);
+                    // `64156abe`: `res[c] - L·tmp`.
+                    res[c] = if oracle_contract_off() {
+                        res[c] - self.l[i][j] * tmp
+                    } else {
+                        (-self.l[i][j]).mul_add(tmp, res[c])
+                    };
                 }
             }
         }
         for i in 0..n {
             let nnz = self.l[i].len();
             if nnz > 1 {
-                res[i] -= dot_sparse(&self.l[i][..nnz - 1], &res, &self.l_colind[i][..nnz - 1]);
+                let dot = if oracle_contract_off() {
+                    chol_solve_dot(&self.l[i][..nnz - 1], &res, &self.l_colind[i][..nnz - 1])
+                } else {
+                    dot_sparse(&self.l[i][..nnz - 1], &res, &self.l_colind[i][..nnz - 1])
+                };
+                res[i] -= dot;
             }
             res[i] /= self.l[i][nnz - 1];
         }
@@ -258,21 +314,34 @@ impl Chol {
             let nnz = self.l[row].len() - 1;
             let diag = self.l[row][nnz];
             let xr = dense[row];
-            let mut tmp = diag.mul_add(diag, if plus { xr * xr } else { -xr * xr });
+            let xx = xr * xr;
+            let mut tmp = if oracle_contract_off() {
+                let ll = diag * diag;
+                // plus: `x x + diag diag`. minus: `(-x x) + diag diag`.
+                if plus { xx + ll } else { -xx + ll }
+            } else {
+                diag.mul_add(diag, if plus { xx } else { -xx })
+            };
             if tmp < 1e-15 {
                 tmp = 1e-15;
                 rank -= 1;
             }
             let r = tmp.sqrt();
             self.l[row][nnz] = r;
+            // `(c, s) = (diag, -x) / (r, r)`, then `s_signed = -s` on an update.
             let c = diag / r;
             let s = -xr / r;
             let ss = if plus { -s } else { s };
             for i in 0..nnz {
                 let j = self.l_colind[row][i];
                 let (dj, mv) = (dense[j], self.l[row][i]);
-                self.l[row][i] = c.mul_add(mv, ss * dj);
-                dense[j] = s.mul_add(mv, c * dj);
+                if oracle_contract_off() {
+                    self.l[row][i] = ss * dj + c * mv;
+                    dense[j] = s * mv + c * dj;
+                } else {
+                    self.l[row][i] = c.mul_add(mv, ss * dj);
+                    dense[j] = s.mul_add(mv, c * dj);
+                }
             }
         }
         rank

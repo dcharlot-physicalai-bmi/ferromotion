@@ -48,6 +48,16 @@ These are not the same arithmetic, and a match to one is not a match to the othe
 
 `copysign(sqrt(1 − sin²), cos)` when `sin² + cos² ≠ 1` reproduces one arm64 `fromto` cosine (`0x3fe6d214bbbba928` → cosine `0x3fe833ad8be0fb0b`, host cosine `0x3fe833ad8be0fb0a`) and moves `0.3°/2`, whose host pair is already Pythagorean. That is not a general port. It is not used.
 
+## Polygon order is an oracle-identity property
+
+`mjCMesh::MakePolygons` stores merged coplanar faces in a `std::unordered_map` keyed by the normal's angles after rounding to 0.01 rad. `alignedFaceEdge` keeps the first incident face in that map's iteration order. The order is the C++ standard library's, not a sort.
+
+The published path follows libc++: `std::hash<double>` is the value's bits (±0 hashes to 0) and the bucket walk is power-of-two. That is the Apple dylib.
+
+The contract-off oracle `64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc` is built by `clang++` (`scripts/build_mujoco_3130_x86_contract_off.sh`), which links libstdc++. libstdc++ 14 hashes a double with `_Hash_bytes` of the IEEE bits and seed `0xc70f6907` (±0 still hashes to 0), and its `unordered_map` grows by prime bucket counts. The same `(θ, φ)` keys therefore come out in a different order. On the oracle identity the hull walks that libstdc++ order. The published identity keeps libc++.
+
+The Thor2 aarch64 contract-off oracle links libstdc++ as well. Its polygon walk matches this x86 oracle, which is why those two dumps agree with each other and both disagree with the Apple libc++ order.
+
 ## Independent execution on this host
 
 Ran on Ubuntu 24.04, x86_64, glibc 2.39, MuJoCo 3.13.0 (`libmujoco.so.3.13.0`), rustc 1.99.1, against Menagerie `4d038b3feae26ec82b46a4d586379114012a8ac7`, after non-Apple `sincos` was host libm again. This is not the prior claim. The command was:
@@ -89,6 +99,17 @@ Tendon fixture (`spatial_tendons_step_as_mujoco_does_bit_for_bit`), initial stat
 ## What was not changed
 
 Golden arrays, equality, the default solver, initialization, the corpus sha, and the 212-model goal were not changed. Warp, Newton, Ferric, and ferromorphic event contracts were not executed. No measured energy and no GPU result is claimed.
+
+## PID trajectory tests
+
+`a_pid_plugin_steps_as_mujoco_does_bit_for_bit` pins the ten-step PID plus servo trajectory
+that commit `2eb1e3c` captured against `libactuator.dylib`'s contracted force
+(`fma(kp, e, kd*edot)`). That is not `libmujoco` `64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc`.
+
+`a_pid_plugin_steps_as_the_contract_off_oracle_does_bit_for_bit` pins the same model and controls
+against that contract-off library (`mujoco-3.13.0-x86_64-contract-off`), captured by
+`mj_loadPluginLibrary` of its `libactuator.so` and ten `mj_step`s. The dylib golden is unchanged.
+Retiring it is not decided here.
 
 ## CI
 

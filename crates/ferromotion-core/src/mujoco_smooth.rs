@@ -18,8 +18,25 @@ use crate::mujoco_kinematics::{KinJointKind, KinState, MjKinematics, SameFrame};
 /// `mjMINVAL`
 const MJ_MINVAL: f64 = 1e-15;
 
+fn contract_off() -> bool {
+    crate::fp_contract::contract_off()
+}
+
 /// `mju_mulInertVec`: a 6-D motion vector through a com-based inertia (`i` = the 10 numbers of `cinert`).
 fn mul_inert_vec(i: &[f64; 10], v: &[f64; 6]) -> [f64; 6] {
+    // Out-of-line `mju_mulInertVec` in `64156abe`. Lanes 0 and 1 share one `addpd`/`subpd`
+    // chain; lane 2 is scalar; lanes 3 and 4 share one `subpd` then `+ i9*v`. Swapping the
+    // two operands of a single add does not change the bits.
+    if contract_off() {
+            return [
+                (((i[0] * v[0] + i[3] * v[1]) + i[4] * v[2]) - i[8] * v[4]) + i[7] * v[5],
+                (((i[1] * v[1] + i[3] * v[0]) + i[5] * v[2]) + i[8] * v[3]) - i[6] * v[5],
+                (((i[5] * v[1] + i[4] * v[0]) + i[2] * v[2]) - i[7] * v[3]) + i[6] * v[4],
+                (i[8] * v[1] - i[7] * v[2]) + i[9] * v[3],
+                (i[6] * v[2] - i[8] * v[0]) + i[9] * v[4],
+                i[9] * v[5] + (i[7] * v[0] - i[6] * v[1]),
+            ];
+        }
     [
         i[7].mul_add(v[5], (-i[8]).mul_add(v[4], i[4].mul_add(v[2], i[0].mul_add(v[0], i[3] * v[1])))),
         (-i[6]).mul_add(v[5], i[8].mul_add(v[3], i[5].mul_add(v[2], i[3].mul_add(v[0], i[1] * v[1])))),
@@ -32,6 +49,10 @@ fn mul_inert_vec(i: &[f64; 10], v: &[f64; 6]) -> [f64; 6] {
 
 /// `mji_dot6`: `((v0·w0 + v2·w2) + (v1·w1 + v3·w3)) + (v4·w4 + v5·w5)`, each pair contracted.
 fn dot6(a: &[f64; 6], b: &[f64; 6]) -> f64 {
+    // `mji_dot6`: the same addition order as `mju_dot`, products not fused.
+    if contract_off() {
+        return ((a[0] * b[0] + a[2] * b[2]) + (a[1] * b[1] + a[3] * b[3])) + (a[4] * b[4] + a[5] * b[5]);
+    }
     (a[0].mul_add(b[0], a[2] * b[2]) + a[1].mul_add(b[1], a[3] * b[3])) + a[4].mul_add(b[4], a[5] * b[5])
 }
 
@@ -46,16 +67,25 @@ pub(crate) fn dot_sparse(v: &[f64], x: &[f64], ind: &[usize]) -> f64 {
     let n = v.len();
     let (mut r0, mut r1, mut r2, mut r3) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     let mut i = 0;
+    // Published path fuses each `res += a*b`. The contract-off library adds the product.
+    let separate = crate::fp_contract::contract_off();
     while i + 4 <= n {
-        r0 = v[i].mul_add(x[ind[i]], r0);
-        r1 = v[i + 1].mul_add(x[ind[i + 1]], r1);
-        r2 = v[i + 2].mul_add(x[ind[i + 2]], r2);
-        r3 = v[i + 3].mul_add(x[ind[i + 3]], r3);
+        if separate {
+            r0 += v[i] * x[ind[i]];
+            r1 += v[i + 1] * x[ind[i + 1]];
+            r2 += v[i + 2] * x[ind[i + 2]];
+            r3 += v[i + 3] * x[ind[i + 3]];
+        } else {
+            r0 = v[i].mul_add(x[ind[i]], r0);
+            r1 = v[i + 1].mul_add(x[ind[i + 1]], r1);
+            r2 = v[i + 2].mul_add(x[ind[i + 2]], r2);
+            r3 = v[i + 3].mul_add(x[ind[i + 3]], r3);
+        }
         i += 4;
     }
     let mut r = (r0 + r2) + (r1 + r3);
     while i < n {
-        r = v[i].mul_add(x[ind[i]], r);
+        r = if separate { r + v[i] * x[ind[i]] } else { v[i].mul_add(x[ind[i]], r) };
         i += 1;
     }
     r
@@ -65,10 +95,12 @@ pub(crate) fn dot_sparse(v: &[f64], x: &[f64], ind: &[usize]) -> f64 {
 /// zero coefficient skipped, each fused into the running column.
 fn mul_mat_t_vec3(j: &[[f64; 3]], v: &[f64; 3]) -> Vec<f64> {
     let mut res = vec![0.0f64; j.len()];
+    // `mju_mulMatTVec` → `mju_addToScl`: `res += jac_row * wrench`. `64156abe` adds the product.
+    let separate = contract_off();
     for r in 0..3 {
         if v[r] != 0.0 {
             for (x, row) in res.iter_mut().zip(j) {
-                *x = row[r].mul_add(v[r], *x);
+                *x = if separate { *x + row[r] * v[r] } else { row[r].mul_add(v[r], *x) };
             }
         }
     }
@@ -82,11 +114,30 @@ fn fmax(a: f64, b: f64) -> f64 {
 
 /// `mji_cross`, contracted.
 fn cross(a: &[f64; 3], b: &[f64; 3]) -> [f64; 3] {
+    // `mji_cross`. The contract-off library subtracts the products.
+    if contract_off() {
+        return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    }
     [a[1].mul_add(b[2], -(a[2] * b[1])), a[2].mul_add(b[0], -(a[0] * b[2])), a[0].mul_add(b[1], -(a[1] * b[0]))]
 }
 
 /// `mji_crossMotion`: `vel × v` for motion vectors.
 fn cross_motion(vel: &[f64; 6], v: &[f64; 6]) -> [f64; 6] {
+    // `mji_crossMotion`. The contract-off library adds the two products, then adds that sum.
+    if contract_off() {
+        let mut r = [
+            -vel[2] * v[1] + vel[1] * v[2],
+            vel[2] * v[0] - vel[0] * v[2],
+            -vel[1] * v[0] + vel[0] * v[1],
+            -vel[2] * v[4] + vel[1] * v[5],
+            vel[2] * v[3] - vel[0] * v[5],
+            -vel[1] * v[3] + vel[0] * v[4],
+        ];
+        r[3] += -vel[5] * v[1] + vel[4] * v[2];
+        r[4] += vel[5] * v[0] - vel[3] * v[2];
+        r[5] += -vel[4] * v[0] + vel[3] * v[1];
+        return r;
+    }
     let mut r = [
         (-vel[2]).mul_add(v[1], vel[1] * v[2]),
         vel[2].mul_add(v[0], -(vel[0] * v[2])),
@@ -103,6 +154,21 @@ fn cross_motion(vel: &[f64; 6], v: &[f64; 6]) -> [f64; 6] {
 
 /// `mji_crossForce`: `vel ×* f` for force vectors.
 fn cross_force(vel: &[f64; 6], f: &[f64; 6]) -> [f64; 6] {
+    // `mji_crossForce`, same product-then-add order as the contract-off library.
+    if contract_off() {
+        let mut r = [
+            -vel[2] * f[1] + vel[1] * f[2],
+            vel[2] * f[0] - vel[0] * f[2],
+            -vel[1] * f[0] + vel[0] * f[1],
+            -vel[2] * f[4] + vel[1] * f[5],
+            vel[2] * f[3] - vel[0] * f[5],
+            -vel[1] * f[3] + vel[0] * f[4],
+        ];
+        r[0] += -vel[5] * f[4] + vel[4] * f[5];
+        r[1] += vel[5] * f[3] - vel[3] * f[5];
+        r[2] += -vel[4] * f[3] + vel[3] * f[4];
+        return r;
+    }
     let mut r = [
         (-vel[2]).mul_add(f[1], vel[1] * f[2]),
         vel[2].mul_add(f[0], -(vel[0] * f[2])),
@@ -122,6 +188,26 @@ fn cross_force(vel: &[f64; 6], f: &[f64; 6]) -> [f64; 6] {
 fn inert_com(inert: &[f64; 3], mat: &[f64; 9], dif: &[f64; 3], mass: f64) -> [f64; 10] {
     let tmp = [mat[0] * inert[0], mat[3] * inert[0], mat[6] * inert[0], mat[1] * inert[1], mat[4] * inert[1], mat[7] * inert[1], mat[2] * inert[2], mat[5] * inert[2], mat[8] * inert[2]];
     let mut r = [0.0; 10];
+    // `mju_inertCom` adds the products. The published path keeps the fused chain below.
+    if contract_off() {
+        r[0] = (mat[0] * tmp[0] + mat[1] * tmp[3]) + mat[2] * tmp[6];
+        r[1] = (mat[3] * tmp[1] + mat[4] * tmp[4]) + mat[5] * tmp[7];
+        r[2] = (mat[6] * tmp[2] + mat[7] * tmp[5]) + mat[8] * tmp[8];
+        r[3] = (mat[0] * tmp[1] + mat[1] * tmp[4]) + mat[2] * tmp[7];
+        r[4] = (mat[0] * tmp[2] + mat[1] * tmp[5]) + mat[2] * tmp[8];
+        r[5] = (mat[3] * tmp[2] + mat[4] * tmp[5]) + mat[5] * tmp[8];
+        r[0] += mass * (dif[1] * dif[1] + dif[2] * dif[2]);
+        r[1] += mass * (dif[0] * dif[0] + dif[2] * dif[2]);
+        r[2] += mass * (dif[0] * dif[0] + dif[1] * dif[1]);
+        r[3] -= mass * dif[0] * dif[1];
+        r[4] -= mass * dif[0] * dif[2];
+        r[5] -= mass * dif[1] * dif[2];
+        r[6] = mass * dif[0];
+        r[7] = mass * dif[1];
+        r[8] = mass * dif[2];
+        r[9] = mass;
+        return r;
+    }
     r[0] = mat[2].mul_add(tmp[6], mat[0].mul_add(tmp[0], mat[1] * tmp[3]));
     r[1] = mat[5].mul_add(tmp[7], mat[3].mul_add(tmp[1], mat[4] * tmp[4]));
     r[2] = mat[8].mul_add(tmp[8], mat[6].mul_add(tmp[2], mat[7] * tmp[5]));
@@ -160,10 +246,12 @@ fn mul_dof_vec(dof: &[[f64; 6]], vec: &[f64]) -> [f64; 6] {
         1 => dof[0].map(|x| x * vec[0]),
         _ => {
             let mut r = [0.0; 6];
+            // `mju_mulMatTVec` adds `dof * scale`. The published path fuses that.
+            let separate = contract_off();
             for (d, &v) in dof.iter().zip(vec) {
                 if v != 0.0 {
                     for k in 0..6 {
-                        r[k] = d[k].mul_add(v, r[k]);
+                        r[k] = if separate { r[k] + d[k] * v } else { d[k].mul_add(v, r[k]) };
                     }
                 }
             }
@@ -183,7 +271,7 @@ fn clip(x: f64, lo: f64, hi: f64) -> f64 {
     }
 }
 
-/// `mju_sigmoid`, contracted.
+/// `mju_sigmoid`. `64156abe` is `((x+x) + -5) * (3*x) + 10` times `(x*x)*x`.
 fn sigmoid(x: f64) -> f64 {
     if x <= 0.0 {
         return 0.0;
@@ -191,7 +279,14 @@ fn sigmoid(x: f64) -> f64 {
     if x >= 1.0 {
         return 1.0;
     }
-    x * x * x * (3.0 * x).mul_add(2.0f64.mul_add(x, -5.0), 10.0)
+    if crate::fp_contract::contract_off() {
+        let x3 = (x * x) * x;
+        let t = 3.0 * x;
+        let u = (x + x) + -5.0;
+        ((u * t) + 10.0) * x3
+    } else {
+        x * x * x * (3.0 * x).mul_add(2.0f64.mul_add(x, -5.0), 10.0)
+    }
 }
 
 /// `mju_muscleGainLength`, contracted.
@@ -204,10 +299,11 @@ fn muscle_gain_length(length: f64, lmin: f64, lmax: f64) -> f64 {
             0.5 * x * x
         } else if length <= 1.0 {
             let x = (1.0 - length) / MJ_MINVAL.max(1.0 - a);
-            (-(0.5 * x)).mul_add(x, 1.0)
+            // `64156abe`: `1 + ((-0.5)*x)*x`.
+            if crate::fp_contract::contract_off() { 1.0 + ((-0.5) * x) * x } else { (-(0.5 * x)).mul_add(x, 1.0) }
         } else if length <= b {
             let x = (length - 1.0) / MJ_MINVAL.max(b - 1.0);
-            (-(0.5 * x)).mul_add(x, 1.0)
+            if crate::fp_contract::contract_off() { 1.0 + ((-0.5) * x) * x } else { (-(0.5 * x)).mul_add(x, 1.0) }
         } else {
             let x = (lmax - length) / MJ_MINVAL.max(lmax - b);
             0.5 * x * x
@@ -264,7 +360,8 @@ fn muscle_bias(len: f64, lr: &[f64; 2], acc0: f64, prm: &[f64; 10]) -> f64 {
 fn muscle_dynamics(ctrl: f64, act: f64, prm: &[f64; 3]) -> f64 {
     let ctrlclamp = clip(ctrl, 0.0, 1.0);
     let actclamp = clip(act, 0.0, 1.0);
-    let s = 1.5f64.mul_add(actclamp, 0.5);
+    // `64156abe`: `s = 0.5 + (1.5*actclamp)`, then `tau_deact + (tau_act-tau_deact)*sigmoid`.
+    let s = if crate::fp_contract::contract_off() { 0.5 + 1.5 * actclamp } else { 1.5f64.mul_add(actclamp, 0.5) };
     let tau_act = prm[0] * s;
     let tau_deact = prm[1] / s;
     let dctrl = ctrlclamp - act;
@@ -274,6 +371,8 @@ fn muscle_dynamics(ctrl: f64, act: f64, prm: &[f64; 3]) -> f64 {
         } else {
             tau_deact
         }
+    } else if crate::fp_contract::contract_off() {
+        tau_deact + (tau_act - tau_deact) * sigmoid(dctrl / prm[2] + 0.5)
     } else {
         (tau_act - tau_deact).mul_add(sigmoid(dctrl / prm[2] + 0.5), tau_deact)
     };
@@ -554,11 +653,21 @@ impl SmoothModel {
             m.m_rownnz.push(row.len());
             m.m_colind.extend(row);
         }
-        // `mj_setM0`: at qpos0, the composite inertia seen by each dof, plus its armature
+        // `mj_setM0` (`engine_setconst.c`), at qpos0. The composite pass is `mju_addTo` of
+        // length 10: each parent entry is `crb[parent] + crb[child]`. Then the out-of-line
+        // `mju_mulInertVec` and `mju_dot(..., 6)`. In `64156abe` that dot is unfused:
+        // `((a1 b1 + a3 b3) + (a0 b0 + a2 b2)) + (a5 b5 + a4 b4)`. The published path keeps
+        // the fused four-accumulator `dot_n6`, whose tail is `fma(a4, b4, a5 b5)`.
         let kin0 = kin.state(qpos0);
         let (cinert, cdof, _) = m.com_pos(&kin0);
         let crb = m.composite(&cinert);
-        m.dof_m0 = (0..nv).map(|i| m.dof_armature[i] + dot_n6(&cdof[i], &mul_inert_vec(&crb[m.dof_bodyid[i]], &cdof[i]))).collect();
+        m.dof_m0 = (0..nv)
+            .map(|i| {
+                let buf = mul_inert_vec(&crb[m.dof_bodyid[i]], &cdof[i]);
+                let kinetic = if contract_off() { dot6(&cdof[i], &buf) } else { dot_n6(&cdof[i], &buf) };
+                m.dof_armature[i] + kinetic
+            })
+            .collect();
         // springs on a ball or free joint are not ported yet
         for (j, &k) in m.jnt_type.iter().enumerate() {
             if matches!(k, KinJointKind::Ball | KinJointKind::Free) && m.jnt_stiffness[j] != 0.0 {
@@ -762,29 +871,7 @@ impl SmoothModel {
             }
         }
         // `mj_factorI`: L'DL in place, rows from the last back
-        let mut qld = m.clone();
-        let mut qld_diag_inv = vec![0.0; nv];
-        for k in (0..nv).rev() {
-            let start = self.m_rowadr[k];
-            let diag = self.m_rownnz[k] - 1;
-            let end = start + diag;
-            if qld[end] < MJ_MINVAL {
-                qld[end] = MJ_MINVAL;
-            }
-            let inv_d = 1.0 / qld[end];
-            qld_diag_inv[k] = inv_d;
-            for adr in (start..end).rev() {
-                let i = self.m_colind[adr];
-                let scl = -qld[adr] * inv_d;
-                let (ri, n) = (self.m_rowadr[i], self.m_rownnz[i]);
-                for t in 0..n {
-                    qld[ri + t] = qld[start + t].mul_add(scl, qld[ri + t]);
-                }
-            }
-            for t in 0..diag {
-                qld[start + t] *= inv_d;
-            }
-        }
+        let (qld, qld_diag_inv) = self.factor_i(&m);
         // `mj_comVel`
         let mut cvel = vec![[0.0; 6]; nbody];
         let mut cdof_dot = vec![[0.0; 6]; nv];
@@ -1004,6 +1091,7 @@ impl SmoothModel {
             };
         }
         let mut actuator_force = vec![0.0; nu];
+        let separate = crate::fp_contract::contract_off();
         for (i, a) in self.actuators.iter().enumerate() {
             use crate::mujoco_actuator::{ActBias, ActDyn, ActGain};
             // `Pid::Compute` (MuJoCo runs the plugins after the builtin laws; the outputs are disjoint),
@@ -1019,9 +1107,16 @@ impl SmoothModel {
                 continue;
             }
             let (p, len, vel) = (&a.act.gainprm, actuator_length[i], actuator_velocity[i]);
+            let affine = |prm: &[f64]| {
+                if separate {
+                    (prm[0] + prm[1] * len) + prm[2] * vel
+                } else {
+                    prm[2].mul_add(vel, prm[1].mul_add(len, prm[0]))
+                }
+            };
             let gain = match a.act.gain {
                 ActGain::Fixed => p[0],
-                ActGain::Affine => p[2].mul_add(vel, p[1].mul_add(len, p[0])),
+                ActGain::Affine => affine(p),
                 ActGain::Muscle => muscle_gain(len, vel, &a.act.lengthrange, a.act.acc0, p),
             };
             let input = match (a.act.dynamics, a.actadr) {
@@ -1035,7 +1130,7 @@ impl SmoothModel {
             let b = &a.act.biasprm;
             let bias = match a.act.bias {
                 ActBias::None => 0.0,
-                ActBias::Affine => b[2].mul_add(vel, b[1].mul_add(len, b[0])),
+                ActBias::Affine => affine(b),
                 ActBias::Muscle => muscle_bias(len, &a.act.lengthrange, a.act.acc0, b),
             };
             f += bias;
@@ -1050,7 +1145,7 @@ impl SmoothModel {
             let f = actuator_force[i];
             if f != 0.0 {
                 for (&c, &v) in cols.iter().zip(vals) {
-                    qfrc_actuator[c] = v.mul_add(f, qfrc_actuator[c]);
+                    qfrc_actuator[c] = if separate { qfrc_actuator[c] + v * f } else { v.mul_add(f, qfrc_actuator[c]) };
                 }
             }
         }
@@ -1112,7 +1207,14 @@ impl SmoothModel {
             let rho = self.density;
             for (k, (p, q)) in [(1, 2), (0, 2), (0, 1)].into_iter().enumerate() {
                 let v = lvel[3 + k];
-                lfrc[3 + k] = (-(0.5 * rho * bb[p] * bb[q] * v.abs())).mul_add(v, lfrc[3 + k]);
+                // `lfrc -= 0.5*rho*box[p]*box[q]*|v|*v`. `64156abe` multiplies from
+                // `0.5*rho` and subtracts the product.
+                if contract_off() {
+                    let prod = ((((0.5 * rho) * bb[p]) * bb[q]) * v.abs()) * v;
+                    lfrc[3 + k] -= prod;
+                } else {
+                    lfrc[3 + k] = (-(0.5 * rho * bb[p] * bb[q] * v.abs())).mul_add(v, lfrc[3 + k]);
+                }
             }
             for (k, (p, q)) in [(1, 2), (0, 2), (0, 1)].into_iter().enumerate() {
                 let s = (bb[p] * bb[p] * bb[p]).mul_add(bb[p], bb[q] * bb[q] * bb[q] * bb[q]);
@@ -1146,9 +1248,11 @@ impl SmoothModel {
             }
             let mut row = vec![0.0f64; t.colind.len()];
             for &(qadr, dof, prm) in &t.path {
-                len[i] = prm.mul_add(qpos[qadr], len[i]);
+                // `L += prm * qpos`. `64156abe` `mj_tendon` multiplies, then adds the product onto `L`.
+                len[i] = if contract_off() { prm * qpos[qadr] + len[i] } else { prm.mul_add(qpos[qadr], len[i]) };
                 if let Some(k) = t.colind.iter().position(|&c| c == dof) {
-                    row[k] = prm.mul_add(1.0, row[k]);
+                    // `mju_combineSparseInc` with `src = 1` and `b = prm`: `(prm * 1) + row`.
+                    row[k] = if contract_off() { (prm * 1.0) + row[k] } else { prm.mul_add(1.0, row[k]) };
                 }
             }
             jac[i] = row;
@@ -1161,7 +1265,15 @@ impl SmoothModel {
         let h = self.timestep;
         let next = if a.act.dynamics == crate::mujoco_actuator::ActDyn::FilterExact {
             let tau = MJ_MINVAL.max(a.act.dynprm[0]);
-            (act_dot * tau).mul_add(1.0 - (-h / tau).exp(), act)
+            // `64156abe` filterexact: `act + ((h*act_dot) * (1 - exp(-h/tau)))`.
+            if crate::fp_contract::contract_off() {
+                act + (act_dot * tau) * (1.0 - (-h / tau).exp())
+            } else {
+                (act_dot * tau).mul_add(1.0 - (-h / tau).exp(), act)
+            }
+        } else if crate::fp_contract::contract_off() {
+            // `64156abe`: `act + (h * act_dot)`.
+            act + h * act_dot
         } else {
             act_dot.mul_add(h, act)
         };
@@ -1216,12 +1328,19 @@ impl SmoothModel {
             }
             let inv_d = 1.0 / qld[end];
             diag_inv[k] = inv_d;
+            // Published path fuses the rank-1 update. `mj_factorI` calls `mju_addToScl`,
+            // which is `row += src * scl`.
+            let separate = crate::fp_contract::contract_off();
             for adr in (start..end).rev() {
                 let i = self.m_colind[adr];
                 let scl = -qld[adr] * inv_d;
                 let (ri, n) = (self.m_rowadr[i], self.m_rownnz[i]);
                 for t in 0..n {
-                    qld[ri + t] = qld[start + t].mul_add(scl, qld[ri + t]);
+                    qld[ri + t] = if separate {
+                        qld[ri + t] + qld[start + t] * scl
+                    } else {
+                        qld[start + t].mul_add(scl, qld[ri + t])
+                    };
                 }
             }
             for t in 0..diag {
@@ -1252,9 +1371,12 @@ impl SmoothModel {
             let xi = x[i];
             if xi != 0.0 {
                 let (start, end) = (self.m_rowadr[i], self.m_rowadr[i] + self.m_rownnz[i] - 1);
+                // Published path fuses `x - qLD·x_i`. `mj_solveLD` in the contract-off
+                // library subtracts the product.
+                let separate = crate::fp_contract::contract_off();
                 for adr in start..end {
                     let c = self.m_colind[adr];
-                    x[c] = (-qld[adr]).mul_add(xi, x[c]);
+                    x[c] = if separate { x[c] - qld[adr] * xi } else { (-qld[adr]).mul_add(xi, x[c]) };
                 }
             }
         }

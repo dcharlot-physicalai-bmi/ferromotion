@@ -1744,6 +1744,12 @@ impl MjcfTree {
     /// reason) for a model [`MjcfTree::mujoco_native_unsupported`] names anything for, or whose integrator
     /// is not ported yet.
     pub fn mujoco_native_step(&self, st: &crate::MjNativeState, ctrl: &[f64]) -> Result<crate::MjNativeState, String> {
+        Ok(self.mujoco_native_step_witness(st, ctrl)?.next)
+    }
+
+    /// The same step as [`MjcfTree::mujoco_native_step`], plus the contact witness from the forward
+    /// pass that produced it. The published default is unchanged: this does not install a policy.
+    pub fn mujoco_native_step_witness(&self, st: &crate::MjNativeState, ctrl: &[f64]) -> Result<NativeStepWitness, String> {
         let sm = self.smooth_model();
         if let Some(why) = sm.unsupported.first() {
             return Err(why.clone());
@@ -1766,17 +1772,43 @@ impl MjcfTree {
             st = reset_state();
             ctrl = &zero_ctrl;
         }
-        let (mut sd, _e, mut sol) = self.native_forward(st.time, &st.qpos, &st.qvel, ctrl, &st.act, &st.qacc_warmstart);
+        let (mut sd, mut e, mut sol) = self.native_forward(st.time, &st.qpos, &st.qvel, ctrl, &st.act, &st.qacc_warmstart);
         if sol.qacc.iter().any(bad) {
             st = reset_state();
             ctrl = &zero_ctrl;
-            (sd, _, sol) = self.native_forward(st.time, &st.qpos, &st.qvel, ctrl, &st.act, &st.qacc_warmstart);
+            (sd, e, sol) = self.native_forward(st.time, &st.qpos, &st.qvel, ctrl, &st.act, &st.qacc_warmstart);
         }
-        match self.integrator {
-            MjcfIntegrator::ImplicitFast => sm.implicit_fast(&sd, &sol, &st, ctrl),
-            MjcfIntegrator::Rk4 => Ok(self.native_rk4(&st, ctrl, &sd, &sol)),
-            _ => Ok(sm.euler(&sd, &sol, &st, self.eulerdamp)),
+        let collision = self.collide_qpos(&st.qpos);
+        let moving = |geom: usize| self.geoms.get(geom).and_then(|g| g.joint).is_some();
+        let mut ncon = 0usize;
+        let mut ncon_moving = 0usize;
+        let mut moving_ids = Vec::new();
+        for (i, contact) in collision.contacts.iter().enumerate() {
+            if contact.record.exclude {
+                continue;
+            }
+            ncon += 1;
+            if moving(contact.geom[0]) || moving(contact.geom[1]) {
+                ncon_moving += 1;
+                moving_ids.push(i);
+            }
         }
+        let nefc_contact_moving = e
+            .typ
+            .iter()
+            .zip(e.id.iter())
+            .filter(|(typ, id)| {
+                matches!(**typ, crate::mujoco_efc::CONTACT_FRICTIONLESS | crate::mujoco_efc::CONTACT_PYRAMIDAL | crate::mujoco_efc::CONTACT_ELLIPTIC)
+                    && moving_ids.contains(id)
+            })
+            .count();
+        let qfrc_constraint = sol.qfrc_constraint.clone();
+        let next = match self.integrator {
+            MjcfIntegrator::ImplicitFast => sm.implicit_fast(&sd, &sol, &st, ctrl)?,
+            MjcfIntegrator::Rk4 => self.native_rk4(&st, ctrl, &sd, &sol),
+            _ => sm.euler(&sd, &sol, &st, self.eulerdamp),
+        };
+        Ok(NativeStepWitness { next, ncon, ncon_moving, nefc_contact_moving, qfrc_constraint })
     }
 
     /// **`mj_RungeKutta(m, d, 4)`**: three more forward passes at the tableau's stages, each from `X[0]`
@@ -1788,20 +1820,33 @@ impl MjcfTree {
         const B: [f64; 4] = [1.0 / 6.0, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 6.0];
         let sm = self.smooth_model();
         let (nv, na, h) = (st.qvel.len(), st.act.len(), sm.timestep);
+        let separate = crate::fp_contract::contract_off();
         let mut x = vec![(st.qpos.clone(), st.qvel.clone(), st.act.clone())];
         let mut f = vec![(sol.qacc.clone(), sd.act_dot.clone())];
-        // the weighted rates: `dX = Σ w_j·[qvel_j, qacc_j, act_dot_j]`
+        // `mju_addToScl` of each tableau weight. Velocity is one call of length `nv`. Acceleration and
+        // `act_dot` are the next call, one vector of length `nv+na`, so the wide prefix can cross that boundary.
         let weigh = |x: &[(Vec<f64>, Vec<f64>, Vec<f64>)], f: &[(Vec<f64>, Vec<f64>)], w: &[f64]| -> (Vec<f64>, Vec<f64>, Vec<f64>) {
             let (mut dv, mut da, mut dact) = (vec![0.0f64; nv], vec![0.0f64; nv], vec![0.0f64; na]);
             for (j, &wj) in w.iter().enumerate() {
-                for k in 0..nv {
-                    dv[k] = x[j].1[k].mul_add(wj, dv[k]);
-                }
-                for k in 0..nv {
-                    da[k] = f[j].0[k].mul_add(wj, da[k]);
-                }
-                for k in 0..na {
-                    dact[k] = f[j].1[k].mul_add(wj, dact[k]);
+                if separate {
+                    crate::mujoco_solver::add_to_scl(&mut dv, &x[j].1, wj, 6);
+                    let mut acc = da.clone();
+                    acc.extend_from_slice(&dact);
+                    let mut src = f[j].0.clone();
+                    src.extend_from_slice(&f[j].1);
+                    crate::mujoco_solver::add_to_scl(&mut acc, &src, wj, 6);
+                    da.copy_from_slice(&acc[..nv]);
+                    if na > 0 {
+                        dact.copy_from_slice(&acc[nv..]);
+                    }
+                } else {
+                    for k in 0..nv {
+                        dv[k] = x[j].1[k].mul_add(wj, dv[k]);
+                        da[k] = f[j].0[k].mul_add(wj, da[k]);
+                    }
+                    for k in 0..na {
+                        dact[k] = f[j].1[k].mul_add(wj, dact[k]);
+                    }
                 }
             }
             (dv, da, dact)
@@ -1812,12 +1857,22 @@ impl MjcfTree {
             for a in row {
                 c += a;
             }
-            let t = c.mul_add(h, st.time);
+            // `T = time + C*h`. Step 1 starts at time 0, so the product is the whole sum.
+            let t = if separate { st.time + c * h } else { c.mul_add(h, st.time) };
             let (dv, da, dact) = weigh(&x, &f, row);
             let mut qpos = x[0].0.clone();
             sm.integrate_pos(&mut qpos, &dv, h);
-            let qvel: Vec<f64> = (0..nv).map(|k| da[k].mul_add(h, x[0].1[k])).collect();
-            let act: Vec<f64> = (0..na).map(|k| dact[k].mul_add(h, x[0].2[k])).collect();
+            // `mju_addToScl(X[i]+nq, dX+nv, h, nv+na)` onto a copy of `X[0]`.
+            let (qvel, act) = if separate {
+                let mut acc = x[0].1.clone();
+                acc.extend_from_slice(&x[0].2);
+                let mut src = da.clone();
+                src.extend_from_slice(&dact);
+                crate::mujoco_solver::add_to_scl(&mut acc, &src, h, 6);
+                (acc[..nv].to_vec(), acc[nv..].to_vec())
+            } else {
+                ((0..nv).map(|k| da[k].mul_add(h, x[0].1[k])).collect(), (0..na).map(|k| dact[k].mul_add(h, x[0].2[k])).collect())
+            };
             let (sdi, _, soli) = self.native_forward(t, &qpos, &qvel, ctrl, &act, &st.qacc_warmstart);
             x.push((qpos, qvel, act));
             f.push((soli.qacc, sdi.act_dot));
@@ -1848,6 +1903,15 @@ impl MjcfTree {
     /// two nearly parallel surfaces can read those ulps.
     pub fn geom_frames_mujoco(&self, qpos: &[f64]) -> Vec<(Vector3<f64>, Matrix3<f64>)> {
         self.mj_kin.geom_frames(qpos).into_iter().map(|(p, m)| (Vector3::from(p), Matrix3::new(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]))).collect()
+    }
+
+    /// Instrumented calls made by [`Self::geom_frames_mujoco`] at `qpos`, in execution order.
+    /// An operation that is absent from a later oracle comparison is not a pass.
+    pub fn trace_mujoco_kinematics_ops(&self, qpos: &[f64]) -> Vec<crate::fp_contract::OpSample> {
+        let (_, samples) = crate::fp_contract::capture_ops(|| {
+            let _ = self.geom_frames_mujoco(qpos);
+        });
+        samples
     }
 
     /// Every body's compiled frame in its parent, `(body_pos, body_quat)`, in MuJoCo's body order (the world
@@ -2956,6 +3020,19 @@ pub enum MjcfIntegrator {
     ImplicitFast,
 }
 
+/// One [`MjcfTree::mujoco_native_step`], plus the contact witness of the forward pass that produced it.
+#[derive(Clone, Debug)]
+pub struct NativeStepWitness {
+    pub next: crate::MjNativeState,
+    /// Solver-facing contacts (`record.exclude` is false).
+    pub ncon: usize,
+    /// Those contacts that touch a geom riding on a joint.
+    pub ncon_moving: usize,
+    /// `efc` rows of those moving-body contacts.
+    pub nefc_contact_moving: usize,
+    pub qfrc_constraint: Vec<f64>,
+}
+
 /// One [`MjcfTree::step_mujoco`]: the next state, in MuJoCo's layout, and the forward pass it came from.
 #[derive(Clone, Debug)]
 pub struct MjcfStep {
@@ -3745,7 +3822,11 @@ pub(crate) fn mesh_inertia_mujoco(mesh: &crate::TriMesh3, method: MeshInertia) -
     let (mut facecen, mut total_area) = (Vector3::zeros(), 0.0);
     for t in &mesh.tris {
         let (_, c, area) = tri(v(t[0]), v(t[1]), v(t[2]));
-        facecen = Vector3::new(area.mul_add(c.x, facecen.x), area.mul_add(c.y, facecen.y), area.mul_add(c.z, facecen.z));
+        facecen = if crate::fp_contract::contract_off() {
+            Vector3::new(facecen.x + area * c.x, facecen.y + area * c.y, facecen.z + area * c.z)
+        } else {
+            Vector3::new(area.mul_add(c.x, facecen.x), area.mul_add(c.y, facecen.y), area.mul_add(c.z, facecen.z))
+        };
         total_area += area;
     }
     if total_area < MINVAL {
@@ -3764,10 +3845,13 @@ pub(crate) fn mesh_inertia_mujoco(mesh: &crate::TriMesh3, method: MeshInertia) -
             volume = volume.abs();
         }
         vol += volume;
-        // `CoM += volume * (center * 3.0 / 4.0 + facecen / 4.0)`: the sum's terms are quotients, so only the
-        // accumulation fuses
+        // `CoM += volume * (center * 3.0 / 4.0 + facecen / 4.0)`
         let x = |k: usize| c[k] * 3.0 / 4.0 + facecen[k] / 4.0;
-        com = Vector3::new(volume.mul_add(x(0), com.x), volume.mul_add(x(1), com.y), volume.mul_add(x(2), com.z));
+        com = if crate::fp_contract::contract_off() {
+            Vector3::new(com.x + volume * x(0), com.y + volume * x(1), com.z + volume * x(2))
+        } else {
+            Vector3::new(volume.mul_add(x(0), com.x), volume.mul_add(x(1), com.y), volume.mul_add(x(2), com.z))
+        };
     }
     if vol < MINVAL {
         return Err(if vol < 0.0 { "mesh volume is negative (misoriented triangles)".into() } else { "mesh volume is too small".into() });
@@ -3789,15 +3873,28 @@ pub(crate) fn mesh_inertia_mujoco(mesh: &crate::TriMesh3, method: MeshInertia) -
         }
         total += volume;
         for (j, &(a, b)) in k.iter().enumerate() {
-            // `2*(DD + EE + FF) + DE + ED + DF + FD + EF + FE`, each later product fused into the running sum
-            let sq = f[a].mul_add(f[b], d[a].mul_add(d[b], e[a] * e[b]));
-            let mut sum = 2.0f64.mul_add(sq, d[a] * e[b]);
-            sum = d[b].mul_add(e[a], sum);
-            sum = d[a].mul_add(f[b], sum);
-            sum = d[b].mul_add(f[a], sum);
-            sum = e[a].mul_add(f[b], sum);
-            sum = e[b].mul_add(f[a], sum);
-            p[j] = (volume / cdiv).mul_add(sum, p[j]);
+            if crate::fp_contract::contract_off() {
+                // `P += volume/C * (2*(DD + EE + FF) + DE + ED + DF + FD + EF + FE)`, no FMA.
+                let (dd, ee, ff) = (d[a] * d[b], e[a] * e[b], f[a] * f[b]);
+                let mut sum = 2.0 * ((dd + ee) + ff);
+                sum += d[a] * e[b];
+                sum += d[b] * e[a];
+                sum += d[a] * f[b];
+                sum += d[b] * f[a];
+                sum += e[a] * f[b];
+                sum += e[b] * f[a];
+                p[j] += (volume / cdiv) * sum;
+            } else {
+                // Published default: each later product fused into the running sum.
+                let sq = f[a].mul_add(f[b], d[a].mul_add(d[b], e[a] * e[b]));
+                let mut sum = 2.0f64.mul_add(sq, d[a] * e[b]);
+                sum = d[b].mul_add(e[a], sum);
+                sum = d[a].mul_add(f[b], sum);
+                sum = d[b].mul_add(f[a], sum);
+                sum = e[a].mul_add(f[b], sum);
+                sum = e[b].mul_add(f[a], sum);
+                p[j] = (volume / cdiv).mul_add(sum, p[j]);
+            }
         }
     }
     let inertia = Matrix3::new(p[1] + p[2], -p[3], -p[4], -p[3], p[0] + p[2], -p[5], -p[4], -p[5], p[0] + p[1]);
@@ -3809,23 +3906,31 @@ pub(crate) fn mesh_inertia_mujoco(mesh: &crate::TriMesh3, method: MeshInertia) -
 // product of a chain into the running sum, `s += a*b`). A stored mesh vertex is a double rounded to `f32`:
 // one ulp in the centre of mass can move a whole binade of vertices to the neighbouring float.
 
-/// `mjuu_dot3`, contracted.
+/// `mjuu_dot3`. Published default fuses. The contract-off compiler leaves `(a0*b0 + a1*b1) + a2*b2`.
 fn uu_dot3(a: &Vector3<f64>, b: &Vector3<f64>) -> f64 {
-    a.z.mul_add(b.z, a.x.mul_add(b.x, a.y * b.y))
+    if crate::fp_contract::contract_off() {
+        (a.x * b.x + a.y * b.y) + a.z * b.z
+    } else {
+        a.z.mul_add(b.z, a.x.mul_add(b.x, a.y * b.y))
+    }
 }
 
-/// `mjuu_crossvec` (`b × c`), contracted.
+/// `mjuu_crossvec` (`b × c`). Published default fuses. Contract-off uses separate products.
 fn uu_cross(b: &Vector3<f64>, c: &Vector3<f64>) -> Vector3<f64> {
-    Vector3::new(b.y.mul_add(c.z, -(b.z * c.y)), b.z.mul_add(c.x, -(b.x * c.z)), b.x.mul_add(c.y, -(b.y * c.x)))
+    if crate::fp_contract::contract_off() {
+        Vector3::new(b.y * c.z - b.z * c.y, b.z * c.x - b.x * c.z, b.x * c.y - b.y * c.x)
+    } else {
+        Vector3::new(b.y.mul_add(c.z, -(b.z * c.y)), b.z.mul_add(c.x, -(b.x * c.z)), b.x.mul_add(c.y, -(b.y * c.x)))
+    }
 }
 
 /// `mjuu_normvec`: the squared norm below `mjEPS` (1e-14) leaves the vector alone and returns 0, and a norm
 /// within `mjEPS` of 1 leaves it alone too; otherwise each component is DIVIDED by the norm, which is
-/// returned. The sum of squares is one fused accumulation.
+/// returned. Published default fuses the sum of squares. Contract-off is `nrm += v*v`.
 fn uu_normvec(v: &mut [f64]) -> f64 {
     let mut n2 = 0.0f64;
     for x in v.iter() {
-        n2 = x.mul_add(*x, n2);
+        n2 = if crate::fp_contract::contract_off() { n2 + *x * *x } else { x.mul_add(*x, n2) };
     }
     if n2 < 1e-14 {
         return 0.0;
@@ -3858,31 +3963,52 @@ fn uu_quat2mat(q: &[f64; 4]) -> Matrix3<f64> {
     )
 }
 
-/// `mjuu_mulquat`, contracted, normalised as it normalises.
+/// `mjuu_mulquat`, then `mjuu_normvec`. Published default fuses. Contract-off multiplies, then adds.
 fn uu_mulquat(a: &[f64; 4], b: &[f64; 4]) -> [f64; 4] {
-    let mut r = [
-        (-a[3]).mul_add(b[3], (-a[2]).mul_add(b[2], a[0].mul_add(b[0], -(a[1] * b[1])))),
-        (-a[3]).mul_add(b[2], a[2].mul_add(b[3], a[0].mul_add(b[1], a[1] * b[0]))),
-        a[3].mul_add(b[1], a[2].mul_add(b[0], a[0].mul_add(b[2], -(a[1] * b[3])))),
-        a[3].mul_add(b[0], (-a[2]).mul_add(b[1], a[0].mul_add(b[3], a[1] * b[2]))),
-    ];
+    let mut r = if crate::fp_contract::contract_off() {
+        [
+            ((a[0] * b[0] - a[1] * b[1]) - a[2] * b[2]) - a[3] * b[3],
+            ((a[0] * b[1] + a[1] * b[0]) + a[2] * b[3]) - a[3] * b[2],
+            ((a[0] * b[2] - a[1] * b[3]) + a[2] * b[0]) + a[3] * b[1],
+            ((a[0] * b[3] + a[1] * b[2]) - a[2] * b[1]) + a[3] * b[0],
+        ]
+    } else {
+        [
+            (-a[3]).mul_add(b[3], (-a[2]).mul_add(b[2], a[0].mul_add(b[0], -(a[1] * b[1])))),
+            (-a[3]).mul_add(b[2], a[2].mul_add(b[3], a[0].mul_add(b[1], a[1] * b[0]))),
+            a[3].mul_add(b[1], a[2].mul_add(b[0], a[0].mul_add(b[2], -(a[1] * b[3])))),
+            a[3].mul_add(b[0], (-a[2]).mul_add(b[1], a[0].mul_add(b[3], a[1] * b[2]))),
+        ]
+    };
     uu_normvec4(&mut r);
     r
 }
 
-/// `mjuu_mulmat` (3×3), contracted.
+/// `mjuu_mulmat` (3×3). Published default fuses. Contract-off is `((a0*b0 + a1*b1) + a2*b2)`.
 fn uu_mulmat(a: &Matrix3<f64>, b: &Matrix3<f64>) -> Matrix3<f64> {
-    Matrix3::from_fn(|i, j| a[(i, 2)].mul_add(b[(2, j)], a[(i, 0)].mul_add(b[(0, j)], a[(i, 1)] * b[(1, j)])))
+    if crate::fp_contract::contract_off() {
+        Matrix3::from_fn(|i, j| (a[(i, 0)] * b[(0, j)] + a[(i, 1)] * b[(1, j)]) + a[(i, 2)] * b[(2, j)])
+    } else {
+        Matrix3::from_fn(|i, j| a[(i, 2)].mul_add(b[(2, j)], a[(i, 0)].mul_add(b[(0, j)], a[(i, 1)] * b[(1, j)])))
+    }
 }
 
-/// `mjuu_mulvecmat`: `mat · vec`, contracted.
+/// `mjuu_mulvecmat`: `mat · vec`.
 fn uu_mulvecmat(v: &Vector3<f64>, m: &Matrix3<f64>) -> Vector3<f64> {
-    Vector3::from_fn(|k, _| m[(k, 2)].mul_add(v.z, m[(k, 0)].mul_add(v.x, m[(k, 1)] * v.y)))
+    if crate::fp_contract::contract_off() {
+        Vector3::from_fn(|k, _| (m[(k, 0)] * v.x + m[(k, 1)] * v.y) + m[(k, 2)] * v.z)
+    } else {
+        Vector3::from_fn(|k, _| m[(k, 2)].mul_add(v.z, m[(k, 0)].mul_add(v.x, m[(k, 1)] * v.y)))
+    }
 }
 
-/// `mjuu_mulvecmatT`: `matᵀ · vec`, contracted.
+/// `mjuu_mulvecmatT`: `matᵀ · vec`.
 fn uu_mulvecmat_t(v: &Vector3<f64>, m: &Matrix3<f64>) -> Vector3<f64> {
-    Vector3::from_fn(|k, _| m[(2, k)].mul_add(v.z, m[(0, k)].mul_add(v.x, m[(1, k)] * v.y)))
+    if crate::fp_contract::contract_off() {
+        Vector3::from_fn(|k, _| (m[(0, k)] * v.x + m[(1, k)] * v.y) + m[(2, k)] * v.z)
+    } else {
+        Vector3::from_fn(|k, _| m[(2, k)].mul_add(v.z, m[(0, k)].mul_add(v.x, m[(1, k)] * v.y)))
+    }
 }
 
 /// **MuJoCo's `mjuu_eig3`, ported line for line** — a Jacobi iteration from the identity quaternion with its
@@ -3915,18 +4041,28 @@ pub(crate) fn eig3_mujoco(mat: &Matrix3<f64>) -> ([f64; 3], [f64; 4]) {
             break;
         }
         let tau = (d[(ck, ck)] - d[(rk, rk)]) / (2.0 * d[(rk, ck)]);
-        let t = if tau >= 0.0 { 1.0 / (tau + tau.mul_add(tau, 1.0).sqrt()) } else { -1.0 / (-tau + tau.mul_add(tau, 1.0).sqrt()) };
-        let c = 1.0 / t.mul_add(t, 1.0).sqrt();
+        let t = if crate::fp_contract::contract_off() {
+            if tau >= 0.0 { 1.0 / (tau + (1.0 + tau * tau).sqrt()) } else { -1.0 / (-tau + (1.0 + tau * tau).sqrt()) }
+        } else if tau >= 0.0 {
+            1.0 / (tau + tau.mul_add(tau, 1.0).sqrt())
+        } else {
+            -1.0 / (-tau + tau.mul_add(tau, 1.0).sqrt())
+        };
+        let c = if crate::fp_contract::contract_off() { 1.0 / (1.0 + t * t).sqrt() } else { 1.0 / t.mul_add(t, 1.0).sqrt() };
         if c > 1.0 - EPS {
             break;
         }
         let mut tmp = [0.0; 4];
-        let half = (-0.5f64).mul_add(c, 0.5).sqrt();
+        let half = if crate::fp_contract::contract_off() { (0.5 - 0.5 * c).sqrt() } else { (-0.5f64).mul_add(c, 0.5).sqrt() };
         tmp[rotk + 1] = if tau >= 0.0 { -half } else { half };
         if rotk == 1 {
             tmp[rotk + 1] = -tmp[rotk + 1];
         }
-        tmp[0] = (-tmp[rotk + 1]).mul_add(tmp[rotk + 1], 1.0).sqrt();
+        tmp[0] = if crate::fp_contract::contract_off() {
+            (1.0 - tmp[rotk + 1] * tmp[rotk + 1]).sqrt()
+        } else {
+            (-tmp[rotk + 1]).mul_add(tmp[rotk + 1], 1.0).sqrt()
+        };
         normalize(&mut tmp);
         quat = mulquat(&quat, &tmp);
         normalize(&mut quat);
@@ -3954,28 +4090,29 @@ pub(crate) fn quat_to_rotation(q: &[f64; 4]) -> Matrix3<f64> {
 }
 
 /// A mesh as MuJoCo's OBJ reader (tinyobjloader with `real_t = float`) delivers it: coordinates rounded to
-/// `f32`, quads split along their **shorter diagonal** (measured in `f32`), larger polygons refused because
-/// tinyobj's ear clipping is not reproduced here.
-/// **tinyobjloader's built-in ear clipping, ported branch for branch** — how a face with more than four
-/// vertices becomes triangles, which is what MuJoCo gets because its OBJ decoder builds tinyobj without
-/// `TINYOBJLOADER_USE_MAPBOX_EARCUT`. Three Menagerie families (`arx_l5`, `hello_robot_stretch_3`,
-/// `trossen_wxai`) have such faces and were refused outright until this existed.
+/// `f32`, quads split along their **shorter diagonal** (measured in `f32`).
 ///
-/// Measured against MuJoCo's own `mesh_face` on `hello_robot_stretch_3`, the only Menagerie model with faces
-/// this large: the 49-, 72-, 73- and 85-gons come out **triangle for triangle identical**, all 271 of them.
-/// The 215-gon does not — MuJoCo emits NOTHING for it (its face count is short by exactly that polygon's
-/// 213) while this emits 201, none of them MuJoCo's. That polygon is degenerate at the `f32` noise floor:
-/// its corner cross products run 1e-10 to 1e-9 against an `f32::EPSILON` of 1.19e-7, so which corner first
-/// clears the threshold, and every ear test after it, is decided in the last bits. It moves four geoms of
-/// one model by 1.29e-4 m and nothing else in the corpus. Fused multiply-add in `cross`/`area` is not the
-/// cause — tried, no change.
+/// Polygons with five or more vertices are triangulated by a Rust rewrite of tinyobjloader's builtin ear
+/// clip (the path compiled when `TINYOBJLOADER_USE_MAPBOX_EARCUT` is unset). That algorithm, including the
+/// crossing-number test it carries from W. Randolph Franklin's `pnpoly`, is adapted from tinyobjloader,
+/// MIT License, copyright 2012-Present Syoyo Fujita and contributors
+/// (<https://github.com/tinyobjloader/tinyobjloader>, commit `2945a967` as pinned by MuJoCo 3.13.0). It is
+/// not an independent geometric invention and it is not a verbatim copy of the C++ header. MuJoCo's
+/// `obj_decoder.cc` keeps a face only when the triangulated vertex count is 3 or 4. Three Menagerie
+/// families (`arx_l5`, `hello_robot_stretch_3`, `trossen_wxai`) have such faces.
 ///
-/// It is not a textbook ear clip and the differences are the whole point of porting it rather than writing
-/// one: the working plane is chosen from the FIRST corner of the polygon whose cross product clears
-/// `f32::EPSILON`, not from a fitted normal; convexity is judged by `cross * area < 0` where `area` is one
-/// term of the shoelace sum and not the polygon's area; the ear test is `pnpoly` on the other vertices; and
-/// when no ear is found for a full cycle of `guess_vert` the remaining vertices are silently DROPPED. All of
-/// it runs in `f32`, because tinyobj's `real_t` is `float`.
+/// The PyPI wheel's tinyobj (no `tryParseDouble`, libc++) does not triangulate a regular polygon of more
+/// than 100 vertices, so that wheel's `mesh_facenum` for `link_SG3_gripper_body` is 23,575. The 3.13.0 tag
+/// pinned to tinyobj `2945a967` does triangulate them: a regular n-gon becomes n−2 triangles, and the
+/// gripper mesh is 23,776 faces. Those 201 extra triangles are this ear clip of its one 215-gon, in the
+/// same order as that source build's `mesh_face`. The polygon is degenerate at the `f32` noise floor, so
+/// the clip stops early and drops the vertices it cannot ear; a regular 215-gon still yields all 213.
+///
+/// It is not a textbook ear clip: the working plane is chosen from the FIRST corner of the polygon whose
+/// cross product clears `f32::EPSILON`, not from a fitted normal; convexity is judged by `cross * area < 0`
+/// where `area` is one term of the shoelace sum and not the polygon's area; the ear test is `pnpoly` on the
+/// other vertices; and when no ear is found for a full cycle of `guess_vert` the remaining vertices are
+/// silently dropped. All of it runs in `f32`, because tinyobj's `real_t` is `float`.
 fn triangulate_as_tinyobj(poly: &[usize], verts: &[Vector3<f64>]) -> Vec<[usize; 3]> {
     let vf = |i: usize| -> [f32; 3] {
         let v = verts[i];
@@ -4117,18 +4254,8 @@ pub(crate) fn obj_as_mujoco_reads_it(text: &str) -> Result<crate::TriMesh3, Stri
                             tris.push([poly[1], poly[2], poly[3]]);
                         }
                     }
-                    // ⛔⛔ **MuJoCo DROPS a face with more than 100 vertices.** Not an error, not a
-                    // fallback — the face is silently absent from the mesh. Measured by bisection on
-                    // synthetic OBJ files: a 100-gon yields its 98 triangles and a 101-gon yields none,
-                    // and the cap is on the VERTEX COUNT, not on the line (a 100-gon written with 6-digit
-                    // indices, 701 characters, still triangulates).
-                    //
-                    // It matters once: `hello_robot_stretch_3/link_SG3_gripper_body` holds one 215-gon
-                    // among 23,103 faces. Fanning it gave this port 23,776 triangles against MuJoCo's
-                    // 23,575 — a DIFFERENT SOLID over the same 14,083 vertices — which moved that mesh's
-                    // centre of mass by 2.7e-3, the body's `ipos` by 2.5e-3 (the worst in Menagerie), its
-                    // `qfrc_gravcomp` by 3.6e-4, and its constrained acceleration by 1.4e-2.
-                    101.. => {}
+                    // Polygons of 5 or more vertices, including past 100. A drop at 100 matched the PyPI
+                    // wheel's older tinyobj and not tinyobj 2945a967, which is what the 3.13.0 tag builds.
                     _ => tris.extend(triangulate_as_tinyobj(&poly, &verts)),
                 }
             }
@@ -4932,21 +5059,27 @@ fn inertial_of(el: &El, c: &Compiler) -> Result<BodyInertial, String> {
 }
 
 /// `mjuu_globalinertia`: a principal inertia in a frame, as the six entries of the tensor in the parent
-/// (`xx yy zz xy xz yz`), contracted.
+/// (`xx yy zz xy xz yz`). Products are separate, as in the contract-off compiler.
 fn uu_globalinertia(local: &[f64; 3], quat: &[f64; 4]) -> [f64; 6] {
     let m = uu_quat2mat(quat);
     let mm = |k: usize| m[(k / 3, k % 3)];
     let t = [mm(0) * local[0], mm(3) * local[0], mm(6) * local[0], mm(1) * local[1], mm(4) * local[1], mm(7) * local[1], mm(2) * local[2], mm(5) * local[2], mm(8) * local[2]];
-    let row = |a: usize, b: usize, c: usize, x: usize, y: usize, z: usize| mm(c).mul_add(t[z], mm(a).mul_add(t[x], mm(b) * t[y]));
+    let row = |a: usize, b: usize, c: usize, x: usize, y: usize, z: usize| {
+        if crate::fp_contract::contract_off() {
+            (mm(a) * t[x] + mm(b) * t[y]) + mm(c) * t[z]
+        } else {
+            mm(c).mul_add(t[z], mm(a).mul_add(t[x], mm(b) * t[y]))
+        }
+    };
     [row(0, 1, 2, 0, 3, 6), row(3, 4, 5, 1, 4, 7), row(6, 7, 8, 2, 5, 8), row(0, 1, 2, 1, 4, 7), row(0, 1, 2, 2, 5, 8), row(3, 4, 5, 2, 5, 8)]
 }
 
-/// `mjuu_offcenter`: the parallel-axis term of a point mass at `v`, contracted.
+/// `mjuu_offcenter`: `mass * (y*y + z*z)` and the three products, no FMA.
 fn uu_offcenter(mass: f64, v: &[f64; 3]) -> [f64; 6] {
     [
-        mass * v[1].mul_add(v[1], v[2] * v[2]),
-        mass * v[0].mul_add(v[0], v[2] * v[2]),
-        mass * v[0].mul_add(v[0], v[1] * v[1]),
+        if crate::fp_contract::contract_off() { mass * (v[1] * v[1] + v[2] * v[2]) } else { mass * v[1].mul_add(v[1], v[2] * v[2]) },
+        if crate::fp_contract::contract_off() { mass * (v[0] * v[0] + v[2] * v[2]) } else { mass * v[0].mul_add(v[0], v[2] * v[2]) },
+        if crate::fp_contract::contract_off() { mass * (v[0] * v[0] + v[1] * v[1]) } else { mass * v[0].mul_add(v[0], v[1] * v[1]) },
         -mass * v[0] * v[1],
         -mass * v[0] * v[2],
         -mass * v[1] * v[2],
@@ -5679,7 +5812,7 @@ impl Walk<'_> {
             "capsule" => {
                 need(2)?;
                 let (r, h) = (size[0], 2.0 * size[1]);
-                pi * (r * r).mul_add(h, 4.0 * r * r * r / 3.0)
+                pi * (r * r * h + 4.0 * r * r * r / 3.0)
             }
             "cylinder" => {
                 need(2)?;
@@ -5732,12 +5865,12 @@ impl Walk<'_> {
             }
             "capsule" => {
                 let (r, h) = (size[0], 2.0 * size[1]);
-                let sphere_mass = mass * 4.0 * r / 4.0f64.mul_add(r, 3.0 * h);
+                let sphere_mass = mass * 4.0 * r / (4.0 * r + 3.0 * h);
                 let cylinder_mass = mass - sphere_mass;
-                let side = cylinder_mass * (3.0 * r).mul_add(r, h * h) / 12.0;
+                let side = cylinder_mass * (3.0 * r * r + h * h) / 12.0;
                 let mut i = [side, side, cylinder_mass * r * r / 2.0];
                 let sphere_inertia = 2.0 * sphere_mass * r * r / 5.0;
-                let shift = sphere_mass * h * 3.0f64.mul_add(r, 2.0 * h) / 8.0;
+                let shift = sphere_mass * h * (3.0 * r + 2.0 * h) / 8.0;
                 i[0] += sphere_inertia + shift;
                 i[1] += sphere_inertia + shift;
                 i[2] += sphere_inertia;
@@ -5745,7 +5878,7 @@ impl Walk<'_> {
             }
             "cylinder" => {
                 let (r, h) = (size[0], 2.0 * size[1]);
-                let side = mass * (3.0 * r).mul_add(r, h * h) / 12.0;
+                let side = mass * (3.0 * r * r + h * h) / 12.0;
                 [side, side, mass * r * r / 2.0]
             }
             "ellipsoid" | "box" | "hfield" => {
@@ -5756,7 +5889,7 @@ impl Walk<'_> {
             // the mesh's equivalent inertia box, in the mesh's principal frame (already the geom's)
             _ => {
                 let b = boxsz;
-                [mass * b[1].mul_add(b[1], b[2] * b[2]) / 3.0, mass * b[0].mul_add(b[0], b[2] * b[2]) / 3.0, mass * b[0].mul_add(b[0], b[1] * b[1]) / 3.0]
+                [mass * (b[1] * b[1] + b[2] * b[2]) / 3.0, mass * (b[0] * b[0] + b[2] * b[2]) / 3.0, mass * (b[0] * b[0] + b[1] * b[1]) / 3.0]
             }
         };
         Ok(Some(GeomMass { mass, pose: mj, inertia }))
@@ -5843,6 +5976,13 @@ impl Walk<'_> {
                 aamm[k + 3] = aamm[k + 3].max(p[k]);
             }
         }
+        let mut recorded = vec![volume, com.x, com.y, com.z, boxsz[0], boxsz[1], boxsz[2]];
+        for col in 0..3 {
+            for row in 0..3 {
+                recorded.push(unit[(row, col)]);
+            }
+        }
+        crate::fp_contract::record_op("mesh_inertia", &[mesh.verts.len() as f64, mesh.tris.len() as f64], &recorded);
         let d = MeshData { volume, com, quat, boxsz, aamm };
         // what `mjCMesh::Process` stores back into its float vertex array: CoM-centred, in the principal frame
         let stored = crate::TriMesh3 { verts: final_f64.iter().map(|v| v.map(|x| x as f32 as f64)).collect(), tris: mesh.tris.clone() };
@@ -5898,7 +6038,7 @@ impl Walk<'_> {
                 for p in &sel {
                     mass += p.mass;
                     for (k, c) in com.iter_mut().enumerate() {
-                        *c = p.mass.mul_add(p.pose.pos[k], *c);
+                        *c += p.mass * p.pose.pos[k];
                     }
                 }
                 if mass < 1e-14 {
@@ -7835,6 +7975,54 @@ mod tests {
         assert_eq!(st.qpos.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), [0x3fc0eb6ec5b1ea25, 0xbfcdc7309e13383c]);
     }
 
+    /// The same PID trajectory against the pinned contract-off library, not the dylib golden above.
+    ///
+    /// Oracle id `mujoco-3.13.0-x86_64-contract-off`, artifact
+    /// `64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc`.
+    /// Captured by loading `libactuator.so` from that build and stepping the model in this test:
+    /// `cc -O2 -I<mujoco>/include pid-step.c -L<build>/lib -lmujoco` then
+    /// `mj_loadPluginLibrary(<build>/lib/libactuator.so)`, `mj_loadXML`, ten `mj_step`s
+    /// from `qpos=[0.14,-0.3]`, `qvel=[0.17,-0.4]`, `act=[0.1,0.05]`, ctrl `[0.9,0.4]` then `[-0.5,0.4]`.
+    /// This is not the `libactuator.dylib` capture. Whether that golden is retired is a separate decision.
+    #[test]
+    fn a_pid_plugin_steps_as_the_contract_off_oracle_does_bit_for_bit() {
+        let xml = r#"<mujoco><option timestep="0.002" integrator="implicitfast"/>
+            <extension><plugin plugin="mujoco.pid"><instance name="pid1"><config key="kp" value="7.3"/><config key="ki" value="15"/><config key="kd" value="1.7"/><config key="imax" value="3"/><config key="slewmax" value="4"/></instance></plugin></extension>
+            <worldbody><body name="a" pos="0 0 1"><joint name="h1" type="hinge" axis="0 1 0" damping="0.05"/><geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.03"/>
+              <body name="b" pos="0.3 0 0"><joint name="h2" type="hinge" axis="0 1 0"/><geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.03"/></body></body></worldbody>
+            <actuator><plugin joint="h1" plugin="mujoco.pid" instance="pid1" actdim="2" ctrlrange="-1 1" forcerange="-20 20"/>
+              <position joint="h2" kp="10" kv="0.5"/></actuator></mujoco>"#;
+        let _ = crate::fp_contract::install_policy(
+            crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID,
+            crate::fp_contract::ORACLE_X86_CONTRACT_OFF_SHA256,
+            "",
+        );
+        let t = tree_from_mjcf_str(xml).unwrap();
+        let mut st = crate::MjNativeState { qpos: vec![0.14, -0.3], qvel: vec![0.17, -0.4], act: vec![0.1, 0.05], qacc_warmstart: vec![0.0; 2], ..Default::default() };
+        for k in 0..10 {
+            st = t.mujoco_native_step(&st, if k < 5 { &[0.9, 0.4] } else { &[-0.5, 0.4] }).unwrap();
+        }
+        crate::fp_contract::reset_policy();
+        let qvel = st.qvel.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        let oracle_qvel = [0xbfdd5ed456588f98, 0x4014f1cceb4c77f3];
+        assert_eq!(
+            qvel, oracle_qvel,
+            "qvel xor {:x} {:x}",
+            qvel[0] ^ oracle_qvel[0],
+            qvel[1] ^ oracle_qvel[1]
+        );
+        assert_eq!(
+            st.act.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            [0x3fbd71ae90c1ab78, 0x3feb851eb851eb85],
+            "act"
+        );
+        assert_eq!(
+            st.qpos.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            [0x3fc0eb6ec5b1ea25, 0xbfcdc7309e13383c],
+            "qpos"
+        );
+    }
+
     /// ⭐⭐ **RK4, a fluid and a site thruster, to the bit**: a free box in contact with the floor under
     /// `density` and `viscosity` (the inertia-box fluid model), pushed by a filtered `general` actuator on a
     /// rotated site (its six-component gear turned into the world each stage), next to a damped servo arm —
@@ -8882,19 +9070,19 @@ mod tests {
     fn the_mesh_compiler_stores_mujocos_frame_and_vertices_bit_for_bit() {
         const PRISM: &str = "v 0 0 0\nv 0.3 0 0\nv 0.05 0.2 0\nv 0 0 0.12\nv 0.3 0 0.12\nv 0.05 0.2 0.12\nv 0.1 0.05 0.06\nf 1 3 2\nf 4 5 6\nf 1 2 5\nf 1 5 4\nf 2 3 6\nf 2 6 5\nf 3 1 4\nf 3 4 6\n";
         #[allow(clippy::type_complexity)]
-        let cases: [(&str, [f64; 3], [f64; 4], [u32; 21]); 5] = [
-            (r#"scale="1 1 1""#, [0.11666667088866235, 0.06666666766007741, 0.0599999986588955], [0.1435361039704115, 0.6923852878686818, -0.1435361039704115, 0.6923852878686818], [0xbd75c28f, 0x3ddc43b8, 0xbda4f77d, 0xbd75c28f, 0xbc3fd1b1, 0x3e476670, 0xbd75c28f, 0xbdc44982, 0xbde9d562, 0x3d75c28f, 0x3ddc43b8, 0xbda4f77d, 0x3d75c28f, 0xbc3fd1b1, 0x3e476670, 0x3d75c28f, 0xbdc44982, 0xbde9d562, 0xa3111111, 0x3cb38ebc, 0xbc0e02de]),
-            (r#"scale="-1 1 1""#, [-0.11666667088866235, 0.06666666766007741, 0.0599999986588955], [-0.14353610397041147, 0.6923852878686818, 0.14353610397041147, 0.6923852878686818], [0xbd75c28f, 0x3ddc43b8, 0x3da4f77d, 0xbd75c28f, 0xbc3fd1b1, 0xbe476670, 0xbd75c28f, 0xbdc44982, 0x3de9d562, 0x3d75c28f, 0x3ddc43b8, 0x3da4f77d, 0x3d75c28f, 0xbc3fd1b1, 0xbe476670, 0x3d75c28f, 0xbdc44982, 0x3de9d562, 0xa2ddddde, 0x3cb38ebc, 0x3c0e02de]),
-            (r#"scale="0.5 -2 1.5""#, [0.05833333544433117, -0.1333333353201548, 0.08999999798834324], [0.7054104385769813, 0.7054104385769813, -0.04895010874994723, -0.04895010874994723], [0xbd9c099b, 0xbdb851eb, 0xbdfdf2e3, 0x3d9437d8, 0xbdb851eb, 0xbe143088, 0x3b7a3868, 0xbdb851eb, 0x3e8994fd, 0xbd9c099b, 0x3db851eb, 0xbdfdf2e3, 0x3d9437d8, 0x3db851eb, 0xbe143088, 0x3b7a3868, 0x3db851eb, 0x3e8994fd, 0xbc52a811, 0x00000000, 0xbd0282a0]),
-            (r#"refquat="1 -1 0.3 0" refpos="0.01 0.02 -0.03""#, [0.05824561799328291, -0.11473684199118726, 0.07140351099236919], [0.5233267598406292, 0.6080047538712383, 0.4345389905553699, 0.4094327629682389], [0x3d75c28a, 0xbddc43ba, 0xbda4f77d, 0x3d75c290, 0x3c3fd1a6, 0x3e476670, 0x3d75c293, 0x3dc44981, 0xbde9d562, 0xbd75c294, 0xbddc43b7, 0xbda4f77d, 0xbd75c28e, 0x3c3fd1bc, 0x3e476670, 0xbd75c28b, 0x3dc44983, 0xbde9d562, 0xb17e90f7, 0xbcb38ebc, 0xbc0e02de]),
-            (r#"scale="1 1 -1" refquat="0.9 0.1 0.2 0.3""#, [0.10649123216668764, 0.010175436735153203, -0.10105263218283654], [0.30406589296972475, 0.7519565609609825, -0.38723438184744163, 0.4383546471471347], [0x3d75c28f, 0x3ddc43b8, 0xbda4f77d, 0x3d75c28f, 0xbc3fd1b1, 0x3e476670, 0x3d75c28f, 0xbdc44982, 0xbde9d562, 0xbd75c28f, 0x3ddc43b8, 0xbda4f77d, 0xbd75c28f, 0xbc3fd1b1, 0x3e476670, 0xbd75c28f, 0xbdc44982, 0xbde9d562, 0x29d97476, 0x3cb38ebc, 0xbc0e02de]),
+        let cases: [(&str, [u64; 3], [u64; 4], [u32; 21]); 5] = [
+            (r#"scale="1 1 1""#, [4593071140271816704, 4589468260337276245, 4588807732127072257], [4594339453445378288, 4604411671794160834, 13817711490300154096, 4604411671794160834], [0xbd75c28f, 0x3ddc43b8, 0xbda4f77d, 0xbd75c28f, 0xbc3fd1b1, 0x3e476670, 0xbd75c28f, 0xbdc44982, 0xbde9d562, 0x3d75c28f, 0x3ddc43b8, 0xbda4f77d, 0x3d75c28f, 0xbc3fd1b1, 0x3e476670, 0x3d75c28f, 0xbdc44982, 0xbde9d562, 0xa3111111, 0x3cb38ebc, 0xbc0e02de]),
+            (r#"scale="-1 1 1""#, [13816443177126592512, 4589468260337276245, 4588807732127072257], [13817711490300154096, 4604411671794160834, 4594339453445378288, 4604411671794160834], [0xbd75c28f, 0x3ddc43b8, 0x3da4f77d, 0xbd75c28f, 0xbc3fd1b1, 0xbe476670, 0xbd75c28f, 0xbdc44982, 0x3de9d562, 0x3d75c28f, 0x3ddc43b8, 0x3da4f77d, 0x3d75c28f, 0xbc3fd1b1, 0xbe476670, 0x3d75c28f, 0xbdc44982, 0x3de9d562, 0xa2ddddde, 0x3cb38ebc, 0x3c0e02de]),
+            (r#"scale="0.5 -2 1.5""#, [4588567540644446209, 13817343896819422551, 4591149603981623297], [4604528991921913518, 4604528991921913518, 13810587312019402483, 13810587312019402483], [0xbd9c099b, 0xbdb851eb, 0xbdfdf2e3, 0x3d9437d8, 0xbdb851eb, 0xbe143088, 0x3b7a3868, 0xbdb851eb, 0x3e8994fd, 0xbd9c099b, 0x3db851eb, 0xbdfdf2e3, 0x3d9437d8, 0x3db851eb, 0xbe143088, 0x3b7a3868, 0x3db851eb, 0x3e8994fd, 0xbc52a811, 0xa3800000, 0xbd0282a0]),
+            (r#"refquat="1 -1 0.3 0" refpos="0.01 0.02 -0.03""#, [4588554899227490853, 13816304118299335590, 4589809585871135791], [4602888927946498949, 4603651639511224413, 4601499578461678381, 4601047304872854053], [0x3d75c28a, 0xbddc43ba, 0xbda4f77d, 0x3d75c290, 0x3c3fd1a6, 0x3e476670, 0x3d75c293, 0x3dc44981, 0xbde9d562, 0xbd75c294, 0xbddc43b7, 0xbda4f77d, 0xbd75c28e, 0x3c3fd1bc, 0x3e476670, 0xbd75c28b, 0x3dc44983, 0xbde9d562, 0xb17e90f7, 0xbcb38ebc, 0xbc0e02de]),
+            (r#"scale="1 1 -1" refquat="0.9 0.1 0.2 0.3""#, [4592337922639230840, 4577019361696415747, 13815318067064235622], [4599149184087004035, 4604948242120761775, 13824019451243854462, 4601568315220097765], [0x3d75c28f, 0x3ddc43b8, 0xbda4f77d, 0x3d75c28f, 0xbc3fd1b1, 0x3e476670, 0x3d75c28f, 0xbdc44982, 0xbde9d562, 0xbd75c28f, 0x3ddc43b8, 0xbda4f77d, 0xbd75c28f, 0xbc3fd1b1, 0x3e476670, 0xbd75c28f, 0xbdc44982, 0xbde9d562, 0x29d97600, 0x3cb38ebc, 0xbc0e02de]),
         ];
         for (attrs, pos, quat, vert) in cases {
             let xml = format!(r#"<mujoco><asset><mesh name="p" file="prism.obj" {attrs}/></asset><worldbody><body><freejoint/><geom type="mesh" mesh="p"/></body></worldbody></mujoco>"#);
             let t = tree_from_mjcf(&xml, &|p: &str| (p == "prism.obj").then(|| PRISM.as_bytes().to_vec())).unwrap();
             let d = &t.mesh_props["p"];
-            assert_eq!([d.com.x, d.com.y, d.com.z], pos, "{attrs}: mesh_pos");
-            assert_eq!(d.quat, quat, "{attrs}: mesh_quat");
+            assert_eq!([d.com.x.to_bits(), d.com.y.to_bits(), d.com.z.to_bits()], pos, "{attrs}: mesh_pos");
+            assert_eq!(d.quat.map(f64::to_bits), quat, "{attrs}: mesh_quat");
             let got: Vec<u32> = t.mesh_hulls["p"].verts.iter().flat_map(|v| [v.x as f32, v.y as f32, v.z as f32]).map(f32::to_bits).collect();
             assert_eq!(got, vert, "{attrs}: mesh_vert");
         }
@@ -8909,11 +9097,9 @@ mod tests {
     /// `body_iquat` and `body_ipos` are compared bit for bit (the capsule's quaternion carries a `-0.0`).
     ///
     /// Undone, each of these fails here: the single-geom copy, `x / 180.0 * π`, the sameframe snap, the
-    /// fused parallel-axis term and centre-of-mass sum, the Euler composition order, and a `fullinertia`'s
-    /// eigenframe replacing the stated orientation. The fused `mjuu_globalinertia` is pinned by the corpus
-    /// instead (unfused, 58 of Menagerie's 4,626 bodies change). ⚠ The fused `xyaxes` dot product and
-    /// orthogonalisation and `axisangle`'s `mjuu_normvec` are ported but pinned by nothing: neither this
-    /// model nor any Menagerie body moves a bit when they are unfused.
+    /// parallel-axis term and centre-of-mass sum, the Euler composition order, and a `fullinertia`'s
+    /// eigenframe replacing the stated orientation. The `pair` bits are `mjuu_*` as compiled by
+    /// `libmujoco.so.3.13.0` sha256 `64156abe…` (`-ffp-contract=off`), not the fused products.
     #[test]
     fn body_inertia_and_frames_match_mujocos_compiler_bit_for_bit() {
         const MODEL: &str = r#"<mujoco>
@@ -8946,8 +9132,32 @@ mod tests {
 </mujoco>"#;
         let want: [(&str, [f64; 11]); 4] = [
             ("tiny", [3.343386009704378e-06, 5.297288492289184e-12, 5.297288492289184e-12, 4.0483328182308983e-13, 0.5889040235618007, 0.7567440281846111, 0.28377901056922916, -0.0, -0.00030000000000000003, 0.0004999999999999999, 0.00075]),
-            ("pair", [1.3883952591438333, 0.0054157787576827035, 0.004444959626535254, 0.002163181855674452, 0.7535891875991336, 0.23131982243392565, -0.0790689882846118, 0.610198796438066, 0.004111408683855843, 0.005306650499568431, -0.004145572778944047]),
-            ("full", [1.7, 0.02175572069593266, 0.017060856629607813, 0.012183422674459531, 0.9787378415042712, 0.13658524460465873, 0.1186397093384105, 0.09665054543013765, 0.01, 0.02, 0.03]),
+            ("pair", [
+                f64::from_bits(4608931595544370043),
+                f64::from_bits(4572893989947608286),
+                f64::from_bits(4571774711694224659),
+                f64::from_bits(4567134380285877288),
+                f64::from_bits(4604962947514200200),
+                f64::from_bits(4597502195219470119),
+                f64::from_bits(13813733978576742982),
+                f64::from_bits(4603671401689797218),
+                f64::from_bits(4571390153639527679),
+                f64::from_bits(4572768173632068056),
+                f64::from_bits(13794801579014216111),
+            ]),
+            ("full", [
+                f64::from_bits(4610334938539176755),
+                f64::from_bits(4581927880968064188),
+                f64::from_bits(4580574678532246221),
+                f64::from_bits(4578176886781602968),
+                f64::from_bits(4606990906301860495),
+                f64::from_bits(4594089022344182217),
+                f64::from_bits(4593213312675449881),
+                f64::from_bits(4591628826429314097),
+                f64::from_bits(4576918229304087675),
+                f64::from_bits(4581421828931458171),
+                f64::from_bits(4584304132692975288),
+            ]),
             ("snap", [0.5, 0.001, 0.002, 0.0025, 0.9233805168766387, 0.10259783520851541, 0.20519567041703082, 0.3077935056255462, 0.02, 0.03, 0.04]),
         ];
         let t = tree_from_mjcf_str(MODEL).unwrap();
@@ -10393,15 +10603,10 @@ mod tests {
         assert_eq!(tuned.force(l, v, 1.0, 0.0), 0.0);
         assert!(tuned.force(l, v, 0.0, 1.0) < 0.0, "activation, not control, drives it");
     }
-    /// ⛔⛔ **MuJoCo DROPS an OBJ face with more than 100 vertices** — silently, not as an error and not
-    /// with a fallback. Found by bisection against MuJoCo 3.13.0 on synthetic files: a 100-gon yields its
-    /// 98 triangles and a 101-gon yields none. The cap is on the VERTEX COUNT, not the line: a 100-gon
-    /// written with 6-digit indices, 701 characters long, still triangulates.
-    ///
-    /// It decides one mesh in Menagerie — `hello_robot_stretch_3/link_SG3_gripper_body` has a 215-gon —
-    /// and through it that model's centre of mass, gravity compensation and constrained acceleration.
+    /// A regular n-gon is n−2 triangles for every n the 3.13.0 source build triangulates, including past
+    /// 100. The separate triangle keeps the count unambiguous. The PyPI wheel drops n>100; this does not.
     #[test]
-    fn an_obj_face_with_more_than_a_hundred_vertices_is_dropped_as_mujoco_drops_it() {
+    fn an_obj_polygon_is_ear_clipped_including_past_a_hundred_vertices() {
         let ngon = |n: usize| -> String {
             let mut s = String::new();
             for k in 0..n {
@@ -10420,10 +10625,11 @@ mod tests {
         };
         let tris = |n: usize| obj_as_mujoco_reads_it(&ngon(n)).expect("parses").tris.len();
         assert_eq!(tris(100), 98 + 1, "a 100-gon is fanned into 98 triangles");
-        assert_eq!(tris(101), 1, "a 101-gon is DROPPED, leaving only the separate triangle");
-        assert_eq!(tris(215), 1, "and so is the 215-gon that decides hello_robot_stretch_3");
-        // the boundary is exactly there, and small faces are untouched
+        assert_eq!(tris(101), 99 + 1, "a 101-gon is triangulated, not dropped");
+        assert_eq!(tris(215), 213 + 1, "a regular 215-gon is triangulated into 213 triangles");
+        // small faces stay on the same path
         assert_eq!(tris(99), 97 + 1);
         assert_eq!(tris(5), 3 + 1);
+        assert_eq!(tris(250), 248 + 1);
     }
 }

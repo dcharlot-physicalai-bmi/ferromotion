@@ -1,0 +1,6 @@
+<mujoco model="panda reach contact">
+  <include file="panda_nohand.xml"/>
+  <worldbody>
+    <geom name="floor" type="plane" pos="0 0 0" size="0 0 0.05"/>
+  </worldbody>
+</mujoco>

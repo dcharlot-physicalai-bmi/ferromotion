@@ -1,0 +1,38 @@
+[package]
+name = "urdf-rs"
+# When publishing a new version:
+# - Create "v0.x.y" git tag
+# - Push the above tag (run `git push origin --tags`)
+# Then, CI will publish to crates.io and create a GitHub release.
+version = "0.10.0"
+authors = ["Takashi Ogura <t.ogura@gmail.com>"]
+edition = "2021"
+description = "URDF parser"
+license = "Apache-2.0"
+keywords = ["robotics", "robot", "ros", "urdf"]
+categories = ["data-structures", "parsing"]
+repository = "https://github.com/openrr/urdf-rs"
+
+# Note: serde is public dependency.
+[dependencies]
+quick-xml = { version = "0.42", features = ["overlapped-lists", "serialize"] }
+regex = "1.4.2"
+RustyXML = "0.3.0"
+serde = { version = "1.0.118", features = ["derive"] }
+serde-xml-rs = "0.6.0"
+thiserror = "2.0.0"
+
+[dev-dependencies]
+assert_approx_eq = "1"
+
+[lints]
+workspace = true
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+# missing_docs = "warn" # TODO
+rust_2018_idioms = "warn"
+single_use_lifetimes = "warn"
+unreachable_pub = "warn"
+[workspace.lints.clippy]
+lint_groups_priority = { level = "allow", priority = 1 } # https://github.com/rust-lang/rust-clippy/issues/12920

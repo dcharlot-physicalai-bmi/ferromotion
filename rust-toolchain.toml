@@ -1,4 +1,5 @@
 # Same compiler ferromorphic 1ceec2fc records as verified: rustc 1.100.0 (0ef1bc386 2026-11-09).
 [toolchain]
 channel = "1.100.0"
-profile = "minimal"
+components = ["clippy", "rustfmt"]
+targets = ["wasm32-unknown-unknown", "aarch64-unknown-linux-gnu"]
