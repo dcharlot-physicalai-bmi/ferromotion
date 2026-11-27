@@ -2436,12 +2436,12 @@ mod tests {
         let face1 = [Vector3::new(-1.0, 1.0, 0.0), Vector3::new(1.0, 1.0, 0.0), Vector3::new(1.0, -1.0, 0.0), Vector3::new(-1.0, -1.0, 0.0)];
         let far = [Vector3::new(50.0, 50.0, -1.0), Vector3::new(60.0, 50.0, -1.0)];
         let n = Vector3::z();
-        assert!(!polygon_clip(&mut st, &face1, &far, &n, &(-n)), "a clip with nothing inside must report false");
+        assert!(!polygon_clip(&mut st, &face1, &far, &n, &(-n), 0.0), "a clip with nothing inside must report false");
         assert_eq!((st.x1[0], st.x2[0]), (x1, x2), "and must leave EPA's witness pair untouched");
 
         // the same edge over the square does produce points, and says so
         let over = [Vector3::new(-0.5, 0.0, -0.1), Vector3::new(0.5, 0.0, -0.1)];
-        assert!(polygon_clip(&mut st, &face1, &over, &n, &(-n)), "a clip with points inside must report true");
+        assert!(polygon_clip(&mut st, &face1, &over, &n, &(-n), 0.0), "a clip with points inside must report true");
         assert_eq!(st.x1.len(), 2, "an edge clipped against a face gives its two ends");
     }
 
