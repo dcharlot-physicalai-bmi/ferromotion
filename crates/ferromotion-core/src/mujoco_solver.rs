@@ -202,26 +202,57 @@ fn constraint_update(ne: usize, nf: usize, d: &[f64], r: &[f64], floss: &[f64], 
             let nmt = if oracle_axpy() { n - mu * t } else { axpy(n, -mu, t) };
             s = quad_cost(s, dm, nmt);
             force[i] = -dm * nmt * mu;
-            for j in 1..dim {
-                force[i + j] = -force[i] / t * u[j] * fr[j - 1];
+            // `5491d70f` `mj_constraintUpdate_impl` (VA `0xa2510`) builds `Uhat = U/T`
+            // and stores `((-f) * Uhat) * friction`. `64156abe` is `((-f)/T) * U * friction`.
+            let uhat_4 = crate::fp_contract::oracle_4_0_schedules();
+            let mut uhat = [0.0; 5];
+            if uhat_4 {
+                for j in 1..dim {
+                    uhat[j - 1] = u[j] / t;
+                }
+                for j in 1..dim {
+                    force[i + j] = ((-force[i]) * uhat[j - 1]) * fr[j - 1];
+                }
+            } else {
+                for j in 1..dim {
+                    force[i + j] = -force[i] / t * u[j] * fr[j - 1];
+                }
             }
             state[i] = CONE;
             if let Some(hs) = cone_h.as_deref_mut() {
                 let h = &mut hs[id[i]];
-                let scl = -mu / t;
                 h[0] = 1.0;
-                for j in 1..dim {
-                    h[j] = scl * u[j];
-                }
-                let scl = mu * n / (t * t * t);
-                for k in 1..dim {
-                    for j in k..dim {
-                        h[k * dim + j] = scl * u[j] * u[k];
+                if uhat_4 {
+                    let neg_mu = -mu;
+                    for j in 1..dim {
+                        h[j] = uhat[j - 1] * neg_mu;
                     }
-                }
-                let scl = prod_add(mu, mu, -(mu * n / t));
-                for j in 1..dim {
-                    h[j * (dim + 1)] += scl;
+                    // `(N/T)*mu`, then `(Uhat * scl) * Uhat`. Diagonal add is `(mu*mu) - scl`.
+                    let scl = (n / t) * mu;
+                    for k in 1..dim {
+                        for j in k..dim {
+                            h[k * dim + j] = (uhat[j - 1] * scl) * uhat[k - 1];
+                        }
+                    }
+                    let diag = (mu * mu) - scl;
+                    for j in 1..dim {
+                        h[j * (dim + 1)] += diag;
+                    }
+                } else {
+                    let scl = -mu / t;
+                    for j in 1..dim {
+                        h[j] = scl * u[j];
+                    }
+                    let scl = mu * n / (t * t * t);
+                    for k in 1..dim {
+                        for j in k..dim {
+                            h[k * dim + j] = scl * u[j] * u[k];
+                        }
+                    }
+                    let scl = prod_add(mu, mu, -(mu * n / t));
+                    for j in 1..dim {
+                        h[j * (dim + 1)] += scl;
+                    }
                 }
                 for k in 0..dim {
                     let scl = dm * if k == 0 { mu } else { fr[k - 1] };
@@ -756,28 +787,42 @@ impl Ctx {
                     q[1] = axpy(q[1], jv[i + j], djj);
                     q[2] = axpy(q[2], jv[i + j] * d[i + j], jv[i + j]);
                 }
-                let (mut uu, mut uv, mut vv) = (0.0f64, 0.0f64, 0.0f64);
-                let (mut u, mut vv6) = ([0.0f64; 6], [0.0f64; 6]);
-                u[0] = jaref[i] * mu;
-                vv6[0] = jv[i] * mu;
-                for j in 1..dim {
-                    u[j] = jaref[i + j] * fr[j - 1];
-                    vv6[j] = jv[i + j] * fr[j - 1];
-                }
-                for j in 1..dim {
-                    uu = axpy(uu, u[j], u[j]);
-                    uv = axpy(uv, u[j], vv6[j]);
-                    vv = axpy(vv, vv6[j], vv6[j]);
-                }
-                q[3] = u[0];
-                q[4] = vv6[0];
-                q[5] = uu;
-                q[6] = uv;
-                q[7] = vv;
                 // `1 + (mu*mu)` fused, the parentheses notwithstanding (`_mj_solPrimal`)
                 // `D / (mu*mu*(1 + mu*mu))`. The contract-off library adds `1 + mu*mu`.
                 let denom = if oracle_axpy() { 1.0 + mu * mu } else { mu.mul_add(mu, 1.0) };
-                q[8] = d[i] / ((mu * mu) * denom);
+                let dm = d[i] / ((mu * mu) * denom);
+                if crate::fp_contract::oracle_4_0_schedules() {
+                    // `5491d70f` stores `T0 = sqrt(Σ Uj²)` in `quad[5]` and `Dm` in `quad[6]`.
+                    let mut uu = 0.0;
+                    for j in 1..dim {
+                        let uj = jaref[i + j] * fr[j - 1];
+                        uu = axpy(uu, uj, uj);
+                    }
+                    q[3] = jaref[i] * mu;
+                    q[4] = jv[i] * mu;
+                    q[5] = uu.sqrt();
+                    q[6] = dm;
+                } else {
+                    let (mut uu, mut uv, mut vv) = (0.0f64, 0.0f64, 0.0f64);
+                    let (mut u, mut vv6) = ([0.0f64; 6], [0.0f64; 6]);
+                    u[0] = jaref[i] * mu;
+                    vv6[0] = jv[i] * mu;
+                    for j in 1..dim {
+                        u[j] = jaref[i + j] * fr[j - 1];
+                        vv6[j] = jv[i + j] * fr[j - 1];
+                    }
+                    for j in 1..dim {
+                        uu = axpy(uu, u[j], u[j]);
+                        uv = axpy(uv, u[j], vv6[j]);
+                        vv = axpy(vv, vv6[j], vv6[j]);
+                    }
+                    q[3] = u[0];
+                    q[4] = vv6[0];
+                    q[5] = uu;
+                    q[6] = uv;
+                    q[7] = vv;
+                    q[8] = dm;
+                }
                 adv = dim;
             }
             q[0] *= 0.5;
@@ -821,8 +866,16 @@ impl Ctx {
             }
             if self.typ[i] == CONTACT_ELLIPTIC {
                 let con = self.cones[self.id[i]];
-                let q = &self.quad[3 * i..3 * i + 9];
                 let mu = con.mu;
+                if crate::fp_contract::oracle_4_0_schedules() {
+                    let (c, d0, d1) = elliptic_eval_4(&self.quad[3 * i..], alpha, mu, &self.jaref[i + 1..], &self.jv[i + 1..], &con.friction, con.dim);
+                    cost += c;
+                    deriv[0] += d0;
+                    deriv[1] += d1;
+                    i += con.dim;
+                    continue;
+                }
+                let q = &self.quad[3 * i..3 * i + 9];
                 let (u0, v0, uu, uv, vv, dm) = (q[3], q[4], q[5], q[6], q[7], q[8]);
                 cost += elliptic_cost_dif(q, alpha, mu, dm);
                 let n = axpy(u0, alpha, v0);
@@ -1012,6 +1065,106 @@ impl Ctx {
         }
         iter
     }
+}
+
+/// Zone test in `5491d70f` `PrimalEval`: `T <= 0`, else `N >= mu*T`, else `(mu*N)+T <= 0`.
+fn elliptic_zone(n: f64, t: f64, mu: f64) -> i32 {
+    if t <= 0.0 {
+        if n < 0.0 { 2 } else { 1 }
+    } else if n >= mu * t {
+        1
+    } else if (mu * n) + t <= 0.0 {
+        2
+    } else {
+        3
+    }
+}
+
+/// `5491d70f` `PrimalEval` (VA `0x18e7c0`). Tangent `Uj = Jaref*friction`, `Vj = friction*Jv`,
+/// `Wj = Uj + (alpha*Vj)`, `Tsqr += Wj*Wj`, `WV += Vj*Wj`, `Tsqr_delta += (Wj+Uj)*(alpha*Vj)`.
+fn elliptic_eval_4(q: &[f64], alpha: f64, mu: f64, jaref: &[f64], jv: &[f64], fr: &[f64], dim: usize) -> (f64, f64, f64) {
+    let (u0, v0, t0, dm) = (q[3], q[4], q[5], q[6]);
+    let alpha2 = alpha * alpha;
+    let two_alpha = alpha + alpha;
+    let av0 = alpha * v0;
+    let n = u0 + av0;
+    let nt = dim - 1;
+    let mut tsqr = 0.0;
+    let mut wv = 0.0;
+    let mut tsqr_delta = 0.0;
+    let mut w = [0.0; 5];
+    let mut vtan = [0.0; 5];
+    for j in 0..nt {
+        let uj = jaref[j] * fr[j];
+        let vj = fr[j] * jv[j];
+        let av = alpha * vj;
+        let wj = uj + av;
+        w[j] = wj;
+        vtan[j] = vj;
+        tsqr = axpy(tsqr, wj, wj);
+        wv = axpy(wv, vj, wj);
+        tsqr_delta = axpy(tsqr_delta, wj + uj, av);
+    }
+    let t = tsqr.sqrt();
+    let zone0 = elliptic_zone(u0, t0, mu);
+    let zone = elliptic_zone(n, t, mu);
+    let cost = match (zone0, zone) {
+        (1, 1) => 0.0,
+        (2, 2) => (q[1] * alpha) + (q[2] * alpha2),
+        (3, 3) => {
+            let t_delta = tsqr_delta / (t + t0);
+            let r_delta = av0 - (t_delta * mu);
+            let r0 = u0 - (t0 * mu);
+            let half = (0.5 * dm) * r_delta;
+            let two = (r0 + r0) + r_delta;
+            two * half
+        }
+        (3, 2) => {
+            let dq = alpha * ((q[2] * alpha) + q[1]);
+            let b0 = (u0 * mu) + t0;
+            dq + ((0.5 * dm) * b0) * b0
+        }
+        (2, 3) => {
+            let dq = alpha * ((q[2] * alpha) + q[1]);
+            let b = (mu * n) + t;
+            dq + ((-0.5 * dm) * b) * b
+        }
+        (1, 2) => ((q[1] * alpha) + (q[2] * alpha2)) + q[0],
+        (1, 3) => {
+            let r = n - (mu * t);
+            ((0.5 * dm) * r) * r
+        }
+        (3, 1) => {
+            let r0 = u0 - (t0 * mu);
+            ((-0.5 * dm) * r0) * r0
+        }
+        (2, 1) => -q[0],
+        _ => 0.0,
+    };
+    let (d0, d1) = if tsqr <= 0.0 {
+        if n < 0.0 { ((two_alpha * q[2]) + q[1], q[2] + q[2]) } else { (0.0, 0.0) }
+    } else if n >= mu * t {
+        (0.0, 0.0)
+    } else if (mu * n) + t <= 0.0 {
+        ((two_alpha * q[2]) + q[1], q[2] + q[2])
+    } else {
+        let mut det = 0.0;
+        for j in 0..nt {
+            let what_j = w[j] / t;
+            for k in (j + 1)..nt {
+                let djk = (vtan[k] * what_j) - ((w[k] / t) * vtan[j]);
+                det = axpy(det, djk, djk);
+            }
+        }
+        let t1 = wv / t;
+        let nmt = n - (mu * t);
+        let n1mt = v0 - (t1 * mu);
+        let d0 = (dm * nmt) * n1mt;
+        let nt_over = (n / t) - mu;
+        let prod = (det * mu) * nt_over;
+        (d0, dm * ((n1mt * n1mt) - prod))
+    };
+    (cost, d0, d1)
 }
 
 /// `ellipticCostDif`: `cost(alpha) − cost(0)` of one elliptic cone.

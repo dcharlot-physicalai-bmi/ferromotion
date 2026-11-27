@@ -9155,6 +9155,51 @@ mod tests {
         );
     }
 
+    /// A tilted box in the elliptic cone's middle zone. `5491d70f` `mj_constraintUpdate_impl`
+    /// stores `((-f) * (U/T)) * friction` and `PrimalEval` rebuilds `W = U + alpha*V`.
+    /// `64156abe` uses `((-f)/T) * U * friction` and the `UU/UV/VV` polynomial.
+    #[test]
+    fn a_4x_elliptic_newton_matches_the_unit_tangent_schedule() {
+        const MODEL: &str = r#"<mujoco>
+  <option cone="elliptic" timestep="0.002" gravity="0 0 -9.81" iterations="1"/>
+  <worldbody>
+    <geom type="plane" size="2 2 0.1" friction="0.7 0.02 0.008"/>
+    <body pos="0 0 0.04">
+      <freejoint/>
+      <geom type="box" size="0.05 0.04 0.03" mass="1.3" friction="0.55 0.03 0.01"/>
+    </body>
+  </worldbody>
+</mujoco>"#;
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::fp_contract::reset_policy();
+            }
+        }
+        let _reset = Reset;
+        let qacc = |id: &str, sha: &str| {
+            crate::fp_contract::install_policy(id, sha, "").unwrap();
+            let t = tree_from_mjcf_str(MODEL).unwrap();
+            let qpos = [0.01, -0.02, 0.02, 0.98, 0.1, -0.12, 0.08];
+            let qvel = [0.37, -0.21, -0.15, 0.4, -0.25, 0.13];
+            t.mujoco_native_forward(&qpos, &qvel, &[], &[])
+                .into_iter()
+                .find(|(n, _)| *n == "qacc")
+                .unwrap()
+                .1
+                .iter()
+                .map(|x| x.to_bits())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            qacc(crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID, crate::fp_contract::ORACLE_X86_CONTRACT_OFF_SHA256),
+            vec![0xc0337193d7a53bfe, 0x404134896d5a4f5d, 0x4048c9fd366569eb, 0xc07dcf346dd32424, 0x4084eafc2c23e178, 0xc04ef819b33426a9]
+        );
+        let four = vec![0xc0337193d7a53bfe, 0x404134896d5a4f5d, 0x4048c9fd366569ec, 0xc07dcf346dd32425, 0x4084eafc2c23e179, 0xc04ef819b33426a8];
+        assert_eq!(qacc(crate::fp_contract::ORACLE_4_0_1_ID, crate::fp_contract::ORACLE_4_0_1_SHA256), four);
+        assert_eq!(qacc(crate::fp_contract::ORACLE_4_0_ID, crate::fp_contract::ORACLE_4_0_SHA256), four);
+    }
+
     /// `setDampRatio` in `5491d70f` / `4849b2dd` reflects `1 / (J M⁻¹ J')`. `64156abe` sums
     /// `dof_M0 / trn²`. The 4.x product is `(dampratio * -2) * sqrt(mass * kp)`.
     #[test]
