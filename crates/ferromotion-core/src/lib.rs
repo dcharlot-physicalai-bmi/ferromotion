@@ -376,6 +376,8 @@ pub mod mujoco_actuator;
 mod mujoco_ccd;
 #[cfg(test)]
 mod mujoco_cone_cases;
+#[cfg(test)]
+mod contract_off_sites;
 mod mujoco_collision;
 mod mujoco_contact;
 mod mujoco_hull;
