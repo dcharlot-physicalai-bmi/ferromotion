@@ -1,0 +1,10 @@
+ferromorphic-episode 2
+version 2
+epoch 1
+dt_num_ns 2000000
+dt_den 1
+dt_bits 3f60624dd2f1a9fc
+period_num_ns 20000000
+period_den 1
+origin_ns 0
+episode_nonce 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f

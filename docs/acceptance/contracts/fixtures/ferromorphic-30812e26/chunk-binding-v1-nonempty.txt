@@ -1,0 +1,10 @@
+ferromorphic-chunk-binding 1
+envelope_sha256 dd525f577974d4065d04cb546a1d9636d1006bce40049f630d1275a4448510d3
+epoch 1
+chunk_index 0
+t0_num_ns 1000000000
+t0_den 1
+period_num_ns 20000000
+period_den 1
+n_action_steps 2
+chunk_sha256 6d668d7e25c89249c890d895ef15b8fdcbb97dab7a1339a0a97605c6e1172d86

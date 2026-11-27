@@ -1,0 +1,34 @@
+Copied from github.com/dcharlot-physicalai-bmi/ferromorphic
+branch cursor/scientific-verification-ci-5e0f
+commit 30812e26027cafa50e17c848e5afe57b1f246838
+
+tools/fixtures/episode-v2-20ms.txt
+sha256 dd525f577974d4065d04cb546a1d9636d1006bce40049f630d1275a4448510d3
+
+tools/fixtures/episode-v2-30hz.txt
+sha256 4463c0471d8d4bb0451d3170e9a9dcd337662679225639345427f450b380b6ba
+
+tools/fixtures/chunk-binding-v1-nonempty.txt
+sha256 a16fe7ec9ff4fc20cbc5971e160ad1b724468bac23681474545be39012f3f174
+
+tools/fixtures/chunk-binding-v1-empty.txt
+sha256 f9c519d86ad155cc57fba372e4e11d3fb62208802b9f013f8b98d14ddf918f60
+
+tools/fixtures/episode-v2-golden.sha256
+the four lines above, as published in that commit
+
+tools/fixtures/ferric-v2-nonempty.bin
+sha256 6d668d7e25c89249c890d895ef15b8fdcbb97dab7a1339a0a97605c6e1172d86
+the chunk named by the nonempty binding; same bytes as the pinned v2 golden
+
+tools/fixtures/ferric-v2-empty.bin
+sha256 6295818fa11b85b37ad8054c75e0a1935b0c0cbb5d7e419090c2520a17b1744e
+the chunk named by the empty binding; same bytes as the pinned empty v2 fixture
+
+The full-state v1 golden 7d9bc9c1400bd2b14d4d5336bb713b91733353b9e0a17fa6b1852ecbb05617f1
+and its embedded state_bytes 01e52c73cf8376050d5b95581a6a8e15389668ad2f067d6e517b7d94fc753f13
+are not files in tools/fixtures. They are the runtime output of
+Sim::<Lif>::full_state_bytes after 50 clocked steps in that commit's sim.rs test
+the_full_state_golden_is_pinned_and_state_bytes_kept_its_meaning.
+This tree has no full-state parser and does not copy those bytes.
+The ferric chunk pin is not moved.
