@@ -30,12 +30,19 @@ fn main() {
     });
     eprintln!("{}", ferromotion_core::policy_receipt(policy));
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 3 {
-        eprintln!("usage: qfrc_applied_oracle <model.xml> <dump.txt>");
+    if args.len() != 3 && args.len() != 4 {
+        eprintln!("usage: qfrc_applied_oracle <model.xml> <dump.txt> [mesh dir]");
         std::process::exit(2);
     }
     let xml = std::fs::read_to_string(&args[1]).unwrap_or_else(|err| panic!("read xml: {err}"));
-    let model = tree_from_mjcf(&xml, &|_| None).unwrap_or_else(|err| panic!("load: {err}"));
+    let mesh_dir = args.get(3).map(std::path::PathBuf::from);
+    let model = tree_from_mjcf(&xml, &|path: &str| {
+        let Some(dir) = &mesh_dir else { return None };
+        std::fs::read(dir.join(path))
+            .or_else(|_| std::fs::read(dir.join("assets").join(path)))
+            .ok()
+    })
+    .unwrap_or_else(|err| panic!("load: {err}"));
     let text = std::fs::read_to_string(&args[2]).unwrap_or_else(|err| panic!("read dump: {err}"));
 
     let mut qfrc = Vec::new();
