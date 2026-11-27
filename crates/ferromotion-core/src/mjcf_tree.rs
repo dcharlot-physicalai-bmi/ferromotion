@@ -8929,6 +8929,53 @@ mod tests {
         near(&qvel, &[0.11828805485946914, 0.21556122827087396, -0.7752658029575709, 3.1305892176094394, -1.2844060516761395, 5.23209093858203, 5.630739997332279, 0.28443201416748676, -0.031611412945476945], 1e-7, "step 25 qvel");
     }
 
+    /// `5491d70f` / `4849b2dd` `mjd_actuatorDerivSkip`: a joint whose summed actuator force sits on
+    /// `actuatorfrcrange` contributes no `kv` to `qDeriv`. `64156abe` has no such check, so the same
+    /// step keeps the derivative. This is the lane that moved `franka_fr3/fr3.xml` step 1 `qvel[0]`
+    /// (`0xbfcc94589ddc757a` in both 4.x libraries; the unclamped derivative was `0xbf81a4ef79916368`).
+    #[test]
+    fn a_clamped_joint_actuator_force_drops_the_4x_implicitfast_velocity_derivative() {
+        const MODEL: &str = r#"<mujoco>
+  <option integrator="implicitfast" timestep="0.002"/>
+  <worldbody>
+    <body>
+      <joint name="j" type="hinge" axis="0 1 0" damping="0.21" actuatorfrcrange="-87 87"/>
+      <geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.02" mass="1"/>
+    </body>
+  </worldbody>
+  <actuator><position joint="j" kp="4500" kv="450"/></actuator>
+</mujoco>"#;
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::fp_contract::reset_policy();
+            }
+        }
+        let _reset = Reset;
+        let step = |id: &str, sha: &str| {
+            crate::fp_contract::install_policy(id, sha, "").unwrap();
+            let t = tree_from_mjcf_str(MODEL).unwrap();
+            let st = crate::MjNativeState { qpos: vec![0.4], qvel: vec![0.1], ..Default::default() };
+            t.mujoco_native_step(&st, &[0.0]).unwrap().qvel[0].to_bits()
+        };
+        assert_eq!(
+            step(crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID, crate::fp_contract::ORACLE_X86_CONTRACT_OFF_SHA256),
+            0xbfb576df2f632934,
+            "64156abe keeps kv in qDeriv"
+        );
+        assert_eq!(
+            step(crate::fp_contract::ORACLE_4_0_1_ID, crate::fp_contract::ORACLE_4_0_1_SHA256),
+            0xc0150fb1e594d686,
+            "5491d70f drops kv once the joint force is on actuatorfrcrange"
+        );
+        assert_eq!(
+            step(crate::fp_contract::ORACLE_4_0_ID, crate::fp_contract::ORACLE_4_0_SHA256),
+            0xc0150fb1e594d686,
+            "4849b2dd drops kv once the joint force is on actuatorfrcrange"
+        );
+        crate::fp_contract::reset_policy();
+    }
+
     /// **`RK4`, against MuJoCo's own trajectory.** A damped double pendulum (whose accelerations depend
     /// strongly on position, so a stage evaluated at the wrong position shows) beside a spinning free body
     /// (so every stage composes a quaternion). One step to 1e-13, twenty-five to 1e-10.

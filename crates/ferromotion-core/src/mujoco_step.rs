@@ -369,6 +369,18 @@ impl SmoothModel {
                     continue;
                 }
             }
+            // `mjd_actuatorDerivSkip` in `5491d70f` and `4849b2dd`: a joint transmission whose
+            // summed force sits on `jnt_actfrcrange` contributes no velocity derivative. `64156abe`
+            // has no such check, so this stays on the 4.x profiles.
+            if crate::fp_contract::oracle_4_0_schedules() && a.tendon.is_none() && a.site.is_none() && a.body.is_none() {
+                let j = self.dof_jntid[a.dofadr];
+                if let Some([lo, hi]) = self.jnt_actfrcrange[j] {
+                    let f = sd.qfrc_actuator[a.dofadr];
+                    if f <= lo || f >= hi {
+                        continue;
+                    }
+                }
+            }
             let mut bias_vel = if a.act.bias == ActBias::Affine { a.act.biasprm[2] } else { 0.0 };
             let gain_vel = match a.act.gain {
                 ActGain::Affine => a.act.gainprm[2],
@@ -424,8 +436,17 @@ impl SmoothModel {
             }
         }
         // qH = M + qDeriv·(−h) on M's pattern. Published path fuses that.
-        // `mju_addScl` in the contract-off library is `M + qDeriv*(-h)`.
-        let qh: Vec<f64> = qderiv.iter().zip(&sd.m).map(|(q, m)| if separate { *m + *q * -h } else { q.mul_add(-h, *m) }).collect();
+        // `mju_addScl` in `5491d70f` / `4849b2dd` is `(qDeriv * -h) + M`. The 3.13 contract-off
+        // library adds `M` first.
+        let qh: Vec<f64> = qderiv.iter().zip(&sd.m).map(|(q, m)| {
+            if crate::fp_contract::oracle_4_0_schedules() {
+                *q * -h + *m
+            } else if separate {
+                *m + *q * -h
+            } else {
+                q.mul_add(-h, *m)
+            }
+        }).collect();
         let mut qh = qh;
         // standalone free bodies: their rows back to M
         let free: Vec<usize> = (0..self.jnt_type.len()).filter(|&j| self.jnt_type[j] == KinJointKind::Free && self.is_free_body(self.jnt_bodyid[j])).collect();
