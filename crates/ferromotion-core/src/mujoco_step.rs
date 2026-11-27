@@ -23,6 +23,51 @@ pub struct MjNativeState {
     pub reset: bool,
 }
 
+/// `5491d70f` `bortzCoef`. Horner form `k[i] + xx·res` below `|x| = 1.75`.
+fn bortz_coef(xx: f64) -> f64 {
+    const K: [f64; 9] = [
+        0.083333333333333384,
+        0.0013888888888859755,
+        3.3068783094433201e-05,
+        8.2671949071520734e-07,
+        2.0876900642039142e-08,
+        5.2828494303844588e-10,
+        1.3455485951057888e-11,
+        3.1615515500778219e-13,
+        1.230313397310169e-14,
+    ];
+    if xx < 1.75 * 1.75 {
+        let mut res = K[8];
+        for i in (0..8).rev() {
+            res = K[i] + xx * res;
+        }
+        return res;
+    }
+    let x = xx.sqrt();
+    (1.0 - 0.5 * x / (0.5 * x).tan()) / xx
+}
+
+/// `5491d70f` `mju_derivExpmap`. `res` may alias `vel`.
+fn deriv_expmap(expmap: &[f64; 3], vel: &[f64; 3]) -> [f64; 3] {
+    let mut r = *expmap;
+    let mut xx = (r[0] * r[0] + r[1] * r[1]) + r[2] * r[2];
+    const PI: f64 = std::f64::consts::PI;
+    if xx > PI * PI {
+        let x = xx.sqrt();
+        let scale = (x - 2.0 * PI * (x / (2.0 * PI) + 0.5).floor()) / x;
+        r = [r[0] * scale, r[1] * scale, r[2] * scale];
+        xx = (r[0] * r[0] + r[1] * r[1]) + r[2] * r[2];
+    }
+    let c = bortz_coef(xx);
+    let rxv = cross3(&r, vel);
+    let rxrxv = cross3(&r, &rxv);
+    [
+        (vel[0] + 0.5 * rxv[0]) + c * rxrxv[0],
+        (vel[1] + 0.5 * rxv[1]) + c * rxrxv[1],
+        (vel[2] + 0.5 * rxv[2]) + c * rxrxv[2],
+    ]
+}
+
 impl SmoothModel {
     /// `mj_EulerSkip` then `mj_advance`: the next state from this one's forward pass.
     pub(crate) fn euler(&self, sd: &SmoothData, sol: &Solution, st: &MjNativeState, eulerdamp: bool) -> MjNativeState {
@@ -82,6 +127,25 @@ impl SmoothModel {
         next.time += h;
         next.qacc_warmstart = qacc_solver.to_vec();
         next
+    }
+
+    /// `5491d70f` `mju_derivExpmap`: `dexp⁻¹₋rot(vel)`. Below `|rot| = 1.75` the Bortz
+    /// coefficient is the Horner polynomial `k[i] + xx·res`.
+    pub(crate) fn rk_correct_vel(&self, vel: &mut [f64], dqvel: &[f64], h: f64) {
+        for (j, &kind) in self.jnt_type.iter().enumerate() {
+            let mut vadr = self.jnt_dofadr[j];
+            if kind == crate::mujoco_kinematics::KinJointKind::Free {
+                vadr += 3;
+            } else if kind != crate::mujoco_kinematics::KinJointKind::Ball {
+                continue;
+            }
+            let rot = [h * dqvel[vadr], h * dqvel[vadr + 1], h * dqvel[vadr + 2]];
+            let ang = [vel[vadr], vel[vadr + 1], vel[vadr + 2]];
+            let out = deriv_expmap(&rot, &ang);
+            vel[vadr] = out[0];
+            vel[vadr + 1] = out[1];
+            vel[vadr + 2] = out[2];
+        }
     }
 
     /// `mj_integratePos`

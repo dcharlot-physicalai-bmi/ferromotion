@@ -1842,7 +1842,16 @@ impl MjcfTree {
                 ((0..nv).map(|k| da[k].mul_add(h, x[0].1[k])).collect(), (0..na).map(|k| dact[k].mul_add(h, x[0].2[k])).collect())
             };
             let (sdi, _, soli) = self.native_forward(t, &qpos, &qvel, ctrl, &act, &st.qacc_warmstart);
-            x.push((qpos, qvel, act));
+            // `5491d70f` `rkCorrectVel` rewrites the stored stage rate after the forward
+            // copied the uncorrected velocity. `64156abe` stores that same velocity.
+            let qvel_rate = if crate::fp_contract::oracle_4_0_schedules() {
+                let mut rate = qvel.clone();
+                sm.rk_correct_vel(&mut rate, &dv, h);
+                rate
+            } else {
+                qvel
+            };
+            x.push((qpos, qvel_rate, act));
             f.push((soli.qacc, sdi.act_dot));
         }
         let (dv, da, dact) = weigh(&x, &f, &B);
