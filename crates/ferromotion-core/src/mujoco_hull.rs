@@ -13,9 +13,9 @@
 //! ⭐ THREE frames, as `mjCMesh::Process` has them. The hull and the polygon merge run on the vertices AS
 //! THE FILE STATES THEM (`f32`, before `refpos`, `refquat` and `scale`: `MakeGraph` and `MakePolygons` come
 //! first), the polygon normals are recomputed from the FINAL `f64` vertices, CoM-centred in the principal
-//! frame (`MakePolygonNormals`, from each polygon's first three vertices, never reoriented), and the
-//! collider reads the final vertices rounded to `f32`. On a MIRRORED mesh (negative scale product) a
-//! polygon wound outward in the file is wound inward once mirrored, and MuJoCo keeps it that way.
+//! frame, and the collider reads the final vertices rounded to `f32`. 3.13 takes each normal from the
+//! polygon's first three vertices and does not reverse the cycle. 4.x (`orient_4`) reverses the tail of
+//! each polygon when the scale determinant is negative, then replaces every normal with Newell's method.
 //!
 //! ⭐ The hull is qhull's own ([`crate::qhull::mesh_graph`], a port verified integer for integer against
 //! MuJoCo's `mesh_graph` on all 794 Menagerie collision meshes): the same vertices in the same order, each
@@ -90,6 +90,30 @@ fn dot3f(a: &Vector3<f64>, b: &Vector3<f64>) -> f64 {
 const MINVAL: f64 = 1e-15;
 /// `kAngleTol` in `mjCMesh::MakePolygons`.
 const ANGLE_TOL: f64 = 0.01;
+
+/// `MakePolygonNormals` in `5491d70f`: Newell's method. `mjuu_dot3` is `z² + (x² + y²)`, then each
+/// component is divided by the norm. A normal shorter than `mjEPS` (1e-14) is `(1, 0, 0)`.
+fn newell_normal(verts: &[Vector3<f64>], idx: &[usize]) -> Vector3<f64> {
+    let mut n = Vector3::<f64>::zeros();
+    let nv = idx.len();
+    if nv == 0 || verts.is_empty() {
+        return Vector3::<f64>::x();
+    }
+    for j in 0..nv {
+        let v0 = verts[idx[j]];
+        let v1 = verts[idx[(j + 1) % nv]];
+        n.x += (v0.y - v1.y) * (v0.z + v1.z);
+        n.y += (v0.z - v1.z) * (v0.x + v1.x);
+        n.z += (v0.x - v1.x) * (v0.y + v1.y);
+    }
+    let n2: f64 = (n.z * n.z) + (n.x * n.x + n.y * n.y);
+    let nrm = n2.sqrt();
+    if nrm < 1e-14 {
+        Vector3::<f64>::x()
+    } else {
+        Vector3::<f64>::new(n.x / nrm, n.y / nrm, n.z / nrm)
+    }
+}
 
 impl MeshHull {
     /// Build from a mesh in its own frame (after `scale`/`refpos`/`refquat`). `None` when the vertices have
@@ -169,6 +193,20 @@ impl MeshHull {
             }
         }
         Some(Self { verts, hull_verts, hull_faces, polygons, polymap, max_verts, graph })
+    }
+
+    /// `5491d70f` / `4849b2dd` after `MakePolygons`. A negative scale determinant reverses each polygon's
+    /// tail (`reverse(begin+1, end)`), which 3.13 does not. `MakePolygonNormals` then replaces every normal
+    /// with Newell's method on the final double vertices, mirrored or not.
+    pub fn orient_4(&mut self, final_f64: &[Vector3<f64>], mirrored: bool) {
+        for p in &mut self.polygons {
+            if mirrored && p.verts.len() >= 2 {
+                p.verts[1..].reverse();
+            }
+            if final_f64.len() == self.verts.len() {
+                p.normal = newell_normal(final_f64, &p.verts);
+            }
+        }
     }
 
     /// `mjc_meshSupport`: the vertex most along `local_dir` (mesh frame), scanning the hull's vertices from

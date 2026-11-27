@@ -6979,7 +6979,11 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
     for name in &walk.collidable_meshes {
         let stored = &walk.mesh_stored[name];
         let cap = walk.meshes.get(name).and_then(|a| a.maxhullvert);
-        let hull = crate::mujoco_hull::MeshHull::from_frames(&walk.mesh_file[name].verts, stored, &walk.mesh_final[name], cap).ok_or_else(|| format!("mesh '{name}': no 3-D convex hull (MuJoCo refuses such a collision mesh)"))?;
+        let mut hull = crate::mujoco_hull::MeshHull::from_frames(&walk.mesh_file[name].verts, stored, &walk.mesh_final[name], cap).ok_or_else(|| format!("mesh '{name}': no 3-D convex hull (MuJoCo refuses such a collision mesh)"))?;
+        if crate::fp_contract::oracle_4_0_schedules() {
+            let scale = walk.meshes.get(name).map(|a| a.scale).unwrap_or(Vector3::new(1.0, 1.0, 1.0));
+            hull.orient_4(&walk.mesh_final[name], scale.x * scale.y * scale.z <= 0.0);
+        }
         out.mesh_hulls.insert(name.clone(), hull);
         out.mesh_raw.insert(name.clone(), walk.mesh_raw[name].clone());
         out.mesh_file.insert(name.clone(), walk.mesh_file[name].clone());

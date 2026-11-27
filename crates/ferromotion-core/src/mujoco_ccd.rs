@@ -1555,7 +1555,8 @@ fn mesh_normals(obj: &CcdObj, dim: usize, vi: [i64; 3]) -> Vec<(V3, usize)> {
 }
 
 /// Edge directions (unit) and their far endpoints for the edge/vertex feature of a geom.
-fn edge_normals(obj: &CcdObj, dim: usize, v: &[V3; 3], v1i: i64) -> Vec<(V3, V3)> {
+fn edge_normals(obj: &CcdObj, dim: usize, v: &[V3; 3], vi: &[i64; 3]) -> Vec<(V3, V3)> {
+    let v1i = vi[0];
     let pose = &obj.pose;
     match obj.kind {
         GeomType::Box => {
@@ -1579,6 +1580,29 @@ fn edge_normals(obj: &CcdObj, dim: usize, v: &[V3; 3], v1i: i64) -> Vec<(V3, V3)
         }
         GeomType::Mesh => {
             let hull = obj.hull.expect("mesh geom without hull data");
+            // `5491d70f` `meshEdgeNormals` rebuilds both ends from the float vertices. 3.13 subtracts the
+            // EPA witness, which already carries the margin.
+            if crate::fp_contract::oracle_4_0_schedules() {
+                let base = globalcoord(pose, hull.verts[v1i as usize], true);
+                if dim == 2 {
+                    let far = globalcoord(pose, hull.verts[vi[1] as usize], true);
+                    return vec![(normalize3(&(far - base)), far)];
+                }
+                if dim == 1 {
+                    let mut out = Vec::new();
+                    for &pi in &hull.polymap[v1i as usize] {
+                        let poly = &hull.polygons[pi].verts;
+                        let nvert = poly.len();
+                        if let Some(j) = poly.iter().position(|&x| x == v1i as usize) {
+                            let k = if j == 0 { nvert - 1 } else { j - 1 };
+                            let e = globalcoord(pose, hull.verts[poly[k]], true);
+                            out.push((normalize3(&(e - base)), e));
+                        }
+                    }
+                    return out;
+                }
+                return Vec::new();
+            }
             if dim == 2 {
                 let d = normalize3(&(v[1] - v[0]));
                 return vec![(d, v[1])];
@@ -1745,14 +1769,14 @@ fn multicontact(pt: &Polytope, fi: usize, st: &mut CcdStatus, o1: &CcdObj, o2: &
         let mut picked = None;
         for k in order {
             if k == 1 && nface1 < 3 && !n2.is_empty() {
-                e1 = edge_normals(o1, nface1, &v1, v1i[0]);
+                e1 = edge_normals(o1, nface1, &v1, &v1i);
                 if let Some(r) = aligned_face_edge(&e1, &n2, &dir) {
                     edgecon1 = true;
                     picked = Some(r);
                     break;
                 }
             } else if k == 2 && nface2 < 3 && !n1.is_empty() {
-                e2 = edge_normals(o2, nface2, &v2, v2i[0]);
+                e2 = edge_normals(o2, nface2, &v2, &v2i);
                 if let Some(r) = aligned_face_edge(&e2, &n1, &dir_neg) {
                     edgecon2 = true;
                     picked = Some(r);
@@ -1763,13 +1787,13 @@ fn multicontact(pt: &Polytope, fi: usize, st: &mut CcdStatus, o1: &CcdObj, o2: &
         let Some(r) = picked else { return };
         r
     } else if nface1 < 3 && nface1 <= nface2 {
-        e1 = edge_normals(o1, nface1, &v1, v1i[0]);
+        e1 = edge_normals(o1, nface1, &v1, &v1i);
         n1.clear();
         let Some(r) = aligned_face_edge(&e1, &n2, &dir) else { return };
         edgecon1 = true;
         r
     } else if nface2 < 3 {
-        e2 = edge_normals(o2, nface2, &v2, v2i[0]);
+        e2 = edge_normals(o2, nface2, &v2, &v2i);
         n2.clear();
         let Some(r) = aligned_face_edge(&e2, &n1, &dir_neg) else { return };
         edgecon2 = true;
