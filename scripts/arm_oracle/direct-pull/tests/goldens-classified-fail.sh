@@ -71,7 +71,7 @@ for a in "$@"; do
     mkdir -p "$(dirname "$dest")"
     printf '#!/bin/sh\nexit 0\n' >"$dest"
     chmod +x "$dest"
-    printf '%s\n' "{\"reason\":\"compiler-artifact\",\"target\":{\"kind\":[\"lib\"],\"name\":\"ferromotion-core\"},\"executable\":\"$dest\"}"
+    python3 -c 'import json,sys; json.dump({"reason":"compiler-artifact","package_id":"path+file:///src/crates/ferromotion-core#0.73.0","target":{"kind":["lib"],"name":"ferromotion_core","test":True},"profile":{"test":True},"executable":sys.argv[1]}, sys.stdout); print()' "$dest"
     exit 0
   fi
 done

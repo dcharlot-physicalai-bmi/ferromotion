@@ -16,6 +16,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Oracle direct-pull SHA256SUMS
         run: bash scripts/arm_oracle/direct-pull/tests/sha256sums-match.sh
+      - name: Goldens lib-test JSON bind
+        run: bash scripts/arm_oracle/direct-pull/tests/goldens-bind-package-id.sh
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown

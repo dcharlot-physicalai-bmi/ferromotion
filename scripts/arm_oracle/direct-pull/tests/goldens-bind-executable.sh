@@ -49,15 +49,15 @@ for a in "$@"; do
         mkdir -p "$(dirname "$dest")"
         printf '#!/bin/sh\nexit 0\n' >"$dest"
         chmod +x "$dest"
-        printf '%s\n' "{\"reason\":\"compiler-artifact\",\"target\":{\"kind\":[\"lib\"],\"name\":\"ferromotion-core\"},\"executable\":\"$dest\"}"
-        printf '%s\n' '{"reason":"compiler-artifact","target":{"kind":["custom-build"],"name":"build-script-build"},"executable":null}'
+        python3 -c 'import json,sys; json.dump({"reason":"compiler-artifact","package_id":"path+file:///src/crates/ferromotion-core#0.73.0","target":{"kind":["lib"],"name":"ferromotion_core","test":True},"profile":{"test":True},"executable":sys.argv[1]}, sys.stdout); print()' "$dest"
+        printf '%s\n' '{"reason":"compiler-artifact","package_id":"path+file:///src/crates/build-script-build#0.0.0","target":{"kind":["custom-build"],"name":"build-script-build"},"profile":{"test":false},"executable":null}'
         ;;
       deps-only)
         decoy="${CARGO_TARGET_DIR}/debug/deps/ferromotion_core-decoy"
         mkdir -p "$(dirname "$decoy")"
         printf '#!/bin/sh\nexit 0\n' >"$decoy"
         chmod +x "$decoy"
-        printf '%s\n' '{"reason":"compiler-artifact","target":{"kind":["lib"],"name":"ferromotion-core"},"executable":null}'
+        printf '%s\n' '{"reason":"compiler-artifact","package_id":"path+file:///src/crates/ferromotion-core#0.73.0","target":{"kind":["lib"],"name":"ferromotion_core"},"profile":{"test":true},"executable":null}'
         ;;
       *)
         echo "fixture cargo: unknown FAKE_CARGO_BIND" >&2

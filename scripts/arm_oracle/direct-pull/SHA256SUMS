@@ -21,7 +21,7 @@ f982ef8a667b9af6d60dd74bdf7afa7fb738d9bed44093fe9d98a965f8065294  ./pins.sh
 237fdfb8ea17eafe3a01f73c3418ecdc03af65b86e711f80d137353a1ccd55ed  ./schedules/x86-step.txt.xz
 08f3fd35c28c53e86a40b8da89c15c88637f9a4a8edddacd1564d6b5579bac43  ./tests/compare-arm-x86-fixture.sh
 1f2dbf9558b882e6b0ffb24dc030dfe48fe074d3acc845f42ebd706772feba3c  ./tests/compiler-rt-link-check.sh
-24bfe07298716935a67b41a56b03c2cc60ae5e62ab6353daec5a903a10344768  ./tests/goldens-classified-fail.sh
+06425ff286cb8639e7ee24f9be9ae495186ac6789b5cba96b4e08a8aa9fcd7eb  ./tests/goldens-classified-fail.sh
 441e588c172e735bee26bd51550d2cb9af4e8d009fe9599cd5eed9c34866482f  ./tests/probe-receipt-fixture.sh
 bdb1b9b4f4242d421d96f8af659308e85476a993d76bc6323b99d0ac18481a46  ./tests/receipt-on-real-tree.sh
 8690ee5345c564c311a678f94953f2d0bfc39764de07b9668b268fc03eae545e  ./tests/run-recovery-fixture.sh
@@ -36,8 +36,11 @@ e2cdf6e2532b599ce77b4fb4337bf602e32fa0ec77765b3b853044043786cacc  ../run-212.sh
 42ca58bd278fb41174be9234d9db203fb4eb7a498373ff27fa2fa6f3f7831906  ../run-rust-212.sh
 6232f8d1221b92d6bfbedb66712c8f0d24be7ae87a56241f98314497454771c5  ../build-thor2.sh
 5df7e5444d4e5917ec6420047b6a4f227b81b938f2f52a9295c430359a9cc36a  ./tests/toolchain-refusal.sh
-cb1d391ff9776fb372b3f0de18d4c9db7701848f14139b129198563eef22b2d8  ./tests/goldens-bind-executable.sh
+13867066b59b7c55c63319bc344e068e07c95dabe0655f26843fe5440887a69b  ./tests/goldens-bind-executable.sh
 7eb9ee2a981d4a1dfe883ea3ac4124435da3c3ab87aaf5c66afdf56aa9aa50e0  ./tests/sha256sums-match.sh
 1f000a60b8b332d69f6962b555e9256ca71e44903ad0c04e5c251a384331d17e  ./probes/op-vectors.c
 a96688aabb1708e9f95a0e4f7827587b7f452a484259bf6a7dddd23cc5d9044f  ../op-vectors.sh
-e4a5732cdbd691c96082662efb1430680bf67a20d22e72d967186c932b51c981  ../toolchain.sh
+96a115e91096718a2340929eba9d7e9066e710e612d3bca4b78c97a4c2802634  ../toolchain.sh
+5408418e4c63cfa8239838e87e93b486de30289021d003230d90295522f0bbb2  ./tests/fixtures/cargo-lib-test-path-id.jsonl
+e1afca8211642626af6b0a2734ee248d2fe34a4d526d484dca52070966f66242  ./tests/fixtures/cargo-lib-test-registry-id.jsonl
+eeb5a298ebbe721a943fb11c3e4675bdee4e5ef18fb761605a0e8984e43ac4d8  ./tests/goldens-bind-package-id.sh

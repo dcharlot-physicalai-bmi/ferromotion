@@ -55,43 +55,84 @@ arm_oracle_bind_built_binary() {
   printf '%s\n' "$bin" >>"$out/toolchain-bins.txt"
 }
 
-# The lib test executable is the JSON `executable` of the ferromotion-core lib
-# artifact from `cargo test --lib --no-run --message-format=json`.
-# Thor2's cargo writes that binary under debug/build/ferromotion-core/<hash>/out/,
-# not debug/deps/. A deps/ glob is not a second guess.
+# The lib test executable is one compiler-artifact from
+# `cargo test --lib --no-run --message-format=json`.
+# Cargo's target name is ferromotion_core. The package spec `-p ferromotion-core`
+# stays hyphenated; that string is not the artifact's target.name.
+# The package_id is path+file://…/crates/ferromotion-core#<version>, with no name field.
+# Thor2 writes the binary under debug/build/ferromotion-core/<hash>/out/.
+# A deps/ glob is not a second guess. Exactly one such executable is required.
 arm_oracle_bind_lib_test_executable() {
   local out="$1" json="$2"
-  local line exe n=0
+  local exe
   if [[ ! -s "$json" ]]; then
     arm_oracle_toolchain_fail "cargo JSON for the lib test executable is missing"
     return 2
   fi
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    [[ "$line" == *'"reason":"compiler-artifact"'* ]] || continue
-    [[ "$line" == *'"kind":["lib"]'* && "$line" == *'"name":"ferromotion-core"'* ]] || continue
-    [[ "$line" == *'"executable":"'* ]] || continue
-    [[ "$line" == *'"executable":null'* ]] && continue
-    exe="${line#*\"executable\":\"}"
-    exe="${exe%%\"*}"
-    if [[ "$exe" == *\\* || -z "$exe" ]]; then
-      arm_oracle_toolchain_fail "cargo JSON executable is not a plain path"
-      return 2
-    fi
-    if [[ ! -x "$exe" ]]; then
-      arm_oracle_toolchain_fail "cargo JSON executable is missing: $exe"
-      return 2
-    fi
-    if [[ -s "$out/toolchain-bins.txt" ]] && grep -F -x -q "$exe" "$out/toolchain-bins.txt"; then
-      n=$((n + 1))
-      continue
-    fi
-    arm_oracle_bind_built_binary "$out" "$exe"
-    n=$((n + 1))
-  done <"$json"
-  if [[ "$n" -eq 0 ]]; then
-    arm_oracle_toolchain_fail "cargo JSON recorded no lib test executable"
+  if ! command -v python3 >/dev/null 2>&1; then
+    arm_oracle_toolchain_fail "python3 is required to read cargo JSON"
     return 2
   fi
+  if ! exe="$(python3 - "$json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+found = []
+seen = set()
+with open(path, encoding="utf-8") as fh:
+    for lineno, raw in enumerate(fh, 1):
+        line = raw.strip()
+        if not line:
+            continue
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            sys.stderr.write("refusing: cargo JSON line %s is not JSON\n" % lineno)
+            sys.exit(2)
+        if obj.get("reason") != "compiler-artifact":
+            continue
+        profile = obj.get("profile") or {}
+        if profile.get("test") is not True:
+            continue
+        target = obj.get("target") or {}
+        kind = target.get("kind") or []
+        if "lib" not in kind:
+            continue
+        if target.get("name") != "ferromotion_core":
+            continue
+        package_id = obj.get("package_id") or ""
+        if "/crates/ferromotion-core#" not in package_id:
+            continue
+        exe = obj.get("executable")
+        if not isinstance(exe, str) or exe == "":
+            continue
+        if exe in seen:
+            continue
+        seen.add(exe)
+        found.append(exe)
+if len(found) != 1:
+    if len(found) == 0:
+        sys.stderr.write("refusing: cargo JSON recorded no lib test executable\n")
+    else:
+        sys.stderr.write("refusing: cargo JSON recorded more than one lib test executable\n")
+    sys.exit(2)
+print(found[0])
+PY
+)"; then
+    return 2
+  fi
+  if [[ "$exe" == *$'\n'* || "$exe" == *\\* || -z "$exe" ]]; then
+    arm_oracle_toolchain_fail "cargo JSON executable is not a plain path"
+    return 2
+  fi
+  if [[ ! -x "$exe" ]]; then
+    arm_oracle_toolchain_fail "cargo JSON executable is missing: $exe"
+    return 2
+  fi
+  arm_oracle_bind_built_binary "$out" "$exe"
 }
 
 # Print the rustc version string from .comment. Empty if the section or the string is absent.
