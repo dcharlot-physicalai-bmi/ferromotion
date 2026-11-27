@@ -40,11 +40,13 @@ duration is refused. No fps is assumed. Index `k` is refused with
 `TimestampIndex` when `k >= n_action_steps`, so an empty chunk has no action
 index 0 and no schedule for that index.
 
-`check_horizon(n, chunk_size)` refuses only `n > chunk_size`. `check_horizon(0, 50)`
-and `check_horizon(0, 0)` are `Ok`. The helper does not shrink version 2:
-`n_action_steps == 0` is a legal body when `action_dim` is nonzero, `values` is
-empty, provenance and joints are complete, and `step_duration_ns` is positive.
-`ActionChunk::try_new(0, 1, [])` is that shape. `action_dim == 0` is still
+`check_horizon(n, chunk_size)` refuses `n == 0` and `n > chunk_size`.
+`check_horizon(0, 50)` and `check_horizon(0, 0)` are `Horizon`.
+Binding 1 and Ferric chunk v3 (`931ee2af`, line 60) both refuse
+`n_action_steps == 0`, so this receiver refuses it too. A chunk with that `n`
+is not a binding. End-of-chunk hold is a receiver state: the current chunk has
+no steps left, or no chunk has arrived yet (receipt source `home`).
+`ActionChunk::try_new(0, 1, [])` is `Horizon`. `action_dim == 0` is still
 `ActionDim`.
 
 Empty noise is `MissingNoiseProvenance`. Empty or non-hex weight and stats are
@@ -76,11 +78,10 @@ epoch, a timestamp off the nanosecond grid, or a `dt` whose bits are not
 `((period_ns as f64) * 1e-9).to_bits()` is refused. There is no ratio exemption.
 A 1000 ns period is valid only with forward-product bits `0x3eb0c6f7a0b5ed8e`.
 The public `BoundaryClock` is an untrusted snapshot. Bind reads it again on
-every call and does not keep a validity bit. The published empty body parses,
-verifies, and encodes to the digest above. `authorize_rollout` returns
-`EntryProposed`. Ferric's name for that authorization refusal is
-`ProposedEntryInvoked`. An empty-horizon execution gate is not installed; one
-may be added only after the proposal gate clears. Asking for action index 0
+every call and does not keep a validity bit. The published empty-body file is
+still the `c052289` fixture. The receiver refuses those bytes: `parse_chunk`,
+`encode`, `verify_chunk`, and `authorize_rollout` return `Horizon`. That refusal
+is not an end-of-chunk hold. Asking for action index 0 of a zero-step count
 returns `TimestampIndex { index: 0, steps: 0 }`. A zero `step_duration_ns` is
 `StepDuration` (Ferric's fixture spells that case `StepDurationAbsent`).
 These tests are not inference and not a joint step.

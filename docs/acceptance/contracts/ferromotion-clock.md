@@ -89,7 +89,7 @@ Tick phases recorded, and not simulated, are deliveries, neuron updates, enqueue
 
 `DynamicsLab::time` remains the sum of the `dt` values passed to `DynamicsLab::step`. That accumulator is not the shared tick. Replacing it is not part of this decision.
 
-Codec v2 accepts `n_action_steps == 0` as a body when the rest of the payload is complete. `check_horizon` matches the pinned Ferric helper: only `n > chunk_size` is a horizon error. Asking for action index 0 of that body is `TimestampIndex`. `authorize_rollout` still returns `EntryProposed`. That is the authorization refusal. An empty-horizon execution gate is not in this revision. `accept_event_step` is a different helper: a zero `max_delay` accepts only an event equal to the clock. It does not encode a chunk and it does not run a joint step.
+The SmolVLA receiver refuses `n_action_steps == 0` with `Horizon`. That is not an end-of-chunk hold and not a chunk binding. `bind_v2_timestamps` with `n_action_steps == 0` still runs steps 1–9 and stamps no index; that clock call is not a binding. Asking for action index 0 of a zero-step count is `TimestampIndex`. `accept_event_step` is a different helper: a zero `max_delay` accepts only an event equal to the clock. It does not encode a chunk and it does not run a joint step.
 
 A scheduling period above `2^53` is `InexactPeriod`. It is not installed and it is not bound. Integer stamps of an accepted period remain `origin_ns + tick * period_ns` in `u64`. The forward product of an accepted period is still `(period_ns as f64) * 1e-9`, with no ratio exemption. That product is not interoperability.
 

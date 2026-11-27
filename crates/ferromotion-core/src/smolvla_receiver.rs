@@ -4,8 +4,9 @@
 //! `dcharlot-physicalai-bmi/ferric` at `3ee11c015e3478c7c4aa0409499346f79ab1c8ce`
 //! (`docs/acceptance/contracts/smolvla-ferromotion.md` and
 //! `docs/acceptance/contracts/fixtures/smolvla-chunk-v2.json`). The empty-horizon
-//! fixture is Ferric `c05228929efc3bcb4210b475dd959370fa69893a`. Codec version 1
-//! is withdrawn. This file does not copy Ferric's encoder.
+//! fixture is Ferric `c05228929efc3bcb4210b475dd959370fa69893a`. This receiver
+//! refuses `n_action_steps == 0`. That refusal is not an end-of-chunk hold.
+//! Codec version 1 is withdrawn. This file does not copy Ferric's encoder.
 //!
 //! A digest that matches the fixture is a protocol check. It does not authorize
 //! a rollout, load weights, or record a measurement. The entry
@@ -163,10 +164,12 @@ pub fn refuse_pixel(pixel: f32) -> Result<(), CodecError> {
     if pixel.is_finite() && (0.0..=1.0).contains(&pixel) { Ok(()) } else { Err(CodecError::PixelRange) }
 }
 
-/// `n_action_steps > chunk_size` only. Zero is inside the helper.
-/// This does not decide which version-2 payloads encode.
+/// Refuse `n_action_steps == 0` and `n_action_steps > chunk_size`.
+/// Binding 1 and Ferric chunk v3 refuse zero, so this receiver does too.
+/// End-of-chunk hold is a receiver state (no steps left, or no chunk yet
+/// with receipt source `home`). It is not an `n = 0` binding.
 pub fn check_horizon(n_action_steps: u32, chunk_size: u32) -> Result<(), CodecError> {
-    if n_action_steps > chunk_size {
+    if n_action_steps == 0 || n_action_steps > chunk_size {
         Err(CodecError::Horizon)
     } else {
         Ok(())
@@ -182,12 +185,12 @@ pub struct ActionChunk {
 }
 
 impl ActionChunk {
-    /// `try_new(0, 1, [])` is a valid empty matrix. `action_dim == 0` is not.
+    /// `n_action_steps == 0` is [`CodecError::Horizon`]. `action_dim == 0` is [`CodecError::ActionDim`].
     pub fn try_new(n_action_steps: u32, action_dim: u32, values: Vec<f32>) -> Result<Self, CodecError> {
-        check_horizon(n_action_steps, CHUNK_SIZE)?;
         if action_dim == 0 || action_dim > PRE_UNPAD_WIDTH as u32 {
             return Err(CodecError::ActionDim);
         }
+        check_horizon(n_action_steps, CHUNK_SIZE)?;
         let expect = (n_action_steps as usize).checked_mul(action_dim as usize).ok_or(CodecError::ChunkShape)?;
         if values.len() != expect {
             return Err(CodecError::ChunkShape);
@@ -319,8 +322,7 @@ pub fn digest_sha256(bytes: &[u8]) -> String {
 }
 
 /// Same checks as [`encode`], then [`CodecError::EntryProposed`].
-/// An empty horizon is not a second refusal while the entry is proposed.
-/// An empty-horizon execution gate, if one is added, runs only after this gate clears.
+/// `n_action_steps == 0` is [`CodecError::Horizon`] from those checks. It is not a hold and not a binding.
 /// A golden digest does not authorize a rollout.
 pub fn authorize_rollout(chunk: &ChunkV2) -> Result<(), CodecError> {
     encode(chunk)?;
@@ -382,6 +384,7 @@ pub fn parse_chunk(bytes: &[u8]) -> Result<ChunkV2, CodecError> {
     if cur.at != cur.bytes.len() {
         return Err(CodecError::ChunkShape);
     }
+    check_horizon(chunk.n_action_steps, CHUNK_SIZE)?;
     Ok(chunk)
 }
 
@@ -629,7 +632,7 @@ mod tests {
         chunk.n_action_steps = 51;
         assert_eq!(encode(&chunk), Err(CodecError::Horizon));
         chunk.n_action_steps = 0;
-        assert_eq!(encode(&chunk), Err(CodecError::ChunkShape));
+        assert_eq!(encode(&chunk), Err(CodecError::Horizon));
         chunk.n_action_steps = 2;
         chunk.action_dim = 0;
         assert_eq!(encode(&chunk), Err(CodecError::ActionDim));
@@ -759,12 +762,12 @@ mod tests {
         assert_eq!(empty.step_duration_ns, full.step_duration_ns);
         assert_eq!(empty.n_action_steps, 0);
         assert!(empty.values_time_major.is_empty());
-        assert_ne!(encode(&empty).unwrap(), encode(&full).unwrap());
+        assert_eq!(encode(&empty), Err(CodecError::Horizon));
+        assert_ne!(digest_sha256(&encode(&full).unwrap()), EMPTY_GOLDEN_DIGEST);
     }
 
-    /// Published empty fixture at Ferric `c052289`. This encoder recomputes the bytes.
-    /// Ferric names the authorization error `ProposedEntryInvoked`; this receiver's
-    /// corresponding refusal is `EntryProposed`. Neither test runs a model.
+    /// The Ferric `c052289` empty fixture stays on disk. The receiver refuses it.
+    /// `n_action_steps == 0` is `Horizon`, not a hold and not a binding.
     #[test]
     fn published_empty_horizon_matches_canonical_bytes_and_refuses_index_zero() {
         const EMPTY: &str = include_str!("../../../docs/acceptance/contracts/fixtures/smolvla-empty-chunk-v2.json");
@@ -779,31 +782,32 @@ mod tests {
         assert!(EMPTY.contains("\"execution_error\": \"ProposedEntryInvoked\""));
         assert!(EMPTY.contains("\"timestamp_index_zero\": \"TimestampIndex\""));
         assert_eq!(json_string(EMPTY, "digest_sha256"), EMPTY_GOLDEN_DIGEST);
-        assert_eq!(check_horizon(0, 50), Ok(()));
-        assert_eq!(check_horizon(0, 0), Ok(()));
-        let shape = ActionChunk::try_new(0, 2, Vec::new()).unwrap();
-        let mut chunk = empty_protocol_chunk();
-        assert_eq!(shape.n_action_steps, chunk.n_action_steps);
-        assert_eq!(shape.action_dim, chunk.action_dim);
-        chunk.values_time_major = shape.values;
-        let bytes = encode(&chunk).unwrap();
         let published = decode_hex(&json_string(EMPTY, "canonical_hex"));
-        assert_eq!(bytes, published);
-        assert_eq!(bytes.len(), 449);
-        assert_eq!(digest_sha256(&bytes), EMPTY_GOLDEN_DIGEST);
-        assert_eq!(verify_chunk(&bytes).unwrap(), chunk);
+        assert_eq!(published.len(), 449);
+        assert_eq!(digest_sha256(&published), EMPTY_GOLDEN_DIGEST);
+        let chunk = empty_protocol_chunk();
+        assert_eq!(check_horizon(0, 50), Err(CodecError::Horizon));
+        assert_eq!(check_horizon(0, 0), Err(CodecError::Horizon));
+        assert_eq!(ActionChunk::try_new(0, 2, Vec::new()), Err(CodecError::Horizon));
+        assert_eq!(encode(&chunk), Err(CodecError::Horizon));
+        assert_eq!(parse_chunk(&published), Err(CodecError::Horizon));
+        assert_eq!(verify_chunk(&published), Err(CodecError::Horizon));
+        assert_eq!(authorize_rollout(&chunk), Err(CodecError::Horizon));
+        assert_eq!(protocol_receipt(&chunk, EMPTY_GOLDEN_DIGEST), Err(CodecError::Horizon));
         assert_eq!(
             action_timestamp_ns(chunk.t0_ns, chunk.step_duration_ns, 0, 0),
             Err(CodecError::TimestampIndex { index: 0, steps: 0 })
         );
-        let receipt = protocol_receipt(&chunk, EMPTY_GOLDEN_DIGEST).unwrap();
-        assert!(receipt.matches_golden_fixture);
-        assert!(!receipt.rollout_authorized);
-        assert!(!receipt.model_executed);
-        assert_eq!(receipt.inference, InferenceFidelity::NotExecuted);
-        assert_eq!(receipt.measured_receipts, 0);
-        assert_eq!(authorize_rollout(&chunk), Err(CodecError::EntryProposed));
         assert_eq!(FERRIC_EMPTY_FIXTURE_REVISION.len(), 40);
+    }
+
+    /// `n = 0` is not a binding and not an end-of-chunk hold.
+    #[test]
+    fn a_zero_step_chunk_is_refused_and_is_not_a_hold() {
+        assert_eq!(check_horizon(0, CHUNK_SIZE), Err(CodecError::Horizon));
+        assert_eq!(ActionChunk::try_new(0, 1, Vec::new()), Err(CodecError::Horizon));
+        assert_eq!(encode(&empty_protocol_chunk()), Err(CodecError::Horizon));
+        assert_eq!(check_horizon(1, CHUNK_SIZE), Ok(()));
     }
 
     #[test]
@@ -820,10 +824,13 @@ mod tests {
         bad.noise_sha256.clear();
         assert_eq!(encode(&bad), Err(CodecError::MissingNoiseProvenance));
         assert_eq!(authorize_rollout(&bad), Err(CodecError::MissingNoiseProvenance));
-        assert_eq!(ActionChunk::try_new(0, chunk.action_dim, vec![0.0]), Err(CodecError::ChunkShape));
-        bad = chunk.clone();
+        assert_eq!(ActionChunk::try_new(0, chunk.action_dim, vec![0.0]), Err(CodecError::Horizon));
+        bad = protocol_fixture();
         bad.step_duration_ns = 0;
         assert_eq!(encode(&bad), Err(CodecError::StepDuration));
+        bad = chunk.clone();
+        bad.step_duration_ns = 0;
+        assert_eq!(encode(&bad), Err(CodecError::Horizon));
         assert_eq!(ActionChunk::try_new(0, 0, Vec::new()), Err(CodecError::ActionDim));
         assert_eq!(check_horizon(51, 50), Err(CodecError::Horizon));
     }

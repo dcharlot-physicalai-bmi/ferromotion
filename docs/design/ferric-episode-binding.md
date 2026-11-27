@@ -1,6 +1,6 @@
 # Binding a Ferric chunk to an episode
 
-revision 3, agreed by bmi-2, bmi-3 and bmi-4 2026-11-20
+revision 4. Revision 3 was agreed by bmi-2, bmi-3 and bmi-4 on 2026-11-20. Revision 4 is bmi-2's hold wording from 2026-11-27: hold is a receiver state, not an `n = 0` binding.
 
 Proposal only. The envelope parser and `bind_v2_timestamps` are unchanged in this commit. `EPISODE_ENVELOPE_INTEROPERABLE` stays false. `predict_action_chunk` still returns `ContractError::ProposedEntryInvoked` at `crates/ferric-accept/src/smolvla.rs:486-487` on `cursor/toolchain-1.100`, so a live-output episode uses fixtures until that refusal is gone.
 
@@ -61,23 +61,26 @@ Header `ferromorphic-chunk-binding 1`. Fields, in order:
 8. `n_action_steps`
 9. `chunk_sha256`, 64 lowercase hex digits
 
-`chunk_sha256` is Ferric's `digest_sha256` over the full canonical chunk bytes, header included. The version-2 goldens, on the `20000000/1` grid only, are `6d668d7e25c89249c890d895ef15b8fdcbb97dab7a1339a0a97605c6e1172d86` and the empty chunk `6295818fa11b85b37ad8054c75e0a1935b0c0cbb5d7e419090c2520a17b1744e`. The version-3 goldens at `100000000/3` come later with Ferric chunk v3.
+`chunk_sha256` is Ferric's `digest_sha256` over the full canonical chunk bytes, header included. The version-2 nonempty golden, on the `20000000/1` grid only, is `6d668d7e25c89249c890d895ef15b8fdcbb97dab7a1339a0a97605c6e1172d86`. The old empty-body digest `6295818fa11b85b37ad8054c75e0a1935b0c0cbb5d7e419090c2520a17b1744e` is not a binding. The version-3 goldens at `100000000/3` come later with Ferric chunk v3.
 
 The chain runs one way, from the binding to the envelope. The envelope is the clock for the whole episode. A chunk hash inside it would force a new envelope per chunk, and the binding's `envelope_sha256` would then cycle. `bind_v2_timestamps` still checks `t0` against `origin_ns + chunk_index * period` on that clock, in the integer arithmetic of the reduced rationals.
 
 The receiver decodes the chunk and hands `(t0, period, n)` to the ferromorphic verifier. The verifier refuses a mismatch, a `chunk_index` that is not strictly increasing, and an earlier `t0` (`Late`). The SHA-256 of the binding text is stamped on every `StepReceipt` that consumes the chunk.
 
-The receiver also refuses unless all of these hold: the binding period equals both the envelope period and the chunk period, `t0` is on the grid, and the binding's `n` equals the chunk's `n`, with `n ≤ 50`. It refuses if the MJCF timestep bits are not `3f5b4e81b4e81b4f`.
+The receiver also refuses unless all of these hold: the binding period equals both the envelope period and the chunk period, `t0` is on the grid, and the binding's `n` equals the chunk's `n`, with `1 ≤ n ≤ 50`. It refuses `n_action_steps == 0`. It refuses if the MJCF timestep bits are not `3f5b4e81b4e81b4f`.
 
 Ferric will publish chunk v3. It carries `t0` and the period as a reduced `(num_ns, den)`, because version 2's integer `t0_ns` cannot express `100000000/3`. It also carries the SO-100 joint names and units, a named and hashed `so100` stats key, and real stats and noise hashes. Version 2 stays parseable forever. The receiver targets chunk v3. Its pin waits for bmi-3's chunk-v3 SHA. That SHA supersedes a plain re-pin to the green toolchain head.
 
 ## (5) Receiver policy
 
-Before the first chunk, the target is the `home` keyframe `qpos` (`0 -1.57 1.57 1.57 -1.57 0` in `so_arm100.xml`). The receipt source is `home`.
+`hold` is a receiver state. It is not a binding, and it is not `n_action_steps == 0`. Binding 1 (`ferromorphic-chunk-binding 1`) and Ferric chunk v3 (`931ee2af`, line 60) both refuse `n_action_steps == 0`, so a chunk with that `n` cannot be bound.
 
-At the end of a chunk, and for `n = 0`, the receiver holds the last target. The receipt source is `hold`, and each tick increments a held count.
+The state is one of these:
 
-A hold longer than one chunk duration, `n_action_steps` times the period, without a new binding is `Stale` and ends the episode.
+* No chunk has arrived yet. The target is the `home` keyframe `qpos` (`0 -1.57 1.57 1.57 -1.57 0` in `so_arm100.xml`). The receipt source is `home`.
+* The current chunk has no steps left. The target stays the last target from that chunk. The receipt source is `hold`, and each such tick increments a held count.
+
+A `hold` longer than one chunk duration, the bound chunk's `n_action_steps` times the period, without a new binding is `Stale` and ends the episode. That `n` is the `n` of a chunk that was bound, so it is at least 1.
 
 A new chunk supersedes the rest of the current chunk from its `t0`.
 

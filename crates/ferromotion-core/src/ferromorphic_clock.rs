@@ -478,7 +478,8 @@ pub fn tick_stamp_ns(origin_ns: u64, period_ns: u64, tick: u64) -> Result<u64, T
 /// 9. Requires `step_duration_ns == period_ns` and `t0_ns` on
 ///    `origin_ns + n * period_ns`.
 ///
-/// `n_action_steps == 0` still runs those checks and stamps no index. The call does
+/// `n_action_steps == 0` still runs those checks and stamps no index. That is this
+/// clock call. It is not a chunk binding and not an end-of-chunk hold. The call does
 /// not read `tick` as authorization. A match does not run inference or a joint step
 /// and does not set [`EPISODE_ENVELOPE_INTEROPERABLE`]. This is ferromotion's copy.
 /// [`FERROMORPHIC_BIND_VERIFIED`] names the git crate's `bind_v2_timestamps`, not this
