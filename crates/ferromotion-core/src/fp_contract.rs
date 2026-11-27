@@ -394,7 +394,11 @@ mod tests {
 
     #[test]
     fn unfused_sites_match_the_named_oracle_on_random_and_adversarial_vectors() {
-        let text = include_str!("../../../docs/acceptance/oracles/x86_64-contract-off-op-vectors.txt");
+        // Each arch has its own file. x86 invalid ops are the SSE real-indefinite
+        // −qNaN; AArch64's default NaN is +qNaN. `scripts/arm_oracle/op-vectors.sh`
+        // compiles the oracle C with `-ffp-contract=off` and writes the file.
+        // Equality stays bitwise. The x86 file is not rewritten for the other arch.
+        let text = contract_off_op_vectors();
         let mut n = 0usize;
         for line in text.lines().filter(|line| !line.is_empty()) {
             let mut parts = line.split('\t');
@@ -411,5 +415,20 @@ mod tests {
             n += 1;
         }
         assert!(n >= 100);
+    }
+
+    fn contract_off_op_vectors() -> &'static str {
+        #[cfg(target_arch = "x86_64")]
+        {
+            include_str!("../../../docs/acceptance/oracles/x86_64-contract-off-op-vectors.txt")
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            include_str!("../../../docs/acceptance/oracles/aarch64-contract-off-op-vectors.txt")
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            compile_error!("contract-off op vectors are recorded for x86_64 and aarch64 only")
+        }
     }
 }
