@@ -56,11 +56,22 @@ Rules:
 
 The grid identity is `t0_num_ns * period_den == (origin_ns * period_den + k * period_num_ns) * t0_den` for some integer `k >= 0`. The implementation uses the divisibility form: `d = t0_num_ns * period_den - origin_ns * period_den * t0_den` must be `>= 0`, and `period_num_ns * t0_den` must divide `d`. Every product is checked `u128`. `d < 0` is `BeforeOrigin`. A non-zero remainder is `OffGrid`. A product that does not fit is `Overflow`.
 
-`n = 0` on a chunk body is `CodecError::Horizon`. On a binding, `verify_chunk_binding` calls `check_horizon` and maps that same refusal to `EpisodeError::NoActionSteps`. `n > 50` is `Horizon` on the chunk body and `TooManyActionSteps` on the binding. Identifiers are internal. Hold is a receiver state: no chunk yet, source `home`, or the current chunk has no steps left, source `hold`. It is not an `n = 0` binding.
+`n = 0` on a chunk body is `CodecError::Horizon`. On a binding, `verify_chunk_binding` calls `check_horizon` and maps that same refusal to `EpisodeError::NoActionSteps`. `n > 50` is `Horizon` on the chunk body and `TooManyActionSteps` on the binding. Identifiers are internal. Hold is a receiver state: no chunk yet, source `home`, or the current chunk has no steps left, source `hold`. It is not an `n = 0` binding. The proposed v3/SO-100 profile below retires the `home` source. That retirement is not implemented.
 
 ## Where 30 Hz is required
 
 Envelope v2 accepts any reduced `dt` and period that satisfy the rules above. Ferric's SO-100 profile, lines 246–250 of the pinned v3 contract, is what refuses anything else. For that profile the only legal clock is 30 Hz with 20 substeps: period `100000000/3`, dt `5000000/3`. This crate does not apply that profile.
+
+## Hold and staleness (proposed for ferric v3 text revision)
+
+Proposed. Not implemented. `EPISODE_ENVELOPE_INTEROPERABLE`, `FERROMORPHIC_BIND_VERIFIED`, and `JOINT_LOOP_EXECUTED` stay false. This section waits for a revised ferric contract sha before any code change.
+
+1. There are no wall-clock thresholds. Plant time is the envelope grid, in exact integer rationals, with products checked in `u128`. An accepted binding covers `[t0, t0 + n * period)`. Substep `s` at plant time `t` uses `action_index = floor((t - t0) / period)` of the newest accepted binding that covers `t`. The grid index `k` is bounded to `u64`. A product that does not fit in `u128` is `Overflow`.
+2. `Late` stays binding refusal 12. `Stale` is a new refusal: `t0 + n * period <=` the plant time at acceptance. A binding that is only partly elapsed is accepted and starts at the action covering `t`. Skipped indices are never commanded. `Late` and `Stale` stay refusals. They are not hold values.
+3. Hold: when no accepted binding covers `t`, the receiver applies a zero-order hold of the last applied position target, with no extrapolation. The stamp repeats that binding's hash, `chunk_index`, and `action_index`. The substep counter keeps counting. `hold` is `1`.
+4. A step before any accepted chunk is refused (`NoBinding`). For the v3/SO-100 profile the `home` source is retired. The sentence above, "Hold is a receiver state", still describes the code. The retirement is this proposal.
+5. A hold never crosses `episode_nonce`.
+6. One canonical binary stream, `stamp_version` 1. Each plant substep is one 49-byte little-endian record: `binding_sha256` (32 raw bytes, the SHA-256 of the binding-1 text), `chunk_index` `u64`, `action_index` `u32` in `[0, n)`, `substep_index` `u32` in `[0, S)`, and `hold` `u8` in `{0, 1}`. `S = period / dt` is an integer, and for SO-100 it is 20. `hold = 1` is the zero-order hold in item 3. `StepReceipt` and `ferromorphic-step 3` carry only `stamp_version`, the stamp count, and `stamp_stream_sha256` as 64 lowercase hex digits. The receipt pins the SHA-256 of the exact stamp stream.
 
 ## Full state v1
 
