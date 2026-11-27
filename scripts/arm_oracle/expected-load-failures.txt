@@ -1,0 +1,5 @@
+aloha/filtered_cartesian_actuators.xml
+aloha/joint_position_actuators.xml
+aloha/keyframe_ctrl.xml
+aloha/keyframe_no_act.xml
+shadow_hand/keyframes.xml

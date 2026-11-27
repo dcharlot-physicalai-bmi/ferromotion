@@ -1,0 +1,5 @@
+# mju_mulQuat([0.9, 0.1, -0.2, 0.3], [0.8, -0.1, 0.4, 0.2])
+# oracle id mujoco-3.13.0-x86_64-contract-off
+# artifact sha256 64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc
+# This is the Linux x86_64 contract-off export. It is not a Darwin arm64 golden.
+3fe8000000000000 bfc5c28f5c28f5c2 3fc3333333333333 3fdc28f5c28f5c29
