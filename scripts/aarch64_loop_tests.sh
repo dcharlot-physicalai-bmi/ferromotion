@@ -9,12 +9,13 @@
 # This script does not skip a test on aarch64. The rerun is the comparison.
 #
 # panda_contact_reach, profile mujoco-3.13.0-x86_64-contract-off,
-# libmujoco sha256 64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc,
-# code path 2aeb3611c9f3edca1961eb25ee374df56229d799:
-#   plant   5c4c4514c93d3c667deecb6b4f834562ff7b2ad14dc61b6c88943c2f3b443fe7
-#   zero    5fd57262dd51c8a559f470e7e5bc0b8a5fc2122bceb001696af4662d77fbe13c
-#   open    2e3a8ce12ebd612b665b4f2d3516e1c31dae9b94f202f7bbd63c6bd50544227c
-#   state   01e990011ad4d1e59d902d3fc1f480fca708b1cc574970de96f69fbe7a22fe82
+# libmujoco sha256 64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc.
+# The x86_64 receipt is docs/acceptance/receipts/2026-11-27-panda-contact-reach-2.md.
+# These hashes were measured on x86_64. An aarch64 match is not claimed.
+#   plant    c3b70e92db29d9f112626d68d2d5c387895fb6f72dc95bf98d70262c34d300b2
+#   zero     b3dc651ba290426b3e81a70db2e5aa59dbcc9fa787498934c07b5882925e04e8
+#   open     a3a1c16ef5627785074a3c219490e1296a8233e62495430b517272f815a23852
+#   state    4e49f36ed5148e355c13dd8a58c7d6b48d0062fb4cd56cce059117178ea40e50
 #   envelope 170e9795fc32875de5a6f6a531e5efd51760b73013e2b1b4fc5e9ab7d4f8091a
 set -euo pipefail
 cd "$(dirname "$0")/.."

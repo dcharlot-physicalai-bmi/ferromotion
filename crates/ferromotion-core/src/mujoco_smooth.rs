@@ -539,6 +539,8 @@ pub(crate) struct SmoothData {
     pub(crate) qfrc_actuator: Vec<f64>,
     pub(crate) qfrc_smooth: Vec<f64>,
     pub(crate) qacc_smooth: Vec<f64>,
+    /// How many actuators had `forcerange` change the force. Not an `mjData` field.
+    pub(crate) forcerange_binds: usize,
 }
 
 impl SmoothModel {
@@ -840,13 +842,15 @@ impl SmoothModel {
     /// [`SmoothModel::forward`] at `d->time`, which a `mujoco.pid` slew limiter reads (no previous setpoint
     /// at `t = 0`).
     pub(crate) fn forward_at(&self, time: f64, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64]) -> SmoothData {
-        self.forward_with(time, qpos, qvel, ctrl, act, &std::collections::BTreeMap::new())
+        self.forward_with(time, qpos, qvel, ctrl, act, &std::collections::BTreeMap::new(), &[])
     }
 
     /// [`SmoothModel::forward_at`] with the adhesion actuators' moments, by actuator index — which MuJoCo
     /// builds from the constraint rows (`mj_transmission` runs after `mj_makeConstraint`), so the caller
     /// passes them in from a first pass; an adhesion actuator without one has no moment.
-    pub(crate) fn forward_with(&self, time: f64, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64], body_moments: &std::collections::BTreeMap<usize, (Vec<usize>, Vec<f64>)>) -> SmoothData {
+    /// `qfrc_applied` is MuJoCo's generalised applied force. An empty slice keeps the
+    /// `+ 0.0 +` acceleration sum, which is the published native path.
+    pub(crate) fn forward_with(&self, time: f64, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64], body_moments: &std::collections::BTreeMap<usize, (Vec<usize>, Vec<f64>)>, qfrc_applied: &[f64]) -> SmoothData {
         let nbody = self.kin.bodies.len();
         let nv = self.dof_bodyid.len();
         let kin = self.kin.state(qpos);
@@ -1091,6 +1095,7 @@ impl SmoothModel {
             };
         }
         let mut actuator_force = vec![0.0; nu];
+        let mut forcerange_binds = 0usize;
         let separate = crate::fp_contract::contract_off();
         for (i, a) in self.actuators.iter().enumerate() {
             use crate::mujoco_actuator::{ActBias, ActDyn, ActGain};
@@ -1099,9 +1104,10 @@ impl SmoothModel {
             if let Some(p) = &a.act.pid {
                 let adr = a.actadr.unwrap_or(0);
                 let own: Vec<f64> = (adr..adr + a.act.actnum()).map(|j| act.get(j).copied().unwrap_or(0.0)).collect();
-                let mut f = p.force(&a.act, actuator_length[i], actuator_velocity[i], ctrl_raw.get(i).copied().unwrap_or(0.0), &own, time, self.timestep);
-                if let Some([lo, hi]) = a.act.forcerange {
-                    f = clip(f, lo, hi);
+                let raw = p.force(&a.act, actuator_length[i], actuator_velocity[i], ctrl_raw.get(i).copied().unwrap_or(0.0), &own, time, self.timestep);
+                let f = if let Some([lo, hi]) = a.act.forcerange { clip(raw, lo, hi) } else { raw };
+                if f.to_bits() != raw.to_bits() {
+                    forcerange_binds += 1;
                 }
                 actuator_force[i] = f;
                 continue;
@@ -1134,8 +1140,12 @@ impl SmoothModel {
                 ActBias::Muscle => muscle_bias(len, &a.act.lengthrange, a.act.acc0, b),
             };
             f += bias;
+            let raw = f;
             if let Some([lo, hi]) = a.act.forcerange {
                 f = clip(f, lo, hi);
+            }
+            if f.to_bits() != raw.to_bits() {
+                forcerange_binds += 1;
             }
             actuator_force[i] = f;
         }
@@ -1154,12 +1164,19 @@ impl SmoothModel {
                 qfrc_actuator[d] = clip(qfrc_actuator[d], *lo, *hi);
             }
         }
-        // `mj_fwdAcceleration`
-        let qfrc_smooth: Vec<f64> = (0..nv).map(|i| (qfrc_passive[i] - qfrc_bias[i]) + 0.0 + qfrc_actuator[i]).collect();
+        // `mj_fwdAcceleration`. Empty `qfrc_applied` keeps the literal `+ 0.0 +` sum.
+        let applied_live = qfrc_applied.iter().any(|x| x.to_bits() != 0.0f64.to_bits());
+        let qfrc_smooth: Vec<f64> = if applied_live {
+            (0..nv)
+                .map(|i| (qfrc_passive[i] - qfrc_bias[i]) + qfrc_applied.get(i).copied().unwrap_or(0.0) + qfrc_actuator[i])
+                .collect()
+        } else {
+            (0..nv).map(|i| (qfrc_passive[i] - qfrc_bias[i]) + 0.0 + qfrc_actuator[i]).collect()
+        };
         let qacc_smooth = self.solve_ld(&qld, &qld_diag_inv, &qfrc_smooth);
         SmoothData {
             kin, subtree_com, cinert, cdof, crb, m, qld, qld_diag_inv, cvel, cdof_dot, qfrc_bias,
-            qfrc_spring, qfrc_damper, qfrc_gravcomp, qfrc_fluid, qfrc_passive, ten_length, ten_j, ten_velocity, moment, actuator_length, actuator_velocity, actuator_force, act_dot, qfrc_actuator, qfrc_smooth, qacc_smooth,
+            qfrc_spring, qfrc_damper, qfrc_gravcomp, qfrc_fluid, qfrc_passive, ten_length, ten_j, ten_velocity, moment, actuator_length, actuator_velocity, actuator_force, act_dot, qfrc_actuator, qfrc_smooth, qacc_smooth, forcerange_binds,
         }
     }
 

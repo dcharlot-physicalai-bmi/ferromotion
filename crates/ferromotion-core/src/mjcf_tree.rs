@@ -1649,7 +1649,7 @@ impl MjcfTree {
     /// flattened as MuJoCo stores them.
     pub fn mujoco_native_forward(&self, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64]) -> Vec<(&'static str, Vec<f64>)> {
         let nv = self.smooth_model().dof_bodyid.len();
-        let (sd, e, sol) = self.native_forward(0.0, qpos, qvel, ctrl, act, &vec![0.0; nv]);
+        let (sd, e, sol, _) = self.native_forward(0.0, qpos, qvel, ctrl, act, &vec![0.0; nv], &[]);
         let mut out = sd.arrays();
         if self.smooth_model().tendons.iter().any(Option::is_none) {
             out.retain(|(name, _)| !name.starts_with("ten_"));
@@ -1690,9 +1690,9 @@ impl MjcfTree {
 
     /// The native forward pass: smooth dynamics, the constraint rows on MuJoCo's own contacts, and the solve
     /// from `qacc_warmstart`.
-    fn native_forward(&self, time: f64, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64], qacc_warmstart: &[f64]) -> (crate::mujoco_smooth::SmoothData, crate::mujoco_efc::Efc, crate::mujoco_solver::Solution) {
+    fn native_forward(&self, time: f64, qpos: &[f64], qvel: &[f64], ctrl: &[f64], act: &[f64], qacc_warmstart: &[f64], qfrc_applied: &[f64]) -> (crate::mujoco_smooth::SmoothData, crate::mujoco_efc::Efc, crate::mujoco_solver::Solution, Vec<crate::mujoco_efc::NativeContact>) {
         let sm = self.smooth_model();
-        let mut sd = sm.forward_at(time, qpos, qvel, ctrl, act);
+        let mut sd = sm.forward_with(time, qpos, qvel, ctrl, act, &std::collections::BTreeMap::new(), qfrc_applied);
         let contacts: Vec<crate::mujoco_efc::NativeContact> = self
             .collide_qpos(qpos)
             .contacts
@@ -1724,7 +1724,7 @@ impl MjcfTree {
             .filter_map(|(i, a)| a.body.map(|b| (i, sm.body_moment(&sd, &e, &contacts, b, sm.efc.elliptic))))
             .collect();
         if !bodies.is_empty() {
-            sd = sm.forward_with(time, qpos, qvel, ctrl, act, &bodies);
+            sd = sm.forward_with(time, qpos, qvel, ctrl, act, &bodies, qfrc_applied);
         }
         let opt = crate::mujoco_solver::SolverOptions {
             iterations: self.solver_iterations,
@@ -1736,7 +1736,7 @@ impl MjcfTree {
             meaninertia: sm.efc.meaninertia,
         };
         let sol = sm.fwd_constraint(&sd, &e, &contacts, qacc_warmstart, &opt);
-        (sd, e, sol)
+        (sd, e, sol, contacts)
     }
 
     /// **`mj_step` in MuJoCo's own arithmetic**: the native forward pass at `st` with control `ctrl`, then
@@ -1750,6 +1750,13 @@ impl MjcfTree {
     /// The same step as [`MjcfTree::mujoco_native_step`], plus the contact witness from the forward
     /// pass that produced it. The published default is unchanged: this does not install a policy.
     pub fn mujoco_native_step_witness(&self, st: &crate::MjNativeState, ctrl: &[f64]) -> Result<NativeStepWitness, String> {
+        self.mujoco_native_step_witness_applied(st, ctrl, &[])
+    }
+
+    /// [`MjcfTree::mujoco_native_step_witness`] with MuJoCo's `qfrc_applied` added into `qfrc_smooth`.
+    /// An empty or all-zero slice leaves that sum as the literal `+ 0.0 +` the published native path uses.
+    /// `ctrl` is still the actuator control. The contacts on the witness are the ones passed to the solver.
+    pub fn mujoco_native_step_witness_applied(&self, st: &crate::MjNativeState, ctrl: &[f64], qfrc_applied: &[f64]) -> Result<NativeStepWitness, String> {
         let sm = self.smooth_model();
         if let Some(why) = sm.unsupported.first() {
             return Err(why.clone());
@@ -1766,28 +1773,31 @@ impl MjcfTree {
         let nv = sm.dof_bodyid.len();
         let reset_state = || crate::MjNativeState { time: 0.0, qpos: self.qpos0(), qvel: vec![0.0; nv], act: vec![0.0; st.act.len()], qacc_warmstart: vec![0.0; nv], reset: true };
         let zero_ctrl = vec![0.0; ctrl.len()];
-        let (mut st, mut ctrl) = (st.clone(), ctrl);
+        let (mut st, mut ctrl, mut qfrc_applied) = (st.clone(), ctrl, qfrc_applied);
         st.reset = false;
         if st.qpos.iter().any(bad) || st.qvel.iter().any(bad) {
             st = reset_state();
             ctrl = &zero_ctrl;
+            qfrc_applied = &[];
         }
-        let (mut sd, mut e, mut sol) = self.native_forward(st.time, &st.qpos, &st.qvel, ctrl, &st.act, &st.qacc_warmstart);
+        let (mut sd, mut e, mut sol, mut solved_contacts) = self.native_forward(st.time, &st.qpos, &st.qvel, ctrl, &st.act, &st.qacc_warmstart, qfrc_applied);
         if sol.qacc.iter().any(bad) {
             st = reset_state();
             ctrl = &zero_ctrl;
-            (sd, e, sol) = self.native_forward(st.time, &st.qpos, &st.qvel, ctrl, &st.act, &st.qacc_warmstart);
+            qfrc_applied = &[];
+            (sd, e, sol, solved_contacts) = self.native_forward(st.time, &st.qpos, &st.qvel, ctrl, &st.act, &st.qacc_warmstart, qfrc_applied);
         }
-        let collision = self.collide_qpos(&st.qpos);
         let moving = |geom: usize| self.geoms.get(geom).and_then(|g| g.joint).is_some();
         let mut ncon = 0usize;
         let mut ncon_moving = 0usize;
         let mut moving_ids = Vec::new();
-        for (i, contact) in collision.contacts.iter().enumerate() {
-            if contact.record.exclude {
+        let mut contacts = Vec::new();
+        for (i, contact) in solved_contacts.iter().enumerate() {
+            if contact.exclude {
                 continue;
             }
             ncon += 1;
+            contacts.push(WitnessContact { geom: contact.geom, dist: contact.dist });
             if moving(contact.geom[0]) || moving(contact.geom[1]) {
                 ncon_moving += 1;
                 moving_ids.push(i);
@@ -1803,19 +1813,20 @@ impl MjcfTree {
             })
             .count();
         let qfrc_constraint = sol.qfrc_constraint.clone();
+        let forcerange_binds = sd.forcerange_binds;
         let next = match self.integrator {
             MjcfIntegrator::ImplicitFast => sm.implicit_fast(&sd, &sol, &st, ctrl)?,
-            MjcfIntegrator::Rk4 => self.native_rk4(&st, ctrl, &sd, &sol),
+            MjcfIntegrator::Rk4 => self.native_rk4(&st, ctrl, &sd, &sol, qfrc_applied),
             _ => sm.euler(&sd, &sol, &st, self.eulerdamp),
         };
-        Ok(NativeStepWitness { next, ncon, ncon_moving, nefc_contact_moving, qfrc_constraint })
+        Ok(NativeStepWitness { next, ncon, ncon_moving, nefc_contact_moving, qfrc_constraint, contacts, forcerange_binds })
     }
 
     /// **`mj_RungeKutta(m, d, 4)`**: three more forward passes at the tableau's stages, each from `X[0]`
     /// advanced by the stage's weighted rates (`mj_integratePos` for the positions), with the step's own
     /// warmstart; then `mj_advance` from `X[0]` with the `B`-weighted rates, positions by the weighted
     /// velocity. Every weighted sum is `mju_addToScl` — fused, a zero weight included.
-    fn native_rk4(&self, st: &crate::MjNativeState, ctrl: &[f64], sd: &crate::mujoco_smooth::SmoothData, sol: &crate::mujoco_solver::Solution) -> crate::MjNativeState {
+    fn native_rk4(&self, st: &crate::MjNativeState, ctrl: &[f64], sd: &crate::mujoco_smooth::SmoothData, sol: &crate::mujoco_solver::Solution, qfrc_applied: &[f64]) -> crate::MjNativeState {
         const A: [f64; 9] = [0.5, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 1.0];
         const B: [f64; 4] = [1.0 / 6.0, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 6.0];
         let sm = self.smooth_model();
@@ -1873,7 +1884,7 @@ impl MjcfTree {
             } else {
                 ((0..nv).map(|k| da[k].mul_add(h, x[0].1[k])).collect(), (0..na).map(|k| dact[k].mul_add(h, x[0].2[k])).collect())
             };
-            let (sdi, _, soli) = self.native_forward(t, &qpos, &qvel, ctrl, &act, &st.qacc_warmstart);
+            let (sdi, _, soli, _) = self.native_forward(t, &qpos, &qvel, ctrl, &act, &st.qacc_warmstart, qfrc_applied);
             x.push((qpos, qvel, act));
             f.push((soli.qacc, sdi.act_dot));
         }
@@ -3020,17 +3031,29 @@ pub enum MjcfIntegrator {
     ImplicitFast,
 }
 
+/// One contact passed to the native solver (`exclude` already dropped).
+#[derive(Clone, Copy, Debug)]
+pub struct WitnessContact {
+    pub geom: [usize; 2],
+    pub dist: f64,
+}
+
 /// One [`MjcfTree::mujoco_native_step`], plus the contact witness of the forward pass that produced it.
 #[derive(Clone, Debug)]
 pub struct NativeStepWitness {
     pub next: crate::MjNativeState,
-    /// Solver-facing contacts (`record.exclude` is false).
+    /// Solver-facing contacts (`exclude` is false). These are the contacts the solve was given,
+    /// not a second collision query.
     pub ncon: usize,
     /// Those contacts that touch a geom riding on a joint.
     pub ncon_moving: usize,
     /// `efc` rows of those moving-body contacts.
     pub nefc_contact_moving: usize,
     pub qfrc_constraint: Vec<f64>,
+    /// Geom indices and distance for each solver-facing contact, in the order the solver received them.
+    pub contacts: Vec<WitnessContact>,
+    /// Actuators whose `forcerange` changed the force on this step.
+    pub forcerange_binds: usize,
 }
 
 /// One [`MjcfTree::step_mujoco`]: the next state, in MuJoCo's layout, and the forward pass it came from.
