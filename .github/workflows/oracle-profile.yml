@@ -71,6 +71,9 @@ jobs:
           cmake --version
           command -v ninja
           ninja --version
+          # setup-python owns `python3`. The apt numpy module is on the system
+          # interpreter, so install numpy into the interpreter the scripts run.
+          python3 -m pip install --disable-pip-version-check numpy
           python3 -c 'import numpy; print(numpy.__file__)'
           sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
           sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
@@ -137,6 +140,9 @@ jobs:
           cmake --version
           command -v ninja
           ninja --version
+          # setup-python owns `python3`. The apt numpy module is on the system
+          # interpreter, so install numpy into the interpreter the scripts run.
+          python3 -m pip install --disable-pip-version-check numpy
           python3 -c 'import numpy; print(numpy.__file__)'
           sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
           sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
