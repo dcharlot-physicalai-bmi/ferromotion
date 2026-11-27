@@ -1,7 +1,8 @@
 name: oracle-40-profile
 
-# The 4.0.0 contract-off profile. The pin is the latest receipt for
-# mujoco-4.0.0-x86_64-contract-off. A gain needs a new receipt. A loss fails.
+# The 4.0.0 contract-off profile. The pin is the path and sha256 for
+# mujoco-4.0.0-x86_64-contract-off in conformance/oracle_profile_pins.json.
+# A new receipt becomes the gate only when that pin changes. A loss fails.
 on:
   push:
     branches:

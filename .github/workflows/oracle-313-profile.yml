@@ -1,9 +1,11 @@
 name: oracle-313-profile
 
-# The 3.13.0 contract-off profile. The pin is the latest receipt for
-# mujoco-3.13.0-x86_64-contract-off. This branch carries the fidelity
-# receipt b6a3a885 byte for byte. The later fidelity receipt 701413e
-# records code that is not on this branch, so it is not copied here.
+# The 3.13.0 contract-off profile. The pin is the path and sha256 for
+# mujoco-3.13.0-x86_64-contract-off in conformance/oracle_profile_pins.json.
+# A new receipt becomes the gate only when that pin changes. This branch
+# carries the fidelity receipt b6a3a885 byte for byte. The later fidelity
+# receipt 701413e records code that is not on this branch, so it is not
+# the pin.
 on:
   push:
     branches:

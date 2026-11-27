@@ -1,7 +1,9 @@
 name: oracle-401-profile
 
-# The 4.0.1 contract-off profile. The pin is the latest receipt for
-# mujoco-4.0.1-x86_64-contract-off. It does not read the 4.0.0 receipt.
+# The 4.0.1 contract-off profile. The pin is the path and sha256 for
+# mujoco-4.0.1-x86_64-contract-off in conformance/oracle_profile_pins.json.
+# It does not read the 4.0.0 receipt. A new receipt becomes the gate only
+# when that pin changes.
 on:
   push:
     branches:

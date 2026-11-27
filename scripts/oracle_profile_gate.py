@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Pin a profile run to the latest receipt for its oracle id.
+"""Pin a profile run to the receipt named for its oracle id.
 
-The latest receipt in docs/acceptance/receipts for that id is the pin.
-Its sidecar must match the file bytes. A run passes when the sorted
-20-step-exact model set and every per-field count equal that receipt.
+``conformance/oracle_profile_pins.json`` names one receipt path and sha256
+per oracle id. A new receipt becomes the gate only when that file changes.
+The receipt's sidecar must also match the file bytes. A run passes when the
+sorted 20-step-exact model set and every per-field count equal that receipt.
 A model leaving the set, or a per-field count dropping, fails. A larger
 set or a higher count fails until a new receipt records that set's sha256
-and those counts. Field names are compared as written; a rename is a loss
-of the old name. Nothing in this script is a numeric pin.
+and those counts, and the pin is updated to that receipt. Field names are
+compared as written; a rename is a loss of the old name. Nothing in this
+script is a numeric pin.
 """
 from __future__ import annotations
 
@@ -20,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-RECEIPTS = ROOT / "docs" / "acceptance" / "receipts"
+PINS = ROOT / "conformance" / "oracle_profile_pins.json"
 
 STEP_RE = re.compile(
     r"BIT FOR BIT at every one of (\d+) steps: (\d+) of (\d+) models stepped \((\d+) the loader refuses\)"
@@ -177,12 +179,23 @@ def load_receipt(path: Path) -> Receipt:
     )
 
 
-def latest_receipt(oracle_id: str) -> Receipt:
-    found = [load_receipt(path) for path in sorted(RECEIPTS.glob("*.md"))]
-    matched = [rec for rec in found if rec.oracle_id == oracle_id]
-    if not matched:
-        raise SystemExit(f"no receipt for {oracle_id}")
-    return max(matched, key=lambda rec: (rec.utc_end, rec.path.name))
+def pinned_receipt(oracle_id: str) -> Receipt:
+    pins = json.loads(PINS.read_text())
+    entry = pins.get(oracle_id)
+    if not isinstance(entry, dict) or "receipt" not in entry or "sha256" not in entry:
+        raise SystemExit(f"no path and sha256 pin for {oracle_id} in {PINS.relative_to(ROOT)}")
+    rel = entry["receipt"]
+    digest = entry["sha256"]
+    path = ROOT / rel
+    if not path.is_file():
+        raise SystemExit(f"pinned receipt missing: {rel}")
+    got = sha256_file(path)
+    if got != digest:
+        raise SystemExit(f"pinned receipt {rel} sha256 {got} != {digest}")
+    rec = load_receipt(path)
+    if rec.oracle_id != oracle_id:
+        raise SystemExit(f"pinned receipt {rel} is {rec.oracle_id}, not {oracle_id}")
+    return rec
 
 
 def load_run(native: Path, step: Path, ledger: Path) -> Run:
@@ -240,7 +253,7 @@ def classify(pin: Receipt, run: Run) -> tuple[list[str], list[str]]:
 
 
 def check(oracle_id: str, native: Path, step: Path, ledger: Path, lib: Path | None, native_dump: Path | None, step_dump: Path | None) -> int:
-    pin = latest_receipt(oracle_id)
+    pin = pinned_receipt(oracle_id)
     if lib is not None:
         check_blob(lib, pin.lib_sha256, None, "libmujoco")
     if native_dump is not None:
