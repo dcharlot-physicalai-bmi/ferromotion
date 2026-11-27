@@ -1,11 +1,11 @@
 {
   "mujoco-4.0.1-x86_64-contract-off": {
-    "receipt": "docs/acceptance/receipts/7bb3308a73d6355fbeef80dac8069461b3ceaf7c.md",
-    "sha256": "ae6d10d87e63872607fd10a3d158f85d862432c54db53cc3e75ca3dc730bde64"
+    "receipt": "docs/acceptance/receipts/6dbc5dbd9931a23c243c0dc2a356d36a1d959f0e.md",
+    "sha256": "aeef9d25afb026f93227aa0809c70fdeaf7f4b78f1e0d39a51e14c3afc8dd75d"
   },
   "mujoco-4.0.0-x86_64-contract-off": {
-    "receipt": "docs/acceptance/receipts/7bb3308a73d6355fbeef80dac8069461b3ceaf7c-4.0.0.md",
-    "sha256": "d6ec4611da63b8ee65de753b7b4d0af94aa0ce0a55d6a9ef2e8f123906a3dd34"
+    "receipt": "docs/acceptance/receipts/6dbc5dbd9931a23c243c0dc2a356d36a1d959f0e-4.0.0.md",
+    "sha256": "7d6c282f879d03f235e8818e8bc7e53d8d91086c0f7d5fbd8f4e8b5150a4c163"
   },
   "mujoco-3.13.0-x86_64-contract-off": {
     "receipt": "docs/acceptance/receipts/2aeb3611c9f3edca1961eb25ee374df56229d799.supersedes-c590d3a2.md",
