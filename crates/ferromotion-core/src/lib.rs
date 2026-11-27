@@ -213,6 +213,7 @@ mod joint_acceptance;
 mod external_oracles;
 mod smolvla_receiver;
 mod ferromorphic_clock;
+mod episode_v2;
 mod collision;
 mod constraint;
 mod constraints;
@@ -418,6 +419,10 @@ pub use smolvla_receiver::{
     IMAGE_ALIGN_CORNERS, IMAGE_INTERPOLATION, IMAGE_PAD_LEFT,
     IMAGE_PAD_TOP, IMAGE_SIDE, LEROBOT_UPSTREAM, PREDICT_ACTION_CHUNK, PREPROCESS_STEPS, PRE_UNPAD_STEPS,
     PRE_UNPAD_WIDTH, PROPOSED_FERRIC_ENTRY, SELECT_ACTION_IS_NOT_THE_ENTRY, SMOLVLA_HUB_ID, STATE_WIDTH, TOKEN_MAX,
+};
+pub use episode_v2::{
+    steps_per_action, verify_chunk_binding, BindingState, ChunkBinding, ChunkFacts, EpisodeEnvelopeV2, EpisodeError,
+    NsRational, CHUNK_BINDING_HEADER, EPISODE_ENVELOPE_V2_HEADER, EPISODE_ENVELOPE_V2_VERSION, MAX_ACTION_STEPS,
 };
 pub use ferromorphic_clock::{
     accept_event, accept_event_step, accumulated_f64, bind_dt, bind_v2_timestamps, delivery_step, finite_positive,

@@ -42,12 +42,17 @@ index 0 and no schedule for that index.
 
 `check_horizon(n, chunk_size)` refuses `n == 0` and `n > chunk_size`.
 `check_horizon(0, 50)` and `check_horizon(0, 0)` are `Horizon`.
-Binding 1 and Ferric chunk v3 (`931ee2af`, line 60) both refuse
-`n_action_steps == 0`, so this receiver refuses it too. A chunk with that `n`
-is not a binding. End-of-chunk hold is a receiver state: the current chunk has
-no steps left, or no chunk has arrived yet (receipt source `home`).
 `ActionChunk::try_new(0, 1, [])` is `Horizon`. `action_dim == 0` is still
 `ActionDim`.
+
+On a `ferromorphic-chunk-binding 1` record the same two refusals have the
+binding names. `n == 0` is `EpisodeError::NoActionSteps`. `n > 50` is
+`EpisodeError::TooManyActionSteps`. `CodecError::Horizon` and
+`NoActionSteps` are one refusal: a chunk with no steps is not a binding.
+`verify_chunk_binding` calls `check_horizon` and maps `Horizon` onto those
+two names. Identifiers stay internal. End-of-chunk hold is a receiver state
+(the current chunk has no steps left, or no chunk has arrived and the receipt
+source is `home`). It is not an `n = 0` binding.
 
 Empty noise is `MissingNoiseProvenance`. Empty or non-hex weight and stats are
 refused. A value outside its joint limits, `n_action_steps` above 50, or a
