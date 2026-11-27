@@ -5702,7 +5702,12 @@ impl Walk<'_> {
             "capsule" => {
                 need(2)?;
                 let (r, h) = (size[0], 2.0 * size[1]);
-                pi * (r * r * h + 4.0 * r * r * r / 3.0)
+                // Published compiler fuses `r²·h + 4/3 r³`. The contract-off source adds the products.
+                if crate::fp_contract::contract_off() {
+                    pi * (r * r * h + 4.0 * r * r * r / 3.0)
+                } else {
+                    pi * (r * r).mul_add(h, 4.0 * r * r * r / 3.0)
+                }
             }
             "cylinder" => {
                 need(2)?;
@@ -5755,12 +5760,24 @@ impl Walk<'_> {
             }
             "capsule" => {
                 let (r, h) = (size[0], 2.0 * size[1]);
-                let sphere_mass = mass * 4.0 * r / (4.0 * r + 3.0 * h);
+                // Published `SetInertia` fuses the denominator, the cylinder side, and the
+                // sphere shift. The contract-off compiler adds those products.
+                let (sphere_mass, side, shift) = if crate::fp_contract::contract_off() {
+                    let sphere_mass = mass * 4.0 * r / (4.0 * r + 3.0 * h);
+                    let cylinder_mass = mass - sphere_mass;
+                    let side = cylinder_mass * (3.0 * r * r + h * h) / 12.0;
+                    let shift = sphere_mass * h * (3.0 * r + 2.0 * h) / 8.0;
+                    (sphere_mass, side, shift)
+                } else {
+                    let sphere_mass = mass * 4.0 * r / 4.0f64.mul_add(r, 3.0 * h);
+                    let cylinder_mass = mass - sphere_mass;
+                    let side = cylinder_mass * (3.0 * r).mul_add(r, h * h) / 12.0;
+                    let shift = sphere_mass * h * 3.0f64.mul_add(r, 2.0 * h) / 8.0;
+                    (sphere_mass, side, shift)
+                };
                 let cylinder_mass = mass - sphere_mass;
-                let side = cylinder_mass * (3.0 * r * r + h * h) / 12.0;
                 let mut i = [side, side, cylinder_mass * r * r / 2.0];
                 let sphere_inertia = 2.0 * sphere_mass * r * r / 5.0;
-                let shift = sphere_mass * h * (3.0 * r + 2.0 * h) / 8.0;
                 i[0] += sphere_inertia + shift;
                 i[1] += sphere_inertia + shift;
                 i[2] += sphere_inertia;
@@ -5768,7 +5785,11 @@ impl Walk<'_> {
             }
             "cylinder" => {
                 let (r, h) = (size[0], 2.0 * size[1]);
-                let side = mass * (3.0 * r * r + h * h) / 12.0;
+                let side = if crate::fp_contract::contract_off() {
+                    mass * (3.0 * r * r + h * h) / 12.0
+                } else {
+                    mass * (3.0 * r).mul_add(r, h * h) / 12.0
+                };
                 [side, side, mass * r * r / 2.0]
             }
             "ellipsoid" | "box" | "hfield" => {
