@@ -1,0 +1,47 @@
+{
+  "kind": "protocol_test",
+  "not_model_evidence": true,
+  "not_rollout_evidence": true,
+  "not_energy_evidence": true,
+  "note": "Byte length, file sha256, canonical-bytes sha256, and digest of the version 3 fixtures. canonical_sha256 and digest_sha256 are SHA-256 of the canonical chunk bytes. file_sha256 is SHA-256 of the fixture file. chunk_index is not a byte of the chunk.",
+  "fixtures": [
+    {
+      "path": "docs/acceptance/contracts/fixtures/smolvla-chunk-v3.json",
+      "role": "protocol test, seed 3, finite zero noise, one step, k=1",
+      "file_sha256": "a500b2e9dfce00d070c9b0f825d53edb49a19933ab992410e7dd2d23721442bc",
+      "canonical_len": 943,
+      "canonical_sha256": "4e1722a629708d81221e5c75c1946dcd28af40ab639239bde1ea3893dbb643e5",
+      "digest_sha256": "4e1722a629708d81221e5c75c1946dcd28af40ab639239bde1ea3893dbb643e5"
+    },
+    {
+      "path": "docs/acceptance/contracts/fixtures/smolvla-chunk-v3-real-noise.json",
+      "role": "50-step fixture values, seed 0x5a17, real noise hash, k=1",
+      "file_sha256": "44e444846a3aa61987201346fb80bd18bc58a642ccb3822ff9b5b6bb751b6742",
+      "canonical_len": 2119,
+      "canonical_sha256": "13e82f106898b5a2b1c6fb48f487cf7d6cbe81cb2f8410a71e8f626a2f0c329b",
+      "digest_sha256": "13e82f106898b5a2b1c6fb48f487cf7d6cbe81cb2f8410a71e8f626a2f0c329b",
+      "noise_sha256": "8db2ebc813c83673d6b61b10b2c2a2352018371cbfe9c661f3b405ac6370b61c"
+    },
+    {
+      "path": "docs/acceptance/contracts/fixtures/smolvla-chunk-v3-sequence.json",
+      "role": "binding-1 sequence, chunk_index 0 and 1, strictly increasing k",
+      "file_sha256": "8dbd31344e8fd9b1a12db9562bfc5787ab420a9cf2ec33079a931736f0fc8f1c",
+      "chunks": [
+        {
+          "chunk_index": 0,
+          "k": 0,
+          "canonical_len": 943,
+          "canonical_sha256": "7700ea35fbdc35587a111acb1dd605826fb21088da84ec17613af8598799c1c7",
+          "digest_sha256": "7700ea35fbdc35587a111acb1dd605826fb21088da84ec17613af8598799c1c7"
+        },
+        {
+          "chunk_index": 1,
+          "k": 1,
+          "canonical_len": 943,
+          "canonical_sha256": "516bb02fe060793533d079c60987137f6a659226852a2cd58b893cb39bf943ba",
+          "digest_sha256": "516bb02fe060793533d079c60987137f6a659226852a2cd58b893cb39bf943ba"
+        }
+      ]
+    }
+  ]
+}

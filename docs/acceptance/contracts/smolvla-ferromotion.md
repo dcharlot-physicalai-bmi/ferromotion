@@ -98,7 +98,10 @@ sha256 `bc5f67f054b1a84226d0438f959750697fea7a9c9eeca417b134b39a3e5c19fd`,
 `cursor/toolchain-1.100` at `9b0a2ffab2dcf902e0bec726cf30c437c69a6e84` and
 `cursor/fleet-energy-harness-65da` at `13ffe43a30ade6f514697286a2af00f0bbbc6c2a`.
 The version-2 pins above are superseded as the contract-document pin and are
-kept. The version-3 codec is not in this tree. This pin claims no codec verdict.
+kept. The version-3 codec is ferric `b9fd7597c24c6f05b162c572a126749998f5c5a2`
+and fleet `160b0be18f486cf1697272c6d462d1fa1e140b0e`. The fixtures under
+`fixtures/ferric-b9fd759/` are codec fixtures, not model output.
+`predict_action_chunk` still refuses with `ProposedEntryInvoked`.
 
 Real weight, stats, and noise sha256 values for `lerobot/smolvla_base` are not
 in the fixture. The hashes there are synthetic.

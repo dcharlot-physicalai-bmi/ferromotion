@@ -34,6 +34,12 @@ pub const FERRIC_V3_CONTRACT_SHA256: &str =
 
 /// Git blob of that file. 21831 bytes.
 pub const FERRIC_V3_CONTRACT_BLOB: &str = "b178ba4dfa051412653a9694211d383e2fa049c6";
+
+/// Toolchain commit of the version-3 codec. The contract bytes above are unchanged.
+pub const FERRIC_V3_CODEC_REVISION: &str = "b9fd7597c24c6f05b162c572a126749998f5c5a2";
+
+/// Fleet commit whose version-3 codec and fixtures match [`FERRIC_V3_CODEC_REVISION`].
+pub const FERRIC_V3_CODEC_FLEET_REVISION: &str = "160b0be18f486cf1697272c6d462d1fa1e140b0e";
 pub const PROPOSED_FERRIC_ENTRY: &str = "ferric.smolvla.predict_action_chunk.v1";
 pub const PREDICT_ACTION_CHUNK: &str = "predict_action_chunk";
 pub const SELECT_ACTION_IS_NOT_THE_ENTRY: &str = "select_action";

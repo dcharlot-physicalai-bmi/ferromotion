@@ -1,0 +1,37 @@
+Copied from github.com/dcharlot-physicalai-bmi/ferric
+
+Codec and these fixtures were compared at:
+
+branch cursor/toolchain-1.100
+commit b9fd7597c24c6f05b162c572a126749998f5c5a2
+
+branch cursor/fleet-energy-harness-65da
+commit 160b0be18f486cf1697272c6d462d1fa1e140b0e
+
+Identical blobs at both commits:
+
+crates/ferric-accept/src/smolvla_v3.rs
+crates/ferric-accept/tests/smolvla_v3.rs
+docs/acceptance/contracts/smolvla-ferromotion-v3.md
+  sha256 bc5f67f054b1a84226d0438f959750697fea7a9c9eeca417b134b39a3e5c19fd
+  git blob b178ba4dfa051412653a9694211d383e2fa049c6
+  the contract pin is unchanged
+docs/acceptance/contracts/fixtures/smolvla-chunk-v3.json
+docs/acceptance/contracts/fixtures/smolvla-chunk-v3-real-noise.json
+docs/acceptance/contracts/fixtures/smolvla-chunk-v3-sequence.json
+docs/acceptance/contracts/fixtures/smolvla-v3-fixture-record.json
+docs/acceptance/contracts/fixtures/smolvla-chunk-v2.json
+docs/acceptance/contracts/fixtures/smolvla-empty-chunk-v2.json
+
+crates/ferric-accept/src/smolvla.rs differs by one test line.
+Toolchain calls pad_state(&[0.0; 33]). Fleet calls pad_state(&vec![0.0; 33]).
+The codec functions are the same.
+
+These files are codec fixtures. They are not model output.
+predict_action_chunk refuses with ProposedEntryInvoked.
+
+The version-2 codec pins stay:
+contract 3ee11c015e3478c7c4aa0409499346f79ab1c8ce
+empty fixture c05228929efc3bcb4210b475dd959370fa69893a
+canonical nonempty 6d668d7e25c89249c890d895ef15b8fdcbb97dab7a1339a0a97605c6e1172d86
+canonical empty 6295818fa11b85b37ad8054c75e0a1935b0c0cbb5d7e419090c2520a17b1744e

@@ -212,6 +212,7 @@ mod closed_loop;
 mod joint_acceptance;
 mod external_oracles;
 mod smolvla_receiver;
+mod smolvla_v3;
 mod ferromorphic_clock;
 mod episode_v2;
 mod collision;
@@ -416,12 +417,14 @@ pub use smolvla_receiver::{
     refuse_token_len, verify_chunk, ActionChunk, ChunkV2, CodecError, ControlReject, InferenceFidelity, JointSpec,
     ProtocolReceipt, CODEC_V1_WITHDRAWN, CODEC_VERSION,
     DIGEST_DOMAIN, EMPTY_GOLDEN_DIGEST, FERRIC_CONTRACT_REVISION, FERRIC_EMPTY_FIXTURE_REVISION,
-    FERRIC_V3_CONTRACT_BLOB, FERRIC_V3_CONTRACT_FLEET_REVISION, FERRIC_V3_CONTRACT_REVISION,
-    FERRIC_V3_CONTRACT_SHA256, GOLDEN_DIGEST,
+    FERRIC_V3_CODEC_FLEET_REVISION, FERRIC_V3_CODEC_REVISION, FERRIC_V3_CONTRACT_BLOB,
+    FERRIC_V3_CONTRACT_FLEET_REVISION, FERRIC_V3_CONTRACT_REVISION, FERRIC_V3_CONTRACT_SHA256,
+    GOLDEN_DIGEST,
     IMAGE_ALIGN_CORNERS, IMAGE_INTERPOLATION, IMAGE_PAD_LEFT,
     IMAGE_PAD_TOP, IMAGE_SIDE, LEROBOT_UPSTREAM, PREDICT_ACTION_CHUNK, PREPROCESS_STEPS, PRE_UNPAD_STEPS,
     PRE_UNPAD_WIDTH, PROPOSED_FERRIC_ENTRY, SELECT_ACTION_IS_NOT_THE_ENTRY, SMOLVLA_HUB_ID, STATE_WIDTH, TOKEN_MAX,
 };
+pub use smolvla_v3::{decode_action_chunk_v3, predict_action_chunk, ActionChunkV3, JointV3, V3Error};
 pub use episode_v2::{
     steps_per_action, verify_chunk_binding, BindingState, ChunkBinding, ChunkFacts, EpisodeEnvelopeV2, EpisodeError,
     NsRational, CHUNK_BINDING_HEADER, EPISODE_ENVELOPE_V2_HEADER, EPISODE_ENVELOPE_V2_VERSION, MAX_ACTION_STEPS,
