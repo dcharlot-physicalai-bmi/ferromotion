@@ -2510,24 +2510,37 @@ pub fn ccd(config: &CcdConfig, o1: &mut CcdObj, o2: &mut CcdObj) -> CcdStatus {
         dist_cutoff: config.dist_cutoff,
     };
     let is_round = |k: GeomType| matches!(k, GeomType::Sphere | GeomType::Capsule);
-    if is_round(o1.kind) || is_round(o2.kind) {
+    // `5491d70f` also shrinks any geom pair whose margin is positive: GJK runs on the bare
+    // shape and `inflate` puts half the margin back on each witness. `64156abe` only shrinks
+    // a sphere or a capsule.
+    let four = crate::fp_contract::oracle_4_0_schedules();
+    let shrink = is_round(o1.kind) || is_round(o2.kind) || (four && (o1.margin > 0.0 || o2.margin > 0.0));
+    if shrink {
         let (m1, m2) = (o1.margin, o2.margin);
         let (mut full1, mut full2) = (0.0, 0.0);
+        if four && m1 > 0.0 {
+            full1 = 0.5 * m1;
+            o1.margin = 0.0;
+        }
+        if four && m2 > 0.0 {
+            full2 = 0.5 * m2;
+            o2.margin = 0.0;
+        }
         if o1.kind == GeomType::Sphere {
-            full1 = o1.size[0] + 0.5 * m1;
+            full1 = if four { full1 + o1.size[0] } else { o1.size[0] + 0.5 * m1 };
             o1.reduced = Some(Reduced::Point);
             o1.margin = 0.0;
         } else if o1.kind == GeomType::Capsule {
-            full1 = o1.size[0] + 0.5 * m1;
+            full1 = if four { full1 + o1.size[0] } else { o1.size[0] + 0.5 * m1 };
             o1.reduced = Some(Reduced::Line);
             o1.margin = 0.0;
         }
         if o2.kind == GeomType::Sphere {
-            full2 = o2.size[0] + 0.5 * m2;
+            full2 = if four { full2 + o2.size[0] } else { o2.size[0] + 0.5 * m2 };
             o2.reduced = Some(Reduced::Point);
             o2.margin = 0.0;
         } else if o2.kind == GeomType::Capsule {
-            full2 = o2.size[0] + 0.5 * m2;
+            full2 = if four { full2 + o2.size[0] } else { o2.size[0] + 0.5 * m2 };
             o2.reduced = Some(Reduced::Line);
             o2.margin = 0.0;
         }
