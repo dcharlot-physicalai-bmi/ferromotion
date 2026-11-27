@@ -218,8 +218,10 @@ pub fn plane_cylinder(margin: f64, p1: &GeomPose, p2: &GeomPose, size2: [f64; 2]
     let prjvec = dot3(&vec, &normal);
     let axis = axis * size2[1];
     prjaxis *= size2[1];
-    // `mji_addToScl3(pos, v, s)`: `pos += v·s`, one fused step per component
-    let add_scl = |pos: Vector3<f64>, v: &Vector3<f64>, s: f64| Vector3::from_fn(|k, _| v[k].mul_add(s, pos[k]));
+    // `mji_addToScl3(pos, v, s)`: `pos += v·s`, one fused step per component. The contract-off
+    // oracles round `v·s`, then the sum.
+    let separate = contract_off();
+    let add_scl = |pos: Vector3<f64>, v: &Vector3<f64>, s: f64| Vector3::from_fn(|k, _| if separate { pos[k] + v[k] * s } else { v[k].mul_add(s, pos[k]) });
     let mut out = Vec::with_capacity(4);
     let d = dist0 + prjaxis + prjvec;
     if d <= margin {
@@ -234,7 +236,12 @@ pub fn plane_cylinder(margin: f64, p1: &GeomPose, p2: &GeomPose, size2: [f64; 2]
     let prjvec1 = -prjvec * 0.5;
     let d = dist0 + prjaxis + prjvec1;
     if d <= margin {
-        let mut vec1 = Vector3::new(vec.y.mul_add(axis.z, -(vec.z * axis.y)), vec.z.mul_add(axis.x, -(vec.x * axis.z)), vec.x.mul_add(axis.y, -(vec.y * axis.x)));
+        // `mji_cross(vec1, vec, axis)`: `a1 b2 − a2 b1`, … (both products rounded on the contract-off path)
+        let mut vec1 = if separate {
+            Vector3::new(vec.y * axis.z - vec.z * axis.y, vec.z * axis.x - vec.x * axis.z, vec.x * axis.y - vec.y * axis.x)
+        } else {
+            Vector3::new(vec.y.mul_add(axis.z, -(vec.z * axis.y)), vec.z.mul_add(axis.x, -(vec.x * axis.z)), vec.x.mul_add(axis.y, -(vec.y * axis.x)))
+        };
         normalize3_mj(&mut vec1);
         vec1 *= size2[0] * 3.0f64.sqrt() / 2.0;
         out.push(pre(d, add_scl(add_scl(p2.pos + vec1 + axis, &vec, -0.5), &normal, -d * 0.5), normal, Vector3::zeros()));

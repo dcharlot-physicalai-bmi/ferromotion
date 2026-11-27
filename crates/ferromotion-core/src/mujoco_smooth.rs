@@ -971,9 +971,17 @@ impl SmoothModel {
             let frc_spring = -x * t.stiffness;
             let frc_damper = -ten_velocity[i] * t.damping;
             if frc_spring != 0.0 || frc_damper != 0.0 {
+                // `qfrc_spring[k] += J * frc_spring` in `mj_springdamper`: the contract-off oracles
+                // round the product, then the sum
+                let separate = contract_off();
                 for (&k, &jv) in t.colind.iter().zip(&ten_j[i]) {
-                    qfrc_spring[k] = jv.mul_add(frc_spring, qfrc_spring[k]);
-                    qfrc_damper[k] = jv.mul_add(frc_damper, qfrc_damper[k]);
+                    if separate {
+                        qfrc_spring[k] += jv * frc_spring;
+                        qfrc_damper[k] += jv * frc_damper;
+                    } else {
+                        qfrc_spring[k] = jv.mul_add(frc_spring, qfrc_spring[k]);
+                        qfrc_damper[k] = jv.mul_add(frc_damper, qfrc_damper[k]);
+                    }
                 }
             }
         }
