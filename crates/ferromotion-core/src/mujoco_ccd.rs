@@ -282,6 +282,34 @@ impl<'a> CcdObj<'a> {
                 local_to_global(&mat, &ls, &pos)
             }
             GeomType::Ellipsoid => {
+                if crate::fp_contract::oracle_4_0_schedules() {
+                    // `5491d70f` `mjc_ellipsoidSupport` (VA `0x6bc80`). `matᵀ·dir` is packed:
+                    // x is `(m00·dx + m10·dy) + m20·dz`, y and z swap the first pair,
+                    // `(m11·dy + m01·dx) + m21·dz` and `(m12·dy + m02·dx) + m22·dz`.
+                    // `norm²` is `(sx² + sy²) + sz²`, `inv` is `1/sqrt`, and each axis is
+                    // `s · (inv · size)`. The world product swaps the first pair again,
+                    // `(m01·sy + m00·sx) + m02·sz`, then adds `pos`.
+                    let (dx, dy, dz) = (dir.x, dir.y, dir.z);
+                    let lx = (mat[(0, 0)] * dx + mat[(1, 0)] * dy) + mat[(2, 0)] * dz;
+                    let ly = (mat[(1, 1)] * dy + mat[(0, 1)] * dx) + mat[(2, 1)] * dz;
+                    let lz = (mat[(1, 2)] * dy + mat[(0, 2)] * dx) + mat[(2, 2)] * dz;
+                    let (s0, s1, s2) = (self.size[0], self.size[1], self.size[2]);
+                    let mut sx = lx * s0;
+                    let mut sy = ly * s1;
+                    let mut sz = lz * s2;
+                    let norm2 = (sx * sx + sy * sy) + sz * sz;
+                    if norm2 < MINVAL2 {
+                        return V3::new(mat[(0, 0)] * s0 + pos.x, mat[(1, 0)] * s0 + pos.y, mat[(2, 0)] * s0 + pos.z);
+                    }
+                    let inv = 1.0 / norm2.sqrt();
+                    sx *= inv * s0;
+                    sy *= inv * s1;
+                    sz *= inv * s2;
+                    let wx = (mat[(0, 1)] * sy + mat[(0, 0)] * sx) + mat[(0, 2)] * sz;
+                    let wy = (mat[(1, 1)] * sy + mat[(1, 0)] * sx) + mat[(1, 2)] * sz;
+                    let wz = (mat[(2, 1)] * sy + mat[(2, 0)] * sx) + mat[(2, 2)] * sz;
+                    return V3::new(wx + pos.x, wy + pos.y, wz + pos.z);
+                }
                 let mut ls = Vector3::new(local_dir.x * self.size[0], local_dir.y * self.size[1], local_dir.z * self.size[2]);
                 let n2 = dot3(&ls, &ls);
                 if n2 < MINVAL2 {
@@ -1678,8 +1706,12 @@ fn epa(st: &mut CcdStatus, pt: &mut Polytope, o1: &mut CcdObj, o2: &mut CcdObj) 
             upper = upper_k;
             upper2 = upper * upper;
         }
-        if upper - lower < tolerance {
-            if k == 0 && upper < lower - 1e-10 {
+        // `5491d70f` stops on this iteration's gap `upper_k − lower`. `64156abe` stops on
+        // the running minimum `upper − lower`.
+        let gap = if crate::fp_contract::oracle_4_0_schedules() { upper_k } else { upper };
+        if gap - lower < tolerance {
+            let slack = if crate::fp_contract::oracle_4_0_schedules() { tolerance } else { 1e-10 };
+            if k == 0 && upper < lower - slack {
                 face = None;
             }
             break;
