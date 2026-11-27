@@ -1,12 +1,24 @@
-name: oracle-profile
+name: 3.13 contract-off
 
 on:
   push:
     branches: [main, "cursor/**", "chore/**"]
   pull_request:
 
-# Contract-off comparisons against libmujoco 64156abe. The published-default
-# jobs in ci.yml and menagerie-conformance.yml are unchanged: their goldens
+# 3.13 contract-off oracle gate. Profile mujoco-3.13.0-x86_64-contract-off.
+# libmujoco sha256 64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc,
+# verified by scripts/oracle_profile_ci.py against conformance/oracle_x86_contract_off.json.
+# The pin is the corrected 212 receipt committed in 54999d65:
+# docs/acceptance/receipts/2aeb3611c9f3edca1961eb25ee374df56229d799.supersedes-c590d3a2.md
+# sha256 d6b8600825d4ed0634df581d269216f22930aa263bd401c7a9a5d43efbbef6d7.
+# It names code 2aeb361. c590d3a2 is superseded and is not the pin.
+# The gate requires 212/212 20-step bit-exact (exact set
+# caa71f582e61cf5eda1adcba7ff572da4ac4fb76596f8fd3a0f2232a1d5018bc)
+# and native 631/636, exactly as that receipt records. A loss fails.
+# An unreceipted gain fails. Nothing here is re-pinned or relabeled.
+# The library is fetched and built by scripts/oracle_profile_prepare.sh,
+# the same way this profile workflow already did.
+# The published-default bit-exact gate is a different workflow. Its goldens
 # stay the contracted captures, and this workflow does not rewrite them.
 
 env:
@@ -16,7 +28,7 @@ env:
 
 jobs:
   contract-off-native:
-    name: contract-off native
+    name: 3.13 contract-off native (631/636)
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
@@ -47,7 +59,7 @@ jobs:
         run: python3 scripts/oracle_profile_ci.py --phase graph --lib "$RUNNER_TEMP/oracle/lib/libmujoco.so.3.13.0" --menagerie "$RUNNER_TEMP/menagerie" --dump "$RUNNER_TEMP/oracle/x86-mesh-graph.txt"
 
   contract-off-conformance:
-    name: contract-off conformance
+    name: 3.13 contract-off 20-step (212/212)
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
