@@ -983,7 +983,10 @@ impl SmoothModel {
                     } else {
                         for j in 0..con.dim - 1 {
                             let fri = con.friction[j];
-                            let v = (fri * fri).mul_add(if j < 2 { tran } else { rot }, tran);
+                            // `tran + fri*fri*(j < 2 ? tran : rot)`: the contract-off oracles round
+                            // the product, then the sum
+                            let w = if j < 2 { tran } else { rot };
+                            let v = if crate::fp_contract::contract_off() { tran + (fri * fri) * w } else { (fri * fri).mul_add(w, tran) };
                             e.diag_a[i + 2 * j] = v;
                             e.diag_a[i + 2 * j + 1] = v;
                         }

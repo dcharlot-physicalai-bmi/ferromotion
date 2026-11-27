@@ -8,14 +8,14 @@ on:
 # 3.13 contract-off oracle gate. Profile mujoco-3.13.0-x86_64-contract-off.
 # libmujoco sha256 64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc,
 # verified by scripts/oracle_profile_ci.py against conformance/oracle_x86_contract_off.json.
-# The pin is the corrected 212 receipt committed in 54999d65:
-# docs/acceptance/receipts/2aeb3611c9f3edca1961eb25ee374df56229d799.supersedes-c590d3a2.md
-# sha256 d6b8600825d4ed0634df581d269216f22930aa263bd401c7a9a5d43efbbef6d7.
-# It names code 2aeb361. c590d3a2 is superseded and is not the pin.
-# The gate requires 212/212 20-step bit-exact (exact set
-# caa71f582e61cf5eda1adcba7ff572da4ac4fb76596f8fd3a0f2232a1d5018bc)
-# and native 631/636, exactly as that receipt records. A loss fails.
-# An unreceipted gain fails. Nothing here is re-pinned or relabeled.
+# The pin is docs/acceptance/receipts/e1c052f10eae4d4aef1ddab0e0887b2754afde4f.md
+# sha256 82981186caed2e17868dc605f57222371caa1de2a496423f6ba2427cc398a693.
+# It names code e1c052f. The previous pin
+# 2aeb3611c9f3edca1961eb25ee374df56229d799.supersedes-c590d3a2.md is unchanged.
+# c590d3a2 stays superseded. The gate requires 212/212 20-step bit-exact
+# (exact set caa71f582e61cf5eda1adcba7ff572da4ac4fb76596f8fd3a0f2232a1d5018bc)
+# and native 636/636, exactly as that receipt records. A loss fails.
+# An unreceipted gain fails. The receipt file itself is not edited.
 # The library is fetched and built by scripts/oracle_profile_prepare.sh,
 # the same way this profile workflow already did.
 # The published-default bit-exact gate is a different workflow. Its goldens
@@ -28,7 +28,7 @@ env:
 
 jobs:
   contract-off-native:
-    name: 3.13 contract-off native (631/636)
+    name: 3.13 contract-off native (636/636)
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
@@ -54,9 +54,9 @@ jobs:
       - name: Build libmujoco 64156abe and the native dump
         run: bash scripts/oracle_profile_prepare.sh native
       - name: Native comparison
-        run: python3 scripts/oracle_profile_ci.py --phase native --lib "$RUNNER_TEMP/oracle/lib/libmujoco.so.3.13.0" --menagerie "$RUNNER_TEMP/menagerie" --dump "$RUNNER_TEMP/oracle/x86-native.txt"
+        run: python3 scripts/oracle_profile_ci.py --phase native --receipt docs/acceptance/receipts/e1c052f10eae4d4aef1ddab0e0887b2754afde4f.md --receipt-sha256 82981186caed2e17868dc605f57222371caa1de2a496423f6ba2427cc398a693 --lib "$RUNNER_TEMP/oracle/lib/libmujoco.so.3.13.0" --menagerie "$RUNNER_TEMP/menagerie" --dump "$RUNNER_TEMP/oracle/x86-native.txt"
       - name: mesh_graph comparison
-        run: python3 scripts/oracle_profile_ci.py --phase graph --lib "$RUNNER_TEMP/oracle/lib/libmujoco.so.3.13.0" --menagerie "$RUNNER_TEMP/menagerie" --dump "$RUNNER_TEMP/oracle/x86-mesh-graph.txt"
+        run: python3 scripts/oracle_profile_ci.py --phase graph --receipt docs/acceptance/receipts/e1c052f10eae4d4aef1ddab0e0887b2754afde4f.md --receipt-sha256 82981186caed2e17868dc605f57222371caa1de2a496423f6ba2427cc398a693 --lib "$RUNNER_TEMP/oracle/lib/libmujoco.so.3.13.0" --menagerie "$RUNNER_TEMP/menagerie" --dump "$RUNNER_TEMP/oracle/x86-mesh-graph.txt"
 
   contract-off-conformance:
     name: 3.13 contract-off 20-step (212/212)
@@ -85,4 +85,4 @@ jobs:
       - name: Build libmujoco 64156abe and the step dump
         run: bash scripts/oracle_profile_prepare.sh step
       - name: 20-step comparison
-        run: python3 scripts/oracle_profile_ci.py --phase step --lib "$RUNNER_TEMP/oracle/lib/libmujoco.so.3.13.0" --menagerie "$RUNNER_TEMP/menagerie" --dump "$RUNNER_TEMP/oracle/x86-step.txt"
+        run: python3 scripts/oracle_profile_ci.py --phase step --receipt docs/acceptance/receipts/e1c052f10eae4d4aef1ddab0e0887b2754afde4f.md --receipt-sha256 82981186caed2e17868dc605f57222371caa1de2a496423f6ba2427cc398a693 --lib "$RUNNER_TEMP/oracle/lib/libmujoco.so.3.13.0" --menagerie "$RUNNER_TEMP/menagerie" --dump "$RUNNER_TEMP/oracle/x86-step.txt"
