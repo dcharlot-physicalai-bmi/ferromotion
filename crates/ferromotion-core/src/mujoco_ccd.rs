@@ -629,7 +629,15 @@ fn s3d(s1: &V3, s2: &V3, s3: &V3, s4: &V3) -> [f64; 4] {
     let c42 = det3(s1, s3, s4);
     let c43 = -det3(s1, s2, s4);
     let c44 = det3(s1, s2, s3);
-    let m_det = c41 + c42 + c43 + c44;
+    // `5491d70f` `gjk` (VA `0x84b00`, the inlined `S3D` at `+0x5b9`) subtracts the
+    // negated cofactors: `((C42 − (−C41)) − (−C43)) + C44`, which is
+    // `((C42 + C41) + C43) + C44`. `64156abe` adds `C41` first. A zero weight drops
+    // that vertex and the other three go to `S2D`.
+    let m_det = if crate::fp_contract::oracle_4_0_schedules() {
+        ((c42 + c41) + c43) + c44
+    } else {
+        ((c41 + c42) + c43) + c44
+    };
     let (comp1, comp2, comp3, comp4) = (same_sign2(m_det, c41) != 0, same_sign2(m_det, c42) != 0, same_sign2(m_det, c43) != 0, same_sign2(m_det, c44) != 0);
     if comp1 && comp2 && comp3 && comp4 {
         return [c41 / m_det, c42 / m_det, c43 / m_det, c44 / m_det];
@@ -2912,6 +2920,34 @@ mod tests {
             lambda.map(|x| x.to_bits()),
             [0x3fc1dd7584709817, 0x3f9682b825ed1116, 0x3fead48cddb47172]
         );
+    }
+
+    /// `5491d70f` inlined `S3D` (`gjk+0x5b9`) on the last inside tetrahedron of
+    /// `rby1m_1.2` geom 38 vs geom 11. The weights are the signed volumes over
+    /// `((C42+C41)+C43)+C44`. `gdb` read these four, and the following `lincomb` was `n = 4`.
+    #[test]
+    fn a_4x_s3d_matches_the_rby1_four_point_coefficients() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                let _ = crate::fp_contract::install_policy("published-default", "published-default", "");
+            }
+        }
+        let _reset = Reset;
+        let b = |x: u64| f64::from_bits(x);
+        let p = |x: u64, y: u64, z: u64| V3::new(b(x), b(y), b(z));
+        let s1 = p(0x3fc1f767f8b5920c, 0x3fce0207e0c94aaa, 0x3ec501c3c2b90000);
+        let s2 = p(0xbfe4f4be15b2464a, 0xbfd8de2764e3d493, 0x3f9b5908091a3508);
+        let s3 = p(0x3fb8dcc2d72eba6e, 0xbfd7f78a4963e142, 0x3f955350a8982b00);
+        let s4 = p(0xbfc24ca0151c5486, 0xbf99327d7478a2df, 0xbfccbad3d2b41a1c);
+        let want = [0x3fe3186dc91df271, 0x3fc36023a312fe91, 0x3fcb6508ac3078a6, 0x3fa364723112fc15];
+        for (id, sha) in [
+            (crate::fp_contract::ORACLE_4_0_1_ID, crate::fp_contract::ORACLE_4_0_1_SHA256),
+            (crate::fp_contract::ORACLE_4_0_ID, crate::fp_contract::ORACLE_4_0_SHA256),
+        ] {
+            crate::fp_contract::install_policy(id, sha, "").unwrap();
+            assert_eq!(s3d(&s1, &s2, &s3, &s4).map(|x| x.to_bits()), want, "{id}");
+        }
     }
 
     #[test]
