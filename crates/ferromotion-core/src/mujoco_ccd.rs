@@ -1393,6 +1393,18 @@ fn polytope4(pt: &mut Polytope, st: &mut CcdStatus, o1: &mut CcdObj, o2: &mut Cc
     EPA_SUCCESS
 }
 
+/// `5491d70f` `mjc_hillclimbSupport` (VA `0x6c040`) widens `mesh_vert` with
+/// `cvtss2sd` before the multiply. Each `xmat` row is `(m2·z) + ((m1·y) + (m0·x))`,
+/// and `geom_xpos` is added after that product is stored. EPA keeps those world
+/// points and combines them as `(λ2·p2) + ((λ1·p1) + (λ0·p0))`; it does not
+/// rebuild them from the vertex index.
+///
+/// Aloha home pose, geom 15 vs 45: the contact normal is `mju_normalize3(x1−x2)`.
+/// The stored world `y` values of the final face match. One corner does not:
+/// `5491d70f` pairs geom 45's `bfa0093318fc2018` with geom 15's `bf9fa2cb87a46dd1`
+/// (Minkowski `y` `3f3be6aa94f497c0`); we pair it with geom 15's `bf7b5c4a8c16ce16`
+/// (Minkowski `y` `3f993b538ef28caa`). Witness `x2.y` is then `bf9371ef600579a0`
+/// against `bf9371ef6005799f`.
 fn epa_witness(pt: &Polytope, fi: usize) -> (V3, V3, f64) {
     let f = &pt.faces[fi];
     let (a, b, c) = (&pt.verts[f.verts[0]], &pt.verts[f.verts[1]], &pt.verts[f.verts[2]]);
