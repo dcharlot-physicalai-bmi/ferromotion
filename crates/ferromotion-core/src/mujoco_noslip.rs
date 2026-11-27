@@ -37,8 +37,8 @@ impl SmoothModel {
                 if xi != 0.0 {
                     for adr in start..end {
                         let c = off + self.m_colind[adr];
-                        // `x -= L·xᵢ`. `64156abe` subtracts the product; it does not fuse `(-L)·xᵢ + x`.
-                        y[c] = if crate::fp_contract::contract_off() {
+                        // `x -= L·xᵢ`. The contract-off libraries subtract the product.
+                        y[c] = if crate::fp_contract::contract_off_line() {
                             y[c] - sd.qld[adr] * xi
                         } else {
                             (-sd.qld[adr]).mul_add(xi, y[c])
@@ -53,10 +53,10 @@ impl SmoothModel {
             }
         }
         let mut ar = vec![0.0; nefc * nefc];
-        // `mju_sqrMatTD` calls `mju_addToScl` on the lower prefix of length `i+1`. At n >= 6 and with
-        // no alias, `64156abe` does the groups of four as `res + (scl·x)` and the tail as `(scl·x) + res`.
+        // `mju_sqrMatTD` calls `mju_addToScl` on the lower prefix of length `i+1`. At n >= 6 the
+        // contract-off libraries do groups of four as `res + (scl·x)` and the tail as `(scl·x) + res`.
         // Shorter prefixes are entirely `(scl·x) + res`.
-        let separate = crate::fp_contract::contract_off();
+        let separate = crate::fp_contract::contract_off_line();
         for i in 0..nefc {
             for j in 0..nv {
                 let t = y[i * nv + j];
@@ -156,8 +156,8 @@ impl Dual<'_> {
                 };
         }
         for j in 0..dim {
-            // `res -= R·f`. `64156abe` subtracts the product.
-            res[j] = if crate::fp_contract::contract_off() {
+            // `res -= R·f`. The contract-off libraries subtract the product.
+            res[j] = if crate::fp_contract::contract_off_line() {
                 res[j] - self.e.r[i + j] * force[i + j]
             } else {
                 (-self.e.r[i + j]).mul_add(force[i + j], res[j])
@@ -257,8 +257,9 @@ fn cost_change(a: &[f64], force: &mut [f64], old: &[f64], res: &[f64], dim: usiz
 fn qcqp2(ain: &[f64], bin: &[f64], d: &[f64], r: f64) -> ([f64; 5], bool) {
     let (b1, b2) = (bin[0] * d[0], bin[1] * d[1]);
     let (a11, a22, a12) = (ain[0] * d[0] * d[0], ain[3] * d[1] * d[1], ain[1] * d[0] * d[1]);
-    // `mju_QCQP2` matches in 4849b2dd and 5491d70f, but this schedule dropped one `efc_state` on both.
-    let separate = crate::fp_contract::contract_off();
+    // `5491d70f` / `4849b2dd` `mju_QCQP2` has no `vfmadd`: `mulsd` then `addsd`/`subsd`.
+    // Fusing it compensated for a fused `AR` and put `flybody/scene.xml` state 0 on the cone side.
+    let separate = crate::fp_contract::contract_off_line();
     let (mut la, mut v1, mut v2) = (0.0f64, 0.0f64, 0.0f64);
     for _ in 0..20 {
         // `det = (a11+λ)(a22+λ) − a12²`, then `v = −A⁻¹b`, `val = v·v − r²`. No FMA in `64156abe`.
