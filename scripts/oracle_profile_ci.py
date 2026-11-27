@@ -254,6 +254,26 @@ def receipt_rank(code_time: int, file_time: int, name: str) -> tuple[int, int, s
     return (code_time, file_time, name)
 
 
+def receipt_with_sha256(path: Path, digest: str) -> Path:
+    """Use this receipt file. Its sidecar must name it and hash to ``digest``.
+
+    The file is the pin. A squash or cherry-pick does not have to carry the
+    commit named inside the receipt. The bytes are not rewritten.
+    """
+    if not path.is_file():
+        raise ValueError(f"receipt missing: {path}")
+    sidecar = Path(str(path) + ".sha256")
+    if not sidecar.is_file():
+        raise ValueError(f"receipt sidecar missing: {sidecar}")
+    got = sha256_file(path)
+    side = sidecar.read_text().split()
+    rel = path.relative_to(ROOT).as_posix() if path.is_absolute() else path.as_posix()
+    if len(side) < 2 or side[0] != got or side[0] != digest or side[1] != rel:
+        raise ValueError(f"receipt sha256 {got} sidecar {side!r}; pin {digest} {rel}")
+    parse_pin_block(path.read_text())
+    return path
+
+
 def latest_receipt(directory: Path | None = None) -> Path:
     directory = directory or RECEIPTS
     ranked: list[tuple[tuple[int, int, str], Path]] = []
@@ -547,6 +567,8 @@ def main() -> int:
     parser.add_argument("--lib", type=Path)
     parser.add_argument("--menagerie", type=Path)
     parser.add_argument("--dump", type=Path)
+    parser.add_argument("--receipt", type=Path)
+    parser.add_argument("--receipt-sha256")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--write-receipt", action="store_true")
     parser.add_argument("--native-log", type=Path)
@@ -618,7 +640,12 @@ def main() -> int:
     else:
         check_file(args.dump, artifact["step_dump_sha256"], artifact["step_dump_bytes"], "x86-step.txt")
         example = "menagerie_native_step"
-    receipt_path = latest_receipt()
+    if (args.receipt is None) != (args.receipt_sha256 is None):
+        parser.error("--receipt and --receipt-sha256 are set together")
+    if args.receipt is not None:
+        receipt_path = receipt_with_sha256(args.receipt, args.receipt_sha256)
+    else:
+        receipt_path = latest_receipt()
     _digest, pinned_models, pinned_fields = parse_pin_block(receipt_path.read_text())
     print(f"receipt {receipt_path.name} exact {len(pinned_models)} fields {len(pinned_fields)}")
     env = {
