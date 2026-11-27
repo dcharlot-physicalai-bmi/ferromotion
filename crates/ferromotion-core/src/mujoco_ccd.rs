@@ -1405,6 +1405,14 @@ fn polytope4(pt: &mut Polytope, st: &mut CcdStatus, o1: &mut CcdObj, o2: &mut Cc
 /// (Minkowski `y` `3f3be6aa94f497c0`); we pair it with geom 15's `bf7b5c4a8c16ce16`
 /// (Minkowski `y` `3f993b538ef28caa`). Witness `x2.y` is then `bf9371ef600579a0`
 /// against `bf9371ef6005799f`.
+///
+/// Hillclimb on this pair returns `5491d70f`'s index whenever the direction
+/// matches. The walk is strict `>`, neighbors in `mesh_graph` order, the dot is
+/// `(x·lx + y·ly) + z·lz` on the widened vertex, the direction is `matᵀ·dir`
+/// with no normalization, and meshes under 10 vertices are scanned. The first
+/// split is support call 5 on geom 15: our direction
+/// `bfeec3b188e8cd8f bfd17767dd95dd72 bfa21bd2e08212e8` picks index 3540;
+/// `5491d70f`'s `bfeea75a48913b54 bfd25e4e4c29e8f9 3c516ba621f0920f` picks 3487.
 fn epa_witness(pt: &Polytope, fi: usize) -> (V3, V3, f64) {
     let f = &pt.faces[fi];
     let (a, b, c) = (&pt.verts[f.verts[0]], &pt.verts[f.verts[1]], &pt.verts[f.verts[2]]);
