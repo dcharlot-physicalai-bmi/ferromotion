@@ -404,7 +404,10 @@ fn lincomb(coef: &[f64], vs: &[V3]) -> V3 {
                 if contract_off() { coef[0] * vs[0][k] + coef[1] * vs[1][k] } else { coef[0].mul_add(vs[0][k], coef[1] * vs[1][k]) }
             }
             3 => {
-                if contract_off() {
+                if crate::fp_contract::oracle_4_0_schedules() {
+                    // `5491d70f` sums the third term first: `c0·v0 + (c1·v1 + c2·v2)`.
+                    coef[0] * vs[0][k] + (coef[1] * vs[1][k] + coef[2] * vs[2][k])
+                } else if contract_off() {
                     (coef[0] * vs[0][k] + coef[1] * vs[1][k]) + coef[2] * vs[2][k]
                 } else {
                     coef[2].mul_add(vs[2][k], coef[0].mul_add(vs[0][k], coef[1] * vs[1][k]))
@@ -1555,6 +1558,15 @@ fn mesh_normals(obj: &CcdObj, dim: usize, vi: [i64; 3]) -> Vec<(V3, usize)> {
 }
 
 /// Edge directions (unit) and their far endpoints for the edge/vertex feature of a geom.
+/// `5491d70f` `capsuleEdgeNormals`: the capsule axis through the witness, extended by `size[1]`.
+fn capsule_segment(obj: &CcdObj, w: &V3) -> (V3, V3, V3) {
+    let m = &obj.pose.mat;
+    let axis = V3::new(m[(0, 2)], m[(1, 2)], m[(2, 2)]);
+    let pr = dot3(&(w - obj.pose.pos), &axis);
+    let length = obj.size[1];
+    (axis, add_scl3(w, &axis, -pr - length), add_scl3(w, &axis, -pr + length))
+}
+
 fn edge_normals(obj: &CcdObj, dim: usize, v: &[V3; 3], vi: &[i64; 3]) -> Vec<(V3, V3)> {
     let v1i = vi[0];
     let pose = &obj.pose;
@@ -1734,6 +1746,19 @@ fn simplex_dim(vi: &mut [i64; 3], v: &mut [V3; 3]) -> usize {
     }
 }
 
+/// The GJK simplex, as `mjc_multicontact` reads `suppind` / `suppvert` when EPA did not run.
+/// Indices follow `5491d70f`: `supp[0]`, `supp[nsupp>1]`, `supp[nsupp>2]`.
+fn shallow_multicontact(st: &mut CcdStatus, o1: &CcdObj, o2: &CcdObj) {
+    let i1 = if st.nsimplex > 1 { 1 } else { 0 };
+    let i2 = if st.nsimplex > 2 { 2 } else { 0 };
+    let mut pt = Polytope::new(1);
+    pt.verts.push(st.simplex[0]);
+    pt.verts.push(st.simplex[i1]);
+    pt.verts.push(st.simplex[i2]);
+    pt.faces.push(Face { verts: [0, 1, 2], adj: [0, 0, 0], v: V3::zeros(), dist2: 0.0, index: 0 });
+    multicontact(&pt, 0, st, o1, o2);
+}
+
 fn multicontact(pt: &Polytope, fi: usize, st: &mut CcdStatus, o1: &CcdObj, o2: &CcdObj) {
     if o1.kind == GeomType::Mesh && o1.hull.map(|h| h.polygons.is_empty()).unwrap_or(true) {
         return;
@@ -1757,6 +1782,9 @@ fn multicontact(pt: &Polytope, fi: usize, st: &mut CcdStatus, o1: &CcdObj, o2: &
     let mut edgecon2 = false;
     let mut e1: Vec<(V3, V3)> = Vec::new();
     let mut e2: Vec<(V3, V3)> = Vec::new();
+    // `5491d70f` `capsuleEdgeNormals` replaces the simplex point with the capsule segment.
+    let mut cap1: Option<V3> = None;
+    let mut cap2: Option<V3> = None;
     let four = crate::fp_contract::oracle_4_0_schedules();
     let (i, j) = if let Some(r) = if four { aligned_faces_4(&n1, &n2, &dir) } else { aligned_faces(&n1, &n2) } {
         r
@@ -1769,19 +1797,33 @@ fn multicontact(pt: &Polytope, fi: usize, st: &mut CcdStatus, o1: &CcdObj, o2: &
         let mut picked = None;
         for k in order {
             if k == 1 && nface1 < 3 && !n2.is_empty() {
-                e1 = edge_normals(o1, nface1, &v1, &v1i);
+                if o1.kind == GeomType::Capsule {
+                    let (axis, a, b) = capsule_segment(o1, &st.x1[0]);
+                    e1 = vec![(axis, b)];
+                    cap1 = Some(a);
+                } else {
+                    e1 = edge_normals(o1, nface1, &v1, &v1i);
+                }
                 if let Some(r) = aligned_face_edge(&e1, &n2, &dir) {
                     edgecon1 = true;
                     picked = Some(r);
                     break;
                 }
+                cap1 = None;
             } else if k == 2 && nface2 < 3 && !n1.is_empty() {
-                e2 = edge_normals(o2, nface2, &v2, &v2i);
+                if o2.kind == GeomType::Capsule {
+                    let (axis, a, b) = capsule_segment(o2, &st.x2[0]);
+                    e2 = vec![(axis, b)];
+                    cap2 = Some(a);
+                } else {
+                    e2 = edge_normals(o2, nface2, &v2, &v2i);
+                }
                 if let Some(r) = aligned_face_edge(&e2, &n1, &dir_neg) {
                     edgecon2 = true;
                     picked = Some(r);
                     break;
                 }
+                cap2 = None;
             }
         }
         let Some(r) = picked else { return };
@@ -1801,8 +1843,8 @@ fn multicontact(pt: &Polytope, fi: usize, st: &mut CcdStatus, o1: &CcdObj, o2: &
     } else {
         return;
     };
-    let face1: Vec<V3> = if edgecon1 { vec![v1[0], e1[i].1] } else { face_vertices(o1, if edgecon2 { n1[j].1 } else { n1[i].1 }) };
-    let face2: Vec<V3> = if edgecon2 { vec![v2[0], e2[i].1] } else { face_vertices(o2, n2[j].1) };
+    let face1: Vec<V3> = if edgecon1 { vec![cap1.unwrap_or(v1[0]), e1[i].1] } else { face_vertices(o1, if edgecon2 { n1[j].1 } else { n1[i].1 }) };
+    let face2: Vec<V3> = if edgecon2 { vec![cap2.unwrap_or(v2[0]), e2[i].1] } else { face_vertices(o2, n2[j].1) };
     // half the geom margin, and none of a capsule's (its radius is already in the witness)
     let half = |o: &CcdObj| if four && o.kind != GeomType::Capsule { 0.5 * o.margin } else { 0.0 };
     let (m1, m2) = (half(o1), half(o2));
@@ -1921,6 +1963,10 @@ pub fn ccd(config: &CcdConfig, o1: &mut CcdObj, o2: &mut CcdObj) -> CcdStatus {
             inflate(&mut st, full1, full2);
             if st.dist[0] > st.dist_cutoff {
                 st.dist[0] = MAX_LIMIT;
+            } else if crate::fp_contract::oracle_4_0_schedules() && config.max_contacts > 1 && st.dist[0] < 0.0 && st.nsimplex > 0 {
+                // `5491d70f` / `4849b2dd` `mjc_ccd`: a negative distance after inflating the reduced
+                // capsule or sphere runs `mjc_multicontact` on the GJK simplex. 3.13 returns the witness.
+                shallow_multicontact(&mut st, o1, o2);
             }
             return st;
         }
@@ -2433,6 +2479,52 @@ mod tests {
         let s = prim(GeomType::Sphere, [0.05, 0.0, 0.0], [0.03, 0.04, 1.12], ID);
         let c = collide_pair(0.0, &s, &m).unwrap();
         check_set(&c, -0.005000002980232357, [0.0, 0.0, -1.0], &[[0.030000000000000002, 0.040000000000000015, 1.0725000014901163]], 1e-9);
+    }
+
+    /// `5491d70f` sums a 3-simplex tail-first, and the capsule segment clipped against the
+    /// `f_distal_pst` triangle then has these two distances (`rh_lfmiddle` vs that mesh).
+    #[test]
+    fn the_shadow_capsule_edge_has_mujocos_two_distances() {
+        let _guard = PolicyReset;
+        crate::fp_contract::install_policy(crate::fp_contract::ORACLE_4_0_1_ID, crate::fp_contract::ORACLE_4_0_1_SHA256, "").unwrap();
+        let b = f64::from_bits;
+        let mesh = [
+            V3::new(b(0x3fd54bf6fc9ad856), b(0x3fb36c950c356c48), b(0x3fb21714566a4039)),
+            V3::new(b(0x3fd565b679337956), b(0x3fb2d3c6c0b0e10b), b(0x3fb21813777861b4)),
+            V3::new(b(0x3fd56637a5b15a3a), b(0x3fb2d5072e914c73), b(0x3fb210adb695cdda)),
+        ];
+        let edge = [
+            V3::new(b(0x3fd576eaca540083), b(0x3fb41573a1ee003f), b(0x3fb0c11ec6475167)),
+            V3::new(b(0x3fd53556ccf69447), b(0x3fb2094e63f78ed6), b(0x3fb6bb17f0d626a6)),
+        ];
+        let n = V3::new(b(0xbfe93ccbb214c192), b(0xbfe112eeb9bc1113), b(0xbfd38cc540f08554));
+        let dir = V3::new(b(0x3fe93ccbb214c192), b(0x3fe112eeb9bc1113), b(0x3fd38cc540f08554));
+        let mut st = CcdStatus {
+            separated: false,
+            dist: Vec::new(),
+            x1: Vec::new(),
+            x2: Vec::new(),
+            gjk_iterations: 0,
+            epa_iterations: 0,
+            epa_status: 0,
+            simplex: [Vertex::default(); 4],
+            nsimplex: 3,
+            tolerance: 1e-6,
+            max_iterations: 35,
+            max_contacts: 2,
+            dist_cutoff: 0.0,
+        };
+        assert!(polygon_clip(&mut st, &mesh, &edge, &n, &dir, 0.0));
+        let mut bits: Vec<u64> = st.dist.iter().map(|d| d.to_bits()).collect();
+        bits.sort();
+        assert_eq!(bits, vec![0xbf5d1a4181e483b3, 0xbf5d1b20233ae58e]);
+    }
+
+    struct PolicyReset;
+    impl Drop for PolicyReset {
+        fn drop(&mut self) {
+            let _ = crate::fp_contract::install_policy("published-default", "published-default", "");
+        }
     }
 
     /// A clip that writes nothing must SAY so and leave EPA's witness pair alone. (MuJoCo's edge-on-face
