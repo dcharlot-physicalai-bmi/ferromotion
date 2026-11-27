@@ -6559,6 +6559,80 @@ fn plugin_pid(el: &El, instances: &PluginInstances) -> Result<crate::mujoco_actu
     Ok(crate::mujoco_actuator::Pid { kp, ki, kd, i_max, slew_max })
 }
 
+/// Replace the control block when a nearer class wrote a different shortcut than `tag`.
+/// `chain` is nearest-first, the same order `one_actuator` builds.
+fn resync_4x_shortcut(rec: &mut ActRecord, defaults: &Defaults, chain: &[&str], tag: &str, c: &Compiler) -> Result<(), ActErr> {
+    let inherits = |last_tag: &str, attrs: &[(String, String)], gain: crate::mujoco_actuator::ActGain| -> bool {
+        if last_tag == tag {
+            return true;
+        }
+        if last_tag != "general" {
+            return false;
+        }
+        let stated = attrs.iter().rev().find(|(k, _)| k == "gaintype").map(|(_, v)| v.as_str());
+        match tag {
+            "damper" => stated == Some("affine") || (stated.is_none() && gain == crate::mujoco_actuator::ActGain::Affine),
+            "muscle" => stated == Some("muscle") || (stated.is_none() && gain == crate::mujoco_actuator::ActGain::Muscle),
+            "dcmotor" => stated == Some("dcmotor"),
+            "pid" => stated == Some("pid"),
+            "orientation" => stated == Some("so3"),
+            _ => matches!(stated, None | Some("fixed")) && gain == crate::mujoco_actuator::ActGain::Fixed,
+        }
+    };
+    let mut source: Option<&str> = None;
+    let mut poisoned = false;
+    for class in chain {
+        let Some(decls) = defaults.actuator_decls.get(*class).filter(|d| !d.is_empty()) else { continue };
+        let (last_tag, last_attrs) = &decls[decls.len() - 1];
+        if !poisoned {
+            if inherits(last_tag, last_attrs, rec.gain) {
+                return Ok(());
+            }
+            poisoned = true;
+            continue;
+        }
+        let mut slot = ActRecord::default();
+        let pos = chain.iter().position(|k| *k == *class).expect("class is in the chain");
+        let mut through: Vec<&str> = chain[pos..].to_vec();
+        through.reverse();
+        for k in through {
+            for (dtag, dattrs) in defaults.actuator_decls.get(k).into_iter().flatten() {
+                slot.apply(dtag, dattrs, c)?;
+            }
+        }
+        if inherits(last_tag, last_attrs, slot.gain) {
+            source = Some(*class);
+            rec.gain = slot.gain;
+            rec.gainprm = slot.gainprm;
+            rec.bias = slot.bias;
+            rec.biasprm = slot.biasprm;
+            rec.dynamics = slot.dynamics;
+            rec.dynprm = slot.dynprm;
+            break;
+        }
+    }
+    if source.is_none() && poisoned {
+        let slot = ActRecord::default();
+        rec.gain = slot.gain;
+        rec.gainprm = slot.gainprm;
+        rec.bias = slot.bias;
+        rec.biasprm = slot.biasprm;
+        rec.dynamics = slot.dynamics;
+        rec.dynprm = slot.dynprm;
+    }
+    // `SetControl` clears the activation flags before the shortcut writes `kv` / `kp`.
+    // A velocity, motor, or adhesion setter also clears `dyntype`; a position setter keeps
+    // a source `timeconst`.
+    if poisoned && matches!(tag, "velocity" | "motor" | "adhesion") {
+        rec.dynamics = crate::mujoco_actuator::ActDyn::None;
+        rec.dynprm = [1.0, 0.0, 0.0];
+        rec.actearly = false;
+        rec.actdim = None;
+        rec.actlimited = None;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&str, &MjcfJoint>, ten_by_name: &HashMap<&str, (usize, &MjcfTendon)>, instances: &PluginInstances, childclass: Option<&str>, name: &str) -> Result<crate::mujoco_actuator::Actuator, ActErr> {
     use crate::mujoco_actuator::Actuator;
@@ -6586,6 +6660,16 @@ fn one_actuator(el: &El, defaults: &Defaults, c: &Compiler, by_name: &HashMap<&s
         for (dtag, dattrs) in defaults.actuator_decls.get(*k).into_iter().flatten() {
             rec.apply(dtag, dattrs, c)?;
         }
+    }
+    // `5491d70f` `mjXShortcutSource` (VA `0x31fed0`; `4849b2dd` VA `0x31f930`) returns the class
+    // slot only when its actuator type equals this shortcut, or the slot is `general` with this
+    // shortcut's gain type. A `<position>` slot does not supply `kv` to `<velocity>`. The null
+    // source is the documented default (`kv = 1`), and `mjs_setToVelocity` (`5491d70f` VA
+    // `0x1db7b0`, `4849b2dd` VA `0x1db3a0`) writes `gainprm[0] = kv` and `biasprm[2] = -kv`
+    // after zeroing the control block. `64156abe` keeps one slot per class, so this runs only
+    // on the 4.x profiles.
+    if crate::fp_contract::oracle_4_0_schedules() && tag != "general" {
+        resync_4x_shortcut(&mut rec, defaults, &chain, tag, c)?;
     }
     rec.apply(tag, &el.attrs, c)?;
     if let Some(why) = rec.unsupported {
@@ -9003,6 +9087,72 @@ mod tests {
             "4849b2dd drops kv once the joint force is on actuatorfrcrange"
         );
         crate::fp_contract::reset_policy();
+    }
+
+    /// `rainbow_robotics_rby1` wheel actuators. The class writes `<velocity>` and then
+    /// `<position kp="4000" kv="400">`, so the one class slot is a position actuator.
+    /// `64156abe` reads that slot: `kv = gainprm[0] = 4000`. `5491d70f` `mjXShortcutSource`
+    /// rejects it and `mjs_setToVelocity` stores the documented `kv = 1`, `biasprm[2] = -1`.
+    #[test]
+    fn a_4x_velocity_shortcut_ignores_a_position_class_slot() {
+        const MODEL: &str = r#"<mujoco>
+  <option gravity="0 0 0"/>
+  <default>
+    <velocity ctrllimited="true"/>
+    <position ctrllimited="true" kp="4000" kv="400"/>
+  </default>
+  <worldbody>
+    <body>
+      <joint name="w" type="hinge" axis="0 0 1"/>
+      <geom type="sphere" size="0.05" mass="1"/>
+      <body pos="0.2 0 0">
+        <joint name="t" type="hinge" axis="0 0 1"/>
+        <geom type="sphere" size="0.05" mass="1"/>
+      </body>
+    </body>
+  </worldbody>
+  <actuator>
+    <velocity joint="w" ctrlrange="-3.14 3.14"/>
+    <position joint="t" ctrlrange="-1 1"/>
+  </actuator>
+</mujoco>"#;
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::fp_contract::reset_policy();
+            }
+        }
+        let _reset = Reset;
+        let bits = |id: &str, sha: &str| {
+            crate::fp_contract::install_policy(id, sha, "").unwrap();
+            let t = tree_from_mjcf_str(MODEL).unwrap();
+            let w = &t.actuators[0];
+            let p = &t.actuators[1];
+            (
+                w.gainprm[0].to_bits(),
+                w.biasprm[2].to_bits(),
+                p.gainprm[0].to_bits(),
+                p.biasprm[1].to_bits(),
+                p.biasprm[2].to_bits(),
+            )
+        };
+        let position = (0x40af400000000000, 0xc0af400000000000, 0xc079000000000000);
+        assert_eq!(
+            bits(crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID, crate::fp_contract::ORACLE_X86_CONTRACT_OFF_SHA256),
+            (0x40af400000000000, 0xc0af400000000000, position.0, position.1, position.2),
+            "64156abe velocity kv is the position slot's gainprm[0]"
+        );
+        let wheel = (0x3ff0000000000000, 0xbff0000000000000, position.0, position.1, position.2);
+        assert_eq!(
+            bits(crate::fp_contract::ORACLE_4_0_1_ID, crate::fp_contract::ORACLE_4_0_1_SHA256),
+            wheel,
+            "5491d70f velocity kv is 1"
+        );
+        assert_eq!(
+            bits(crate::fp_contract::ORACLE_4_0_ID, crate::fp_contract::ORACLE_4_0_SHA256),
+            wheel,
+            "4849b2dd velocity kv is 1"
+        );
     }
 
     /// `setDampRatio` in `5491d70f` / `4849b2dd` reflects `1 / (J M⁻¹ J')`. `64156abe` sums
