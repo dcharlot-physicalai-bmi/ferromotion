@@ -127,6 +127,16 @@ fn local_to_global(m: &nalgebra::Matrix3<f64>, v: &V3, pos: &V3) -> V3 {
     mat_vec(m, v) + pos
 }
 
+/// `5491d70f` `mjc_hillclimbSupport` (VA `0x6c040`) writes the mesh vertex as
+/// `(m2·z) + ((m1·y) + (m0·x))`, then adds `pos`. The vertex is still the local
+/// `float` promoted to `double`; the rotation is applied after that promotion.
+#[inline]
+fn local_to_global_4(m: &nalgebra::Matrix3<f64>, v: &V3, pos: &V3) -> V3 {
+    let row = |a: f64, b: f64, c: f64| c * v.z + (b * v.y + a * v.x);
+    let r = V3::new(row(m[(0, 0)], m[(0, 1)], m[(0, 2)]), row(m[(1, 0)], m[(1, 1)], m[(1, 2)]), row(m[(2, 0)], m[(2, 1)], m[(2, 2)]));
+    V3::new(r.x + pos.x, r.y + pos.y, r.z + pos.z)
+}
+
 /// The minors `M_i4` of `S2D` / `triAffineCoord`: `a₀a₁ − b₀b₁ − c₀c₁ + d₀d₁ + e₀e₁ − f₀f₁`, left to right.
 #[inline]
 fn minor6(a: (f64, f64), b: (f64, f64), c: (f64, f64), d: (f64, f64), e: (f64, f64), f: (f64, f64)) -> f64 {
@@ -325,7 +335,11 @@ impl<'a> CcdObj<'a> {
             GeomType::Mesh => {
                 let hull = self.hull.expect("mesh geom without hull data");
                 let v = hull.support_mujoco(&local_dir, &mut self.vertindex, &mut self.meshindex);
-                local_to_global(&mat, &v, &pos)
+                if crate::fp_contract::oracle_4_0_schedules() {
+                    local_to_global_4(&mat, &v, &pos)
+                } else {
+                    local_to_global(&mat, &v, &pos)
+                }
             }
             GeomType::Sphere | GeomType::Plane | GeomType::HField => pos,
         }
@@ -491,7 +505,74 @@ fn s1d(s1: &V3, s2: &V3) -> [f64; 2] {
     }
 }
 
+/// `5491d70f` `S2D` (VA `0x8ac60`). The minors are the cross product of `(s2−s1)` and
+/// `(s3−s1)`. Inside the triangle the weights are the cofactors over `(C31+C32)+C33`,
+/// not over the 3D minor.
+fn s2d_4(s1: &V3, s2: &V3, s3: &V3) -> [f64; 3] {
+    let Some(p_o) = project_origin_plane_4(s1, s2, s3) else {
+        let l = s1d(s1, s2);
+        return [l[0], l[1], 0.0];
+    };
+    let d21 = *s2 - *s1;
+    let d31 = *s3 - *s1;
+    let m14 = d21.y * d31.z - d21.z * d31.y;
+    let m24 = d21.x * d31.z - d21.z * d31.x;
+    let m34 = d21.x * d31.y - d21.y * d31.x;
+    let (mu1, mu2, mu3) = (m14.abs(), m24.abs(), m34.abs());
+    let (m_max, x, y) = if mu1 >= mu2 && mu1 >= mu3 {
+        (m14, 1, 2)
+    } else if mu2 >= mu3 {
+        (m24, 0, 2)
+    } else {
+        (m34, 0, 1)
+    };
+    let s1_2 = [s1[x], s1[y]];
+    let s2_2 = [s2[x], s2[y]];
+    let s3_2 = [s3[x], s3[y]];
+    let p_2 = [p_o[x], p_o[y]];
+    let d1 = [s1_2[0] - p_2[0], s1_2[1] - p_2[1]];
+    let d2 = [s2_2[0] - p_2[0], s2_2[1] - p_2[1]];
+    let d3 = [s3_2[0] - p_2[0], s3_2[1] - p_2[1]];
+    let c31 = d2[0] * d3[1] - d3[0] * d2[1];
+    let c32 = d3[0] * d1[1] - d1[0] * d3[1];
+    let c33 = d1[0] * d2[1] - d2[0] * d1[1];
+    let (comp1, comp2, comp3) = (same_sign2(m_max, c31) != 0, same_sign2(m_max, c32) != 0, same_sign2(m_max, c33) != 0);
+    if comp1 && comp2 && comp3 {
+        let m_det = (c31 + c32) + c33;
+        return [c31 / m_det, c32 / m_det, c33 / m_det];
+    }
+    let mut lambda = [0.0; 3];
+    let mut dmin = MAX_LIMIT;
+    if !comp1 {
+        let l = s1d(s2, s3);
+        let x = lincomb(&l, &[*s2, *s3]);
+        lambda = [0.0, l[0], l[1]];
+        dmin = dot3(&x, &x);
+    }
+    if !comp2 {
+        let l = s1d(s1, s3);
+        let x = lincomb(&l, &[*s1, *s3]);
+        let d = dot3(&x, &x);
+        if d < dmin {
+            lambda = [l[0], 0.0, l[1]];
+            dmin = d;
+        }
+    }
+    if !comp3 {
+        let l = s1d(s1, s2);
+        let x = lincomb(&l, &[*s1, *s2]);
+        let d = dot3(&x, &x);
+        if d < dmin {
+            lambda = [l[0], l[1], 0.0];
+        }
+    }
+    lambda
+}
+
 fn s2d(s1: &V3, s2: &V3, s3: &V3) -> [f64; 3] {
+    if crate::fp_contract::oracle_4_0_schedules() {
+        return s2d_4(s1, s2, s3);
+    }
     let Some(p_o) = project_origin_plane(s1, s2, s3) else {
         let l = s1d(s1, s2);
         return [l[0], l[1], 0.0];
@@ -2776,6 +2857,61 @@ mod tests {
         let over = [Vector3::new(-0.5, 0.0, -0.1), Vector3::new(0.5, 0.0, -0.1)];
         assert!(polygon_clip(&mut st, &face1, &over, &n, &(-n), 0.0), "a clip with points inside must report true");
         assert_eq!(st.x1.len(), 2, "an edge clipped against a face gives its two ends");
+    }
+
+    /// `5491d70f` `S2D` on the final simplex of `rby1m_1.2` geom 33 vs geom 11.
+    /// The three sphere supports are the center. The three mesh supports are the
+    /// world vertices `mjc_hillclimbSupport` returned. The simplex points are the
+    /// differences, in the order the search kept them. `gdb` on `lincomb` read
+    /// `3fc1dd7584709817`, `3f9682b825ed1116`, `3fead48cddb47172`.
+    #[test]
+    fn a_4x_s2d_matches_the_rby1_sphere_mesh_coefficients() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                let _ = crate::fp_contract::install_policy("published-default", "published-default", "");
+            }
+        }
+        let _reset = Reset;
+        crate::fp_contract::install_policy(crate::fp_contract::ORACLE_4_0_1_ID, crate::fp_contract::ORACLE_4_0_1_SHA256, "").unwrap();
+        let b = |x: u64| f64::from_bits(x);
+        let sphere = V3::new(b(0xbfd29a9900e398b6), b(0x3fa44bcf84f6425c), b(0x3fda928324c56d05));
+        let mesh = [
+            V3::new(b(0xbfc2f1a9fe92dcb2), b(0x3f9bf487f4e81bbf), b(0x3fd60092c2415a38)),
+            V3::new(b(0xbfd4c49ba883ec6a), b(0x3fd2c57181c63359), b(0x3fc7c1bd9d41bf1c)),
+            V3::new(b(0xbfd2d0e9a6e9846d), b(0xbf8754b06e2f591c), b(0x3fd5531dc4e15258)),
+        ];
+        let s: Vec<V3> = mesh.iter().map(|m| sphere - m).collect();
+        let lambda = s2d(&s[0], &s[1], &s[2]);
+        assert_eq!(
+            lambda.map(|x| x.to_bits()),
+            [0x3fc1dd7584709817, 0x3f9682b825ed1116, 0x3fead48cddb47172]
+        );
+        // `lincomb` adds the later coefficient outside. Inflate then shifts the sphere
+        // witness by the radius along `normalize(x2 − x1)`. The contact is the midpoint.
+        // These are the `mj_forward` bits of geom 33 vs geom 11.
+        let x1 = lincomb(&lambda, &[sphere, sphere, sphere]);
+        let x2 = lincomb(&lambda, &mesh);
+        let n = normalize3(&(x2 - x1));
+        let radius = f64::from_bits(0x3fbcbcf52755e65b);
+        let x1 = add_scl3(&x1, &n, radius);
+        let pos = (x1 + x2) * 0.5;
+        assert_eq!(
+            [pos.x.to_bits(), pos.y.to_bits(), pos.z.to_bits()],
+            [0xbfd173a0a7049b30, 0xbf69929bfee69222, 0x3fd4af3cbac3558f]
+        );
+        let normal = normalize3(&(x1 - x2));
+        assert_eq!(
+            [normal.x.to_bits(), normal.y.to_bits(), normal.z.to_bits()],
+            [0x3fc65da41036243a, 0xbfda8fdaf89772bb, 0xbfec9265ee654c05]
+        );
+        // `4849b2dd` `S2D` uses the same cofactor sum. The weights do not move.
+        crate::fp_contract::install_policy(crate::fp_contract::ORACLE_4_0_ID, crate::fp_contract::ORACLE_4_0_SHA256, "").unwrap();
+        let lambda = s2d(&s[0], &s[1], &s[2]);
+        assert_eq!(
+            lambda.map(|x| x.to_bits()),
+            [0x3fc1dd7584709817, 0x3f9682b825ed1116, 0x3fead48cddb47172]
+        );
     }
 
     #[test]

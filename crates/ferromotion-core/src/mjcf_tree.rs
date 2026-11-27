@@ -9259,8 +9259,8 @@ mod tests {
 
     /// `5491d70f` `gjk` (VA `0x84b00`) projects the origin onto the simplex edge or face and
     /// counts a reduced sphere as a discrete point. `64156abe` keeps the barycentric combination
-    /// and the smooth-sphere tolerance. `64156abe` matches this pair's whole contact. The 4.x
-    /// profiles match its distance.
+    /// and the smooth-sphere tolerance. `64156abe` matches this pair's whole contact. Both 4.x
+    /// profiles match its distance. The rby1 sphere-mesh coefficients are pinned on `S2D`.
     #[test]
     fn a_4x_sphere_mesh_uses_the_projected_search_point() {
         const MESH: &str = "v 0 0 0\nv 1 0 0.02\nv 0.1 1 0\nv 0.05 0.08 1\nv 0.7 0.4 0.3\nf 1 2 3\nf 1 3 4\nf 1 4 5\n";
