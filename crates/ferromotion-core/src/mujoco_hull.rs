@@ -26,10 +26,10 @@
 //!
 //! ⭐ And the polygons come out in MuJoCo's ORDER, which is not the faces' order: `MakePolygons` gathers them
 //! in a `std::unordered_map` keyed by the rounded normal angles and walks it. The published path is libc++
-//! (`libcpp_unordered_order`, with MuJoCo's `PairHash`). The contract-off oracle `64156abe` links libstdc++,
-//! so that identity walks `libstdcpp_unordered_order` instead. The collider reads polygons by index — a
-//! vertex's polygons are listed in index order and the first of equal candidates wins — so on Menagerie this
-//! order alone moved mesh–mesh contacts from 897 to 1,291 of 1,293.
+//! (`libcpp_unordered_order`, with MuJoCo's xor `PairHash`). `64156abe` links libstdc++ and hashes a pair
+//! with `hash(a) ^ hash(b)`. `4849b2dd` and `5491d70f` link the same libstdc++ but their `PairHash` is
+//! `h1 ^ (h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2))`. The collider reads polygons by index — a vertex's
+//! polygons are listed in index order and the first of equal candidates wins.
 
 use crate::TriMesh3;
 use nalgebra::Vector3;
@@ -499,9 +499,13 @@ fn make_polygons(verts: &[Vector3<f64>], faces: &[[usize; 3]], normal_verts: &[V
         }
     }
     // The published path walks polygons in libc++ order, which is what the Apple build does.
-    // The contract-off oracle is linked with libstdc++, whose `unordered_map` walks a different order,
-    // and `alignedFaceEdge` keeps the first face in that order.
-    let order = if crate::fp_contract::contract_off_line() {
+    // 3.13 contract-off (`64156abe`) links libstdc++ and hashes a pair with `hash(a) ^ hash(b)`.
+    // 4.0.0 and 4.0.1 (`4849b2dd`, `5491d70f`) use the same libstdc++ table, but `PairHash` is
+    // `h1 ^ (h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2))`. `alignedFaceEdge` keeps the first face.
+    let order = if crate::fp_contract::oracle_4_0_schedules() {
+        let hashes: Vec<u64> = keys.iter().map(|&(t, p)| libstdcpp_hash_combine(libstdcpp_hash_f64(t as f64), libstdcpp_hash_f64(p as f64))).collect();
+        libstdcpp_unordered_order(&hashes)
+    } else if crate::fp_contract::contract_off() {
         let hashes: Vec<u64> = keys.iter().map(|&(t, p)| libstdcpp_hash_f64(t as f64) ^ libstdcpp_hash_f64(p as f64)).collect();
         libstdcpp_unordered_order(&hashes)
     } else {
@@ -630,7 +634,13 @@ fn libcpp_unordered_order(hashes: &[u64]) -> Vec<usize> {
     order
 }
 
+/// 4.0.x `PairHash`: `h1 ^ (h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2))`, all `size_t`.
+fn libstdcpp_hash_combine(h1: u64, h2: u64) -> u64 {
+    h1 ^ h2.wrapping_add(0x9e3779b9).wrapping_add(h1 << 6).wrapping_add(h1 >> 2)
+}
+
 /// libstdc++ `std::hash<double>`: `_Hash_bytes` of the IEEE bits, seed `0xc70f6907`, and ±0 hashes to 0.
+/// `std::hash<int>` is the identity (`static_cast<size_t>`). The polygon key is a pair of doubles.
 fn libstdcpp_hash_f64(x: f64) -> u64 {
     if x == 0.0 {
         return 0;
@@ -657,13 +667,49 @@ fn libstdcpp_hash_bytes(data: &[u8], seed: u64) -> u64 {
     hash
 }
 
-/// libstdc++ 14 `unordered_map` iteration for unique keys. The prime table is that library's
-/// `_M_next_bkt` image. Checked against g++ 14 on this host.
+/// libstdc++ `unordered_map` iteration for unique keys.
+///
+/// The bucket counts are `__prime_list` in `libstdc++.so.6.0.33` (symbol
+/// `_ZNSt8__detail12__prime_listE`, 304 increasing primes). `_M_next_bkt` returns the first prime
+/// greater than or equal to its argument; for arguments at most 13 it uses the 14-byte table that
+/// sits immediately in front of that list, which is the same sequence. The map is default-constructed
+/// (`MakePolygons` does not call `reserve`): the first insert grows from 1 bucket through
+/// `_Prime_rehash_policy` with `max_load_factor` 1 and growth 2, so the first real bucket count is 11.
+/// A node goes to the head of its bucket, or immediately after `before_begin` when the bucket is empty.
+/// Iteration starts at `before_begin._M_nxt`. Checked against g++ 14 on this host.
 fn libstdcpp_unordered_order(hashes: &[u64]) -> Vec<usize> {
-    const PRIMES: &[usize] = &[
-        2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97, 103, 109, 113, 127, 137, 139, 149, 157, 167, 179, 193, 199, 211, 227, 241, 257, 277, 293, 313, 337, 359, 383, 409, 439, 467, 503, 541, 577, 619, 661, 709, 761, 823, 887, 953, 1031, 1109, 1193, 1289, 1381, 1493, 1613, 1741, 1879, 2029, 2179, 2357, 2549, 2753, 2971, 3209, 3469, 3739, 4027, 4349, 4703, 5087, 5503, 5953, 6427, 6949, 7517, 8123, 8783, 9497, 10273, 11113, 12011, 12983, 14033, 15173, 16411, 17749, 19183, 20753, 22447, 24281, 26267, 28411, 30727, 33223, 35933, 38873, 42043, 45481, 49201, 53201, 57557, 62233, 67307, 72817, 78779, 85229, 92203, 99733, 107897, 116731, 126271, 136607, 147793, 159871, 172933, 187091, 202409,
+    const PRIMES: &[u64] = &[
+        2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37,
+        41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89,
+        97, 103, 109, 113, 127, 137, 139, 149, 157, 167, 179, 193,
+        199, 211, 227, 241, 257, 277, 293, 313, 337, 359, 383, 409,
+        439, 467, 503, 541, 577, 619, 661, 709, 761, 823, 887, 953,
+        1031, 1109, 1193, 1289, 1381, 1493, 1613, 1741, 1879, 2029, 2179, 2357,
+        2549, 2753, 2971, 3209, 3469, 3739, 4027, 4349, 4703, 5087, 5503, 5953,
+        6427, 6949, 7517, 8123, 8783, 9497, 10273, 11113, 12011, 12983, 14033, 15173,
+        16411, 17749, 19183, 20753, 22447, 24281, 26267, 28411, 30727, 33223, 35933, 38873,
+        42043, 45481, 49201, 53201, 57557, 62233, 67307, 72817, 78779, 85229, 92203, 99733,
+        107897, 116731, 126271, 136607, 147793, 159871, 172933, 187091, 202409, 218971, 236897, 256279,
+        277261, 299951, 324503, 351061, 379787, 410857, 444487, 480881, 520241, 562841, 608903, 658753,
+        712697, 771049, 834181, 902483, 976369, 1056323, 1142821, 1236397, 1337629, 1447153, 1565659, 1693859,
+        1832561, 1982627, 2144977, 2320627, 2510653, 2716249, 2938679, 3179303, 3439651, 3721303, 4026031, 4355707,
+        4712381, 5098259, 5515729, 5967347, 6456007, 6984629, 7556579, 8175383, 8844859, 9569143, 10352717, 11200489,
+        12117689, 13109983, 14183539, 15345007, 16601593, 17961079, 19431899, 21023161, 22744717, 24607243, 26622317, 28802401,
+        31160981, 33712729, 36473443, 39460231, 42691603, 46187573, 49969847, 54061849, 58488943, 63278561, 68460391, 74066549,
+        80131819, 86693767, 93793069, 101473717, 109783337, 118773397, 128499677, 139022417, 150406843, 162723577, 176048909, 190465427,
+        206062531, 222936881, 241193053, 260944219, 282312799, 305431229, 330442829, 357502601, 386778277, 418451333, 452718089, 489790921,
+        529899637, 573292817, 620239453, 671030513, 725980837, 785430967, 849749479, 919334987, 994618837, 1076067617, 1164186217, 1259520799,
+        1362662261, 1474249943, 1594975441, 1725587117, 1866894511, 2019773507, 2185171673, 2364114217, 2557710269, 2767159799, 2993761039, 3238918481,
+        3504151727, 3791104843, 4101556399, 4294967291, 6442450933, 8589934583, 12884901857, 17179869143, 25769803693, 34359738337, 51539607367, 68719476731,
+        103079215087, 137438953447, 206158430123, 274877906899, 412316860387, 549755813881, 824633720731, 1099511627689, 1649267441579, 2199023255531, 3298534883309, 4398046511093,
+        6597069766607, 8796093022151, 13194139533241, 17592186044399, 26388279066581, 35184372088777, 52776558133177, 70368744177643, 105553116266399, 140737488355213, 211106232532861, 281474976710597,
+        562949953421231, 1125899906842597, 2251799813685119, 4503599627370449, 9007199254740881, 18014398509481951, 36028797018963913, 72057594037927931, 144115188075855859, 288230376151711717, 576460752303423433, 1152921504606846883,
+        2305843009213693951, 4611686018427387847, 9223372036854775783, 18446744073709551557
     ];
-    let next_bkt = |n: usize| PRIMES[PRIMES.partition_point(|&p| p < n)];
+    let next_bkt = |n: usize| -> usize {
+        let p = PRIMES[PRIMES.partition_point(|&p| p < n as u64)];
+        usize::try_from(p).expect("libstdc++ bucket count exceeds usize")
+    };
     let n = hashes.len();
     let nil = usize::MAX;
     let bb = n;
@@ -794,6 +840,15 @@ mod tests {
         let keys: [(f64, f64); 20] = [(-7.0, 1.0), (-4.0, 6.0), (-1.0, 11.0), (2.0, 16.0), (5.0, 21.0), (8.0, 26.0), (11.0, 31.0), (14.0, 36.0), (17.0, 41.0), (20.0, 46.0), (23.0, 51.0), (26.0, 56.0), (29.0, 61.0), (32.0, 66.0), (35.0, 71.0), (38.0, 76.0), (41.0, 81.0), (44.0, 86.0), (47.0, 91.0), (50.0, 96.0)];
         let hashes: Vec<u64> = keys.iter().map(|&(t, p)| libstdcpp_hash_f64(t) ^ libstdcpp_hash_f64(p)).collect();
         let order = [18, 17, 15, 13, 0, 1, 19, 12, 7, 3, 4, 5, 2, 6, 16, 9, 14, 10, 8, 11];
+        assert_eq!(libstdcpp_unordered_order(&hashes), order.to_vec());
+    }
+
+    /// 4.0.x `PairHash` on the same keys, pinned against g++ 14's `unordered_map`.
+    #[test]
+    fn polygon_order_is_libstdcpp_hash_combine() {
+        let keys: [(f64, f64); 20] = [(-7.0, 1.0), (-4.0, 6.0), (-1.0, 11.0), (2.0, 16.0), (5.0, 21.0), (8.0, 26.0), (11.0, 31.0), (14.0, 36.0), (17.0, 41.0), (20.0, 46.0), (23.0, 51.0), (26.0, 56.0), (29.0, 61.0), (32.0, 66.0), (35.0, 71.0), (38.0, 76.0), (41.0, 81.0), (44.0, 86.0), (47.0, 91.0), (50.0, 96.0)];
+        let hashes: Vec<u64> = keys.iter().map(|&(t, p)| libstdcpp_hash_combine(libstdcpp_hash_f64(t), libstdcpp_hash_f64(p))).collect();
+        let order = [19, 17, 16, 15, 0, 18, 1, 6, 14, 2, 4, 3, 5, 13, 9, 11, 7, 8, 10, 12];
         assert_eq!(libstdcpp_unordered_order(&hashes), order.to_vec());
     }
 
