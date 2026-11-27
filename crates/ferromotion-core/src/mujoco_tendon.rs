@@ -345,6 +345,8 @@ fn wrap(x0: &[f64; 3], x1: &[f64; 3], xpos: &[f64; 3], xmat: &[f64; 9], radius: 
         } else {
             (dx0.mul_add(dx0, dy0 * dy0).sqrt(), dx1.mul_add(dx1, dy1 * dy1).sqrt())
         };
+        // `64156abe` adds `l1 + (wlen + l0)`. The published sum is left to right.
+        #[allow(clippy::if_same_then_else)]
         let denom = if contract_off() { l1 + (wlen + l0) } else { l0 + wlen + l1 };
         let dz = p1[2] - p0[2];
         res[2] = p0[2] + dz * l0 / denom;
@@ -426,7 +428,11 @@ impl SmoothModel {
                     wpnt[1] = x1;
                     wbody[1] = s1.body;
                     let sum = dist3(&wpnt[0], &wpnt[1]);
-                    len = if contract_off() { (sum / divisor) + len } else { len + sum / divisor };
+                    // `mj_tendon` stores `(segment / divisor) + L` on the contract-off path.
+                    #[allow(clippy::if_same_then_else)]
+                    {
+                        len = if contract_off() { (sum / divisor) + len } else { len + sum / divisor };
+                    }
                     1
                 }
                 Some(((w, wlen), gbody)) => {
@@ -438,8 +444,13 @@ impl SmoothModel {
                     wbody[3] = s1.body;
                     let d1 = dist3(&wpnt[0], &wpnt[1]);
                     let d2 = dist3(&wpnt[2], &wpnt[3]);
+                    // A wrap is `dist2 + (wlen + dist1)` before the division (`64156abe`).
+                    #[allow(clippy::if_same_then_else)]
                     let sum = if contract_off() { d2 + (wlen + d1) } else { d1 + wlen + d2 };
-                    len = if contract_off() { (sum / divisor) + len } else { len + sum / divisor };
+                    #[allow(clippy::if_same_then_else)]
+                    {
+                        len = if contract_off() { (sum / divisor) + len } else { len + sum / divisor };
+                    }
                     3
                 }
             };

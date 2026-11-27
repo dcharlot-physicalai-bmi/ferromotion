@@ -748,7 +748,11 @@ impl SmoothModel {
                                 let d2 = (d[2] * dif) * dif;
                                 let mut acc = d2 + d1;
                                 let d3 = ((d[3] * dif) * dif) * dif;
-                                acc = d3 + acc;
+                                // `64156abe` adds `term + acc`. `+=` would add `acc + term`.
+                                #[allow(clippy::assign_op_pattern)]
+                                {
+                                    acc = d3 + acc;
+                                }
                                 let d4 = (((d[4] * dif) * dif) * dif) * dif;
                                 let p = d4 + acc;
                                 let mut t = d[2] + d[2];
@@ -757,7 +761,10 @@ impl SmoothModel {
                                 let mut t3 = 3.0 * d[3];
                                 t3 *= dif;
                                 t3 *= dif;
-                                deriv = t3 + deriv;
+                                #[allow(clippy::assign_op_pattern)]
+                                {
+                                    deriv = t3 + deriv;
+                                }
                                 let mut t4 = 4.0 * d[4];
                                 t4 *= dif;
                                 t4 *= dif;
@@ -1132,8 +1139,12 @@ impl SmoothModel {
                         let mut s = (0.0f64, 0.0f64);
                         for &c in &chain {
                             if contract_off {
-                                s.0 = jd1[k][c] * qvel[c] + s.0;
-                                s.1 = jd2[k][c] * qvel[c] + s.1;
+                                // `mju_dotSparseX3`: `(jac·qvel) + acc`.
+                                #[allow(clippy::assign_op_pattern)]
+                                {
+                                    s.0 = jd1[k][c] * qvel[c] + s.0;
+                                    s.1 = jd2[k][c] * qvel[c] + s.1;
+                                }
                             } else {
                                 s.0 = jd1[k][c].mul_add(qvel[c], s.0);
                                 s.1 = jd2[k][c].mul_add(qvel[c], s.1);

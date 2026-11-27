@@ -65,13 +65,17 @@ impl SmoothModel {
                     let wide = if separate && n >= 6 { n & !3 } else { 0 };
                     for k in 0..n {
                         let acc = ar[i * nefc + k];
-                        ar[i * nefc + k] = if !separate {
-                            y[k * nv + j].mul_add(t, acc)
-                        } else if k < wide {
-                            acc + y[k * nv + j] * t
-                        } else {
-                            y[k * nv + j] * t + acc
-                        };
+                        // `64156abe` wide lanes are `acc + prod`; the tail is `prod + acc`.
+                        #[allow(clippy::if_same_then_else)]
+                        {
+                            ar[i * nefc + k] = if !separate {
+                                y[k * nv + j].mul_add(t, acc)
+                            } else if k < wide {
+                                acc + y[k * nv + j] * t
+                            } else {
+                                y[k * nv + j] * t + acc
+                            };
+                        }
                     }
                 }
             }

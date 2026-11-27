@@ -90,14 +90,21 @@ pub(crate) fn add_to_scl(res: &mut [f64], x: &[f64], scl: f64, wide_at: usize) {
     if n >= wide_at {
         let prefix = n & !3;
         for i in 0..prefix {
-            res[i] = res[i] + x[i] * scl;
+            res[i] += x[i] * scl;
         }
         for i in prefix..n {
-            res[i] = x[i] * scl + res[i];
+            // `64156abe` `mju_addToScl`: `scl*x + res`. `+=` would add the other way.
+            #[allow(clippy::assign_op_pattern)]
+            {
+                res[i] = x[i] * scl + res[i];
+            }
         }
     } else {
         for i in 0..n {
-            res[i] = x[i] * scl + res[i];
+            #[allow(clippy::assign_op_pattern)]
+            {
+                res[i] = x[i] * scl + res[i];
+            }
         }
     }
 }
@@ -1146,7 +1153,7 @@ impl SmoothModel {
         let mda = mul_sym_vec(&sd.m, &self.m_rownnz, &self.m_rowadr, &self.m_colind, &da);
         let gauss = 0.5 * dot(&da, &mda);
         // `cost += 0.5 * dot(da, M da)`.
-        let mut cost_ws = if oracle_axpy() { cost_con + gauss } else { axpy(cost_con, 0.5, dot(&da, &mda)) };
+        let cost_ws = if oracle_axpy() { cost_con + gauss } else { axpy(cost_con, 0.5, dot(&da, &mda)) };
         let cost_smooth = constraint_update(ne, nf, &e.d, &e.r, &e.frictionloss, &out.efc_b, &e.typ, &e.id, &cones, &mut state, &mut force, None);
         out.qfrc_constraint = if sparse {
             // `mju_mulMatTVecSparse`

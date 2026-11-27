@@ -651,6 +651,8 @@ fn libstdcpp_unordered_order(hashes: &[u64]) -> Vec<usize> {
             buckets[bkt] = bb;
         }
     };
+    // `size` is qhull's element count, read by the resize test. It is not the node index.
+    #[allow(clippy::explicit_counter_loop)]
     for (i, &h) in hashes.iter().enumerate() {
         let mut do_rehash = false;
         let mut nb = 0usize;
