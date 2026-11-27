@@ -107,6 +107,7 @@ cp -f "$pull/probes/mulquat.c" "$run/probes/mulquat.c"
 cp -f "$root/compiler-rt.sh" "$run/scripts/compiler-rt.sh"
 cp -f "$parser" "$run/scripts/read-mulquat-fixture.sh"
 cp -f "$receipt_src" "$run/scripts/write-receipt.sh"
+cp -f "$pull/../toolchain.sh" "$run/scripts/toolchain.sh"
 chmod +x "$run/scripts/write-receipt.sh" "$run/scripts/read-mulquat-fixture.sh"
 for rel in \
   probes/oracle_dump.c probes/pyhex.h probes/hexfloat_selftest.c \
@@ -188,10 +189,29 @@ for f in native.txt step.txt result.txt accept.txt; do
   printf 'rust\n' >"$rust/$f"
 done
 printf 'ferromotion_tested_commit e0557dd109151a02702dfb262ea0a8c2b9dd07db\nferromotion_tested_tree b30b3d5a5600110e1b871d931aceecfb284b5b67\n' >"$rust/ferromotion-tested.txt"
+printf 'COPIED_FROM_OLD_PROVENANCE\nrelease: 9.9.9\n' >"$run/provenance/cargo-vv.txt"
+if FERROMOTION_RECEIPT_LAYOUT_TEST=1 run_receipt "$rust" "$libdir" rust >"$tmp/rust.out" 2>"$tmp/rust.err"; then
+  echo "rust receipt succeeded without a build toolchain" >&2
+  exit 1
+fi
+grep -q 'refusing:' "$tmp/rust.err"
+cat >"$tmp/probe.rs" <<'EOF'
+fn main() {}
+EOF
+rustc "$tmp/probe.rs" -o "$tmp/probe-bin"
+# shellcheck source=../../toolchain.sh
+source "$pull/../toolchain.sh"
+arm_oracle_capture_rustc_vv "$rust/rustc-vv.txt"
+arm_oracle_bind_built_binary "$rust" "$tmp/probe-bin"
 FERROMOTION_RECEIPT_LAYOUT_TEST=1 run_receipt "$rust" "$libdir" rust >"$tmp/rust.out" 2>"$tmp/rust.err"
 grep -q 'identity_role rust' "$rust/RECEIPT.txt"
 grep -q 'rust_links_libmujoco no' "$rust/RECEIPT.txt"
 grep -q "compiler_rt_sha256 $rt_sha" "$rust/RECEIPT.txt"
+grep -q '^toolchain_comment rustc version ' "$rust/RECEIPT.txt"
+if grep -q 'COPIED_FROM_OLD_PROVENANCE' "$rust/RECEIPT.txt"; then
+  echo "rust receipt copied cargo-vv.txt" >&2
+  exit 1
+fi
 
 goldens="$tmp/goldens-stamp"
 mkdir -p "$goldens"
@@ -200,6 +220,13 @@ printf 'cargo\n' >"$goldens/cargo-test.txt"
 printf 'result\n' >"$goldens/result.txt"
 printf 'ferromotion_tested_commit e0557dd109151a02702dfb262ea0a8c2b9dd07db\nferromotion_tested_tree b30b3d5a5600110e1b871d931aceecfb284b5b67\n' >"$goldens/ferromotion-tested.txt"
 if FERROMOTION_RECEIPT_LAYOUT_TEST=1 run_receipt "$goldens" /nonexistent goldens >"$tmp/g.out" 2>"$tmp/g.err"; then
+  echo "goldens receipt succeeded without a build toolchain" >&2
+  exit 1
+fi
+grep -q 'refusing:' "$tmp/g.err"
+arm_oracle_capture_rustc_vv "$goldens/rustc-vv.txt"
+arm_oracle_bind_built_binary "$goldens" "$tmp/probe-bin"
+if FERROMOTION_RECEIPT_LAYOUT_TEST=1 run_receipt "$goldens" /nonexistent goldens >"$tmp/g.out" 2>"$tmp/g.err"; then
   :
 else
   echo "goldens receipt failed" >&2
@@ -207,6 +234,7 @@ else
   exit 1
 fi
 grep -q 'does not bind libmujoco' "$goldens/RECEIPT.txt"
+grep -q '^toolchain_source rustc-vv-at-build-and-elf-comment' "$goldens/RECEIPT.txt"
 rm -f "$goldens/identity.txt"
 if FERROMOTION_RECEIPT_LAYOUT_TEST=1 run_receipt "$goldens" /nonexistent goldens >"$tmp/g2.out" 2>"$tmp/g2.err"; then
   echo "goldens receipt succeeded without identity.txt" >&2
