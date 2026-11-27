@@ -2,9 +2,10 @@
 //! `30812e26027cafa50e17c848e5afe57b1f246838`, spec
 //! `docs/contracts/ferromotion-clock.md` in that commit.
 //!
-//! Full-state v1 is generated in their test and is not a fixture file yet.
-//! It is not pinned here. The version-2 codec pins stay. The version-3
-//! contract text is pinned in `ferric_v3_contract`, with no codec verdict.
+//! Full-state v1 is pinned from the later commit `3213150f` in
+//! `ferromorphic_3213150f`, not from these bytes. The version-2 codec pins
+//! stay. The version-3 contract text is pinned in `ferric_v3_contract`, with
+//! no codec verdict.
 
 use ferromotion_core::{
     ChunkBinding, ChunkFacts, CodecError, EpisodeEnvelopeV2, EpisodeError,

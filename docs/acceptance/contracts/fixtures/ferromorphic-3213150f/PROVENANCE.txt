@@ -1,0 +1,20 @@
+Copied from github.com/dcharlot-physicalai-bmi/ferromorphic
+branch cursor/scientific-verification-ci-5e0f
+commit 3213150fd863f67d7027d1e3bebc8ea052886a75
+parent 30812e26027cafa50e17c848e5afe57b1f246838
+
+tools/fixtures/full-state-v1-lif50.bin
+970 bytes
+sha256 7d9bc9c1400bd2b14d4d5336bb713b91733353b9e0a17fa6b1852ecbb05617f1
+
+tools/fixtures/full-state-v1-lif50-state-bytes.bin
+280 bytes
+sha256 01e52c73cf8376050d5b95581a6a8e15389668ad2f067d6e517b7d94fc753f13
+
+tools/fixtures/full-state-v1-lif50.sha256
+the two lines above, as published in that commit
+
+Layout: docs/contracts/ferromotion-clock.md in that commit, the full-state
+section, with field widths from Sim::full_state_bytes and Sim::state_bytes.
+The 30812e26 fixtures are a separate copy and are not changed.
+This pin checks the byte structure. It does not restore a simulation.

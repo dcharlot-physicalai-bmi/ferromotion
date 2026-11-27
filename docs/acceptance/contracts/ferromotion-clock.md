@@ -62,6 +62,14 @@ The grid identity is `t0_num_ns * period_den == (origin_ns * period_den + k * pe
 
 Envelope v2 accepts any reduced `dt` and period that satisfy the rules above. Ferric's SO-100 profile, lines 246–250 of the pinned v3 contract, is what refuses anything else. For that profile the only legal clock is 30 Hz with 20 substeps: period `100000000/3`, dt `5000000/3`. This crate does not apply that profile.
 
+## Full state v1
+
+Ferromorphic `3213150fd863f67d7027d1e3bebc8ea052886a75` publishes the Lif golden that `30812e26` only described. The files are under `docs/acceptance/contracts/fixtures/ferromorphic-3213150f/`. The 970-byte record is sha256 `7d9bc9c1400bd2b14d4d5336bb713b91733353b9e0a17fa6b1852ecbb05617f1`. The embedded `state_bytes` are 280 bytes, sha256 `01e52c73cf8376050d5b95581a6a8e15389668ad2f067d6e517b7d94fc753f13`.
+
+The layout in their clock contract is little-endian: magic `ferromorphic-sim-state\0`, version `1` as `u32`, the model tag (`u32` length and bytes), `state_bytes` (`u64` length and bytes), the net, the neuron records, and a SHA-256 of every byte before it. Field widths are the ones `Sim::full_state_bytes` and `Sim::state_bytes` document in that commit. `state_bytes` starts with `dt` bits, a mode byte, `t`, `epoch`, a presence byte and value for `origin_ns`, and the same for `period_ns`.
+
+The parser checks that structure. On this golden, `t` is 50, `origin_ns` is 7000, and `period_ns` is 100000. It does not read neuron fields and it does not restore a simulation.
+
 ## Earlier adapter
 
 `crates/ferromotion-core/src/ferromorphic_clock.rs` still parses receipt v2 and the version-1 envelope (`dt_bits`, integer `period_ns`, `origin_ns`) and still runs `bind_v2_timestamps`. That path is not envelope v2. Its flags stay false. It is not the grammar in `episode_v2.rs`.
