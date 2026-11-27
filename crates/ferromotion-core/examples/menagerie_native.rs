@@ -160,6 +160,28 @@ fn main() {
                 }
                 if let Some(o) = ours.get(name.as_str()) {
                     compare("mjData ", name, &format!("{} state {s}", m.rel), o, want);
+                    if name == "efc_J" {
+                        if let Some(k) = o.iter().zip(want).position(|(a, b)| a.to_bits() != b.to_bits()) {
+                            let nv = st.qvel.len().max(1);
+                            let row = k / nv;
+                            let typ = ours.get("efc_type").and_then(|v| v.get(row)).copied();
+                            let id = ours.get("efc_id").and_then(|v| v.get(row)).copied();
+                            let pos = ours.get("efc_pos").and_then(|v| v.get(row)).copied();
+                            let want_pos = st.arrays.iter().find(|(n, _)| n == "efc_pos").and_then(|(_, v)| v.get(row)).copied();
+                            eprintln!(
+                                "efc_J\t{} state {s}\trow {row}\ttype {typ:?}\tid {id:?}\tefc_pos ours {:016x} want {:016x}",
+                                m.rel,
+                                pos.unwrap_or(0.0).to_bits(),
+                                want_pos.unwrap_or(0.0).to_bits()
+                            );
+                            for dof in 0..nv {
+                                let i = row * nv + dof;
+                                if o.get(i).zip(want.get(i)).is_some_and(|(a, b)| a.to_bits() != b.to_bits()) {
+                                    eprintln!("  dof {dof}\tours {:016x}\twant {:016x}", o[i].to_bits(), want[i].to_bits());
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

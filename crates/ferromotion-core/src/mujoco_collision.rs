@@ -309,27 +309,51 @@ pub fn plane_cylinder(margin: f64, p1: &GeomPose, p2: &GeomPose, size2: [f64; 2]
     let prjvec = dot3(&vec, &normal);
     let axis = axis * size2[1];
     prjaxis *= size2[1];
-    // `mji_addToScl3(pos, v, s)`: `pos += v·s`, one fused step per component
-    let add_scl = |pos: Vector3<f64>, v: &Vector3<f64>, s: f64| Vector3::from_fn(|k, _| v[k].mul_add(s, pos[k]));
+    // `5491d70f` `mji_addToScl3` is `pos + (v·s)`, and `mji_add3` / `mji_addTo3` are
+    // separate adds. The published path fuses the scale into the add.
+    let four = crate::fp_contract::oracle_4_0_schedules();
+    let add3 = |a: Vector3<f64>, b: Vector3<f64>| Vector3::new(a.x + b.x, a.y + b.y, a.z + b.z);
+    let sub3 = |a: Vector3<f64>, b: Vector3<f64>| Vector3::new(a.x - b.x, a.y - b.y, a.z - b.z);
+    let add_scl = |pos: Vector3<f64>, v: &Vector3<f64>, s: f64| {
+        if four {
+            Vector3::new(pos.x + v.x * s, pos.y + v.y * s, pos.z + v.z * s)
+        } else {
+            Vector3::from_fn(|k, _| v[k].mul_add(s, pos[k]))
+        }
+    };
+    let place = |base: Vector3<f64>, d: f64| add_scl(base, &normal, -d * 0.5);
     let mut out = Vec::with_capacity(4);
     let d = dist0 + prjaxis + prjvec;
     if d <= margin {
-        out.push(pre(d, add_scl(p2.pos + vec + axis, &normal, -d * 0.5), normal, Vector3::zeros()));
+        let base = if four { add3(add3(p2.pos, vec), axis) } else { p2.pos + vec + axis };
+        out.push(pre(d, place(base, d), normal, Vector3::zeros()));
     } else {
         return out;
     }
     let d = dist0 - prjaxis + prjvec;
     if d <= margin {
-        out.push(pre(d, add_scl(p2.pos + vec - axis, &normal, -d * 0.5), normal, Vector3::zeros()));
+        let base = if four { sub3(add3(p2.pos, vec), axis) } else { p2.pos + vec - axis };
+        out.push(pre(d, place(base, d), normal, Vector3::zeros()));
     }
     let prjvec1 = -prjvec * 0.5;
     let d = dist0 + prjaxis + prjvec1;
     if d <= margin {
-        let mut vec1 = Vector3::new(vec.y.mul_add(axis.z, -(vec.z * axis.y)), vec.z.mul_add(axis.x, -(vec.x * axis.z)), vec.x.mul_add(axis.y, -(vec.y * axis.x)));
+        let mut vec1 = if four {
+            Vector3::new(vec.y * axis.z - vec.z * axis.y, vec.z * axis.x - vec.x * axis.z, vec.x * axis.y - vec.y * axis.x)
+        } else {
+            Vector3::new(vec.y.mul_add(axis.z, -(vec.z * axis.y)), vec.z.mul_add(axis.x, -(vec.x * axis.z)), vec.x.mul_add(axis.y, -(vec.y * axis.x)))
+        };
         normalize3_mj(&mut vec1);
         vec1 *= size2[0] * 3.0f64.sqrt() / 2.0;
-        out.push(pre(d, add_scl(add_scl(p2.pos + vec1 + axis, &vec, -0.5), &normal, -d * 0.5), normal, Vector3::zeros()));
-        out.push(pre(d, add_scl(add_scl(p2.pos - vec1 + axis, &vec, -0.5), &normal, -d * 0.5), normal, Vector3::zeros()));
+        let side = |signed: Vector3<f64>| {
+            if four {
+                place(add_scl(add3(signed, axis), &vec, -0.5), d)
+            } else {
+                add_scl(add_scl(signed + axis, &vec, -0.5), &normal, -d * 0.5)
+            }
+        };
+        out.push(pre(d, side(add3(p2.pos, vec1)), normal, Vector3::zeros()));
+        out.push(pre(d, side(sub3(p2.pos, vec1)), normal, Vector3::zeros()));
     }
     out
 }
