@@ -108,6 +108,11 @@ struct Trace {
     nonzero_tau: Vec<usize>,
 }
 
+/// Receipt norm: `sqrt` of the left-associated sum of `v * v`. Not an FMA chain.
+fn norm_bits(q: &[f64; 7]) -> u64 {
+    q.iter().map(|v| v * v).sum::<f64>().sqrt().to_bits()
+}
+
 fn bits(values: &[f64]) -> String {
     values
         .iter()
@@ -525,5 +530,46 @@ fn panda_reach_contact_moves_the_arm() {
     for (k, tick) in first.ticks.iter().enumerate() {
         assert_eq!(tick.min_dist.unwrap().to_bits(), min_bits[k], "tick {k}");
         assert_eq!(tick.hash, tick_hash[k], "tick {k}");
+    }
+    // Receipt -3's norm cells, as bits of `norm_bits` (sum of `v * v`, then `sqrt`).
+    let plant_norm = [
+        0x4047_905f_90c0_e588,
+        0x4046_7a19_bb0d_9839,
+        0x4045_9fc7_c3d8_b765,
+        0x4044_e404_5728_2872,
+        0x4044_442c_8228_01cc,
+        0x4043_cb4e_26e3_808f,
+        0x4043_5e7e_f23b_ac4c,
+        0x4043_110c_e00b_20cc,
+        0x4042_d905_6261_c086,
+        0x4042_a12e_18d4_4686,
+        0x4042_7796_1a02_10a9,
+        0x4042_4f51_ee22_7f50,
+        0x4042_387b_1194_c2da,
+        0x4042_2601_7449_1678,
+        0x4042_1eb4_156f_0618,
+        0x4042_169e_d41a_fab7,
+    ];
+    let zero_norm = [
+        0x4047_905f_90c0_e588,
+        0x4046_80e8_ddd2_0dcc,
+        0x4045_a056_4d80_1716,
+        0x4044_e71a_02ad_e292,
+        0x4044_4ed4_cabf_e926,
+        0x4043_d22d_0323_0218,
+        0x4043_6ca7_0c63_7d36,
+        0x4043_1a81_7d83_c114,
+        0x4042_d896_004b_dd2f,
+        0x4042_a43e_f3fb_cab5,
+        0x4042_7b41_827f_fb04,
+        0x4042_5bbb_9eb2_59fd,
+        0x4042_4415_51b5_da8d,
+        0x4042_32f4_c250_922f,
+        0x4042_2734_70dc_5498,
+        0x4042_1fdb_3664_e183,
+    ];
+    for (k, (tick, ztick)) in first.ticks.iter().zip(zero.ticks.iter()).enumerate() {
+        assert_eq!(norm_bits(&tick.qfrc), plant_norm[k], "plant norm tick {k}");
+        assert_eq!(norm_bits(&ztick.qfrc), zero_norm[k], "zero-torque norm tick {k}");
     }
 }
