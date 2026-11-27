@@ -1192,6 +1192,15 @@ impl Polytope {
         }
     }
 
+    fn replace_simplex2(&mut self, st: &mut CcdStatus, v1: usize, v2: usize) {
+        st.nsimplex = 2;
+        st.simplex[0] = self.verts[v1];
+        st.simplex[1] = self.verts[v2];
+        self.faces.clear();
+        self.verts.clear();
+        self.map.clear();
+    }
+
     fn replace_simplex3(&mut self, st: &mut CcdStatus, v1: usize, v2: usize, v3: usize) {
         st.nsimplex = 3;
         st.simplex[0] = self.verts[v1];
@@ -1203,7 +1212,35 @@ impl Polytope {
     }
 }
 
+/// `5491d70f` `triAffineCoord`. Two-point edges, then the 2D areas of `(p, v2, v3)`,
+/// `(p, v1, v3)`, and `(p, v1, v2)`. The weights divide by `(C31 + C32) + C33`.
+fn tri_affine_4(v1: &V3, v2: &V3, v3: &V3, p: &V3) -> [f64; 3] {
+    let d21 = v2 - v1;
+    let d31 = v3 - v1;
+    let m14 = d21.y * d31.z - d21.z * d31.y;
+    let m24 = d21.x * d31.z - d21.z * d31.x;
+    let m34 = d21.x * d31.y - d21.y * d31.x;
+    let (x, y) = if m14.abs() >= m24.abs() && m14.abs() >= m34.abs() {
+        (1, 2)
+    } else if m24.abs() >= m34.abs() {
+        (0, 2)
+    } else {
+        (0, 1)
+    };
+    let d1 = [v1[x] - p[x], v1[y] - p[y]];
+    let d2 = [v2[x] - p[x], v2[y] - p[y]];
+    let d3 = [v3[x] - p[x], v3[y] - p[y]];
+    let c31 = d2[0] * d3[1] - d3[0] * d2[1];
+    let c32 = d3[0] * d1[1] - d1[0] * d3[1];
+    let c33 = d1[0] * d2[1] - d2[0] * d1[1];
+    let m_det = (c31 + c32) + c33;
+    [c31 / m_det, c32 / m_det, c33 / m_det]
+}
+
 fn tri_affine_coord(v1: &V3, v2: &V3, v3: &V3, p: &V3) -> [f64; 3] {
+    if crate::fp_contract::oracle_4_0_schedules() {
+        return tri_affine_4(v1, v2, v3, p);
+    }
     let m14 = minor6((v2.y, v3.z), (v2.z, v3.y), (v1.y, v3.z), (v1.z, v3.y), (v1.y, v2.z), (v1.z, v2.y));
     let m24 = minor6((v2.x, v3.z), (v2.z, v3.x), (v1.x, v3.z), (v1.z, v3.x), (v1.x, v2.z), (v1.z, v2.x));
     let m34 = minor6((v2.x, v3.y), (v2.y, v3.x), (v1.x, v3.y), (v1.y, v3.x), (v1.x, v2.y), (v1.y, v2.x));
@@ -1269,20 +1306,25 @@ fn rotmat120(axis: &V3) -> nalgebra::Matrix3<f64> {
 }
 
 fn ray_triangle(v1: &V3, v2: &V3, v3: &V3, v4: &V3, v5: &V3) -> i32 {
+    ray_triangle_tol(v1, v2, v3, v4, v5, 0.0).0
+}
+
+/// `5491d70f` `rayTriangle`. The three volumes are `det(v3−v1, v4−v1, v2−v1)` and its
+/// cycles. A hit requires every volume to clear `tol` on the same side.
+fn ray_triangle_tol(v1: &V3, v2: &V3, v3: &V3, v4: &V3, v5: &V3, tol: f64) -> (i32, [f64; 3]) {
     let d12 = v2 - v1;
     let d13 = v3 - v1;
     let d14 = v4 - v1;
     let d15 = v5 - v1;
-    let vol1 = det3(&d13, &d14, &d12);
-    let vol2 = det3(&d14, &d15, &d12);
-    let vol3 = det3(&d15, &d13, &d12);
-    if vol1 >= 0.0 && vol2 >= 0.0 && vol3 >= 0.0 {
-        return 1;
-    }
-    if vol1 <= 0.0 && vol2 <= 0.0 && vol3 <= 0.0 {
-        return -1;
-    }
-    0
+    let det = [det3(&d13, &d14, &d12), det3(&d14, &d15, &d12), det3(&d15, &d13, &d12)];
+    let hit = if det[0] >= tol && det[1] >= tol && det[2] >= tol {
+        1
+    } else if det[0] <= -tol && det[1] <= -tol && det[2] <= -tol {
+        -1
+    } else {
+        0
+    };
+    (hit, det)
 }
 
 const EPA_SUCCESS: i32 = 0;
@@ -1293,6 +1335,45 @@ const EPA_P3_INVALID_V5: i32 = 6;
 const EPA_P3_MISSING_ORIGIN: i32 = 7;
 const EPA_P3_ORIGIN_ON_FACE: i32 = 8;
 const EPA_P4_MISSING_ORIGIN: i32 = 9;
+
+/// `5491d70f` `recoverHexa`. A positive volume opposite two volumes below `-mjMINVAL`
+/// swaps that equator edge with the poles. Otherwise the most negative volume selects
+/// a tetrahedron: only `idx[0]` and `idx[1]` change.
+fn recover_hexa(idx: &mut [usize; 5], det: &[f64; 3]) -> bool {
+    let (i1, i2, i3, i4, i5) = (idx[0], idx[1], idx[2], idx[3], idx[4]);
+    if det[0] > 0.0 && det[1] < -MINVAL && det[2] < -MINVAL {
+        *idx = [i3, i5, i4, i1, i2];
+        return true;
+    }
+    if det[1] > 0.0 && det[2] < -MINVAL && det[0] < -MINVAL {
+        *idx = [i1, i5, i4, i2, i3];
+        return true;
+    }
+    if det[2] > 0.0 && det[0] < -MINVAL && det[1] < -MINVAL {
+        *idx = [i2, i5, i4, i3, i1];
+        return true;
+    }
+    if det[0] <= det[1] && det[0] <= det[2] {
+        idx[0] = i1;
+        idx[1] = i2;
+    } else if det[1] <= det[0] && det[1] <= det[2] {
+        idx[0] = i2;
+        idx[1] = i3;
+    } else {
+        idx[0] = i3;
+        idx[1] = i1;
+    }
+    false
+}
+
+fn origin_on_edge(v1: &V3, v2: &V3) -> bool {
+    if dot3(v1, v2) < 0.0 {
+        if let Some(p) = project_origin_line_4(v1, v2) {
+            return dot3(&p, &p) < MINVAL2;
+        }
+    }
+    false
+}
 
 fn polytope2(pt: &mut Polytope, st: &mut CcdStatus, o1: &mut CcdObj, o2: &mut CcdObj) -> i32 {
     let v1 = st.simplex[0].vert;
@@ -1318,12 +1399,49 @@ fn polytope2(pt: &mut Polytope, st: &mut CcdStatus, o1: &mut CcdObj, o2: &mut Cc
     let v3i = pt.epa_support(o1, o2, &d1, norm3(&d1));
     let v4i = pt.epa_support(o1, o2, &d2, norm3(&d2));
     let v5i = pt.epa_support(o1, o2, &d3, norm3(&d3));
+    // `5491d70f` `polytope2`: if the 120° equator misses the GJK segment, support once
+    // more along the outward normal of the nearest equator edge, tilted by `1e-3`
+    // along the segment. `64156abe` keeps the three seeds.
+    if crate::fp_contract::oracle_4_0_schedules() {
+        let diff2 = dot3(&diff, &diff);
+        let tol = MINVAL * diff2 * diff2.sqrt();
+        let (hit, det) = ray_triangle_tol(&v1, &v2, &pt.verts[v3i].vert, &pt.verts[v4i].vert, &pt.verts[v5i].vert, tol);
+        if hit == 0 {
+            let (vai, vbi, vci) = if det[0] <= det[1] && det[0] <= det[2] {
+                (v3i, v4i, v5i)
+            } else if det[1] <= det[0] && det[1] <= det[2] {
+                (v4i, v5i, v3i)
+            } else {
+                (v5i, v3i, v4i)
+            };
+            let va = pt.verts[vai].vert;
+            let vb = pt.verts[vbi].vert;
+            let vc = pt.verts[vci].vert;
+            let edge = vb - va;
+            let d4 = cross3(&edge, &diff);
+            let sign = if dot3(&(vc - v1), &diff) >= 0.5 * diff2 { 1e-3 } else { -1e-3 };
+            let d4 = add_scl3(&d4, &diff, sign * norm3(&edge));
+            let v6i = pt.epa_support(o1, o2, &d4, norm3(&d4));
+            let v6 = pt.verts[v6i];
+            pt.verts.pop();
+            let (v6v, vb, vc) = (v6.vert, vb, vc);
+            if ray_triangle_tol(&v1, &v2, &v6v, &vb, &vc, tol).0 != 0 {
+                pt.verts[vai] = v6;
+            } else if ray_triangle_tol(&v1, &v2, &va, &v6v, &vc, tol).0 != 0 {
+                pt.verts[vbi] = v6;
+            } else if ray_triangle_tol(&v1, &v2, &va, &vb, &v6v, tol).0 != 0 {
+                pt.verts[vci] = v6;
+            }
+        }
+        let (v3, v4, v5) = (pt.verts[v3i].vert, pt.verts[v4i].vert, pt.verts[v5i].vert);
+        pt.center = ((((v1 + v2) + v3) + v4) + v5) * 0.2;
+    }
     let (v3, v4, v5) = (pt.verts[v3i].vert, pt.verts[v4i].vert, pt.verts[v5i].vert);
     let tri = [(v1i, v3i, v4i, 1, 3, 2), (v1i, v5i, v3i, 2, 4, 0), (v1i, v4i, v5i, 0, 5, 1), (v2i, v4i, v3i, 5, 0, 4), (v2i, v3i, v5i, 3, 1, 5), (v2i, v5i, v4i, 4, 2, 3)];
     for (a, b, c, x, y, z) in tri {
         if pt.attach_face(a, b, c, x, y, z) < MINDIST2 {
             pt.replace_simplex3(st, a, b, c);
-            return polytope3(pt, st, o1, o2);
+            return polytope3(pt, st, o1, o2, false);
         }
     }
     if ray_triangle(&v1, &v2, &v3, &v4, &v5) == 0 {
@@ -1335,7 +1453,11 @@ fn polytope2(pt: &mut Polytope, st: &mut CcdStatus, o1: &mut CcdObj, o2: &mut Cc
     EPA_SUCCESS
 }
 
-fn polytope3(pt: &mut Polytope, st: &mut CcdStatus, o1: &mut CcdObj, o2: &mut CcdObj) -> i32 {
+fn polytope3(pt: &mut Polytope, st: &mut CcdStatus, o1: &mut CcdObj, o2: &mut CcdObj, allow_p2: bool) -> i32 {
+    if crate::fp_contract::oracle_4_0_schedules() {
+        return polytope3_4(pt, st, o1, o2, allow_p2);
+    }
+    let _ = allow_p2;
     let (v1, v2, v3) = (st.simplex[0].vert, st.simplex[1].vert, st.simplex[2].vert);
     // `scl3(center, center, 1.0/3.0)`: a multiply by the rounded third, not a division by three
     pt.center = (v1 + v2 + v3) * (1.0 / 3.0);
@@ -1371,6 +1493,110 @@ fn polytope3(pt: &mut Polytope, st: &mut CcdStatus, o1: &mut CcdObj, o2: &mut Cc
     EPA_SUCCESS
 }
 
+/// `5491d70f` `polytope3`. The poles are `±n` of the GJK triangle. If `v4v5` misses the
+/// triangle, `recoverHexa` rewires the five vertices before the faces are attached.
+/// `64156abe` always builds the original hexahedron.
+fn polytope3_4(pt: &mut Polytope, st: &mut CcdStatus, o1: &mut CcdObj, o2: &mut CcdObj, allow_p2: bool) -> i32 {
+    let (v1, v2, v3) = (st.simplex[0].vert, st.simplex[1].vert, st.simplex[2].vert);
+    let n = cross3(&(v2 - v1), &(v3 - v1));
+    let n_norm = norm3(&n);
+    if n_norm < MINVAL {
+        return EPA_P3_BAD_NORMAL;
+    }
+    let v1i = pt.insert_vertex(st.simplex[0]);
+    let v2i = pt.insert_vertex(st.simplex[1]);
+    let v3i = pt.insert_vertex(st.simplex[2]);
+    let n_neg = n * -1.0;
+    let v5i = pt.epa_support(o1, o2, &n_neg, n_norm);
+    let v4i = pt.epa_support(o1, o2, &n, n_norm);
+    let (v4, v5) = (pt.verts[v4i].vert, pt.verts[v5i].vert);
+    if tri_point_intersect(&v1, &v2, &v3, &v4) {
+        return EPA_P3_INVALID_V4;
+    }
+    if tri_point_intersect(&v1, &v2, &v3, &v5) {
+        return EPA_P3_INVALID_V5;
+    }
+    let d4 = v4 - v1;
+    let d5 = v5 - v1;
+    if dot3(&n, &d4) < MINEPATOL * n_norm || dot3(&n_neg, &d5) < MINEPATOL * n_norm {
+        return EPA_P3_ORIGIN_ON_FACE;
+    }
+    let mut idx = [v1i, v2i, v3i, v4i, v5i];
+    let mut is_hexa = true;
+    let (hit, det) = ray_triangle_tol(&v4, &v5, &v1, &v2, &v3, 0.0);
+    if hit == 0 {
+        is_hexa = recover_hexa(&mut idx, &det);
+    }
+    let (v1, v2, v3, v4, v5) = (
+        pt.verts[idx[0]].vert,
+        pt.verts[idx[1]].vert,
+        pt.verts[idx[2]].vert,
+        pt.verts[idx[3]].vert,
+        pt.verts[idx[4]].vert,
+    );
+    let (mut dist4, mut dist5) = (MAX_LIMIT, MAX_LIMIT);
+    let (dist0, dist1, dist2, dist3) = if is_hexa {
+        pt.center = V3::new(
+            0.2 * ((((v1.x + v2.x) + v3.x) + v4.x) + v5.x),
+            0.2 * ((((v1.y + v2.y) + v3.y) + v4.y) + v5.y),
+            0.2 * ((((v1.z + v2.z) + v3.z) + v4.z) + v5.z),
+        );
+        let d0 = pt.attach_face(idx[3], idx[0], idx[1], 1, 3, 2);
+        let d1 = pt.attach_face(idx[3], idx[2], idx[0], 2, 4, 0);
+        let d2 = pt.attach_face(idx[3], idx[1], idx[2], 0, 5, 1);
+        let d3 = pt.attach_face(idx[4], idx[1], idx[0], 5, 0, 4);
+        dist4 = pt.attach_face(idx[4], idx[0], idx[2], 3, 1, 5);
+        dist5 = pt.attach_face(idx[4], idx[2], idx[1], 4, 2, 3);
+        (d0, d1, d2, d3)
+    } else {
+        pt.center = (((v1 + v2) + v4) + v5) * 0.25;
+        let d0 = pt.attach_face(idx[0], idx[1], idx[3], 1, 3, 2);
+        let d1 = pt.attach_face(idx[0], idx[4], idx[1], 2, 3, 0);
+        let d2 = pt.attach_face(idx[0], idx[3], idx[4], 0, 3, 1);
+        let d3 = pt.attach_face(idx[4], idx[3], idx[1], 2, 0, 1);
+        (d0, d1, d2, d3)
+    };
+    if dist0 < MINDIST3 || dist1 < MINDIST3 || dist2 < MINDIST3 || dist3 < MINDIST3 || dist4 < MINDIST3 || dist5 < MINDIST3 {
+        if allow_p2 {
+            let (e1, e2, e3) = (pt.verts[v1i].vert, pt.verts[v2i].vert, pt.verts[v3i].vert);
+            if origin_on_edge(&e1, &e2) {
+                pt.replace_simplex2(st, v1i, v2i);
+                return polytope2(pt, st, o1, o2);
+            }
+            if origin_on_edge(&e2, &e3) {
+                pt.replace_simplex2(st, v2i, v3i);
+                return polytope2(pt, st, o1, o2);
+            }
+            if origin_on_edge(&e3, &e1) {
+                pt.replace_simplex2(st, v3i, v1i);
+                return polytope2(pt, st, o1, o2);
+            }
+        }
+        return EPA_P3_ORIGIN_ON_FACE;
+    }
+    let tol2 = st.tolerance * st.tolerance;
+    let missing = if is_hexa {
+        (!same_side(&v4, &v1, &v2, &v3) && dist0 >= tol2)
+            || (!same_side(&v4, &v3, &v1, &v2) && dist1 >= tol2)
+            || (!same_side(&v4, &v2, &v3, &v1) && dist2 >= tol2)
+            || (!same_side(&v5, &v2, &v1, &v3) && dist3 >= tol2)
+            || (!same_side(&v5, &v1, &v3, &v2) && dist4 >= tol2)
+            || (!same_side(&v5, &v3, &v2, &v1) && dist5 >= tol2)
+    } else {
+        (!same_side(&v1, &v2, &v4, &v5) && dist0 >= tol2)
+            || (!same_side(&v1, &v5, &v2, &v4) && dist1 >= tol2)
+            || (!same_side(&v1, &v4, &v5, &v2) && dist2 >= tol2)
+            || (!same_side(&v5, &v4, &v2, &v1) && dist3 >= tol2)
+    };
+    if missing {
+        return EPA_P3_MISSING_ORIGIN;
+    }
+    for i in 0..pt.faces.len() {
+        pt.add_to_map(i);
+    }
+    EPA_SUCCESS
+}
+
 fn polytope4(pt: &mut Polytope, st: &mut CcdStatus, o1: &mut CcdObj, o2: &mut CcdObj) -> i32 {
     let v1 = pt.insert_vertex(st.simplex[0]);
     let v2 = pt.insert_vertex(st.simplex[1]);
@@ -1381,7 +1607,7 @@ fn polytope4(pt: &mut Polytope, st: &mut CcdStatus, o1: &mut CcdObj, o2: &mut Cc
     for (a, b, c, x, y, z) in tri {
         if pt.attach_face(a, b, c, x, y, z) < MINDIST4 {
             pt.replace_simplex3(st, a, b, c);
-            return polytope3(pt, st, o1, o2);
+            return polytope3(pt, st, o1, o2, true);
         }
     }
     if !test_tetra(&pt.verts[v1].vert, &pt.verts[v2].vert, &pt.verts[v3].vert, &pt.verts[v4].vert) {
@@ -1399,20 +1625,15 @@ fn polytope4(pt: &mut Polytope, st: &mut CcdStatus, o1: &mut CcdObj, o2: &mut Cc
 /// points and combines them as `(λ2·p2) + ((λ1·p1) + (λ0·p0))`; it does not
 /// rebuild them from the vertex index.
 ///
-/// Aloha home pose, geom 15 vs 45: the contact normal is `mju_normalize3(x1−x2)`.
-/// The stored world `y` values of the final face match. One corner does not:
-/// `5491d70f` pairs geom 45's `bfa0093318fc2018` with geom 15's `bf9fa2cb87a46dd1`
-/// (Minkowski `y` `3f3be6aa94f497c0`); we pair it with geom 15's `bf7b5c4a8c16ce16`
-/// (Minkowski `y` `3f993b538ef28caa`). Witness `x2.y` is then `bf9371ef600579a0`
-/// against `bf9371ef6005799f`.
-///
-/// Hillclimb on this pair returns `5491d70f`'s index whenever the direction
-/// matches. The walk is strict `>`, neighbors in `mesh_graph` order, the dot is
-/// `(x·lx + y·ly) + z·lz` on the widened vertex, the direction is `matᵀ·dir`
-/// with no normalization, and meshes under 10 vertices are scanned. The first
-/// split is support call 5 on geom 15: our direction
-/// `bfeec3b188e8cd8f bfd17767dd95dd72 bfa21bd2e08212e8` picks index 3540;
-/// `5491d70f`'s `bfeea75a48913b54 bfd25e4e4c29e8f9 3c516ba621f0920f` picks 3487.
+/// Aloha home pose, geom 15 vs 45: GJK ends on a triangle whose `±n` supports match.
+/// `rayTriangle(v4, v5, v1, v2, v3)` is 0 (`3f0d433739142e93`, `bf5debae213d90f2`,
+/// `bf2917a15baa1352`), so `recoverHexa` swaps that equator edge with the poles
+/// before the faces are built. The old winding picked a different closest face
+/// (`bfeec3b188e8cd8f bfd17767dd95dd72 bfa21bd2e08212e8` vs
+/// `bfeea75a48913b54 bfd25e4e4c29e8f9 3c516ba621f0920f`). With the recovered
+/// hexahedron every support index matches, and `triAffineCoord`'s `(C31+C32)+C33`
+/// weights make the contact `bf8fc2d178230d12`, position `0 bf9374bc6a7ef9da
+/// 3fddfd61f75150c4`, normal `bfeffffe02515824 bf56937dc7a55a36 0`.
 fn epa_witness(pt: &Polytope, fi: usize) -> (V3, V3, f64) {
     let f = &pt.faces[fi];
     let (a, b, c) = (&pt.verts[f.verts[0]], &pt.verts[f.verts[1]], &pt.verts[f.verts[2]]);
@@ -2315,7 +2536,7 @@ pub fn ccd(config: &CcdConfig, o1: &mut CcdObj, o2: &mut CcdObj) -> CcdStatus {
         let mut pt = Polytope::new(config.max_iterations);
         let ret = match st.nsimplex {
             2 => polytope2(&mut pt, &mut st, o1, o2),
-            3 => polytope3(&mut pt, &mut st, o1, o2),
+            3 => polytope3(&mut pt, &mut st, o1, o2, true),
             _ => polytope4(&mut pt, &mut st, o1, o2),
         };
         st.epa_status = ret;
