@@ -7,5 +7,7 @@
   "step_dump_bytes": 7582957,
   "graph_dump_sha256": "744105177f6ebfd14ffcd87602513f89af7bd38967c5c671cb3ba5314e50f51e",
   "graph_dump_bytes": 14382748,
-  "menagerie_sha": "4d038b3feae26ec82b46a4d586379114012a8ac7"
+  "menagerie_sha": "4d038b3feae26ec82b46a4d586379114012a8ac7",
+  "receipt": "docs/acceptance/receipts/2aeb3611c9f3edca1961eb25ee374df56229d799.supersedes-c590d3a2.md",
+  "receipt_sha256": "d6b8600825d4ed0634df581d269216f22930aa263bd401c7a9a5d43efbbef6d7"
 }

@@ -4,9 +4,9 @@
 The published Menagerie job is a different oracle (the PyPI wheel). This script
 does not write that ledger and does not change its pass rule.
 
-The count pin is the newest receipt under ``docs/acceptance/receipts`` whose
-named commit is an ancestor of HEAD. Two receipts may name the same code
-commit; the later receipt file wins, and a later filename breaks a tie.
+The count pin is the receipt path and sha256 in
+``conformance/oracle_x86_contract_off.json``. The file is hashed before it is
+read. Selection does not ask git whether a commit is an ancestor.
 That receipt carries the sorted 20-step exact model ids, ``exact_set_sha256``
 of those ids (one per line, trailing newline), and every ``mjData`` /
 ``mjModel`` tally line.
@@ -31,9 +31,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PIN_PATH = ROOT / "conformance" / "oracle_x86_contract_off.json"
-RECEIPTS = ROOT / "docs" / "acceptance" / "receipts"
-COMMIT_RE = re.compile(r"ferromotion commit `([0-9a-f]{40})`")
-ORACLE_RE = re.compile(r"^\* oracle id `([^`]+)`$", re.M)
 BULLET_RE = re.compile(r"^\* `([^`]+)`$")
 
 
@@ -211,69 +208,23 @@ def parse_pin_block(text: str) -> tuple[str, list[str], dict[str, tuple[int, int
     return recorded[1], models, fields
 
 
-def receipt_commit(text: str) -> str | None:
-    match = COMMIT_RE.search(text)
-    return match.group(1) if match else None
-
-
-def commit_time(sha: str) -> int | None:
-    proc = subprocess.run(
-        ["git", "-C", str(ROOT), "log", "-1", "--format=%ct", sha],
-        text=True,
-        capture_output=True,
-    )
-    if proc.returncode != 0 or not proc.stdout.strip().isdigit():
-        return None
-    return int(proc.stdout.strip())
-
-
-def is_ancestor(sha: str) -> bool:
-    proc = subprocess.run(
-        ["git", "-C", str(ROOT), "merge-base", "--is-ancestor", sha, "HEAD"],
-        capture_output=True,
-    )
-    return proc.returncode == 0
-
-
-def receipt_file_time(path: Path) -> int:
-    """Commit time of the receipt file itself.
-
-    Two receipts can name the same code commit. The later file is the correction.
-    """
-    proc = subprocess.run(
-        ["git", "-C", str(ROOT), "log", "-1", "--format=%ct", "--", str(path)],
-        text=True,
-        capture_output=True,
-    )
-    if proc.returncode != 0 or not proc.stdout.strip().isdigit():
-        return 0
-    return int(proc.stdout.strip())
-
-
 def receipt_rank(code_time: int, file_time: int, name: str) -> tuple[int, int, str]:
-    """Sort key: newer code, then newer receipt file, then a later filename."""
+    """Sort key kept for the self-test. Receipt selection does not use it."""
     return (code_time, file_time, name)
 
 
-def latest_receipt(directory: Path | None = None) -> Path:
-    directory = directory or RECEIPTS
-    oracle = json.loads(PIN_PATH.read_text())["oracle_id"]
-    ranked: list[tuple[tuple[int, int, str], Path]] = []
-    for path in sorted(directory.glob("*.md")):
-        text = path.read_text()
-        named = ORACLE_RE.search(text)
-        if named is not None and named.group(1) != oracle:
-            continue
-        sha = receipt_commit(text)
-        if sha is None:
-            continue
-        when = commit_time(sha)
-        if when is None or not is_ancestor(sha):
-            continue
-        ranked.append((receipt_rank(when, receipt_file_time(path), path.name), path))
-    if not ranked:
-        raise ValueError(f"no receipt under {directory} names an ancestor of HEAD")
-    return max(ranked)[1]
+def pinned_receipt() -> Path:
+    """The receipt named by path and sha256. No git ancestry lookup."""
+    artifact = json.loads(PIN_PATH.read_text())
+    rel = artifact["receipt"]
+    digest = artifact["receipt_sha256"]
+    path = ROOT / rel
+    if not path.is_file():
+        raise ValueError(f"pinned receipt missing: {rel}")
+    got = sha256_file(path)
+    if got != digest:
+        raise ValueError(f"pinned receipt {rel} sha256 {got} != {digest}")
+    return path
 
 
 def render_receipt(
@@ -543,6 +494,8 @@ def self_test() -> int:
     if receipt_rank(100, 5, fresh_name) <= receipt_rank(100, 5, stale_name):
         print("self-test let the stale filename beat the correction when times match", file=sys.stderr)
         return 1
+    pinned = pinned_receipt()
+    parse_pin_block(pinned.read_text())
     print("self-test ok: a regression fails, an unreceipted gain fails, a matching receipt passes")
     return 0
 
@@ -624,7 +577,7 @@ def main() -> int:
     else:
         check_file(args.dump, artifact["step_dump_sha256"], artifact["step_dump_bytes"], "x86-step.txt")
         example = "menagerie_native_step"
-    receipt_path = latest_receipt()
+    receipt_path = pinned_receipt()
     _digest, pinned_models, pinned_fields = parse_pin_block(receipt_path.read_text())
     print(f"receipt {receipt_path.name} exact {len(pinned_models)} fields {len(pinned_fields)}")
     env = {
