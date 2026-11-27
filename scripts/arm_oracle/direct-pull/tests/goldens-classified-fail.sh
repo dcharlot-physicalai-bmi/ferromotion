@@ -53,7 +53,7 @@ cat >"$bundle/ferromotion/PROVENANCE.txt" <<'EOF'
 ferromotion_tested_commit 515a7dec4b4ed2fa7257f328c7c3f9b169b8d7ba
 ferromotion_tested_tree 67e20a00014302498e9b350862549f9d705911a6
 EOF
-cp -f "$oracle/run-goldens.sh" "$oracle/limits.sh" "$oracle/compiler-rt.sh" "$bundle/scripts/"
+cp -f "$oracle/run-goldens.sh" "$oracle/limits.sh" "$oracle/compiler-rt.sh" "$oracle/toolchain.sh" "$bundle/scripts/"
 cat >"$bundle/scripts/write-receipt.sh" <<'EOF'
 #!/bin/sh
 printf 'receipt\n' >"$1/RECEIPT.txt"
@@ -65,6 +65,16 @@ if [ "$1" = "-vV" ]; then
   printf '%s\n' 'release: 1.99.1'
   exit 0
 fi
+for a in "$@"; do
+  if [ "$a" = "--message-format=json" ]; then
+    dest="${CARGO_TARGET_DIR}/debug/build/ferromotion-core/fixturehash/out/ferromotion_core-fixturehash"
+    mkdir -p "$(dirname "$dest")"
+    printf '#!/bin/sh\nexit 0\n' >"$dest"
+    chmod +x "$dest"
+    printf '%s\n' "{\"reason\":\"compiler-artifact\",\"target\":{\"kind\":[\"lib\"],\"name\":\"ferromotion-core\"},\"executable\":\"$dest\"}"
+    exit 0
+  fi
+done
 if [ "${FAKE_CARGO_RESULT:-fail3}" = "partial" ]; then
   printf '%s\n' 'test geom_frames_match_mujocos_kinematics_bit_for_bit ... FAILED'
   printf '%s\n' 'test spatial_tendons_step_as_mujoco_does_bit_for_bit ... FAILED'

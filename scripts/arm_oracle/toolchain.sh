@@ -55,6 +55,45 @@ arm_oracle_bind_built_binary() {
   printf '%s\n' "$bin" >>"$out/toolchain-bins.txt"
 }
 
+# The lib test executable is the JSON `executable` of the ferromotion-core lib
+# artifact from `cargo test --lib --no-run --message-format=json`.
+# Thor2's cargo writes that binary under debug/build/ferromotion-core/<hash>/out/,
+# not debug/deps/. A deps/ glob is not a second guess.
+arm_oracle_bind_lib_test_executable() {
+  local out="$1" json="$2"
+  local line exe n=0
+  if [[ ! -s "$json" ]]; then
+    arm_oracle_toolchain_fail "cargo JSON for the lib test executable is missing"
+    return 2
+  fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" == *'"reason":"compiler-artifact"'* ]] || continue
+    [[ "$line" == *'"kind":["lib"]'* && "$line" == *'"name":"ferromotion-core"'* ]] || continue
+    [[ "$line" == *'"executable":"'* ]] || continue
+    [[ "$line" == *'"executable":null'* ]] && continue
+    exe="${line#*\"executable\":\"}"
+    exe="${exe%%\"*}"
+    if [[ "$exe" == *\\* || -z "$exe" ]]; then
+      arm_oracle_toolchain_fail "cargo JSON executable is not a plain path"
+      return 2
+    fi
+    if [[ ! -x "$exe" ]]; then
+      arm_oracle_toolchain_fail "cargo JSON executable is missing: $exe"
+      return 2
+    fi
+    if [[ -s "$out/toolchain-bins.txt" ]] && grep -F -x -q "$exe" "$out/toolchain-bins.txt"; then
+      n=$((n + 1))
+      continue
+    fi
+    arm_oracle_bind_built_binary "$out" "$exe"
+    n=$((n + 1))
+  done <"$json"
+  if [[ "$n" -eq 0 ]]; then
+    arm_oracle_toolchain_fail "cargo JSON recorded no lib test executable"
+    return 2
+  fi
+}
+
 # Print the rustc version string from .comment. Empty if the section or the string is absent.
 arm_oracle_elf_comment_rustc() {
   local bin="$1"

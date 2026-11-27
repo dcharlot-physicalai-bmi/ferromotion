@@ -58,13 +58,13 @@ trap refuse_unexpected ERR
   echo "cargo_target_dir $CARGO_TARGET_DIR"
   echo "These tests embed the unproven Darwin arrays. A failure is not relabeled as the Linux oracle."
 } >"$OUT/result.txt"
-shopt -s nullglob
-for built in "$CARGO_TARGET_DIR"/debug/deps/ferromotion_core-*; do
-  if [[ -f "$built" && -x "$built" ]]; then
-    arm_oracle_bind_built_binary "$OUT" "$built"
-  fi
-done
-shopt -u nullglob
+# The path is cargo's executable field. debug/deps/ferromotion_core-* misses
+# Thor2, where the lib test binary is debug/build/ferromotion-core/<hash>/out/.
+norun="$OUT/cargo-norun.json"
+arm_oracle_timeout "$ARM_ORACLE_WALL_TIMEOUT" \
+  "${ARM_ORACLE_CARGO[@]}" test --offline --locked --jobs 2 -p ferromotion-core --lib --no-run --message-format=json \
+  >"$norun"
+arm_oracle_bind_lib_test_executable "$OUT" "$norun"
 if [[ -e "$FM/target" || -e "$ROOT/ferromotion/target" ]]; then
   echo "refusing: cargo wrote a target directory inside a ferromotion source tree" >&2
   exit 2
