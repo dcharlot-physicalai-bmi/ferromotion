@@ -392,6 +392,18 @@ pub fn resolve_dampratio(acts: &mut [Actuator], dof_m0: &[f64]) {
     }
 }
 
+/// `setDampRatio` in `5491d70f` and `4849b2dd`. The reflected mass is `1 / (J M⁻¹ J')`,
+/// not the 3.13 sum of `dof_M0 / trn²`. The product is `(dampratio * -2) * sqrt(mass * kp)`.
+pub fn apply_dampratio_4(acts: &mut [Actuator], mass: &[f64]) {
+    for (a, &mass) in acts.iter_mut().zip(mass) {
+        if a.gainprm[0] != -a.biasprm[1] || a.biasprm[2] <= 0.0 {
+            continue;
+        }
+        let root = (mass * a.gainprm[0]).sqrt();
+        a.biasprm[2] = (a.biasprm[2] * -2.0) * root;
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------
 // MUSCLES
 // ---------------------------------------------------------------------------------------------------

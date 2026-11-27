@@ -7099,6 +7099,27 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
     // ⛔ `dampratio` cannot be resolved while reading the file: it is a ratio against the inertia the
     // transmission reflects, so it needs the mass matrix. MuJoCo does it in `mj_setConst`, at `qpos0` —
     // which is `q = 0` here, because a joint's `ref` is folded into its origin.
+    fn reflected_mass_4(sm: &crate::mujoco_smooth::SmoothModel, sd: &crate::mujoco_smooth::SmoothData, moment: &[(usize, f64)]) -> f64 {
+        let nv = sm.dof_bodyid.len();
+        if nv == 0 || moment.is_empty() {
+            return 0.0;
+        }
+        let mut y = vec![0.0; nv];
+        for &(d, m) in moment {
+            y[d] = m;
+        }
+        let tmp = sm.solve_m(sd, &y);
+        // `mju_dot` walks the dense vectors. A zero lane contributes nothing here.
+        let mut idx: Vec<usize> = moment.iter().map(|(d, _)| *d).collect();
+        idx.sort_unstable();
+        idx.dedup();
+        let mut w = 0.0;
+        for i in idx {
+            w += y[i] * tmp[i];
+        }
+        // one force output: `w /= outnum`, then `mass = 1/w` when `w > mjMINVAL`.
+        if w > 1e-15 { 1.0 / w } else { 0.0 }
+    }
     if out.actuators.iter().any(|a| a.biasprm[2] > 0.0) {
         // `dof_M0`, as `mj_setM0` computes it in MuJoCo's own arithmetic
         let names = &out.mj_body_names;
@@ -7109,8 +7130,16 @@ pub fn tree_from_mjcf(xml: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> R
             qpos0: out.qpos0(),
             ..Default::default()
         };
-        let dof_m0 = crate::mujoco_smooth::SmoothModel::new(&out.mj_kin, inp).dof_m0;
-        crate::mujoco_actuator::resolve_dampratio(&mut out.actuators, &dof_m0);
+        let qpos0 = inp.qpos0.clone();
+        let sm = crate::mujoco_smooth::SmoothModel::new(&out.mj_kin, inp);
+        if crate::fp_contract::oracle_4_0_schedules() {
+            let nv = qpos0.len();
+            let sd = sm.forward_at(0.0, &qpos0, &vec![0.0; nv], &[], &[]);
+            let mass: Vec<f64> = out.actuators.iter().map(|a| reflected_mass_4(&sm, &sd, &a.moment)).collect();
+            crate::mujoco_actuator::apply_dampratio_4(&mut out.actuators, &mass);
+        } else {
+            crate::mujoco_actuator::resolve_dampratio(&mut out.actuators, &sm.dof_m0);
+        }
     }
     // ⛔ **`actuator_acc0`**, the other thing `mj_setConst` cannot do while reading the file: the
     // acceleration a unit force on each transmission produces at `qpos0`, `‖M⁻¹·moment‖`. A muscle whose
@@ -8974,6 +9003,54 @@ mod tests {
             "4849b2dd drops kv once the joint force is on actuatorfrcrange"
         );
         crate::fp_contract::reset_policy();
+    }
+
+    /// `setDampRatio` in `5491d70f` / `4849b2dd` reflects `1 / (J M⁻¹ J')`. `64156abe` sums
+    /// `dof_M0 / trn²`. The 4.x product is `(dampratio * -2) * sqrt(mass * kp)`.
+    #[test]
+    fn a_4x_dampratio_uses_the_inverse_mass_matrix() {
+        const MODEL: &str = r#"<mujoco>
+  <option timestep="0.002"/>
+  <worldbody>
+    <body>
+      <joint name="j1" type="hinge" axis="0 1 0" armature="0.05"/>
+      <geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.02" mass="1"/>
+      <body pos="0.3 0 0">
+        <joint name="j2" type="hinge" axis="0 1 0" armature="0.02"/>
+        <geom type="capsule" fromto="0 0 0 0.25 0 0" size="0.02" mass="0.6"/>
+      </body>
+    </body>
+  </worldbody>
+  <actuator>
+    <position joint="j1" kp="40" dampratio="1"/>
+    <position joint="j2" kp="20" dampratio="0.8"/>
+  </actuator>
+</mujoco>"#;
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::fp_contract::reset_policy();
+            }
+        }
+        let _reset = Reset;
+        let qvel = |id: &str, sha: &str| {
+            crate::fp_contract::install_policy(id, sha, "").unwrap();
+            let t = tree_from_mjcf_str(MODEL).unwrap();
+            let st = crate::MjNativeState { qpos: vec![0.4, -0.7], qvel: vec![0.3, -0.5], ..Default::default() };
+            t.mujoco_native_step(&st, &[0.1, -0.2]).unwrap().qvel.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            qvel(crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID, crate::fp_contract::ORACLE_X86_CONTRACT_OFF_SHA256),
+            vec![0x3fa3241012d7b2b8, 0x3fdb15c8fed63916]
+        );
+        assert_eq!(
+            qvel(crate::fp_contract::ORACLE_4_0_1_ID, crate::fp_contract::ORACLE_4_0_1_SHA256),
+            vec![0x3fa4b5177a419b10, 0x3fdaa48ee4969afe]
+        );
+        assert_eq!(
+            qvel(crate::fp_contract::ORACLE_4_0_ID, crate::fp_contract::ORACLE_4_0_SHA256),
+            vec![0x3fa4b5177a419b10, 0x3fdaa48ee4969afe]
+        );
     }
 
     /// `agility_cassie/cassie.xml` step 2 `qpos[24]`, the `right-achilles-rod` ball joint.
