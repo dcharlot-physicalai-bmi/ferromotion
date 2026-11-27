@@ -1266,14 +1266,14 @@ impl SmoothModel {
         let h = self.timestep;
         let next = if a.act.dynamics == crate::mujoco_actuator::ActDyn::FilterExact {
             let tau = MJ_MINVAL.max(a.act.dynprm[0]);
-            // `64156abe` filterexact: `act + ((h*act_dot) * (1 - exp(-h/tau)))`.
-            if crate::fp_contract::contract_off() {
+            // Contract-off `mj_nextActivation`: `mulsd` then `addsd`, `act + (act_dot * tau) * (1 - exp)`.
+            if crate::fp_contract::contract_off_line() {
                 act + (act_dot * tau) * (1.0 - (-h / tau).exp())
             } else {
                 (act_dot * tau).mul_add(1.0 - (-h / tau).exp(), act)
             }
-        } else if crate::fp_contract::contract_off() {
-            // `64156abe`: `act + (h * act_dot)`.
+        } else if crate::fp_contract::contract_off_line() {
+            // Contract-off: `act + (h * act_dot)`. `5491d70f` is `mulsd` of `h` then `addsd` into `act`.
             act + h * act_dot
         } else {
             act_dot.mul_add(h, act)

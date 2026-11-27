@@ -50,3 +50,24 @@ These 14 pass all 20 steps and still differ on a forward state. The field is the
 - `tetheria_aero_hand_open/scene_right.xml` `qfrc_spring`
 - `umi_gripper/scene.xml` `qacc`
 - `umi_gripper/umi_gripper.xml` `qacc`
+
+## 4.x sites gated by the 3.13-only `contract_off`
+
+`contract_off()` is true only for `64156abe`. `5491d70f` and `4849b2dd` are compiled with `-ffp-contract=off`, so a product added into an accumulator is `mulsd`/`mulpd` then `addsd`/`addsd`, not `vfmadd`. Each row is that disassembly, or the 4.x source when the symbol is the same instruction sequence in both libraries.
+
+| site | 4.x form | before | result |
+| --- | --- | --- | --- |
+| noslip `x − L·xᵢ` | unfused subtract | fused on 4.x | unfused with the rows below |
+| noslip `mju_addToScl` | groups of four `res + (scl·x)`, tail `(scl·x) + res` | fused | unfused. `efc_AR` 30/30 |
+| noslip `res − R·f` | unfused subtract | fused | unfused |
+| `mju_QCQP2` | `0x1a9a00`: 28 `mulsd`, 8 `addsd`, 4 `subsd`, no `vfmadd` | fused | unfused. This was the site compensating for a fused `AR`: `flybody/scene.xml` state 0 and `hello_robot_stretch_3/stretch.xml` state 2 went `SATISFIED` to `CONE` until `det = (A11+λ)(A22+λ) − A12²` and `v = −Pb` were separated |
+| noslip `force − res·ARinv` | unfused | already `contract_off() \|\| oracle_4_0_schedules()` | agrees |
+| `mju_sqrMatTDSparseNumeric` | `scale = D·vt`, then `acc + (scale·J)` | already the 4.x branch | agrees |
+| `mju_QCQP3` | `mulsd`/`addsd`/`mulpd`, no `vfmadd` | already `contract_off_line()` | agrees |
+| `mj_nextActivation` | `0x191ba0`: `mulsd` of `h` or `tau·(1−exp)`, then `addsd` into `act` | fused `mul_add` | unfused. Steps 196 to 204 and 195 to 203 |
+| `mjc_ConvexHField` cell | source `(2.0·size) / (ncol−1)`, then `dx·c − size` | 4.x path is `2.0·size`, not the 3.13 `size+size` | agrees. Barkour `efc_J` is not this gate |
+| mesh `PairHash` | `h1 ^ (h2 + 0x9e3779b9 + (h1<<6) + (h1>>2))` | already `oracle_4_0_schedules()` | agrees |
+| `mju_wrap` inside | no `vfmadd`; first residual is the same separate sum as the later ones | `contract_off() \|\| oracle_4_0_schedules()` | agrees |
+| quat integrate / `mji_mulMatVec3` | no `vfmadd` | `off() \|\| oracle_4_0_schedules()` | agrees |
+
+Local `contract_off()` helpers in the smooth, CCD, collision, and tendon modules call `contract_off_line()`, so they are already unfused on 4.x. They are not this flag.
