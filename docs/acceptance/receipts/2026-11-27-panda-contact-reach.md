@@ -4,12 +4,15 @@ This episode corrects `docs/acceptance/receipts/2026-11-20-panda-contact.md` (`9
 
 ## Profile
 
-The plant is `MjcfTree::mujoco_native_step`, the function `examples/menagerie_native_step` calls, after `install_policy` of the 212-of-212 profile. The published default is not installed and is not changed.
+The plant is `MjcfTree::mujoco_native_step` after `install_policy("mujoco-3.13.0-x86_64-contract-off", "64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc", "")`. That is the function `examples/menagerie_native_step` calls once `install_policy_from_env` has installed the same id. The published default is not installed and is not changed.
 
 * profile id `mujoco-3.13.0-x86_64-contract-off`
 * libmujoco sha256 `64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc`
-* code path `2aeb3611c9f3edca1961eb25ee374df56229d799`
-* receipt `c590d3a219638c4f247ee2eeab3085b758e56176`, corrected by `docs/acceptance/receipts/2aeb3611c9f3edca1961eb25ee374df56229d799.supersedes-c590d3a2.md`
+* code path `2aeb3611c9f3edca1961eb25ee374df56229d799` (`MjcfTree::mujoco_native_step`)
+* receipt commit `54999d65ee234f9486aca4d386568fdbe07b2fae`
+* receipt file `docs/acceptance/receipts/2aeb3611c9f3edca1961eb25ee374df56229d799.supersedes-c590d3a2.md`, sha256 `d6b8600825d4ed0634df581d269216f22930aa263bd401c7a9a5d43efbbef6d7`
+* that receipt: native `efc_force` / `qacc` / `qfrc_constraint` 631 of 636, step 212 of 212
+* `c590d3a219638c4f247ee2eeab3085b758e56176` is superseded by `54999d65`
 * exact set sha256 `caa71f582e61cf5eda1adcba7ff572da4ac4fb76596f8fd3a0f2232a1d5018bc`
 * step oracle dump sha256 `a039f949d938cefc0cf3633edec1415497f8400a776b88809adf9bb06f5678be`
 * policy line: `policy id=mujoco-3.13.0-x86_64-contract-off sha256=64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc mul_quat=Unfused rot_vec_quat=Unfused mul_mat_vec3=Contracted`
