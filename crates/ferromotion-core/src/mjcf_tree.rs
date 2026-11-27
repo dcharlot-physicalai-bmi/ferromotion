@@ -5812,7 +5812,7 @@ impl Walk<'_> {
             "capsule" => {
                 need(2)?;
                 let (r, h) = (size[0], 2.0 * size[1]);
-                pi * (r * r * h + 4.0 * r * r * r / 3.0)
+                if crate::fp_contract::contract_off() { pi * (r * r * h + 4.0 * r * r * r / 3.0) } else { pi * (r * r).mul_add(h, 4.0 * r * r * r / 3.0) }
             }
             "cylinder" => {
                 need(2)?;
@@ -5865,12 +5865,24 @@ impl Walk<'_> {
             }
             "capsule" => {
                 let (r, h) = (size[0], 2.0 * size[1]);
-                let sphere_mass = mass * 4.0 * r / (4.0 * r + 3.0 * h);
+                let sphere_mass = if crate::fp_contract::contract_off() {
+                    mass * 4.0 * r / (4.0 * r + 3.0 * h)
+                } else {
+                    mass * 4.0 * r / 4.0f64.mul_add(r, 3.0 * h)
+                };
                 let cylinder_mass = mass - sphere_mass;
-                let side = cylinder_mass * (3.0 * r * r + h * h) / 12.0;
+                let side = if crate::fp_contract::contract_off() {
+                    cylinder_mass * (3.0 * r * r + h * h) / 12.0
+                } else {
+                    cylinder_mass * (3.0 * r).mul_add(r, h * h) / 12.0
+                };
                 let mut i = [side, side, cylinder_mass * r * r / 2.0];
                 let sphere_inertia = 2.0 * sphere_mass * r * r / 5.0;
-                let shift = sphere_mass * h * (3.0 * r + 2.0 * h) / 8.0;
+                let shift = if crate::fp_contract::contract_off() {
+                    sphere_mass * h * (3.0 * r + 2.0 * h) / 8.0
+                } else {
+                    sphere_mass * h * 3.0f64.mul_add(r, 2.0 * h) / 8.0
+                };
                 i[0] += sphere_inertia + shift;
                 i[1] += sphere_inertia + shift;
                 i[2] += sphere_inertia;
@@ -5878,7 +5890,11 @@ impl Walk<'_> {
             }
             "cylinder" => {
                 let (r, h) = (size[0], 2.0 * size[1]);
-                let side = mass * (3.0 * r * r + h * h) / 12.0;
+                let side = if crate::fp_contract::contract_off() {
+                    mass * (3.0 * r * r + h * h) / 12.0
+                } else {
+                    mass * (3.0 * r).mul_add(r, h * h) / 12.0
+                };
                 [side, side, mass * r * r / 2.0]
             }
             "ellipsoid" | "box" | "hfield" => {
@@ -5889,7 +5905,11 @@ impl Walk<'_> {
             // the mesh's equivalent inertia box, in the mesh's principal frame (already the geom's)
             _ => {
                 let b = boxsz;
-                [mass * (b[1] * b[1] + b[2] * b[2]) / 3.0, mass * (b[0] * b[0] + b[2] * b[2]) / 3.0, mass * (b[0] * b[0] + b[1] * b[1]) / 3.0]
+                if crate::fp_contract::contract_off() {
+                    [mass * (b[1] * b[1] + b[2] * b[2]) / 3.0, mass * (b[0] * b[0] + b[2] * b[2]) / 3.0, mass * (b[0] * b[0] + b[1] * b[1]) / 3.0]
+                } else {
+                    [mass * b[1].mul_add(b[1], b[2] * b[2]) / 3.0, mass * b[0].mul_add(b[0], b[2] * b[2]) / 3.0, mass * b[0].mul_add(b[0], b[1] * b[1]) / 3.0]
+                }
             }
         };
         Ok(Some(GeomMass { mass, pose: mj, inertia }))
@@ -6038,7 +6058,11 @@ impl Walk<'_> {
                 for p in &sel {
                     mass += p.mass;
                     for (k, c) in com.iter_mut().enumerate() {
-                        *c += p.mass * p.pose.pos[k];
+                        *c = if crate::fp_contract::contract_off() {
+                            *c + p.mass * p.pose.pos[k]
+                        } else {
+                            p.mass.mul_add(p.pose.pos[k], *c)
+                        };
                     }
                 }
                 if mass < 1e-14 {

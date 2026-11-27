@@ -357,6 +357,19 @@ mod tests {
     /// `libmujoco.so.3.13.0` sha256 `64156abef7859ac3cedfa4f589c318ff642d1d5d8d0e078efabff21ab02040bc`.
     #[test]
     fn normalize4_matches_the_contract_off_library_sum() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::fp_contract::reset_policy();
+            }
+        }
+        let _reset = Reset;
+        crate::fp_contract::install_policy(
+            crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID,
+            crate::fp_contract::ORACLE_X86_CONTRACT_OFF_SHA256,
+            "",
+        )
+        .unwrap();
         let mut q = [
             -0.6991825490104397,
             1.4818849284346185,

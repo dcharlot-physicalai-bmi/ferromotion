@@ -123,6 +123,17 @@ fn malformed_faces_are_refused_and_a_collinear_face_has_no_area() {
     assert!(err.contains("surface area"), "{err}");
 }
 
+fn contract_off() {
+    crate::install_policy(crate::ORACLE_X86_CONTRACT_OFF_ID, crate::ORACLE_X86_CONTRACT_OFF_SHA256, "").unwrap();
+}
+
+struct ResetPolicy;
+impl Drop for ResetPolicy {
+    fn drop(&mut self) {
+        crate::reset_policy();
+    }
+}
+
 fn compile(name: &str) -> crate::mjcf_tree::MjcfTree {
     let xml = r#"<mujoco><compiler meshdir="."/><asset><mesh name="m" file="m.obj"/></asset><worldbody><body name="b"><geom type="mesh" mesh="m" mass="1" contype="0" conaffinity="0"/></body></worldbody></mujoco>"#;
     let text = obj(name);
@@ -131,6 +142,8 @@ fn compile(name: &str) -> crate::mjcf_tree::MjcfTree {
 
 #[test]
 fn convex_pyramids_match_the_source_compilers_mass_inertia_and_volume_bits() {
+    let _reset = ResetPolicy;
+    contract_off();
     // Diagnostic build sha256 fda4efc9… printed these volumes. Its body_inertia bits match the
     // uninstrumented oracle on these two meshes, so the volumes are comparable.
     let cases: &[(&str, [u64; 3], u64)] = &[
@@ -149,6 +162,8 @@ fn convex_pyramids_match_the_source_compilers_mass_inertia_and_volume_bits() {
 /// Pyramid frames match the contract-off compiler, including the components that used to miss by an ulp.
 #[test]
 fn pyramid_frames_match_the_source_compiler() {
+    let _reset = ResetPolicy;
+    contract_off();
     let tree = compile("pyr6");
     let p = tree.body_ipos["b"];
     let q = tree.body_iquat_wxyz["b"];
@@ -169,6 +184,8 @@ fn pyramid_frames_match_the_source_compiler() {
 /// The L prism's triangles and principal moments match the contract-off source build.
 #[test]
 fn ell_prism_inertia_matches_the_source_compiler() {
+    let _reset = ResetPolicy;
+    contract_off();
     let tree = compile("prism_ell");
     let got = tree.body_iinertia["b"].map(f64::to_bits);
     let oracle = [0x3ff668bdbb5a3878, 0x3ff1f8c6d9f8c6db, 0x3fdc28552406106d];
