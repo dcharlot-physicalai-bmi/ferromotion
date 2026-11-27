@@ -9200,6 +9200,63 @@ mod tests {
         assert_eq!(qacc(crate::fp_contract::ORACLE_4_0_ID, crate::fp_contract::ORACLE_4_0_SHA256), four);
     }
 
+    /// `5491d70f` / `4849b2dd` `polygonClip` (VA `0x825e0`) sets the edge parameter to
+    /// `distP / (distP − distQ)`, with `dist = dot(point − edge, plane)`. `64156abe` uses
+    /// `(pd − dot(plane, P)) / dot(plane, PQ)`. Distance and position are the `mj_forward`
+    /// contact of this pair.
+    #[test]
+    fn a_4x_polygon_clip_uses_the_point_plane_parameter() {
+        const A: &str = "v 0 0 0\nv 1 0 0.02\nv 0.1 1 0\nv 0.05 0.08 1\nv 0.7 0.4 0.3\nf 1 2 3\nf 1 3 4\nf 1 4 5\n";
+        const B: &str = "v 0 0 0\nv 1.1 0.05 0\nv 0.2 0.9 0.04\nv 0.15 0.1 0.95\nv 0.6 0.55 0.4\nf 1 2 3\nf 1 3 4\nf 1 4 5\n";
+        const MODEL: &str = r#"<mujoco>
+  <option timestep="0.002"/>
+  <asset>
+    <mesh name="a" file="a.obj"/>
+    <mesh name="b" file="b.obj"/>
+  </asset>
+  <worldbody>
+    <body>
+      <freejoint/>
+      <geom type="mesh" mesh="a"/>
+    </body>
+    <body pos="0.35 0.22 0.18" quat="0.98 0.12 -0.08 0.11">
+      <geom type="mesh" mesh="b"/>
+    </body>
+  </worldbody>
+</mujoco>"#;
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::fp_contract::reset_policy();
+            }
+        }
+        let _reset = Reset;
+        let bits = |id: &str, sha: &str| {
+            crate::fp_contract::install_policy(id, sha, "").unwrap();
+            let t = tree_from_mjcf(MODEL, &|p: &str| match p {
+                "a.obj" => Some(A.as_bytes().to_vec()),
+                "b.obj" => Some(B.as_bytes().to_vec()),
+                _ => None,
+            })
+            .unwrap();
+            let c = t.collide_qpos(&t.qpos0());
+            assert_eq!(c.contacts.len(), 1, "{:?}", c.contacts);
+            let r = &c.contacts[0].record;
+            let mut out = vec![r.dist.to_bits()];
+            out.extend(r.pos.iter().map(|x| x.to_bits()));
+            out.extend(r.frame[0].iter().map(|x| x.to_bits()));
+            out
+        };
+        assert_eq!(
+            bits(crate::fp_contract::ORACLE_X86_CONTRACT_OFF_ID, crate::fp_contract::ORACLE_X86_CONTRACT_OFF_SHA256),
+            vec![0xbfd4c00e1001ad98, 0x3fda1b9ba60ad49a, 0x3fd51e37c146566e, 0x3fd22e2dd261f850, 0x3fd6df4b9adcb5f0, 0x3fe5b51c18d5aecf, 0x3fe48aec5db61cbd]
+        );
+        let four = vec![0xbfd4c00e1000fb57, 0x3fda1b9ba60b4c00, 0x3fd51e37c145a79e, 0x3fd22e2dd261e51d];
+        let head = |id: &str, sha: &str| bits(id, sha).into_iter().take(4).collect::<Vec<_>>();
+        assert_eq!(head(crate::fp_contract::ORACLE_4_0_1_ID, crate::fp_contract::ORACLE_4_0_1_SHA256), four);
+        assert_eq!(head(crate::fp_contract::ORACLE_4_0_ID, crate::fp_contract::ORACLE_4_0_SHA256), four);
+    }
+
     /// `setDampRatio` in `5491d70f` / `4849b2dd` reflects `1 / (J M⁻¹ J')`. `64156abe` sums
     /// `dof_M0 / trn²`. The 4.x product is `(dampratio * -2) * sqrt(mass * kp)`.
     #[test]

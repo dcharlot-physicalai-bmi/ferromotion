@@ -1361,9 +1361,19 @@ fn polygon_clip(st: &mut CcdStatus, face1: &[V3], face2: &[V3], n: &V3, dir: &V3
                 clipped.push(q);
                 continue;
             }
-            let tmp = dot3(&pn[e], &pq);
-            if tmp != 0.0 {
-                let t = (pd[e] - dot3(&pn[e], &p)) / tmp;
+            // `5491d70f` `polygonClip` (VA `0x825e0`): `t = distP / (distP - distQ)` with
+            // `dist = dot(point - edge, plane)`. `64156abe` uses `(pd - dot(plane, P)) / dot(plane, PQ)`.
+            let t = if crate::fp_contract::oracle_4_0_schedules() {
+                let edge = face1[e];
+                let dist_p = dot3(&(p - edge), &pn[e]);
+                let dist_q = dot3(&(q - edge), &pn[e]);
+                let denom = dist_p - dist_q;
+                if denom == 0.0 { None } else { Some(dist_p / denom) }
+            } else {
+                let tmp = dot3(&pn[e], &pq);
+                if tmp == 0.0 { None } else { Some((pd[e] - dot3(&pn[e], &p)) / tmp) }
+            };
+            if let Some(t) = t {
                 if (0.0..=1.0).contains(&t) {
                     clipped.push(add_scl3(&p, &pq, t));
                 }
